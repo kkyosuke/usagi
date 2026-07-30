@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 pub use usagi_core::infrastructure::runtime_model::{
-    ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+    ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, supported_agent_runtimes,
 };
 
 /// Immutable runtime/model availability captured for one MCP server lifetime.
@@ -24,17 +24,27 @@ impl RuntimeModelSnapshot {
     /// Capture config and executable availability once.
     #[must_use]
     pub fn capture(config: &WorkspaceAgentConfig, locator: &dyn ExecutableLocator) -> Self {
-        let runtimes = ["claude", "codex"]
-            .into_iter()
+        let runtimes = supported_agent_runtimes()
             .filter_map(|runtime| {
-                let models = config.models(runtime);
-                (locator.is_available(runtime) && !models.is_empty()).then(|| RuntimeModels {
-                    runtime,
-                    models: models.to_vec(),
+                let models = config.models(runtime.id);
+                (locator.is_available(runtime.executable) && !models.is_empty()).then(|| {
+                    RuntimeModels {
+                        runtime: runtime.id,
+                        models: models.to_vec(),
+                    }
                 })
             })
             .collect();
         Self { runtimes }
+    }
+
+    /// Build the closed-vocabulary runtime schema for legacy session tools.
+    #[must_use]
+    pub fn runtime_schema() -> Value {
+        json!({
+            "type": "string",
+            "enum": supported_agent_runtimes().map(|runtime| runtime.id).collect::<Vec<_>>()
+        })
     }
 
     /// Build the `agent` schema for `session_dispatch`.
@@ -121,8 +131,14 @@ impl RuntimeModelSnapshot {
             }
             let runtime = alias
                 .as_str()
-                .filter(|value| matches!(*value, "claude" | "codex"))
-                .ok_or_else(|| "agent_cli must be claude or codex".to_owned())?;
+                .filter(|value| supported_agent_runtimes().any(|runtime| runtime.id == *value))
+                .ok_or_else(|| {
+                    let allowed = supported_agent_runtimes()
+                        .map(|runtime| runtime.id)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("agent_cli must be one of: {allowed}")
+                })?;
             object.insert("runtime".into(), Value::String(runtime.into()));
         }
         if let Some(agent) = object.get("agent") {
@@ -189,6 +205,40 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn snapshot_exposes_sakana_when_codex_fugu_is_configured_and_available() {
+        let config = WorkspaceAgentConfig::from_runtime_allowlists([(
+            "sakana-ai",
+            vec!["fugu-model".into()],
+        )]);
+        let schema =
+            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["codex-fugu"])).agent_schema();
+        assert_eq!(
+            schema["oneOf"][1]["properties"]["runtime"]["const"],
+            "sakana-ai"
+        );
+        assert_eq!(
+            schema["oneOf"][1]["properties"]["model"]["enum"],
+            json!(["fugu-model"])
+        );
+        assert_eq!(
+            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["sakana-ai"]))
+                .agent_schema()["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_runtime_schema_uses_the_shared_catalog() {
+        assert_eq!(
+            RuntimeModelSnapshot::runtime_schema()["enum"],
+            json!(["claude", "codex", "sakana-ai"])
+        );
     }
 
     #[test]

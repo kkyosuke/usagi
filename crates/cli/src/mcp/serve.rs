@@ -355,6 +355,9 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot, availability: ToolAvailabi
             if matches!(tool.name(), "session_dispatch" | "session_delegate_brief") {
                 schema["properties"]["agent"] = snapshot.agent_schema();
             }
+            if matches!(tool.name(), "session_create" | "session_delegate_issue") {
+                schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
+            }
             json!({
                 "name": tool.name(),
                 "description": tool.description(),
@@ -408,6 +411,9 @@ fn tools_call(
         {
             return protocol::error(id, error_code::INVALID_PARAMS, &message);
         }
+    }
+    if matches!(name, "session_create" | "session_delegate_issue") {
+        schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
     }
     if let Err(ToolError::InvalidParams(message)) = descriptor.validate(&arguments, &schema) {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
@@ -1423,6 +1429,43 @@ mod tests {
         serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
             .unwrap();
         assert!(String::from_utf8(out).unwrap().contains("not allowed"));
+    }
+
+    #[test]
+    fn tools_list_exposes_sakana_for_dispatch_and_legacy_session_creation() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::from_runtime_allowlists([(
+                "sakana-ai",
+                vec!["fugu-model".into()],
+            )]),
+            &FakeLocator(&["codex-fugu"]),
+        );
+        let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+        let mut out = Vec::new();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        let listed = last_response(&out);
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        let dispatch = tools
+            .iter()
+            .find(|tool| tool["name"] == "session_dispatch")
+            .unwrap();
+        assert_eq!(
+            dispatch["inputSchema"]["properties"]["agent"]["oneOf"][1]["properties"]["runtime"]["const"],
+            "sakana-ai"
+        );
+        let create = tools
+            .iter()
+            .find(|tool| tool["name"] == "session_create")
+            .unwrap();
+        assert_eq!(
+            create["inputSchema"]["properties"]["runtime"]["enum"],
+            serde_json::json!(["claude", "codex", "sakana-ai"])
+        );
     }
 
     #[test]

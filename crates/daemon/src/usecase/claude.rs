@@ -14,6 +14,7 @@ use usagi_core::{
     },
     domain::id::OperationId,
     domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS,
+    domain::settings::DefaultModel,
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
 
@@ -21,7 +22,6 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-const PROFILE_NAME: &str = "claude";
 const PROFILE_REVISION: u32 = 1;
 
 /// Claude's product-private provisioning result.
@@ -75,7 +75,8 @@ impl<P> ClaudeAdapter<P> {
         Self {
             provisioner,
             profile: AgentProfile::new(
-                AgentProfileId::new(PROFILE_NAME).expect("literal profile ID is canonical"),
+                AgentProfileId::new(DefaultModel::Claude.profile_id())
+                    .expect("catalog profile ID is canonical"),
                 "Claude",
                 revision,
                 [
@@ -274,7 +275,7 @@ mod tests {
 
     fn request() -> LaunchRequest {
         LaunchRequest {
-            profile_id: AgentProfileId::new(PROFILE_NAME).unwrap(),
+            profile_id: AgentProfileId::new(DefaultModel::Claude.profile_id()).unwrap(),
             mode: LaunchMode::Headless,
             model: Some(ModelSelector::new("sonnet").unwrap()),
             resume: false,
@@ -517,7 +518,10 @@ mod tests {
     #[test]
     fn exposes_its_profile_and_validates_its_own_durable_snapshot() {
         let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 3);
-        assert_eq!(adapter.profile().id.as_str(), PROFILE_NAME);
+        assert_eq!(
+            adapter.profile().id.as_str(),
+            DefaultModel::Claude.profile_id()
+        );
         assert_eq!(adapter.profile().revision, 3);
         let snapshot = adapter.resolve(&request()).unwrap().snapshot;
         assert_eq!(
