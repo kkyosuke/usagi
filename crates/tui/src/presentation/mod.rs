@@ -715,24 +715,21 @@ fn handle_workspace_agent_reserved_input(
     if runtime.state().overlay().is_some() || !runtime.state().workspace_agent_drawer_open() {
         return None;
     }
-    let owns = match runtime.state().workspace_agent_new() {
-        WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty => matches!(
-            key,
+    let owns = match (runtime.state().workspace_agent_new(), key) {
+        (
+            WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty,
             Key::Up
-                | Key::Down
-                | Key::Enter
-                | Key::Escape
-                | Key::Live(
-                    LiveTerminalAction::WorkspaceAgent | LiveTerminalAction::WorkspaceAgentNew,
-                )
-        ),
-        WorkspaceAgentNew::Idle => matches!(
-            key,
+            | Key::Down
+            | Key::Enter
+            | Key::Escape
+            | Key::Live(LiveTerminalAction::WorkspaceAgent | LiveTerminalAction::WorkspaceAgentNew),
+        )
+        | (
+            WorkspaceAgentNew::Idle,
             Key::Escape
-                | Key::Live(
-                    LiveTerminalAction::WorkspaceAgent | LiveTerminalAction::WorkspaceAgentNew,
-                )
-        ),
+            | Key::Live(LiveTerminalAction::WorkspaceAgent | LiveTerminalAction::WorkspaceAgentNew),
+        ) => true,
+        _ => false,
     };
     owns.then(|| runtime.handle_key(key.clone()))
 }
