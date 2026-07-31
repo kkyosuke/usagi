@@ -1,13 +1,13 @@
 ---
 number: 597
 title: fix(tui): chat drawer の live terminal 描画を右ペインと同じ component に統一する
-status: todo
+status: in-progress
 priority: high
 labels: [tui, bug, terminal, agent, refactor]
 dependson: []
 related: [576, 577, 596]
 created_at: 2026-07-31T11:05:30.567509+00:00
-updated_at: 2026-07-31T11:05:30.567509+00:00
+updated_at: 2026-07-31T11:13:15.283229+00:00
 ---
 
 ## 症状

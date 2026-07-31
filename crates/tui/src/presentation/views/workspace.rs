@@ -31,6 +31,7 @@ use crate::presentation::views::workspace_agent_drawer::{
     self, CHAT_ICON, WorkspaceAgentDrawerProjection,
 };
 use crate::presentation::widgets;
+pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, HomeMode, Notice, PrOverlay, PreviewOverlay, Selection,
     Target, TargetPhase,
@@ -150,25 +151,6 @@ fn pr_summary(prs: &[PrLink]) -> Option<String> {
     } else {
         format!("PR #{} +{}", first.number, suffix)
     })
-}
-
-/// 選択中 live terminal を右ペインに描く presentation-only の投影素材。
-///
-/// 行データは runtime shell が daemon から poll し、scroll offset と feedback とともに
-/// 毎フレーム投影入力として渡す。controller state（reducer）には持ち込まない。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TerminalViewProjection {
-    /// 選択中 live terminal tab の描画済み screen 行。`row_offset` から始まる
-    /// 可視 window だけを保持してよい。
-    pub rows: Vec<String>,
-    /// `rows[0]` が retained terminal 全体の何行目か。
-    pub row_offset: usize,
-    /// window 化前の retained terminal の総行数。
-    pub total_rows: usize,
-    /// viewport 下部に残す retained 行数。`0` は live 出力に追従する。
-    pub scroll: usize,
-    /// 端末操作に対する presentation-safe な feedback。footer に表示する。
-    pub feedback: Option<String>,
 }
 
 /// controller の Home state を描画可能な session / action row へ投影した値。
@@ -1075,38 +1057,10 @@ fn with_footer_gap(mut rows: Vec<String>, height: usize, footer: String) -> Vec<
     rows
 }
 
-/// Retained live-terminal rows clipped into the right pane's content window.
-///
-/// Both the legacy `right_pane` and the controller `home_right_pane` share this so
-/// the visible scrollback window (bottom-anchored, offset by `scroll`) is computed
-/// identically on either render path.
-fn terminal_viewport_rows(
-    rows: &[String],
-    row_offset: usize,
-    total_rows: usize,
-    scroll: usize,
-    width: usize,
-    content_cap: usize,
-) -> Vec<String> {
-    let retained_start = total_rows.saturating_sub(content_cap.saturating_add(scroll));
-    let start = retained_start.saturating_sub(row_offset);
-    rows.iter()
-        .skip(start)
-        .take(content_cap)
-        .map(|line| widgets::clip_to_width(line, width))
-        .collect()
-}
-
-/// The row count reserved above the live-terminal content inside the right pane:
-/// the tab strip, the prefix line, and a blank spacer.
-const RIGHT_PANE_CONTENT_TOP: usize = 3;
-/// The footer gap reserved below the content window.
-const RIGHT_PANE_FOOTER_GAP: usize = 2;
-
 /// Convert a frame-cell pointer position into the retained-terminal viewport row
 /// and column currently rendered in the right pane, or `None` when the pointer is
 /// outside the live content window. `rows_len` and `scroll` describe the same
-/// bottom-anchored window [`terminal_viewport_rows`] draws, so a drag maps back to
+/// bottom-anchored window [`widgets::live_terminal`] draws, so a drag maps back to
 /// the exact cell under the cursor. This shares the pane geometry (chrome rows,
 /// split, content window) with [`render_home`] rather than duplicating it.
 #[must_use]
@@ -1124,13 +1078,15 @@ pub fn terminal_point_at(
     let right_left = split.left.saturating_add(1);
     let column = usize::from(column).checked_sub(right_left)?;
     let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
-    let content_row = body_row.checked_sub(RIGHT_PANE_CONTENT_TOP)?;
+    let content_row = body_row.checked_sub(widgets::live_terminal::RIGHT_PANE_CONTENT_TOP)?;
     let body_height = height.saturating_sub(CHROME_ROWS);
-    let content_cap = body_height.saturating_sub(RIGHT_PANE_CONTENT_TOP + RIGHT_PANE_FOOTER_GAP);
+    let content_cap = body_height.saturating_sub(
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP + widgets::live_terminal::FOOTER_ROWS,
+    );
     if content_row >= content_cap {
         return None;
     }
-    let start = rows_len.saturating_sub(content_cap.saturating_add(scroll));
+    let start = widgets::live_terminal::window_start(rows_len, content_cap, scroll);
     Some(TerminalPoint {
         row: start + content_row,
         column,
@@ -1748,10 +1704,10 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         " {}",
         Role::Accent.style().bold().paint(home.active_label())
     );
-    let footer = Style::new().dim().paint(&widgets::clip_to_width(
-        &format!("[{mode}] active pane"),
-        width,
-    ));
+    let footer_hint = format!("[{mode}] active pane");
+    let footer = Style::new()
+        .dim()
+        .paint(&widgets::clip_to_width(&footer_hint, width));
     if home.pane_tabs.is_empty() {
         let feedback = home
             .pane_error
@@ -1788,21 +1744,17 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         // sharing the legacy viewport window and surfacing terminal feedback in
         // the footer.
         let mut rows = vec![chrome[0].clone(), chrome[1].clone(), String::new()];
-        let content_cap = height.saturating_sub(rows.len() + 2);
-        rows.extend(terminal_viewport_rows(
-            &view.rows,
-            view.row_offset,
-            view.total_rows,
-            view.scroll,
+        rows.extend(widgets::live_terminal::render(
+            view,
             width,
-            content_cap,
+            height.saturating_sub(rows.len()),
+            height.saturating_sub(
+                widgets::live_terminal::RIGHT_PANE_CONTENT_TOP
+                    + widgets::live_terminal::FOOTER_ROWS,
+            ),
+            &footer_hint,
         ));
-        let footer = view.feedback.as_deref().map_or(footer, |feedback| {
-            Style::new()
-                .dim()
-                .paint(&widgets::clip_to_width(feedback, width))
-        });
-        return with_footer_gap(rows, height, footer);
+        return rows;
     }
     with_footer_gap(
         vec![
@@ -2175,7 +2127,15 @@ mod tests {
                 label: "root conversation".to_owned(),
                 selected: true,
             }],
-            terminal_rows: vec!["workspace agent output".to_owned()],
+            terminal_view: Some(TerminalViewProjection {
+                rows: vec!["workspace agent output".to_owned()],
+                row_offset: 0,
+                total_rows: 1,
+                scroll: 0,
+                feedback: None,
+            }),
+            interrupted_detail: None,
+            feedback: None,
             new: WorkspaceAgentNewProjection::default(),
         };
 
