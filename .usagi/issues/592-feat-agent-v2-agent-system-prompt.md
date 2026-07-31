@@ -1,13 +1,13 @@
 ---
 number: 592
 title: feat(agent): v2 の Agent 起動へ system prompt 注入を追加する
-status: todo
+status: done
 priority: high
 labels: [agent, daemon, core, epic]
 dependson: []
 related: [139, 142, 254, 530, 531, 537, 32]
 created_at: 2026-07-31T00:11:36.506934+00:00
-updated_at: 2026-07-31T00:11:36.506934+00:00
+updated_at: 2026-07-31T02:45:35.720848+00:00
 ---
 
 ## 目的
