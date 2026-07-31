@@ -15,6 +15,7 @@
 //! | [`admission`] | may *this* request, right now, produce an effect on *this* generation? |
 //! | [`fence`] | which kind of work is *this* wire request, so [`admission`] can decide it? |
 //! | [`routing`] | may this rollover leave a draining generation behind — can every participant still address it? |
+//! | [`pre_handshake`] | may this accepted socket allocate a worker while its first frame is incomplete? |
 //! | [`workers`] | which client threads must be unblocked and joined before a generation is collected? |
 //! | [`collection`] | when has a draining generation lost its last runtime claim and may retire itself? |
 //! | [`rollover`] | driving the above against the durable objects, with a named boundary at every write |
@@ -40,6 +41,7 @@ pub mod collection;
 pub mod fence;
 pub mod handoff;
 pub mod migration;
+pub mod pre_handshake;
 pub mod registry;
 pub mod rollover;
 pub mod routing;

@@ -285,8 +285,9 @@ generation fence と unlink 規則は [4. IPC#Unix transport](04-ipc.md#unix-tra
 shutdown signal
   -> shared shutdown flag を設定
   -> 新規 connection accept を停止
+  -> pre-handshake / admit 済み connection の stream を shutdown
+  -> 全 client worker を join
   -> accept loop を join（listener ownership を回収）
-  -> 既接続 client worker は shutdown / join しない（現行制約）
   -> owner generation の socket / current locator をこの順に retire
   -> registry の自 generation を retired にして authority を返却
   -> 自 incarnation と一致する場合だけ daemon.json を消去
@@ -1453,10 +1454,15 @@ barrier を戻して旧 authority を維持する。W2 が成功した後の bar
 
 #### client worker の保持
 
-`retired` への遷移は、保持した client worker の stream を shutdown して parked な frame read を解除し、**全 JoinHandle を
+`retired` への遷移と active process の shutdown は、保持した client worker の stream を shutdown して parked な frame read を解除し、**全 JoinHandle を
 join してから** endpoint と process を回収する。count だけを待って JoinHandle を捨てることはしない。そのために
 serving generation は accept した connection ごとに、worker の JoinHandle と、その stream を外から
 `shutdown(2)` できる複製 descriptor を保持する。
+
+pre-handshake の thread / FD 上限と absolute frame deadline は
+[4. IPC#frame と handshake](04-ipc.md#frame-と-handshake) が正本である。permit は complete hello response の直後に返すため、
+この worker barrier は pre-handshake と admit 済み connection の両方を回収する一方、admit 済み connection の寿命を
+pre-handshake cap で制限しない。
 
 descriptor を複製できなかった connection は**保持しない**。unblock 手段の無い thread を保持すると retirement が
 join で止まるため、そのことを記録して serve だけ継続する。長命な generation が歴史上の全 connection を持ち続けない
