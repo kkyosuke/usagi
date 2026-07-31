@@ -6934,6 +6934,10 @@ mod tests {
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            local_llm: usagi_core::domain::settings::LocalLlm {
+                enabled: true,
+                model: "qwen2.5-coder:3b".to_owned(),
+            },
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

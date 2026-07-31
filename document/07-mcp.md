@@ -10,6 +10,7 @@
 ## 目次
 
 - [起動と経路](#起動と経路)
+  - [daemon Agent への local LLM 配線](#daemon-agent-への-local-llm-配線)
 - [プロトコルとライフサイクル](#プロトコルとライフサイクル)
 - [JSON-RPC メソッド](#json-rpc-メソッド)
 - [tool 面](#tool-面)
@@ -43,6 +44,23 @@ cwd から起動した server も、この trusted root にある Workspace 設�
 tool availability を解決する。同じ trusted root は daemon 接続時に申告する workspace にもなる
 （正本は [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence)）。workspace root は認可上の caller identity
 には使用しない。
+
+### daemon Agent への local LLM 配線
+
+本節が daemon-owned Agent launch に optional `usagi-llm` MCP server を配線する条件と順序の正本である。
+設定は daemon が Global `settings.json` から読む `local_llm.enabled` / `local_llm.model` だけを権威とし、
+client request や IPC payload から model を受け取らない。
+
+| 設定 | Claude / Codex の MCP 配線 | system prompt |
+|---|---|---|
+| `enabled = false`（既定） | 既存の `usagi` だけ。`usagi-llm` の server 名・command・argv を一切載せない | scope 別 instruction だけ。delegation instruction を合成しない |
+| `enabled = true` | `usagi` の直後に `usagi-llm` を追加し、同じ usagi binary を `llm-mcp --model <model>` で起動する | scope 別 instruction の後ろに `local_llm_ask` への delegation instruction を合成する |
+
+`model` は `qwen2.5-coder:7b` / `qwen2.5-coder:3b` / `qwen2.5-coder:1.5b` /
+`qwen2.5:7b` の closed allowlist である。Global 設定ファイルを手編集して allowlist 外の値を置いても、
+storage load 時に `qwen2.5-coder:7b` へ sanitize してから daemon provisioner へ渡す。Claude は
+`serde_json` で MCP config を、Codex は TOML basic string の escape を通した `-c` override を組むため、
+command path と model は別 server、別 override、shell command を作れない。
 
 ## プロトコルとライフサイクル
 

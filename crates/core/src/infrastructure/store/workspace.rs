@@ -108,13 +108,16 @@ impl Storage {
 
     /// Load the per-user settings used by the TUI Config screen. Missing files
     /// are the default settings, so an upgrade never prevents the TUI from
-    /// opening.
+    /// opening. Values that later reach process configuration are sanitized at
+    /// this trusted storage boundary.
     ///
     /// # Errors
     ///
     /// Returns an error when `settings.json` cannot be read or parsed.
     pub fn load_settings(&self) -> Result<Settings> {
-        Ok(json_file::read(&self.dir.join(SETTINGS_FILE))?.unwrap_or_default())
+        Ok(json_file::read(&self.dir.join(SETTINGS_FILE))?
+            .map(Settings::sanitized)
+            .unwrap_or_default())
     }
 
     /// Persist per-user settings atomically. Callers that edit a draft must
@@ -184,6 +187,7 @@ mod tests {
             default_model: crate::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            local_llm: crate::domain::settings::LocalLlm::default(),
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -195,6 +199,24 @@ mod tests {
         storage.save_settings(&settings).unwrap();
         assert_eq!(storage.load_settings().unwrap(), settings);
         assert!(storage.dir().join(SETTINGS_FILE).is_file());
+    }
+
+    #[test]
+    fn load_settings_sanitizes_a_hand_edited_local_llm_model() {
+        let (_dir, storage) = temp_storage();
+        fs::create_dir_all(storage.dir()).unwrap();
+        fs::write(
+            storage.dir().join(SETTINGS_FILE),
+            r#"{"local_llm":{"enabled":true,"model":"x';touch /tmp/pwned;#\"\\\n"}}"#,
+        )
+        .unwrap();
+
+        let loaded = storage.load_settings().unwrap();
+        assert!(loaded.local_llm.enabled);
+        assert_eq!(
+            loaded.local_llm.model,
+            crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL
+        );
     }
 
     #[test]
