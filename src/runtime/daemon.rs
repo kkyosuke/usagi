@@ -171,7 +171,10 @@ impl TerminalProfileResolver for TrustedLoginShell {
         let Some(environment) = self.environment.as_ref() else {
             return Ok(resolved);
         };
-        with_user_environment(resolved, &environment.resolved(&self.workspace_root))
+        let user = environment.resolved(&self.workspace_root).map_err(|_| {
+            usagi_core::domain::terminal_launch::TerminalLaunchValidationError::InvalidEnvironment
+        })?;
+        with_user_environment(resolved, &user)
     }
 }
 
@@ -429,7 +432,8 @@ impl CodexProvisioner for RootCodexProvisioner {
             mode,
             local_llm_model.is_some(),
         ));
-        let user = configured_environment(self.environment.as_ref(), &workspace_root);
+        let user = configured_environment(self.environment.as_ref(), &workspace_root)
+            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         Ok(CodexProvision {
             working_directory,
             environment_allowlist: launch_allowlist(context, &user),
@@ -488,7 +492,8 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             mode,
             local_llm_model.is_some(),
         ));
-        let user = configured_environment(self.environment.as_ref(), &workspace_root);
+        let user = configured_environment(self.environment.as_ref(), &workspace_root)
+            .map_err(|_| ClaudeProvisionFailure::MaterializationFailed)?;
         let mut spawn = SpawnProvision::new(
             launch_environment(
                 &user,
@@ -601,10 +606,11 @@ fn claude_prompt_arguments(prompt: String) -> Vec<String> {
 fn configured_environment(
     environment: Option<&Arc<SharedUserEnvironment>>,
     workspace_root: &Path,
-) -> BTreeMap<String, String> {
-    environment.map_or_else(BTreeMap::new, |environment| {
-        environment.resolved(workspace_root)
-    })
+) -> Result<BTreeMap<String, String>, usagi_core::domain::settings::EnvLimitError> {
+    environment.map_or_else(
+        || Ok(BTreeMap::new()),
+        |environment| environment.resolved(workspace_root),
+    )
 }
 
 /// The durable allowlist for a launch: the MCP names plus the configured

@@ -1,129 +1,368 @@
-//! Parallel secret resolution, and the real 1Password CLI (`op`) behind it.
+//! Bounded secret resolution and the owned 1Password CLI child lifecycle.
 //!
-//! The keep/drop policy and the literal-vs-reference decision live in
-//! [`usecase::env`](crate::usecase::env). This module adds the two things that
-//! belong to the outside world: reading many references **at once**, and the
-//! `op read` subprocess itself.
-//!
-//! [`resolve_parallel`] reads every reference on its own thread because `op read`
-//! calls are independent subprocesses: fanning them out turns the wait from the
-//! *sum* of the per-binding latencies into roughly the *slowest single* one — the
-//! difference between a pane that opens and one that feels frozen when a
-//! workspace configures several secrets. It takes the resolver as a parameter, so
-//! that concurrency policy is covered with a fake and only [`OpCli`] — the actual
-//! subprocess — is real IO.
+//! The domain owns every count limit. This adapter validates before it starts a
+//! worker, uses a bounded job queue with a fixed worker count, and funnels the
+//! ordered outcomes through [`collect`](crate::usecase::env::collect).
 
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use crate::domain::settings::{EnvBindings, is_secret_reference, valid_bindings};
+use crate::domain::settings::{
+    EnvBindings, EnvLimitError, MAX_CONCURRENT_SECRET_READS, is_secret_reference, valid_bindings,
+    validate_env_limits,
+};
 use crate::usecase::env::{ResolvedEnvironment, SecretResolver, collect};
 
-/// How long one `op read` may take before its binding is reported as failed.
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
+const OP_TERMINATE_GRACE: Duration = Duration::from_secs(2);
+const OP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The 1Password CLI as a [`SecretResolver`].
-///
-/// Authentication follows the CLI's own rules: an `op signin` session, or a
-/// service-account token in the daemon's own environment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpCli;
 
 impl SecretResolver for OpCli {
-    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=resolve_parallel_resolves_every_binding_and_keeps_the_policy
+    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=successful_child_is_reaped_and_its_readers_are_joined
     fn read(&self, reference: &str) -> Result<String, String> {
-        op_read(reference)
+        real::run(reference)
     }
 }
 
-/// Resolve `bindings` through `resolver`, reading the secret references in
-/// parallel.
+/// Resolve references with bounded fan-out while preserving binding order.
 ///
-/// Literal values never reach the resolver. A panicking reader thread is
-/// reported as a failed binding rather than propagated, so one bad reference
-/// never takes down a launch.
-#[must_use]
-pub fn resolve_parallel<R>(bindings: &EnvBindings, resolver: &R) -> ResolvedEnvironment
+/// # Errors
+/// Returns the domain limit error before any resolver call is made.
+pub fn resolve_parallel<R>(
+    bindings: &EnvBindings,
+    resolver: &R,
+) -> Result<ResolvedEnvironment, EnvLimitError>
 where
     R: SecretResolver + Sync,
 {
+    validate_env_limits(bindings)?;
     let requested: Vec<(String, String)> = valid_bindings(bindings)
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let outcomes = std::thread::scope(|scope| {
-        let handles: Vec<(String, String, _)> = requested
-            .into_iter()
-            .map(|(name, value)| {
-                let handle = is_secret_reference(&value).then(|| {
-                    let reference = value.clone();
-                    scope.spawn(move || resolver.read(&reference))
-                });
-                (name, value, handle)
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|(name, value, handle)| {
-                let outcome = match handle {
-                    Some(handle) => handle
-                        .join()
-                        .unwrap_or_else(|_| Err("secret read thread panicked".to_owned())),
-                    None => Ok(value.clone()),
-                };
-                (name, value, outcome)
-            })
-            .collect::<Vec<_>>()
+    let secret_count = requested
+        .iter()
+        .filter(|(_, value)| is_secret_reference(value))
+        .count();
+    if secret_count == 0 {
+        return Ok(collect(
+            requested
+                .into_iter()
+                .map(|(name, value)| (name, value.clone(), Ok(value))),
+        ));
+    }
+
+    let outcomes = requested
+        .iter()
+        .map(|(_, value)| {
+            if is_secret_reference(value) {
+                Err("secret worker unavailable".to_owned())
+            } else {
+                Ok(value.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    let outcomes = Arc::new(Mutex::new(outcomes));
+    std::thread::scope(|scope| {
+        let worker_count = secret_count.min(MAX_CONCURRENT_SECRET_READS);
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel::<(usize, String)>(worker_count);
+        let jobs_rx = Arc::new(Mutex::new(jobs_rx));
+        for _ in 0..worker_count {
+            let jobs = Arc::clone(&jobs_rx);
+            let outcomes = Arc::clone(&outcomes);
+            scope.spawn(move || {
+                loop {
+                    let job = jobs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recv();
+                    let Ok((index, reference)) = job else { break };
+                    let outcome = catch_unwind(AssertUnwindSafe(|| resolver.read(&reference)))
+                        .unwrap_or_else(|_| Err("secret read thread panicked".to_owned()));
+                    outcomes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)[index] = outcome;
+                }
+            });
+        }
+        for (index, (_, value)) in requested.iter().enumerate() {
+            if is_secret_reference(value) {
+                let _ = jobs_tx.send((index, value.clone()));
+            }
+        }
+        drop(jobs_tx);
     });
-    collect(outcomes)
+    let outcomes = outcomes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    Ok(collect(requested.into_iter().zip(outcomes).map(
+        |((name, reference), outcome)| (name, reference, outcome),
+    )))
 }
 
-/// Run `op read --no-newline <reference>` and return its trimmed stdout.
-///
-/// The child is waited for on a worker thread so a hung `op` (an unresponsive
-/// desktop app, a vault waiting on a prompt) fails its own binding after
-/// [`OP_TIMEOUT`] instead of stalling the launch forever.
-#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=resolve_parallel_resolves_every_binding_and_keeps_the_policy
-fn op_read(reference: &str) -> Result<String, String> {
-    let child = Command::new("op")
-        .arg("read")
-        .arg("--no-newline")
-        .arg(reference)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to start op: {error}"))?;
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = sender.send(child.wait_with_output());
-    });
-    let output = match receiver.recv_timeout(OP_TIMEOUT) {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => return Err(format!("failed to read op output: {error}")),
-        Err(_) => return Err(format!("op exceeded its {OP_TIMEOUT:?} deadline")),
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let detail = if stderr.is_empty() {
-            "no stderr"
-        } else {
-            &stderr
-        };
-        return Err(format!("op exited with {}: {detail}", output.status));
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildExit {
+    success: bool,
+    display: String,
+}
+
+trait OwnedChild {
+    fn try_wait(&mut self) -> Result<Option<ChildExit>, String>;
+    fn terminate(&mut self) -> Result<(), String>;
+    fn kill(&mut self) -> Result<(), String>;
+    fn wait(&mut self) -> Result<ChildExit, String>;
+    fn join_output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String>;
+}
+
+trait ChildRunner {
+    fn spawn(&self, reference: &str) -> Result<Box<dyn OwnedChild>, String>;
+}
+
+trait Time {
+    fn elapsed(&self) -> Duration;
+    fn sleep(&self, duration: Duration);
+}
+
+trait Cancellation {
+    fn is_cancelled(&self) -> bool;
+}
+
+fn run_owned_child(
+    runner: &dyn ChildRunner,
+    time: &dyn Time,
+    reference: &str,
+    cancellation: &dyn Cancellation,
+    timeout: Duration,
+    terminate_grace: Duration,
+    poll_interval: Duration,
+) -> Result<String, String> {
+    let mut child = runner.spawn(reference)?;
+    let deadline = time.elapsed().saturating_add(timeout);
+    let mut status = None;
+    while time.elapsed() < deadline && !cancellation.is_cancelled() {
+        match child.try_wait() {
+            Ok(Some(exit)) => {
+                status = Some(exit);
+                break;
+            }
+            Ok(None) => time.sleep(poll_interval),
+            Err(_) => break,
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
+
+    let interrupted = status.is_none();
+    if interrupted {
+        let _ = child.terminate();
+        let grace_deadline = time.elapsed().saturating_add(terminate_grace);
+        while time.elapsed() < grace_deadline {
+            match child.try_wait() {
+                Ok(Some(exit)) => {
+                    status = Some(exit);
+                    break;
+                }
+                Ok(None) => time.sleep(poll_interval),
+                Err(_) => break,
+            }
+        }
+        if status.is_none() {
+            let _ = child.kill();
+        }
+    }
+
+    // `wait` is called even after `try_wait` observed exit: it is the explicit
+    // reap fence, and implementations must make repeated wait return the status.
+    let reaped = child.wait();
+    let output = child.join_output();
+    if cancellation.is_cancelled() {
+        return Err("op read was cancelled".to_owned());
+    }
+    if interrupted {
+        return Err(format!("op exceeded its {timeout:?} deadline"));
+    }
+    let exit = reaped?;
+    let (stdout, stderr) = output?;
+    if !exit.success {
+        let detail = String::from_utf8_lossy(&stderr).trim().to_owned();
+        return Err(format!(
+            "op exited with {}: {}",
+            exit.display,
+            if detail.is_empty() {
+                "no stderr"
+            } else {
+                &detail
+            }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&stdout)
         .trim_end_matches(['\n', '\r'])
         .to_owned())
 }
 
+mod real {
+    #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output
+
+    use std::io::Read;
+    use std::process::{Child, Command, Stdio};
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        Cancellation, ChildExit, ChildRunner, OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT,
+        OwnedChild, Time, run_owned_child,
+    };
+
+    pub(super) fn run(reference: &str) -> Result<String, String> {
+        run_owned_child(
+            &SystemRunner,
+            &SystemTime::new(),
+            reference,
+            &NeverCancelled,
+            OP_TIMEOUT,
+            OP_TERMINATE_GRACE,
+            OP_POLL_INTERVAL,
+        )
+    }
+
+    struct SystemRunner;
+
+    impl ChildRunner for SystemRunner {
+        fn spawn(&self, reference: &str) -> Result<Box<dyn OwnedChild>, String> {
+            let mut child = Command::new("op")
+                .arg("read")
+                .arg("--no-newline")
+                .arg(reference)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|_| "failed to start secret resolver".to_owned())?;
+            let stdout = reader(child.stdout.take().expect("piped stdout"));
+            let stderr = reader(child.stderr.take().expect("piped stderr"));
+            Ok(Box::new(SystemChild {
+                child,
+                stdout: Some(stdout),
+                stderr: Some(stderr),
+            }))
+        }
+    }
+
+    fn reader(mut pipe: impl Read + Send + 'static) -> JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+    }
+
+    struct SystemChild {
+        child: Child,
+        stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+        stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    }
+
+    impl SystemChild {
+        fn exit(status: std::process::ExitStatus) -> ChildExit {
+            ChildExit {
+                success: status.success(),
+                display: status.to_string(),
+            }
+        }
+    }
+
+    impl OwnedChild for SystemChild {
+        fn try_wait(&mut self) -> Result<Option<ChildExit>, String> {
+            self.child
+                .try_wait()
+                .map(|status| status.map(Self::exit))
+                .map_err(|_| "could not observe secret resolver".to_owned())
+        }
+
+        fn terminate(&mut self) -> Result<(), String> {
+            #[cfg(unix)]
+            {
+                let pid = libc::pid_t::try_from(self.child.id())
+                    .map_err(|_| "could not terminate secret resolver".to_owned())?;
+                // The PID comes directly from this still-owned Child handle.
+                let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+                (result == 0)
+                    .then_some(())
+                    .ok_or_else(|| "could not terminate secret resolver".to_owned())
+            }
+            #[cfg(not(unix))]
+            {
+                self.child
+                    .kill()
+                    .map_err(|_| "could not terminate secret resolver".to_owned())
+            }
+        }
+
+        fn kill(&mut self) -> Result<(), String> {
+            self.child
+                .kill()
+                .map_err(|_| "could not kill secret resolver".to_owned())
+        }
+
+        fn wait(&mut self) -> Result<ChildExit, String> {
+            self.child
+                .wait()
+                .map(Self::exit)
+                .map_err(|_| "could not reap secret resolver".to_owned())
+        }
+
+        fn join_output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
+            fn join(
+                handle: &mut Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+            ) -> Result<Vec<u8>, String> {
+                handle
+                    .take()
+                    .ok_or_else(|| "secret resolver output already joined".to_owned())?
+                    .join()
+                    .map_err(|_| "secret resolver output reader panicked".to_owned())?
+                    .map_err(|_| "could not read secret resolver output".to_owned())
+            }
+            let stdout = join(&mut self.stdout)?;
+            let stderr = join(&mut self.stderr)?;
+            Ok((stdout, stderr))
+        }
+    }
+
+    struct SystemTime(Instant);
+
+    struct NeverCancelled;
+
+    impl Cancellation for NeverCancelled {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    impl SystemTime {
+        fn new() -> Self {
+            Self(Instant::now())
+        }
+    }
+
+    impl Time for SystemTime {
+        fn elapsed(&self) -> Duration {
+            self.0.elapsed()
+        }
+
+        fn sleep(&self, duration: Duration) {
+            std::thread::sleep(duration);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OpCli, resolve_parallel};
-    use crate::domain::settings::EnvBindings;
-    use crate::usecase::env::SecretResolver;
+    use super::*;
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeResolver {
         reads: Mutex<Vec<String>>,
@@ -156,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_parallel_resolves_every_binding_and_keeps_the_policy() {
+    fn bounded_parallel_resolution_keeps_literals_success_failures_and_order() {
         let reader = FakeResolver {
             reads: Mutex::new(Vec::new()),
         };
@@ -168,14 +407,9 @@ mod tests {
                 ("1BAD", "op://Private/Bad/token"),
             ]),
             &reader,
-        );
+        )
+        .unwrap();
 
-        let mut reads = reader.reads.lock().unwrap().clone();
-        reads.sort();
-        assert_eq!(
-            reads,
-            ["op://Private/Locked/token", "op://Private/Open/token"]
-        );
         assert_eq!(
             resolved.values,
             BTreeMap::from([
@@ -195,28 +429,391 @@ mod tests {
         let resolved = resolve_parallel(
             &bindings(&[("SECRET", "op://Private/Item/field"), ("LITERAL", "kept")]),
             &PanickingResolver,
+        )
+        .unwrap();
+        assert_eq!(resolved.values["LITERAL"], "kept");
+        assert_eq!(resolved.failures[0].error, "secret read thread panicked");
+    }
+
+    #[test]
+    fn an_over_limit_request_has_zero_resolver_effects() {
+        let reader = FakeResolver {
+            reads: Mutex::new(Vec::new()),
+        };
+        let oversized = (0..=crate::domain::settings::MAX_SECRET_REFERENCES)
+            .map(|index| (format!("SECRET_{index}"), format!("op://vault/{index}")))
+            .collect();
+        assert_eq!(
+            resolve_parallel(&oversized, &reader),
+            Err(EnvLimitError::TooManySecretReferences)
+        );
+        assert!(reader.reads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn literal_only_bindings_do_not_start_secret_workers() {
+        let reader = FakeResolver {
+            reads: Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            resolve_parallel(&bindings(&[("RUST_LOG", "debug")]), &reader)
+                .unwrap()
+                .values,
+            BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())])
+        );
+        assert!(reader.reads.lock().unwrap().is_empty());
+    }
+
+    struct ConcurrencyResolver {
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+        first_wave: std::sync::Barrier,
+        calls: AtomicUsize,
+    }
+
+    impl SecretResolver for ConcurrencyResolver {
+        fn read(&self, reference: &str) -> Result<String, String> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum.fetch_max(active, Ordering::SeqCst);
+            if self.calls.fetch_add(1, Ordering::SeqCst) < MAX_CONCURRENT_SECRET_READS {
+                self.first_wave.wait();
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(reference.to_owned())
+        }
+    }
+
+    #[test]
+    fn fan_out_never_exceeds_the_domain_concurrency_limit() {
+        let resolver = ConcurrencyResolver {
+            active: AtomicUsize::new(0),
+            maximum: AtomicUsize::new(0),
+            first_wave: std::sync::Barrier::new(MAX_CONCURRENT_SECRET_READS),
+            calls: AtomicUsize::new(0),
+        };
+        let bindings = (0..(MAX_CONCURRENT_SECRET_READS + 3))
+            .map(|index| (format!("SECRET_{index}"), format!("op://vault/{index}")))
+            .collect();
+        resolve_parallel(&bindings, &resolver).unwrap();
+        assert_eq!(
+            resolver.maximum.load(Ordering::SeqCst),
+            MAX_CONCURRENT_SECRET_READS
+        );
+    }
+
+    #[derive(Default)]
+    struct FakeTime(Mutex<Duration>);
+
+    impl Time for FakeTime {
+        fn elapsed(&self) -> Duration {
+            *self.0.lock().unwrap()
+        }
+
+        fn sleep(&self, duration: Duration) {
+            *self.0.lock().unwrap() += duration;
+        }
+    }
+
+    struct NeverCancelled;
+
+    impl Cancellation for NeverCancelled {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    struct AlwaysCancelled;
+
+    impl Cancellation for AlwaysCancelled {
+        fn is_cancelled(&self) -> bool {
+            true
+        }
+    }
+
+    struct FakeRunner {
+        child: Mutex<Option<FakeChild>>,
+        spawn_error: Option<String>,
+    }
+
+    impl ChildRunner for FakeRunner {
+        fn spawn(&self, _reference: &str) -> Result<Box<dyn OwnedChild>, String> {
+            if let Some(error) = &self.spawn_error {
+                return Err(error.clone());
+            }
+            Ok(Box::new(self.child.lock().unwrap().take().unwrap()))
+        }
+    }
+
+    struct FakeChild {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        ready: bool,
+        try_wait_errors: usize,
+        exit_after_terminate: bool,
+        terminated: bool,
+        exit: ChildExit,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+
+    impl OwnedChild for FakeChild {
+        fn try_wait(&mut self) -> Result<Option<ChildExit>, String> {
+            self.events.lock().unwrap().push("try_wait");
+            if self.try_wait_errors > 0 {
+                self.try_wait_errors -= 1;
+                return Err("observation failed".to_owned());
+            }
+            Ok(
+                (self.ready || (self.terminated && self.exit_after_terminate))
+                    .then(|| self.exit.clone()),
+            )
+        }
+
+        fn terminate(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("terminate");
+            self.terminated = true;
+            Ok(())
+        }
+
+        fn kill(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("kill");
+            Ok(())
+        }
+
+        fn wait(&mut self) -> Result<ChildExit, String> {
+            self.events.lock().unwrap().push("wait");
+            Ok(self.exit.clone())
+        }
+
+        fn join_output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
+            self.events.lock().unwrap().push("join_output");
+            Ok((self.stdout.clone(), self.stderr.clone()))
+        }
+    }
+
+    fn fake_runner(exit_after_terminate: bool) -> (FakeRunner, Arc<Mutex<Vec<&'static str>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        (
+            FakeRunner {
+                child: Mutex::new(Some(FakeChild {
+                    events: Arc::clone(&events),
+                    ready: false,
+                    try_wait_errors: 0,
+                    exit_after_terminate,
+                    terminated: false,
+                    exit: ChildExit {
+                        success: false,
+                        display: "signal".to_owned(),
+                    },
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })),
+                spawn_error: None,
+            },
+            events,
+        )
+    }
+
+    #[test]
+    fn owned_child_timeout_escalates_and_reaps_before_joining_output() {
+        let (runner, events) = fake_runner(false);
+        let error = run_owned_child(
+            &runner,
+            &FakeTime::default(),
+            "op://vault/item",
+            &NeverCancelled,
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        assert!(error.contains("deadline"));
+        let events = events.lock().unwrap();
+        let terminate = events
+            .iter()
+            .position(|event| *event == "terminate")
+            .unwrap();
+        let kill = events.iter().position(|event| *event == "kill").unwrap();
+        let wait = events.iter().position(|event| *event == "wait").unwrap();
+        let join = events
+            .iter()
+            .position(|event| *event == "join_output")
+            .unwrap();
+        assert!(terminate < kill && kill < wait && wait < join);
+    }
+
+    #[test]
+    fn successful_child_is_reaped_and_its_readers_are_joined() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runner = FakeRunner {
+            child: Mutex::new(Some(FakeChild {
+                events: Arc::clone(&events),
+                ready: true,
+                try_wait_errors: 0,
+                exit_after_terminate: false,
+                terminated: false,
+                exit: ChildExit {
+                    success: true,
+                    display: "exit status: 0".to_owned(),
+                },
+                stdout: b"secret\n".to_vec(),
+                stderr: Vec::new(),
+            })),
+            spawn_error: None,
+        };
+        assert_eq!(
+            run_owned_child(
+                &runner,
+                &FakeTime::default(),
+                "op://vault/item",
+                &NeverCancelled,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            ),
+            Ok("secret".to_owned())
         );
         assert_eq!(
-            resolved.values,
-            BTreeMap::from([("LITERAL".to_owned(), "kept".to_owned())])
-        );
-        assert_eq!(
-            resolved.failures[0].error,
-            "secret read thread panicked".to_owned()
+            events.lock().unwrap().as_slice(),
+            ["try_wait", "wait", "join_output"]
         );
     }
 
     #[test]
-    fn literal_only_bindings_never_touch_the_op_cli() {
-        // `OpCli` would spawn a subprocess for a reference; a configuration
-        // without references resolves without one.
-        let resolved = resolve_parallel(&bindings(&[("RUST_LOG", "debug")]), &OpCli);
+    fn graceful_timeout_exit_is_reaped_and_does_not_get_killed() {
+        let (runner, events) = fake_runner(true);
+        run_owned_child(
+            &runner,
+            &FakeTime::default(),
+            "op://vault/item",
+            &NeverCancelled,
+            Duration::ZERO,
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+        )
+        .unwrap_err();
+        let events = events.lock().unwrap();
+        assert!(events.contains(&"terminate"));
+        assert!(!events.contains(&"kill"));
+        assert_eq!(&events[events.len() - 2..], ["wait", "join_output"]);
+    }
+
+    #[test]
+    fn observation_errors_still_escalate_reap_and_join() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runner = FakeRunner {
+            child: Mutex::new(Some(FakeChild {
+                events: Arc::clone(&events),
+                ready: false,
+                try_wait_errors: 2,
+                exit_after_terminate: false,
+                terminated: false,
+                exit: ChildExit {
+                    success: false,
+                    display: "signal".to_owned(),
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })),
+            spawn_error: None,
+        };
+        run_owned_child(
+            &runner,
+            &FakeTime::default(),
+            "op://vault/item",
+            &NeverCancelled,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
         assert_eq!(
-            resolved.values,
-            BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())])
+            events.lock().unwrap().as_slice(),
+            [
+                "try_wait",
+                "terminate",
+                "try_wait",
+                "kill",
+                "wait",
+                "join_output"
+            ]
         );
-        assert!(resolved.failures.is_empty());
-        assert!(format!("{OpCli:?}").contains("OpCli"));
-        assert_eq!(OpCli, OpCli {});
+    }
+
+    #[test]
+    fn nonzero_child_reports_empty_and_present_stderr_safely() {
+        for (stderr, suffix) in [
+            (Vec::new(), "no stderr"),
+            (b"vault is locked\n".to_vec(), "vault is locked"),
+        ] {
+            let runner = FakeRunner {
+                child: Mutex::new(Some(FakeChild {
+                    events: Arc::new(Mutex::new(Vec::new())),
+                    ready: true,
+                    try_wait_errors: 0,
+                    exit_after_terminate: false,
+                    terminated: false,
+                    exit: ChildExit {
+                        success: false,
+                        display: "exit status: 1".to_owned(),
+                    },
+                    stdout: Vec::new(),
+                    stderr,
+                })),
+                spawn_error: None,
+            };
+            let error = run_owned_child(
+                &runner,
+                &FakeTime::default(),
+                "op://vault/item",
+                &NeverCancelled,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            )
+            .unwrap_err();
+            assert!(error.ends_with(suffix), "{error}");
+        }
+    }
+
+    #[test]
+    fn spawn_failure_has_no_child_cleanup_effect() {
+        let runner = FakeRunner {
+            child: Mutex::new(None),
+            spawn_error: Some("failed to start secret resolver".to_owned()),
+        };
+        assert_eq!(
+            run_owned_child(
+                &runner,
+                &FakeTime::default(),
+                "op://vault/item",
+                &NeverCancelled,
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::from_millis(1),
+            ),
+            Err("failed to start secret resolver".to_owned())
+        );
+    }
+
+    #[test]
+    fn cancellation_uses_the_same_owned_child_cleanup_path() {
+        let (runner, events) = fake_runner(false);
+        assert_eq!(
+            run_owned_child(
+                &runner,
+                &FakeTime::default(),
+                "op://vault/item",
+                &AlwaysCancelled,
+                Duration::from_secs(30),
+                Duration::ZERO,
+                Duration::from_millis(1),
+            ),
+            Err("op read was cancelled".to_owned())
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.as_slice(),
+            ["terminate", "kill", "wait", "join_output"]
+        );
     }
 }

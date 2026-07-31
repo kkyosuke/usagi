@@ -15,8 +15,9 @@
 mod env;
 
 pub use env::{
-    EnvBindings, SECRET_REFERENCE_PREFIX, format_env_bindings, is_secret_reference,
-    is_valid_env_name, parse_env_bindings, valid_bindings,
+    EnvBindings, EnvLimitError, MAX_CONCURRENT_SECRET_READS, MAX_ENV_BINDINGS,
+    MAX_SECRET_REFERENCES, SECRET_REFERENCE_PREFIX, format_env_bindings, is_secret_reference,
+    is_valid_env_name, parse_env_bindings, valid_bindings, validate_env_limits,
 };
 
 use serde::{Deserialize, Serialize};

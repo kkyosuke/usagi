@@ -115,9 +115,11 @@ impl Storage {
     ///
     /// Returns an error when `settings.json` cannot be read or parsed.
     pub fn load_settings(&self) -> Result<Settings> {
-        Ok(json_file::read(&self.dir.join(SETTINGS_FILE))?
+        let settings = json_file::read(&self.dir.join(SETTINGS_FILE))?
             .map(Settings::sanitized)
-            .unwrap_or_default())
+            .unwrap_or_default();
+        crate::domain::settings::validate_env_limits(&settings.env)?;
+        Ok(settings)
     }
 
     /// Persist per-user settings atomically. Callers that edit a draft must
@@ -128,6 +130,7 @@ impl Storage {
     /// Returns an error when the settings directory cannot be created or the
     /// new file cannot be atomically written.
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        crate::domain::settings::validate_env_limits(&settings.env)?;
         json_file::write_atomic(&self.dir, &self.dir.join(SETTINGS_FILE), settings)
     }
 
@@ -217,6 +220,31 @@ mod tests {
             loaded.local_llm.model,
             crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL
         );
+    }
+
+    #[test]
+    fn global_settings_load_and_save_refuse_the_domain_env_limit() {
+        use crate::domain::settings::{EnvLimitError, MAX_ENV_BINDINGS};
+
+        let (_dir, storage) = temp_storage();
+        let oversized = Settings {
+            env: (0..=MAX_ENV_BINDINGS)
+                .map(|index| (format!("VALUE_{index}"), "literal".to_owned()))
+                .collect(),
+            ..Settings::default()
+        };
+        let save_error = storage.save_settings(&oversized).unwrap_err();
+        assert!(save_error.downcast_ref::<EnvLimitError>().is_some());
+        assert!(!storage.dir().join(SETTINGS_FILE).exists());
+
+        fs::create_dir_all(storage.dir()).unwrap();
+        fs::write(
+            storage.dir().join(SETTINGS_FILE),
+            serde_json::to_vec(&oversized).unwrap(),
+        )
+        .unwrap();
+        let load_error = storage.load_settings().unwrap_err();
+        assert!(load_error.downcast_ref::<EnvLimitError>().is_some());
     }
 
     #[test]

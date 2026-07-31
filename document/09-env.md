@@ -43,6 +43,18 @@ editor は 1 行 1 binding の `NAME=value` を受け取り、保存時に次の
 | secret 参照 | `op://` で始まり、続くパスが空でない値。それ以外は平文として扱う |
 | 重複 | 同名は後の行が勝ち、map は名前順に正規化される |
 
+binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
+合成後の launch admission が同じ検証を使う。
+
+| 対象 | 上限 | 超過時 |
+|---|---:|---|
+| 1 scope または合成後の binding | 128 | 保存・load または launch admission を拒否 |
+| 1 scope または合成後の secret reference | 32 | 保存・load または launch admission を拒否 |
+| 1 launch で同時実行する `op read` | 4 | 残りを bounded queue で待機 |
+
+上限超過を launch admission で検出した場合は secret resolver と PTY child を一つも spawn せず、安全な validation / provision
+error を返す。global と workspace がそれぞれ保存上限内でも、合成後に上限を超える組み合わせは同じように拒否する。
+
 ## 実効環境の合成
 
 実効 binding は global に workspace を重ねた結果で、同名は workspace が勝つ。
@@ -64,8 +76,11 @@ workspace の editor は、この継承関係を隠さない。編集中のス�
 平文の値は解決を要さずそのまま注入する。`op://` の値だけを 1Password CLI（`op read --no-newline`）で
 解決する。
 
-- 解決は **binding ごとに並列**（1 参照 = 1 subprocess）で行うため、待ち時間は個々の合計ではなく
-  最も遅い 1 件ぶんになる。1 件あたり 30 秒の deadline を持つ。
+- 解決は最大 4 worker の bounded queue で行う（1 参照 = 1 subprocess）。1 件あたり 30 秒の deadline を持つ。
+  binding の結果は完了順でなく名前順へ戻して merge する。
+- deadline を超えた `op` は、その child handle の owner が exact child だけへ graceful terminate を送り、2 秒の bounded wait
+  後も残る場合は kill する。その後は wait/reap と stdout / stderr reader の join を終えてから failure を返す。任意 PID や
+  owner が証明できない process は signal 対象にしない。
 - `op` の認証は CLI 側の通常の仕組みに従う（`op signin` セッション、または daemon 自身の環境の
   `OP_SERVICE_ACCOUNT_TOKEN`）。
 - **解決に失敗した binding は注入せず、その変数だけを落として error ログに記録する**（変数名と参照は
