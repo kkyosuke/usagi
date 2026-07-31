@@ -452,6 +452,13 @@ managed pane の selected tab、terminal scroll / text selection を変更しな
 shortcut と header button を受理しない。drawer open 中の root foreground availability は背景 Closeup modal を
 開かず、modal と drawer は同時に visible にならない。
 
+New picker の `Choosing` / `Empty` と launch pending (`Launching`) は排他的な foreground input owner である。この owner は
+上記の picker 予約操作以外の keyboard / `Char` / paste / terminal copy / pointer と、tab の選択・移動・close・resume、
+terminal scroll を inert に消費する。したがって背後の root Agent PTY bytes、pane/tab state、scroll、text selection、
+attach/detach は変化しない。terminal resize と backend/timer tick だけは owner を越えて通常の frame 処理へ進む。
+`Esc` で picker を閉じた次の input から drawer conversation の規則へ戻り、通常文字・paste・`Enter` は selected root
+Agent PTY へ送る。
+
 入力 context の優先順位と遷移は次のとおりである。
 
 | 現在の context | 入力 | 次の context / effect |
