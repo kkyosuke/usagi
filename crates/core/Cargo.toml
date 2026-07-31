@@ -25,6 +25,9 @@ dirs.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 toml.workspace = true
+# atomic persistence temp files use Unix no-follow/close-on-exec flags and
+# verify effective ownership at the infrastructure boundary.
+libc.workspace = true
 # workspace_guard usecase が root 行の Bash command を字句解析するため。
 shell-words.workspace = true
 # vt_screen usecase が端末セルの表示桁数（CJK など全角を 2 桁）を測るため。
