@@ -302,7 +302,12 @@ mod tests {
                     EnvironmentVariableName::new("CLAUDE_TOKEN").unwrap(),
                     "secret".into(),
                 )],
-                vec!["--settings".into(), "/scoped/claude.json".into()],
+                vec![
+                    "--settings".into(),
+                    "/scoped/claude.json".into(),
+                    "--append-system-prompt".into(),
+                    "ephemeral system prompt".into(),
+                ],
             ),
         }
     }
@@ -319,9 +324,15 @@ mod tests {
         let durable = serde_json::to_string(&resolved.snapshot).unwrap();
         assert!(!durable.contains("CLAUDE_TOKEN"));
         assert!(!durable.contains("/scoped/claude.json"));
+        assert!(!durable.contains("ephemeral system prompt"));
         assert_eq!(
             resolved.provision.arguments(),
-            ["--settings", "/scoped/claude.json"]
+            [
+                "--settings",
+                "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
+            ]
         );
         assert!(resolved.provider_resume.is_none());
     }
@@ -345,6 +356,8 @@ mod tests {
             [
                 "--settings",
                 "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
                 "--session-id",
                 reference.native_session_id.expose_sensitive(),
             ]
@@ -373,6 +386,8 @@ mod tests {
             [
                 "--settings",
                 "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
                 "--resume",
                 reference.native_session_id.expose_sensitive(),
             ]

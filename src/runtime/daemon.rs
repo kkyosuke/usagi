@@ -5,6 +5,7 @@
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::agent::prompt::session_system_prompt;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -408,6 +410,14 @@ impl CodexProvisioner for RootCodexProvisioner {
             .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        let mode = sandbox_mode(context);
+        let mut arguments = context
+            .inject_mcp
+            .then(|| codex_integration_arguments(&self.mcp_command))
+            .transpose()
+            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
+            .unwrap_or_default();
+        arguments.extend(codex_system_prompt_arguments(mode));
         let user = configured_environment(self.environment.as_ref(), &workspace_root);
         Ok(CodexProvision {
             working_directory,
@@ -418,12 +428,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                     mcp_environment(context, &self.data_home, &workspace_root)
                         .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
                 ),
-                context
-                    .inject_mcp
-                    .then(|| codex_integration_arguments(&self.mcp_command))
-                    .transpose()
-                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
-                    .unwrap_or_default(),
+                arguments,
             ),
         })
     }
@@ -464,6 +469,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             claude_settings_arguments(&self.mcp_command, mode)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
         );
+        arguments.extend(claude_system_prompt_arguments(mode));
         let user = configured_environment(self.environment.as_ref(), &workspace_root);
         let mut spawn = SpawnProvision::new(
             launch_environment(
@@ -557,6 +563,16 @@ fn claude_settings_arguments(usagi: &Path, mode: SandboxMode) -> Result<Vec<Stri
         "--settings".to_owned(),
         scoped_settings_json(usagi, mode == SandboxMode::Session),
     ])
+}
+
+/// The scope-specific system prompt passed as one opaque argv value. Unlike the
+/// hook command payload, this never crosses a shell or JSON boundary.
+fn claude_system_prompt_arguments(mode: SandboxMode) -> Vec<String> {
+    claude_prompt_arguments(session_system_prompt(mode == SandboxMode::Root, false))
+}
+
+fn claude_prompt_arguments(prompt: String) -> Vec<String> {
+    vec!["--append-system-prompt".to_owned(), prompt]
 }
 
 /// The configured environment for a launch in `workspace_root`, or nothing when
@@ -686,6 +702,45 @@ fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
             r#"hooks.SessionStart = [{{ matcher = "^startup$", hooks = [{{ type = "command", command = {hook_command}, timeout = 10 }}] }}]"#
         ),
     ])
+}
+
+/// The scope-specific system prompt rendered as one Codex `-c` assignment.
+/// Both argv elements stay ephemeral and precede the durable product argv.
+fn codex_system_prompt_arguments(mode: SandboxMode) -> Vec<String> {
+    codex_developer_instructions_arguments(&session_system_prompt(mode == SandboxMode::Root, false))
+}
+
+fn codex_developer_instructions_arguments(prompt: &str) -> Vec<String> {
+    vec![
+        "-c".to_owned(),
+        format!("developer_instructions={}", toml_basic_string(prompt)),
+    ]
+}
+
+/// Renders a TOML basic string without involving a shell. The prompt contains
+/// newlines, and callers may supply quotes, backslashes, or control characters,
+/// so every character TOML forbids literally is escaped.
+fn toml_basic_string(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len() + 2);
+    rendered.push('"');
+    for character in text.chars() {
+        match character {
+            '\\' => rendered.push_str(r"\\"),
+            '"' => rendered.push_str(r#"\""#),
+            '\u{0008}' => rendered.push_str(r"\b"),
+            '\t' => rendered.push_str(r"\t"),
+            '\n' => rendered.push_str(r"\n"),
+            '\u{000c}' => rendered.push_str(r"\f"),
+            '\r' => rendered.push_str(r"\r"),
+            character if character.is_control() => {
+                write!(&mut rendered, r"\u{:04X}", u32::from(character))
+                    .expect("writing to a String cannot fail");
+            }
+            character => rendered.push(character),
+        }
+    }
+    rendered.push('"');
+    rendered
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1017,16 +1072,7 @@ impl PtySpawner for AgentPty {
         // (Claude), the spawned child is the usagi binary running
         // `claude-sandbox … -- <program> …`, so the product only ever runs
         // confined; the durable snapshot still records the bare product program.
-        let (program, mut argv) = match provision.sandbox_launcher() {
-            Some(launcher) => {
-                let mut argv = launcher.prefix.clone();
-                argv.push(plan.program.clone());
-                (launcher.program.clone(), argv)
-            }
-            None => (plan.program.clone(), Vec::new()),
-        };
-        argv.extend(provision.arguments().iter().cloned());
-        argv.extend(plan.argv.iter().cloned());
+        let (program, argv) = provisioned_agent_command(&plan.program, &plan.argv, provision);
         let environment = provision.compose_environment(&self.environment);
         let pty = PtyTerminal::spawn_with(
             &program,
@@ -1092,6 +1138,24 @@ impl PtySpawner for AgentPty {
         release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
         Ok(())
     }
+}
+
+fn provisioned_agent_command(
+    product_program: &str,
+    durable_argv: &[String],
+    provision: &SpawnProvision,
+) -> (String, Vec<String>) {
+    let (program, mut argv) = match provision.sandbox_launcher() {
+        Some(launcher) => {
+            let mut argv = launcher.prefix.clone();
+            argv.push(product_program.to_owned());
+            (launcher.program.clone(), argv)
+        }
+        None => (product_program.to_owned(), Vec::new()),
+    };
+    argv.extend(provision.arguments().iter().cloned());
+    argv.extend(durable_argv.iter().cloned());
+    (program, argv)
 }
 
 fn send_agent_observation(
@@ -11034,6 +11098,127 @@ mod tests {
                 "--allowedTools",
                 "mcp__usagi",
             ]
+        );
+    }
+
+    #[test]
+    fn system_prompt_arguments_follow_scope_once_and_stay_parseable() {
+        use usagi_core::domain::agent::prompt::{root_prompt, session_worktree_prompt};
+
+        for (mode, expected) in [
+            (SandboxMode::Root, root_prompt()),
+            (SandboxMode::Session, session_worktree_prompt()),
+        ] {
+            let claude = claude_system_prompt_arguments(mode);
+            assert_eq!(claude, ["--append-system-prompt", expected]);
+            assert_eq!(
+                claude
+                    .iter()
+                    .filter(|argument| argument.as_str() == "--append-system-prompt")
+                    .count(),
+                1
+            );
+
+            let codex = codex_system_prompt_arguments(mode);
+            assert_eq!(codex[0], "-c");
+            assert_eq!(
+                codex
+                    .iter()
+                    .filter(|argument| argument.starts_with("developer_instructions="))
+                    .count(),
+                1
+            );
+            let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
+            assert_eq!(parsed["developer_instructions"].as_str(), Some(expected));
+        }
+
+        // A later resolve (including a resume replacement) regenerates from
+        // its current scope instead of retaining the previous provision.
+        assert_ne!(
+            claude_system_prompt_arguments(SandboxMode::Root),
+            claude_system_prompt_arguments(SandboxMode::Session)
+        );
+        assert_ne!(
+            codex_system_prompt_arguments(SandboxMode::Root),
+            codex_system_prompt_arguments(SandboxMode::Session)
+        );
+    }
+
+    #[test]
+    fn prompt_renderers_preserve_opaque_argv_and_escape_toml_controls() {
+        let prompt = "don't reinterpret \"quotes\", C:\\work\nnext\tline\u{0000}\u{007f}";
+
+        let claude = claude_prompt_arguments(prompt.to_owned());
+        assert_eq!(claude, ["--append-system-prompt", prompt]);
+        assert_eq!(claude.len(), 2);
+
+        let codex = codex_developer_instructions_arguments(prompt);
+        assert_eq!(codex[0], "-c");
+        assert!(codex[1].contains(r#"\"quotes\""#));
+        assert!(codex[1].contains(r"C:\\work\nnext\tline\u0000\u007F"));
+        let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
+        assert_eq!(parsed["developer_instructions"].as_str(), Some(prompt));
+    }
+
+    #[test]
+    fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
+        let mut codex_arguments =
+            codex_integration_arguments(Path::new("/opt/usagi/bin/usagi")).unwrap();
+        codex_arguments.extend(codex_system_prompt_arguments(SandboxMode::Session));
+        codex_arguments.extend(["resume".to_owned(), "provider-session".to_owned()]);
+        let codex = SpawnProvision::new([], codex_arguments);
+        let (_, argv) = provisioned_agent_command(
+            "codex",
+            &["--".to_owned(), "user prompt".to_owned()],
+            &codex,
+        );
+        let developer = argv
+            .iter()
+            .position(|argument| argument.starts_with("developer_instructions="))
+            .unwrap();
+        let resume = argv
+            .iter()
+            .position(|argument| argument == "resume")
+            .unwrap();
+        let separator = argv.iter().position(|argument| argument == "--").unwrap();
+        assert!(developer < resume);
+        assert!(resume < separator);
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| argument.starts_with("developer_instructions="))
+                .count(),
+            1
+        );
+
+        let prompt = session_system_prompt(false, false);
+        let mut claude =
+            SpawnProvision::new([], claude_system_prompt_arguments(SandboxMode::Session));
+        claude.set_sandbox_launcher(SandboxLauncher {
+            program: "/opt/usagi/bin/usagi".to_owned(),
+            prefix: vec!["claude-sandbox".to_owned(), "--".to_owned()],
+        });
+        claude.append_sensitive_arguments(["--resume".to_owned(), "provider-session".to_owned()]);
+        let (program, argv) =
+            provisioned_agent_command("claude", &["user prompt".to_owned()], &claude);
+        assert_eq!(program, "/opt/usagi/bin/usagi");
+        assert_eq!(
+            argv,
+            [
+                "claude-sandbox",
+                "--",
+                "claude",
+                "--append-system-prompt",
+                prompt.as_str(),
+                "--resume",
+                "provider-session",
+                "user prompt",
+            ]
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| argument.as_str() == "--append-system-prompt")
+                .count(),
+            1
         );
     }
 

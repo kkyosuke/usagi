@@ -845,15 +845,19 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 
 ### Claude 起動の多層防御
 
-Claude の live な起動経路は、常に次の 2 層を同時に配線する。合成ルートの Claude provisioner が
+Claude の live な起動経路は、常に次の 3 層を同時に配線する。合成ルートの Claude provisioner が
 起動 scope（managed session があるか）から `mode` を選び、`--settings` のフック JSON と launcher を
 同じ provisioning で組む。
 
 | 層 | 何を止めるか | 配線 |
 |---|---|---|
+| agent instruction | root coordinator と session worktree の責務・作業範囲の取り違え | core SSoT の scope 別 system prompt → `--append-system-prompt <prompt>` |
 | 論理境界（`PreToolUse` フック） | worktree の外を狙うツール呼び出し | `--settings` の `PreToolUse` → `usagi guard-workspace`（session 起動のみ） |
 | hard boundary（OS sandbox） | 許可 root 外への**すべての**書き込み | `usagi claude-sandbox --mode <mode> --writable-root … -- claude …` |
 
+- **system prompt**: `usagi-core` の `domain::agent::prompt` が持つ scope 別本文を、非 durable な
+  `SpawnProvision` の `--append-system-prompt` に 1 つの argv 値として載せる。本文は shell / JSON
+  escaping を介さず、`LaunchPlan` / `DurableLaunchSnapshot` に保存しない。
 - **起動 argv**: 子プロセスは product ではなく launcher（`usagi` バイナリ）で、
   `usagi claude-sandbox --mode <session|root> [--writable-root <path>]… -- claude <product 引数…>` になる。
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
@@ -874,6 +878,10 @@ Claude の live な起動経路は、常に次の 2 層を同時に配線する�
   ことを許す。`bwrap` を持たない Linux CI でも live 配線（launcher・`--settings`・PTY ライフサイクル）を
   E2E で通すためのもので、**shipping ビルドには存在しない**（合成ルートが `cfg!(debug_assertions)` を渡すため、
   release ビルドでは常に無効）。
+
+Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
+既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
+resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 
 ## 入口面 MCP の tool dispatch
 
