@@ -10,9 +10,13 @@
 //! It is pure: the shell polls the [`TerminalSession`] for rows and cells and
 //! drives the OS clipboard; this type only tracks scroll, an in-progress
 //! [`TerminalSelection`], and the presentation-safe feedback line, and folds them
-//! into the [`TerminalViewProjection`] the right pane renders.
+//! into the [`TerminalViewProjection`] the right pane renders. View state is
+//! retained per terminal in a bounded cache, so temporarily focusing another
+//! pane (for example the workspace Agent drawer) does not erase either view.
 //!
 //! [`TerminalSession`]: crate::usecase::application::terminal_session::TerminalSession
+
+use std::collections::VecDeque;
 
 use usagi_core::domain::id::TerminalRef;
 
@@ -21,13 +25,11 @@ use crate::usecase::application::pr::BrowserOpener;
 use crate::usecase::application::terminal_link::{url_at, validate_url};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 
-/// Scroll, selection, and feedback for the focused live terminal, owned by the
-/// runtime shell rather than the controller reducer.
+const RETAINED_TERMINAL_VIEW_LIMIT: usize = 8;
+
+/// Scroll, selection, and feedback for one live terminal.
 #[derive(Debug, Default)]
-pub struct LiveTerminalControls {
-    /// The terminal these controls currently track. Changing focus resets them
-    /// so scroll and selection never leak between panes.
-    focused: Option<TerminalRef>,
+struct TerminalViewState {
     /// Rows scrolled up from the live bottom.
     scroll: usize,
     /// The furthest the current viewport can scroll, recomputed each frame from
@@ -39,7 +41,7 @@ pub struct LiveTerminalControls {
     pointer_press: Option<TerminalSelection>,
     /// The drag selection, snapshotted at its anchor. It is retained after the
     /// mouse is released so the highlighted range stays on screen (and copyable)
-    /// until a new drag replaces it or focus changes.
+    /// until a new drag replaces it or the terminal is closed/evicted.
     selection: Option<TerminalSelection>,
     /// Whether a mouse drag is currently extending [`Self::selection`]. This
     /// distinguishes "extend the live drag" from "start a fresh selection",
@@ -49,60 +51,115 @@ pub struct LiveTerminalControls {
     feedback: Option<String>,
 }
 
+/// Terminal-local view controls owned by the runtime shell rather than the
+/// controller reducer.
+///
+/// `active` is the focused terminal's state. States left by a focus transition
+/// are retained oldest-first in `retained`; together they are bounded by
+/// [`RETAINED_TERMINAL_VIEW_LIMIT`].
+#[derive(Debug, Default)]
+pub struct LiveTerminalControls {
+    focused: Option<TerminalRef>,
+    active: TerminalViewState,
+    retained: VecDeque<(TerminalRef, TerminalViewState)>,
+}
+
 impl LiveTerminalControls {
-    /// Track `terminal` as the focused pane, resetting scroll, selection, and
-    /// feedback whenever the focused identity changes (including to `None`). The
-    /// shell calls this once per frame before projecting the viewport.
+    /// Track `terminal` as the focused pane, restoring its terminal-local view
+    /// state when focus returns. A pending pointer gesture cannot span panes, so
+    /// blur cancels the gesture while retaining an established selection.
     pub fn sync_focus(&mut self, terminal: Option<&TerminalRef>) {
         if self.focused.as_ref() == terminal {
             return;
         }
+        if let Some(previous) = self.focused.take() {
+            self.active.pointer_press = None;
+            self.active.dragging = false;
+            self.retained
+                .retain(|(retained, _)| !retained.fences(&previous));
+            self.retained
+                .push_back((previous, std::mem::take(&mut self.active)));
+        } else {
+            self.active = TerminalViewState::default();
+        }
+
         self.focused = terminal.cloned();
-        self.scroll = 0;
-        self.max_scroll = 0;
-        self.pointer_press = None;
-        self.selection = None;
-        self.dragging = false;
-        self.feedback = None;
+        if let Some(terminal) = terminal {
+            self.active = self
+                .retained
+                .iter()
+                .position(|(retained, _)| retained.fences(terminal))
+                .and_then(|position| self.retained.remove(position))
+                .map_or_else(TerminalViewState::default, |(_, state)| state);
+            self.trim_retained(RETAINED_TERMINAL_VIEW_LIMIT - 1);
+        } else {
+            self.trim_retained(RETAINED_TERMINAL_VIEW_LIMIT);
+        }
+    }
+
+    /// Forget view state for terminals no longer represented by a live tab.
+    /// Foreground detach does not call this; logical close and exit do.
+    pub fn retain_terminals(&mut self, terminals: &[TerminalRef]) {
+        let is_live =
+            |candidate: &TerminalRef| terminals.iter().any(|terminal| terminal.fences(candidate));
+        self.retained.retain(|(terminal, _)| is_live(terminal));
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|focused| !is_live(focused))
+        {
+            self.focused = None;
+            self.active = TerminalViewState::default();
+        }
+    }
+
+    fn trim_retained(&mut self, limit: usize) {
+        while self.retained.len() > limit {
+            self.retained.pop_front();
+        }
     }
 
     /// Scroll one line toward older output, clamped to the last projected extent.
     pub fn scroll_up(&mut self) {
-        self.scroll = self.scroll.saturating_add(1).min(self.max_scroll);
+        self.active.scroll = self
+            .active
+            .scroll
+            .saturating_add(1)
+            .min(self.active.max_scroll);
     }
 
     /// Scroll one line back toward the live bottom.
     pub fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
+        self.active.scroll = self.active.scroll.saturating_sub(1);
     }
 
     /// Begin a drag selection, replacing any earlier (including finished) one,
     /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {
-        self.pointer_press = None;
-        self.selection = Some(selection);
-        self.dragging = true;
-        self.feedback = Some("terminal selection started".to_owned());
+        self.active.pointer_press = None;
+        self.active.selection = Some(selection);
+        self.active.dragging = true;
+        self.active.feedback = Some("terminal selection started".to_owned());
     }
 
     /// Record a pointer press without starting a text selection. A subsequent
     /// drag promotes the snapshotted viewport and anchor into `selection`; a
     /// release before that remains a plain click.
     pub fn press_pointer(&mut self, selection: TerminalSelection) {
-        self.pointer_press = Some(selection);
-        self.dragging = false;
+        self.active.pointer_press = Some(selection);
+        self.active.dragging = false;
     }
 
     /// Promote a pending press into a drag selection and extend it to `focus`.
     /// Returns `false` for a stray drag that had no preceding press.
     pub fn drag_pointer(&mut self, focus: TerminalPoint) -> bool {
-        if !self.dragging {
-            let Some(selection) = self.pointer_press.take() else {
+        if !self.active.dragging {
+            let Some(selection) = self.active.pointer_press.take() else {
                 return false;
             };
-            self.selection = Some(selection);
-            self.dragging = true;
-            self.feedback = Some("terminal selection started".to_owned());
+            self.active.selection = Some(selection);
+            self.active.dragging = true;
+            self.active.feedback = Some("terminal selection started".to_owned());
         }
         self.extend_selection(focus);
         true
@@ -113,12 +170,12 @@ impl LiveTerminalControls {
     /// A press released before any drag is a click. A promoted drag returns its
     /// selected text for copying. A release without a matching press is inert.
     pub fn release_pointer(&mut self) -> PointerRelease {
-        if self.dragging {
+        if self.active.dragging {
             return self
                 .finish_drag()
                 .map_or(PointerRelease::None, PointerRelease::Copy);
         }
-        if self.pointer_press.take().is_some() {
+        if self.active.pointer_press.take().is_some() {
             return PointerRelease::Click;
         }
         PointerRelease::None
@@ -126,7 +183,7 @@ impl LiveTerminalControls {
 
     /// Extend the in-progress selection to `focus`; a no-op without a selection.
     pub fn extend_selection(&mut self, focus: TerminalPoint) {
-        if let Some(selection) = &mut self.selection {
+        if let Some(selection) = &mut self.active.selection {
             selection.extend(focus);
         }
     }
@@ -134,23 +191,23 @@ impl LiveTerminalControls {
     /// Whether a selection currently exists (either an active drag or a finished
     /// one still highlighted on screen).
     #[must_use]
-    pub const fn has_selection(&self) -> bool {
-        self.selection.is_some()
+    pub fn has_selection(&self) -> bool {
+        self.active.selection.is_some()
     }
 
     /// Whether a mouse drag is actively extending the selection. The shell uses
     /// this to decide whether a drag event extends the live selection or starts
     /// a fresh one over a lingering, finished selection.
     #[must_use]
-    pub const fn is_dragging(&self) -> bool {
-        self.dragging
+    pub fn is_dragging(&self) -> bool {
+        self.active.dragging
     }
 
     /// The current selection, so the shell renders the highlighted rows. Kept
     /// after the mouse is released so the range stays visible.
     #[must_use]
-    pub const fn selection(&self) -> Option<&TerminalSelection> {
-        self.selection.as_ref()
+    pub fn selection(&self) -> Option<&TerminalSelection> {
+        self.active.selection.as_ref()
     }
 
     /// End an in-progress drag and return the finished selection's text to copy,
@@ -159,14 +216,14 @@ impl LiveTerminalControls {
     /// when the selection is empty — an empty selection is dropped with safe
     /// feedback instead of lingering as an invisible highlight.
     pub fn finish_drag(&mut self) -> Option<String> {
-        if !self.dragging {
+        if !self.active.dragging {
             return None;
         }
-        self.dragging = false;
-        let text = self.selection.as_ref()?.text();
+        self.active.dragging = false;
+        let text = self.active.selection.as_ref()?.text();
         if text.is_empty() {
-            self.selection = None;
-            self.feedback = Some("no terminal text is selected".to_owned());
+            self.active.selection = None;
+            self.active.feedback = Some("no terminal text is selected".to_owned());
             None
         } else {
             Some(text)
@@ -176,15 +233,15 @@ impl LiveTerminalControls {
     /// Explicitly drop a retained selection while preserving scroll position
     /// and the focused terminal.
     pub fn clear_selection(&mut self) {
-        self.pointer_press = None;
-        self.selection = None;
-        self.dragging = false;
-        self.feedback = Some("terminal selection cleared".to_owned());
+        self.active.pointer_press = None;
+        self.active.selection = None;
+        self.active.dragging = false;
+        self.active.feedback = Some("terminal selection cleared".to_owned());
     }
 
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
     pub fn record_copy(&mut self, text: &str, result: Result<(), String>) {
-        self.feedback = Some(match result {
+        self.active.feedback = Some(match result {
             Ok(()) => {
                 let lines = text.lines().count().max(1);
                 let suffix = if lines == 1 { "" } else { "s" };
@@ -219,7 +276,7 @@ impl LiveTerminalControls {
         else {
             return false;
         };
-        self.feedback = Some(match browser.open(&url) {
+        self.active.feedback = Some(match browser.open(&url) {
             Ok(()) => format!("opened {url}"),
             Err(message) => format!("Could not open browser: {message}"),
         });
@@ -228,7 +285,7 @@ impl LiveTerminalControls {
 
     /// Replace the feedback line with a presentation-safe message.
     pub fn set_feedback(&mut self, message: impl Into<String>) {
-        self.feedback = Some(message.into());
+        self.active.feedback = Some(message.into());
     }
 
     /// Project `rows` into the right-pane viewport at the current scroll offset,
@@ -236,14 +293,14 @@ impl LiveTerminalControls {
     /// shrunk history re-clamps the offset.
     pub fn project(&mut self, rows: Vec<String>, viewport_rows: usize) -> TerminalViewProjection {
         let total_rows = rows.len();
-        self.max_scroll = total_rows.saturating_sub(viewport_rows);
-        self.scroll = self.scroll.min(self.max_scroll);
+        self.active.max_scroll = total_rows.saturating_sub(viewport_rows);
+        self.active.scroll = self.active.scroll.min(self.active.max_scroll);
         TerminalViewProjection {
             rows,
             row_offset: 0,
             total_rows,
-            scroll: self.scroll,
-            feedback: self.feedback.clone(),
+            scroll: self.active.scroll,
+            feedback: self.active.feedback.clone(),
         }
     }
 
@@ -255,9 +312,9 @@ impl LiveTerminalControls {
         total_rows: usize,
         viewport_rows: usize,
     ) -> std::ops::Range<usize> {
-        self.max_scroll = total_rows.saturating_sub(viewport_rows);
-        self.scroll = self.scroll.min(self.max_scroll);
-        let end = total_rows.saturating_sub(self.scroll);
+        self.active.max_scroll = total_rows.saturating_sub(viewport_rows);
+        self.active.scroll = self.active.scroll.min(self.active.max_scroll);
+        let end = total_rows.saturating_sub(self.active.scroll);
         end.saturating_sub(viewport_rows)..end
     }
 
@@ -274,14 +331,14 @@ impl LiveTerminalControls {
             rows,
             row_offset,
             total_rows,
-            scroll: self.scroll,
-            feedback: self.feedback.clone(),
+            scroll: self.active.scroll,
+            feedback: self.active.feedback.clone(),
         }
     }
 
     #[must_use]
-    pub const fn scroll(&self) -> usize {
-        self.scroll
+    pub fn scroll(&self) -> usize {
+        self.active.scroll
     }
 }
 
@@ -346,9 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn changing_focus_resets_scroll_selection_and_feedback() {
+    fn changing_focus_restores_each_terminals_scroll_selection_and_feedback() {
         let mut controls = LiveTerminalControls::default();
         let first = terminal();
+        let second = terminal();
         controls.sync_focus(Some(&first));
         let _ = controls.project(rows(10), 3);
         controls.scroll_up();
@@ -356,19 +414,67 @@ mod tests {
             vec!["hi".to_owned()],
             TerminalPoint { row: 0, column: 0 },
         ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 1 });
+        let _ = controls.finish_drag();
+        controls.record_copy("hi", Ok(()));
         assert!(controls.has_selection());
 
         // Re-syncing the same terminal keeps the state.
         controls.sync_focus(Some(&first));
         assert!(controls.has_selection());
 
-        // Focusing a different terminal (or none) clears everything.
-        controls.sync_focus(Some(&terminal()));
-        assert!(!controls.has_selection());
-        assert_eq!(controls.project(rows(10), 3).scroll, 0);
-        assert_eq!(controls.project(rows(10), 3).feedback, None);
+        // A second terminal starts clean and keeps an independent view.
+        controls.sync_focus(Some(&second));
+        let _ = controls.project(rows(10), 3);
+        controls.scroll_up();
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["second".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 5 });
+        let _ = controls.finish_drag();
+
+        controls.sync_focus(Some(&first));
+        assert_eq!(controls.project(rows(10), 3).scroll, 1);
+        assert_eq!(
+            controls.selection().map(TerminalSelection::text).as_deref(),
+            Some("hi")
+        );
+        assert_eq!(
+            controls.project(rows(10), 3).feedback.as_deref(),
+            Some("copied 1 line")
+        );
         controls.sync_focus(None);
-        assert!(!controls.has_selection());
+        controls.sync_focus(Some(&second));
+        assert_eq!(controls.project(rows(10), 3).scroll, 2);
+        assert_eq!(
+            controls.selection().map(TerminalSelection::text).as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn retained_terminal_views_are_bounded_and_closed_terminals_are_forgotten() {
+        let terminals = (0..=super::RETAINED_TERMINAL_VIEW_LIMIT)
+            .map(|_| terminal())
+            .collect::<Vec<_>>();
+        let mut controls = LiveTerminalControls::default();
+
+        for (index, terminal) in terminals.iter().enumerate() {
+            controls.sync_focus(Some(terminal));
+            controls.set_feedback(format!("terminal {index}"));
+        }
+
+        // The oldest of nine identities was evicted from the eight-entry cache.
+        controls.sync_focus(Some(&terminals[0]));
+        assert_eq!(controls.project(rows(1), 1).feedback, None);
+
+        // A logically closed terminal is forgotten even if it was focused.
+        controls.set_feedback("must be dropped");
+        controls.retain_terminals(&terminals[1..]);
+        controls.sync_focus(Some(&terminals[0]));
+        assert_eq!(controls.project(rows(1), 1).feedback, None);
     }
 
     #[test]

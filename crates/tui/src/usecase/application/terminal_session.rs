@@ -467,6 +467,10 @@ pub struct TerminalSession {
     /// is retried on the next redraw instead of leaving the PTY at its old
     /// width indefinitely.
     synchronized_geometry: Option<Geometry>,
+    /// One-shot permission to reuse `synchronized_geometry` after this client
+    /// explicitly released only its subscription. Transport reconnects never
+    /// set it and therefore always reassert PTY geometry.
+    detached_geometry: bool,
     screen: TerminalScreen,
     /// Rendered retained rows cached between output/resize/state changes.
     ///
@@ -519,6 +523,7 @@ impl TerminalSession {
             terminal,
             geometry,
             synchronized_geometry: None,
+            detached_geometry: false,
             screen,
             display_cache,
             subscription: None,
@@ -648,9 +653,23 @@ impl TerminalSession {
     /// Connects at an injected monotonic instant. This is the deterministic
     /// clock boundary used by reconnect tests.
     pub fn connect_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
+        let reuse_detached_geometry = std::mem::take(&mut self.detached_geometry);
         for attempt in 0..=SNAPSHOT_RETRY_LIMIT {
-            let resize_error = port.resize(&self.terminal, self.geometry).err();
-            self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
+            // A retained coordinator already synchronized at this exact
+            // geometry does not need another SIGWINCH merely because its
+            // subscription was released. A refused snapshot is different: its
+            // immediate retry must reassert geometry because capture raced a
+            // resize after the preceding synchronization.
+            let resize_error = if attempt == 0
+                && reuse_detached_geometry
+                && self.synchronized_geometry == Some(self.geometry)
+            {
+                None
+            } else {
+                let error = port.resize(&self.terminal, self.geometry).err();
+                self.synchronized_geometry = error.is_none().then_some(self.geometry);
+                error
+            };
             let attach = match port.attach(&self.terminal, self.geometry) {
                 Ok(attach) => attach,
                 Err(error) => return self.fail_at(error, now),
@@ -972,6 +991,7 @@ impl TerminalSession {
             port.detach(&self.terminal, subscription);
         }
         self.state = SessionState::Disconnected;
+        self.detached_geometry = true;
         self.retry_at = None;
         self.retry_attempt = 0;
         self.refresh_display_cache();
@@ -2379,6 +2399,11 @@ mod tests {
         assert_eq!(session.send_input(&mut port, b"after"), Ok(()));
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "back");
+        assert_eq!(
+            port.resized,
+            vec![geometry()],
+            "same-geometry explicit reattach must not resend resize"
+        );
         assert_eq!(
             port.inputs,
             vec![(4, 0, b"before".to_vec()), (5, 1, b"after".to_vec())]

@@ -1953,8 +1953,19 @@ impl WorkspaceUi {
                 .iter()
                 .position(|session| session.terminal().fences(&terminal))
                 .and_then(|position| self.detached_terminals.remove(position));
-            let mut session = retained.unwrap_or_else(|| TerminalSession::new(terminal, geometry));
-            session.connect(&mut AgentStreamPort(agent.port.as_mut()));
+            let mut stream = AgentStreamPort(agent.port.as_mut());
+            // Synchronize a retained coordinator to the currently visible
+            // viewport before attach. At an unchanged geometry this is a no-op;
+            // at a changed outer size it sends exactly one resize and fences the
+            // checkpoint against that new size.
+            let mut session = match retained {
+                Some(mut session) => {
+                    session.resize(&mut stream, geometry);
+                    session
+                }
+                None => TerminalSession::new(terminal, geometry),
+            };
+            session.connect(&mut stream);
             self.terminals.push(session);
         }
     }
@@ -3448,8 +3459,9 @@ impl SessionWorktreeHint {
 
 /// Project the focused live terminal's already-polled rows for
 /// `with_terminal_view`, folding in the shell-owned scroll offset, selection
-/// highlight, and copy feedback tracked by `controls`. Focus changes reset those
-/// controls so nothing leaks between panes.
+/// highlight, and copy feedback tracked by `controls`. Focus changes select the
+/// matching terminal-local state; tabs no longer present in the registry are
+/// pruned from the bounded cache.
 fn controller_terminal_view(
     ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
@@ -3457,6 +3469,11 @@ fn controller_terminal_view(
     viewport_rows: usize,
 ) -> Option<TerminalViewProjection> {
     let terminal = runtime.focused_terminal();
+    let mut live_terminals = runtime.background_terminals();
+    if let Some(terminal) = &terminal {
+        live_terminals.push(terminal.clone());
+    }
+    controls.retain_terminals(&live_terminals);
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
     let mut projection = if let Some(selection) = controls.selection() {
@@ -7152,6 +7169,7 @@ mod tests {
         polls: usize,
         inputs: Vec<Vec<u8>>,
         resizes: usize,
+        resize_geometries: Vec<(TerminalRef, Geometry)>,
         detaches: usize,
     }
 
@@ -7179,9 +7197,9 @@ mod tests {
             Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 9, epoch: 1 },
                 revision: 1,
-                output_offset: 0,
+                output_offset: b"one\r\ntwo\r\nthree".len() as u64,
                 next_input_seq: None,
-                screen: attach_checkpoint(b"", geometry),
+                screen: attach_checkpoint(b"one\r\ntwo\r\nthree", geometry),
                 exited: false,
             })
         }
@@ -7209,10 +7227,12 @@ mod tests {
 
         fn resize_terminal(
             &mut self,
-            _terminal: &TerminalRef,
-            _geometry: Geometry,
+            terminal: &TerminalRef,
+            geometry: Geometry,
         ) -> Result<(), TerminalError> {
-            self.0.lock().unwrap().resizes += 1;
+            let mut calls = self.0.lock().unwrap();
+            calls.resizes += 1;
+            calls.resize_geometries.push((terminal.clone(), geometry));
             Ok(())
         }
 
@@ -14600,6 +14620,111 @@ mod tests {
         assert!(ui.terminal_rows(&first, None).is_none());
         assert!(ui.terminal_rows(&second, None).is_some());
         assert_eq!(*detaches.lock().unwrap(), vec![41]);
+    }
+
+    #[test]
+    fn drawer_round_trip_restores_both_views_without_redundant_resize_or_resync() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = scoped_terminal_ref(workspace, Some(session));
+        let root = scoped_terminal_ref(workspace, None);
+        let calls = Arc::new(Mutex::new(StreamCalls::default()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RecordingStreamPort(Arc::clone(&calls))),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![
+                super::PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![LivePane {
+                        terminal: root.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(root.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                super::PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(managed.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+        let managed_geometry = terminal_geometry(24, 100);
+        let drawer_geometry = foreground_terminal_geometry(24, 100, true);
+        let mut controls = LiveTerminalControls::default();
+
+        ui.sync_foreground_terminal(Some(&managed), managed_geometry);
+        ui.resize_terminals(managed_geometry);
+        let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["managed".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 6 });
+        let _ = controls.finish_drag();
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(runtime.focused_terminal(), Some(root.clone()));
+        ui.sync_foreground_terminal(Some(&root), drawer_geometry);
+        ui.resize_terminals(drawer_geometry);
+        let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
+        controls.scroll_up();
+        controls.scroll_up();
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["drawer".to_owned()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 5 });
+        let _ = controls.finish_drag();
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(runtime.focused_terminal(), Some(managed.clone()));
+        ui.sync_foreground_terminal(Some(&managed), managed_geometry);
+        ui.resize_terminals(managed_geometry);
+        let managed_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
+        assert_eq!(managed_view.scroll, 1);
+        assert_eq!(
+            controls.selection().map(TerminalSelection::text).as_deref(),
+            Some("managed")
+        );
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert_eq!(runtime.focused_terminal(), Some(root.clone()));
+        ui.sync_foreground_terminal(Some(&root), drawer_geometry);
+        ui.resize_terminals(drawer_geometry);
+        let drawer_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
+        assert_eq!(drawer_view.scroll, 2);
+        assert_eq!(
+            controls.selection().map(TerminalSelection::text).as_deref(),
+            Some("drawer")
+        );
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.resize_geometries,
+            vec![(managed, managed_geometry), (root, drawer_geometry)]
+        );
+        // One attach per focus transition means neither same-geometry reattach
+        // entered the checkpoint-refusal retry path.
+        assert_eq!(calls.attaches, 4);
+        assert_eq!(calls.detaches, 3);
     }
 
     #[test]

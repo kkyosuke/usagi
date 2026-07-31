@@ -412,11 +412,13 @@ resumable なら同じ slot の interrupted tab を投影する。inventory-only
 加え、消失した selection は同 slot より後の surviving tab、なければ先頭、conversation が無ければ empty state へ
 縮退する。drawer 自体は observation から自動 open しない。
 
-drawer open 時は root の selected live Agent だけを foreground attach / resync し、drawer 専用 viewport geometry で
-daemon PTY と local VT screen を resize する。選択中 Agent へ既存の ordered input / ACK、scroll、selection /
-copy / link を接続する。他の root tab と managed pane は detached background である。drawer close 時は root
-subscription を detach し、開く前の managed-session selected live tab を attach / resync する。どちらの操作も
-PTY/process を kill / spawn しない。terminal coordinator は bounded cache に保持するため、同じ connection epoch
+drawer open 時は root の selected live Agent だけを foreground attach し、drawer 専用 viewport geometry を使う。
+選択中 Agent へ既存の ordered input / ACK、terminal-local な scroll / selection / feedback、copy / link を接続する。
+他の root tab と managed pane は detached background である。drawer close 時は root subscription を detach し、
+開く前の managed-session selected live tab を元の right pane geometry で attach する。detach 中の terminal は別 pane の
+geometry へ resize せず、同じ outer size で同じ terminal へ戻る attach は resize を再送しない。outer size が変わった
+場合だけ、再 attach 前にその terminal の新しい実 viewport へ 1 回 resize して checkpoint geometry を fence する。
+どちらの操作も PTY/process を kill / spawn しない。terminal coordinator は bounded cache に保持するため、同じ connection epoch
 上の再 attach は `input_seq`、未収束 input fence、その後ろの queue、復号済み screen を引き継ぐ。cache から
 eviction された terminal も attach 応答の `next_input_seq` を採用し、daemon ledger より前へ巻き戻さない。
 connection epoch が変わった場合だけ sequence は daemon とともに 0 へ戻る。
@@ -1022,7 +1024,8 @@ history navigation へそのまま送る。right pane の footer の直前には
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が
-新しい選択を始めるか、focus が別の terminal へ移るまで表示され続ける（release で即座に消えない）。保持中の選択は OS 標準の copy shortcut（macOS: Command+C、Linux: Ctrl+Shift+C、Windows: Ctrl+C）で再コピーできる。この click は text selection
+新しい選択を始めるか、その terminal が論理 close / bounded cache eviction されるまで terminal identity ごとに保持する。
+別 terminal へ focus が移った間は非表示になり、focus が戻ると scroll offset・selection・feedback を復元する（release で即座に消えない）。保持中の選択は OS 標準の copy shortcut（macOS: Command+C、Linux: Ctrl+Shift+C、Windows: Ctrl+C）で再コピーできる。この click は text selection
 だけを解除し、sidebar の navigation / activation、modal の入力所有、PTY への入力を変えない。選択の可視化は選択した桁全体に及び、行末の空白 padding や
 選択範囲に含まれる空行も反転する（agent が描く空白 padding 中心の画面でも選択が消えない）。各 OS の copy shortcut 以外のキー入力は
 コピーに使わず、`Ctrl-C` を含めて live terminal へそのまま送る。
