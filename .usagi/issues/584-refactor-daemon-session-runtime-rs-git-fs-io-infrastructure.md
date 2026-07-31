@@ -1,13 +1,13 @@
 ---
 number: 584
 title: refactor(daemon): session_runtime.rs の git/fs 実IOを infrastructure層へ分離する
-status: in-progress
+status: done
 priority: high
 labels: [daemon, architecture, coverage, refactor]
 dependson: []
 related: []
 created_at: 2026-07-30T10:47:01.109312+00:00
-updated_at: 2026-07-30T22:30:16.654666+00:00
+updated_at: 2026-07-31T00:25:27.353166+00:00
 ---
 
 ## 背景
