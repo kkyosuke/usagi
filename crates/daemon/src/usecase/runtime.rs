@@ -1101,6 +1101,19 @@ impl RuntimeCoordinator {
             .map_err(RuntimeError::Terminal)
     }
 
+    /// Atomically attaches and exposes the connection/client input ledger cursor.
+    pub fn attach_for_client(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        connection: ConnectionId,
+        client: ClientId,
+    ) -> Result<Attached, RuntimeError> {
+        self.running(runtime)?;
+        self.terminals
+            .attach_for_client(&runtime.terminal, connection, client)
+            .map_err(RuntimeError::Terminal)
+    }
+
     /// Removes only the named attachment; the daemon-owned Agent process and its
     /// PTY intentionally stay alive.
     pub fn detach(

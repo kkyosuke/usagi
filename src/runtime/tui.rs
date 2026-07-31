@@ -1508,6 +1508,7 @@ fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> Termi
         ErrorCode::ResyncRequired => TerminalError::ResyncRequired,
         ErrorCode::StaleTarget => TerminalError::Stale,
         ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
+        ErrorCode::IdempotencyExpired | ErrorCode::SequenceGap => TerminalError::OrderingMismatch,
         _ => TerminalError::Unavailable,
     }
 }
@@ -2016,6 +2017,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         let revision = snapshot["revision"]
             .as_u64()
             .ok_or(TerminalError::Unavailable)?;
+        let next_input_seq = body
+            .get("next_input_seq")
+            .and_then(serde_json::Value::as_u64);
         let screen = decode_attach_screen(mode, snapshot, base_offset, output_offset)?;
         // `exited` is `Option<i32>`: null while the process is still running.
         let exited = !snapshot["exited"].is_null();
@@ -2038,6 +2042,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             subscription,
             revision,
             output_offset,
+            next_input_seq,
             screen,
             exited,
         })
@@ -6081,6 +6086,11 @@ mod tests {
             (ErrorCode::ResyncRequired, TerminalError::ResyncRequired),
             (ErrorCode::StaleTarget, TerminalError::Stale),
             (ErrorCode::OwnershipUnknown, TerminalError::Orphaned),
+            (
+                ErrorCode::IdempotencyExpired,
+                TerminalError::OrderingMismatch,
+            ),
+            (ErrorCode::SequenceGap, TerminalError::OrderingMismatch),
             (ErrorCode::Internal, TerminalError::Unavailable),
         ] {
             let error = ClientError::Protocol(ProtocolError::new(code, "safe"));

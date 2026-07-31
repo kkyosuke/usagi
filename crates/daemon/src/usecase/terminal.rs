@@ -283,6 +283,11 @@ pub enum Event {
 pub struct Attached {
     pub subscription: u64,
     pub snapshot: Snapshot,
+    /// The next input sequence expected for the attaching connection/client.
+    ///
+    /// `None` is used only by internal callers that do not carry a client
+    /// identity. Wire-facing attach paths always populate this value.
+    pub next_input_seq: Option<u64>,
 }
 
 impl Attached {
@@ -292,6 +297,7 @@ impl Attached {
         AttachedFrame {
             subscription: self.subscription,
             snapshot: self.snapshot.into_frame(wire),
+            next_input_seq: self.next_input_seq,
         }
     }
 }
@@ -301,6 +307,9 @@ impl Attached {
 pub struct AttachedFrame {
     pub subscription: u64,
     pub snapshot: SnapshotFrame,
+    /// Optional for backward-compatible generation-1 decoding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_input_seq: Option<u64>,
 }
 
 /// Result of an input write.
@@ -741,6 +750,7 @@ impl TerminalRegistry {
             return Ok(Attached {
                 subscription,
                 snapshot: snapshot(entry, checkpoint_bytes_limit)?,
+                next_input_seq: None,
             });
         }
         // Capture before the subscription is recorded: a snapshot the client
@@ -752,7 +762,32 @@ impl TerminalRegistry {
         Ok(Attached {
             subscription,
             snapshot,
+            next_input_seq: None,
         })
+    }
+
+    /// Atomically attaches and reports the daemon ledger position for this
+    /// connection/client pair. A missing ledger starts at zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] for a different generation or
+    /// ownership scope.
+    pub fn attach_for_client(
+        &mut self,
+        reference: &TerminalRef,
+        connection: ConnectionId,
+        client: ClientId,
+    ) -> Result<Attached, RegistryError> {
+        let mut attached = self.attach(reference, connection)?;
+        let entry = self.entry(reference)?;
+        attached.next_input_seq = Some(
+            entry
+                .inputs
+                .get(&(connection, client))
+                .map_or(0, |ledger| ledger.next_seq),
+        );
+        Ok(attached)
     }
 
     /// # Errors
@@ -2132,6 +2167,43 @@ mod tests {
             registry.input_outcome(&r, client, operation, 0).unwrap(),
             Some(InputAck::Written)
         );
+    }
+
+    #[test]
+    fn detach_preserves_the_client_ledger_and_disconnect_discards_it() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let mut writer = Writer::default();
+        let attached = registry.attach_for_client(&r, connection, client).unwrap();
+        assert_eq!(attached.next_input_seq, Some(0));
+        registry
+            .write_input(
+                &r,
+                input(
+                    attached.subscription,
+                    connection,
+                    client,
+                    RequestId::new(),
+                    0,
+                ),
+                b"a",
+                1,
+                &mut writer,
+            )
+            .unwrap();
+
+        registry
+            .detach(&r, attached.subscription, connection)
+            .unwrap();
+        let reattached = registry.attach_for_client(&r, connection, client).unwrap();
+        assert_eq!(reattached.next_input_seq, Some(1));
+
+        registry.disconnect(connection);
+        let fresh = ConnectionId::new();
+        let reattached = registry.attach_for_client(&r, fresh, client).unwrap();
+        assert_eq!(reattached.next_input_seq, Some(0));
     }
 
     /// Every outcome replays as itself. A cached non-success is never promoted to

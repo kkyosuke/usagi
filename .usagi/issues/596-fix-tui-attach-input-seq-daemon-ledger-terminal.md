@@ -1,13 +1,13 @@
 ---
 number: 596
 title: fix(tui): 再 attach 時に input_seq が daemon ledger とずれ、terminal 入力が恒久的に失敗する
-status: todo
+status: done
 priority: high
 labels: [tui, daemon, bug, input, terminal, agent]
 dependson: []
 related: [576, 577, 578, 581]
 created_at: 2026-07-31T11:04:51.172800+00:00
-updated_at: 2026-07-31T11:04:51.172800+00:00
+updated_at: 2026-07-31T11:35:12.735433+00:00
 ---
 
 ## 症状

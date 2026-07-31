@@ -416,7 +416,10 @@ drawer open 時は root の selected live Agent だけを foreground attach / re
 daemon PTY と local VT screen を resize する。選択中 Agent へ既存の ordered input / ACK、scroll、selection /
 copy / link を接続する。他の root tab と managed pane は detached background である。drawer close 時は root
 subscription を detach し、開く前の managed-session selected live tab を attach / resync する。どちらの操作も
-PTY/process を kill / spawn しない。
+PTY/process を kill / spawn しない。terminal coordinator は bounded cache に保持するため、同じ connection epoch
+上の再 attach は `input_seq`、未収束 input fence、その後ろの queue、復号済み screen を引き継ぐ。cache から
+eviction された terminal も attach 応答の `next_input_seq` を採用し、daemon ledger より前へ巻き戻さない。
+connection epoch が変わった場合だけ sequence は daemon とともに 0 へ戻る。
 
 interrupted tab は read-only で、open / reconnect / restore から provider resume を発行しない。選択中 interrupted
 tab の `Ctrl-O r` だけが既存の exact resume contract を実行し、operation / source / relation / lineage / root scope /
@@ -824,7 +827,8 @@ Agent launch、provider resume、runtime kill を行わない。pending tab の 
 だけを取り消し、送信済み operation を推測して再送・cancel しない。
 
 shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
-切替時は以前の subscription を detach し、background target と選択外 tab は terminal session を保持しない。
+切替時は以前の subscription を detach する。background target と選択外 tab の terminal coordinator は bounded
+cache にだけ保持し、foreground stream lane からは外す。
 **定常状態の観測のために 1 frame が同期 request を出すことはない**: foreground の出力取得も background tab の exit 観測も
 [背景 observation lane](#背景-observation-lane) が別 thread で行い、描画スレッドはその結果を非ブロッキングに drain するだけである
 （利用者の操作が起こす attach / input / resize / detach は従来どおり描画スレッドから同期送信する）。

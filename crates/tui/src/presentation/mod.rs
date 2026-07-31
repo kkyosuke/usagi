@@ -16,7 +16,7 @@ pub mod views;
 pub mod widgets;
 pub mod workspace_runtime;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -1490,6 +1490,9 @@ struct WorkspaceUi {
     /// Live coordinator for the active target's selected foreground terminal.
     /// Background and unselected tabs retain only their stable pane identity.
     terminals: Vec<TerminalSession>,
+    /// Recently detached coordinators, oldest first. Keeping the coordinator
+    /// preserves its connection-local input ledger and unresolved input fence.
+    detached_terminals: VecDeque<TerminalSession>,
     terminal_reconnected: bool,
     terminal_size: (usize, usize),
     agent_tab_intent: Option<AgentTabIntentContext>,
@@ -1543,6 +1546,7 @@ enum RestoreJobOutcome {
 /// frame's tab-closing work stays bounded however many background tabs exited at
 /// once; the rest are applied by the next frames.
 const MAX_BACKGROUND_EXITS_PER_FRAME: usize = 8;
+const DETACHED_TERMINAL_LIMIT: usize = 8;
 
 const RESTORE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
 const RESTORE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
@@ -1857,6 +1861,7 @@ impl WorkspaceUi {
             next_pane_launch: PANE_LAUNCH_FIRST,
             active_pane_launch: None,
             terminals: Vec::new(),
+            detached_terminals: VecDeque::new(),
             terminal_reconnected: false,
             terminal_size: (0, 0),
             agent_tab_intent: None,
@@ -1943,7 +1948,12 @@ impl WorkspaceUi {
             return;
         }
         if let Some(agent) = self.agent.as_mut() {
-            let mut session = TerminalSession::new(terminal, geometry);
+            let retained = self
+                .detached_terminals
+                .iter()
+                .position(|session| session.terminal().fences(&terminal))
+                .and_then(|position| self.detached_terminals.remove(position));
+            let mut session = retained.unwrap_or_else(|| TerminalSession::new(terminal, geometry));
             session.connect(&mut AgentStreamPort(agent.port.as_mut()));
             self.terminals.push(session);
         }
@@ -2059,20 +2069,27 @@ impl WorkspaceUi {
         std::mem::take(&mut self.terminal_reconnected)
     }
 
-    /// Release a terminal's client subscription and drop its coordinator. The
-    /// daemon keeps the process; only this TUI detaches. Safe when no session
-    /// matches (already pruned).
+    /// Release a terminal's client subscription and retain its coordinator in a
+    /// bounded LRU. The daemon keeps the process and connection-local input
+    /// ledger; a later attach therefore preserves ordering and unresolved input.
     fn close_terminal(&mut self, terminal: &TerminalRef) {
-        if let Some(agent) = self.agent.as_mut()
-            && let Some(session) = self
-                .terminals
-                .iter_mut()
-                .find(|session| session.terminal().fences(terminal))
-        {
+        let Some(position) = self
+            .terminals
+            .iter()
+            .position(|session| session.terminal().fences(terminal))
+        else {
+            return;
+        };
+        let mut session = self.terminals.remove(position);
+        if let Some(agent) = self.agent.as_mut() {
             session.detach(&mut AgentStreamPort(agent.port.as_mut()));
         }
-        self.terminals
-            .retain(|session| !session.terminal().fences(terminal));
+        self.detached_terminals
+            .retain(|retained| !retained.terminal().fences(terminal));
+        self.detached_terminals.push_back(session);
+        while self.detached_terminals.len() > DETACHED_TERMINAL_LIMIT {
+            self.detached_terminals.pop_front();
+        }
     }
 
     fn agent_continuation_for(&self, terminal: &TerminalRef) -> Option<AgentContinuationRef> {
@@ -7159,6 +7176,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 9, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
+                next_input_seq: None,
                 screen: attach_checkpoint(b"", geometry),
                 exited: false,
             })
@@ -10714,6 +10732,7 @@ mod tests {
                 },
                 revision: 1,
                 output_offset: self.replay.len() as u64,
+                next_input_seq: None,
                 screen: attach_checkpoint(&self.replay, geometry),
                 exited: false,
             })
@@ -10847,6 +10866,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
+                next_input_seq: None,
                 screen: attach_checkpoint(b"", geometry),
                 exited: false,
             })
@@ -11149,6 +11169,7 @@ mod tests {
                 },
                 revision: 1,
                 output_offset: 0,
+                next_input_seq: None,
                 screen: attach_checkpoint(b"", geometry),
                 exited: false,
             })
@@ -11369,6 +11390,10 @@ mod tests {
         // Releasing A's pane at the end must not disturb B's attachment.
         ui.close_terminal(&agent);
         assert_eq!(ui.send_terminal_bytes(&generic, b"k2"), Ok(()));
+        // Returning to A on the same connection revives its retained coordinator
+        // and continues at the daemon ledger cursor instead of restarting at 0.
+        ui.start_terminal_session(agent.clone(), geometry);
+        assert_eq!(ui.send_terminal_bytes(&agent, b"a6"), Ok(()));
 
         let log = log.lock().unwrap().clone();
         // No keystroke was ever spent on a released subscription, and no ledger
@@ -11425,6 +11450,8 @@ mod tests {
                     // converged. Both on the fresh epoch's restarted sequence.
                     "e2 input#0 A",
                     "e2 input#1 A",
+                    // Detach/re-attach on e2 retains the coordinator ledger.
+                    "e2 input#2 A",
                 ],
             ),
             (
@@ -11464,6 +11491,7 @@ mod tests {
                 ("A", b"a4-next".to_vec()),
                 ("A", b"a5".to_vec()),
                 ("B", b"k2".to_vec()),
+                ("A", b"a6".to_vec()),
             ]
         );
     }
@@ -12466,6 +12494,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
+                next_input_seq: None,
                 screen: attach_checkpoint(&[], geometry),
                 exited: false,
             })
@@ -14548,6 +14577,40 @@ mod tests {
         assert!(ui.terminal_rows(&first, None).is_none());
         assert!(ui.terminal_rows(&second, None).is_some());
         assert_eq!(*detaches.lock().unwrap(), vec![41]);
+    }
+
+    #[test]
+    fn detached_terminal_coordinators_are_bounded_and_evict_the_oldest() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminals = (0..=super::DETACHED_TERMINAL_LIMIT)
+            .map(|_| scoped_terminal_ref(workspace, Some(session)))
+            .collect::<Vec<_>>();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(UnavailableAgentCommandPort),
+            );
+        let geometry = terminal_geometry(20, 80);
+
+        for terminal in &terminals {
+            ui.start_terminal_session(terminal.clone(), geometry);
+            ui.close_terminal(terminal);
+        }
+
+        assert_eq!(ui.detached_terminals.len(), super::DETACHED_TERMINAL_LIMIT);
+        assert!(
+            !ui.detached_terminals
+                .iter()
+                .any(|retained| retained.terminal().fences(&terminals[0]))
+        );
+        assert!(
+            ui.detached_terminals
+                .iter()
+                .any(|retained| retained.terminal().fences(terminals.last().unwrap()))
+        );
     }
 
     #[test]

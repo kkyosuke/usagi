@@ -324,7 +324,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
             }
             (TerminalAction::Attach, TerminalRequest::Attach { terminal }) => self
                 .coordinator
-                .attach(&terminal, connection)
+                .attach_for_client(&terminal, connection, client)
                 .map(|attached| json!(attached.into_frame(wire)))
                 .map_err(map_error),
             (
@@ -506,6 +506,10 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
         GenericTerminalError::Terminal(RegistryError::IdempotencyConflict) => {
             ErrorCode::IdempotencyConflict
         }
+        GenericTerminalError::Terminal(RegistryError::IdempotencyExpired) => {
+            ErrorCode::IdempotencyExpired
+        }
+        GenericTerminalError::Terminal(RegistryError::SequenceGap) => ErrorCode::SequenceGap,
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
@@ -1599,6 +1603,8 @@ mod tests {
         let errors = [
             GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable),
             GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
+            GenericTerminalError::Terminal(RegistryError::IdempotencyExpired),
+            GenericTerminalError::Terminal(RegistryError::SequenceGap),
             GenericTerminalError::SpawnFailed,
             GenericTerminalError::UnknownTerminal,
             GenericTerminalError::TerminalGenerationMismatch,
@@ -1623,6 +1629,8 @@ mod tests {
         let expected = [
             ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,
+            ErrorCode::IdempotencyExpired,
+            ErrorCode::SequenceGap,
             ErrorCode::Unavailable,
             ErrorCode::StaleTarget,
             ErrorCode::StaleTarget,

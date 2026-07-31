@@ -1945,7 +1945,7 @@ impl AgentRuntime {
         match (action, request) {
             (TerminalAction::Attach, TerminalRequest::Attach { .. }) => self
                 .coordinator
-                .attach(runtime, connection)
+                .attach_for_client(runtime, connection, client)
                 .map(|attached| json!(attached.into_frame(wire)))
                 .map_err(map_runtime_error),
             (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => {
@@ -2577,6 +2577,14 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         RuntimeError::Terminal(RegistryError::IdempotencyConflict) => (
             ErrorCode::IdempotencyConflict,
             "terminal input operation identity was reused for different input",
+        ),
+        RuntimeError::Terminal(RegistryError::IdempotencyExpired) => (
+            ErrorCode::IdempotencyExpired,
+            "terminal input sequence is behind the daemon ledger",
+        ),
+        RuntimeError::Terminal(RegistryError::SequenceGap) => (
+            ErrorCode::SequenceGap,
+            "terminal input sequence is ahead of the daemon ledger",
         ),
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
@@ -6447,6 +6455,14 @@ mod tests {
             (
                 RuntimeError::Terminal(RegistryError::CheckpointUnavailable),
                 ErrorCode::ResourceExhausted,
+            ),
+            (
+                RuntimeError::Terminal(RegistryError::IdempotencyExpired),
+                ErrorCode::IdempotencyExpired,
+            ),
+            (
+                RuntimeError::Terminal(RegistryError::SequenceGap),
+                ErrorCode::SequenceGap,
             ),
             (
                 RuntimeError::Terminal(RegistryError::StaleTarget),

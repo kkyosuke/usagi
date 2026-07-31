@@ -420,6 +420,18 @@ impl GenericTerminalCoordinator {
             .attach(terminal, connection)
             .map_err(GenericTerminalError::Terminal)
     }
+    /// Atomically attaches and exposes the connection/client input ledger cursor.
+    pub fn attach_for_client(
+        &mut self,
+        terminal: &TerminalRef,
+        connection: ConnectionId,
+        client: ClientId,
+    ) -> Result<Attached, GenericTerminalError> {
+        self.running(terminal)?;
+        self.terminals
+            .attach_for_client(terminal, connection, client)
+            .map_err(GenericTerminalError::Terminal)
+    }
     /// Removes only the named attachment, never the daemon-owned process.
     pub fn detach(
         &mut self,

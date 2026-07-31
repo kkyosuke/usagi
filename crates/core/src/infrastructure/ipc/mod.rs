@@ -477,6 +477,7 @@ pub enum ErrorCode {
     RevisionConflict,
     IdempotencyConflict,
     IdempotencyExpired,
+    SequenceGap,
     ResourceExhausted,
     Backpressure,
     Busy,

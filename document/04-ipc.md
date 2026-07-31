@@ -536,8 +536,11 @@ generic terminal の request vocabulary は `terminal` kind の `launch`、`inve
 `WorkspaceId` / optional `SessionId` / `WorktreeId` の scope、geometry だけを送る。command、argv、
 working directory、environment、secret は wire field ではなく、daemon が trusted profile から解決する。
 
-launch の response は完全な `TerminalRef` を返す。attach は snapshot と connection-owned
-subscription を同時に返す。input、resize、detach はその `TerminalRef` と subscription を必ず含める。
+launch の response は完全な `TerminalRef` を返す。attach は snapshot、connection-owned subscription、
+`(connection, client, terminal)` ledger が次に期待する `next_input_seq` を同時に返す。input、resize、detach は
+その `TerminalRef` と subscription を必ず含める。`next_input_seq` は generation 1 への additive optional field
+であり wire generation は上げない。field を返さない旧 daemon に対して client は connection epoch の一致判定へ
+fallback する。
 
 launch intent は producer 発行の `launch_operation`（`OperationId`）を additive field として持つ。UI の
 `OpenTerminal` effect が決めた durable identity をそのまま wire へ載せるため、response が失われて client が
@@ -669,7 +672,7 @@ ACK を受け取れなかった terminal input の outcome を、**その reques
 | client incarnation（`ClientHello.client_id`） | client process | client process 1 回の起動 | daemon の durable per-client state（input operation ledger）の key |
 | connection epoch | client（transport 交換ごとに増える client-local 値） | 1 本の transport | subscription の有効性判定。epoch が変われば全 subscription が無効 |
 | subscription | daemon（`attach` の応答） | それを発行した connection | どの attachment が write してよいかの fence |
-| `input_seq` | client | connection epoch + fresh subscription に局所 | 同一 epoch 内の順序番号。fresh subscription で 0 に reset する |
+| `input_seq` | client | connection epoch に局所 | 同一 connection の detach / fresh subscription を跨ぐ順序番号。fresh connection で 0 に reset する |
 | `input_operation`（`OperationId`） | client（input ごと） | daemon ledger の bound 内 | request retry / reconnect / reattach を越えて同じ logical input を識別する |
 
 `client_id` は canonical resource ID（UUID）でなければならない。PID は再利用されるため、PID 由来の identity では
@@ -678,8 +681,8 @@ terminal stream lane・poll lane のすべてで同じ値を申告する。こ�
 一貫性 fence」であり、authorization boundary ではない。
 
 `input_seq` を cross-connection の operation identity として使わない。逆に `input_operation` は epoch に依存しないため、
-fresh subscription が `input_seq` を 0 へ戻しても（[#523](../.usagi/issues/523-fix-tui-shared-terminal-connection-epoch-pane-subscription.md)）、
-未収束 operation の照合は影響を受けない。
+fresh connection が `input_seq` を 0 へ戻しても、未収束 operation の照合は影響を受けない。同じ connection の fresh
+subscription は attach 応答の `next_input_seq` を採用し、ledger position を継続する。
 
 #### wire
 
@@ -762,7 +765,7 @@ effect unknown は表示だけでなく、**per-terminal producer queue の orde
 | `unknown` | fence を latch する。ledger は忘れる方向にしか変化しないため再照会せず、blind resend もしない。解放には明示的な user abandonment / recovery policy が必要で、現行 UI では session 破棄だけがこれを解く |
 | transport failure | fence と照会をそのまま維持し、reconnect 後に再照会する |
 
-#523 の fresh subscription が `input_seq` を 0 へ戻しても、未収束 operation と queue は消さない。reattach は streaming の
+#596 の fresh connection が `input_seq` を 0 へ戻しても、未収束 operation と queue は消さない。reattach は streaming の
 回復であって、失われた ACK の収束ではないからである。
 
 `inventory` は `WorkspaceId` / optional `SessionId`（None=root）/ `WorktreeId` の scope を送り、
@@ -1061,9 +1064,9 @@ terminal の `unavailable` は TerminalSession の connection-local subscription
 100ms から 2s 上限の指数 backoff 後、元の完全な `TerminalRef` に `attach` して atomic snapshot と
 新しい subscription を取得する。transport EOF はclient connectionをdropして次回に開き直すが、
 response bodyのlocal decode failureは同じclient connectionとinput ledgerを保持する。成功後は snapshot の
-`output_offset` から `resume` し、backoff と subscription-local input sequence を、client-local connection epochが
-変わった場合だけresetする。同じconnectionでのsnapshot reattachは
-subscriptionが変わってもnext input sequenceを保持する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
+`output_offset` から `resume` し、backoff と connection-local input sequence を、client-local connection epochが
+変わった場合だけresetする。同じconnectionでのsnapshot reattachは subscriptionが変わっても attach 応答の
+`next_input_seq` を採用する。`stale_target`、`ownership_unknown`、exited は retry 対象ではなく、detach / tab
 close も pending retry を解除する。どの失敗経路も replacement launch を行わない。
 
 ### stream connection の共有と subscription の無効化
