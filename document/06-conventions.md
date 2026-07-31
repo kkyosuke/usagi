@@ -60,7 +60,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
 | `portable-pty` | `usagi-daemon` の infrastructure（`pty`）による PTY の確保、子プロセス起動、入出力・resize・wait | 本依存 |
-| `libc` | 合成ルートでの daemon process-start identity 観測と exact-owner signal | 本依存 |
+| `libc` | `usagi-core` infrastructure の atomic temp file 検証（Unix の no-follow・所有者・link identity）と合成ルートでの daemon process-start identity 観測・exact-owner signal | 本依存 |
 | `signal-hook` | 合成ルートで daemon の SIGINT / SIGTERM handler と同期 wait を worker spawn 前に準備する | 本依存 |
 | `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
 
@@ -78,6 +78,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire も直列化する。
 `portable-pty` は `usagi-daemon` の infrastructure に閉じ込め、daemon の usecase 層は PTY ポートを介して使う。
+`libc` は `usagi-core` の infrastructure に閉じた atomic temp file の Unix 安全性検証にも使う。
 `crossterm`（実端末 IO）・`libc`（daemon の process-start identity 観測と fenced signal）・`signal-hook`（daemon shutdown signal）・`fs2`（daemon 単一インスタンス
 ロック）は合成ルート（`src/main.rs`）も使い、`usagi-tui` は `Terminal` ポートに対して純粋に振る舞う
 （[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
