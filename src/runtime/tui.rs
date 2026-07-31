@@ -52,7 +52,7 @@ use usagi_core::usecase::note::Target as StoreTarget;
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::vt_screen::ScreenCheckpoint;
 use usagi_core::usecase::workspace as workspace_usecase;
-use usagi_daemon::usecase::session_runtime::SystemGit;
+use usagi_daemon::infrastructure::session_worktree::SystemGit;
 use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
@@ -6934,6 +6934,10 @@ mod tests {
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            local_llm: usagi_core::domain::settings::LocalLlm {
+                enabled: true,
+                model: "qwen2.5-coder:3b".to_owned(),
+            },
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

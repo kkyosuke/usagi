@@ -4,6 +4,8 @@
 //! launch it. It deliberately does not describe a CLI syntax, shell escaping,
 //! PTY/IO, secrets, or provisioning. Those are adapter responsibilities.
 
+pub mod prompt;
+
 use std::{collections::BTreeSet, fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -165,6 +167,7 @@ pub enum AgentCapability {
     Headless,
     PhaseReporting,
     McpWiring,
+    SystemPrompt,
 }
 
 /// A product-neutral launch interaction mode.
@@ -777,6 +780,10 @@ mod tests {
         let profile_id = AgentProfileId::new("test").unwrap();
         assert_eq!(profile_id.as_str(), "test");
         assert_eq!(profile_id.to_string(), "test");
+        assert_eq!(
+            serde_json::to_string(&AgentCapability::SystemPrompt).unwrap(),
+            "\"system_prompt\""
+        );
         assert_eq!(
             ModelSelector::new("adapter/model").unwrap().as_str(),
             "adapter/model"

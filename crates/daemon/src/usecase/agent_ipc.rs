@@ -1201,7 +1201,9 @@ impl AgentRuntime {
                 session_id: launch.session,
                 worktree_id: resolved.worktree_id,
             },
-            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
+            required_capabilities: [AgentCapability::McpWiring, AgentCapability::SystemPrompt]
+                .into_iter()
+                .collect(),
         };
         let authorization = RuntimeAuthorization {
             runtime,
@@ -1401,7 +1403,9 @@ impl AgentRuntime {
                 session_id: target.session_id,
                 worktree_id: resolved.worktree_id,
             },
-            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
+            required_capabilities: [AgentCapability::McpWiring, AgentCapability::SystemPrompt]
+                .into_iter()
+                .collect(),
         };
         let superseded = [source.runtime.clone()];
         let authorization = RuntimeAuthorization {
@@ -1578,7 +1582,9 @@ impl AgentRuntime {
                 session_id: intent.session,
                 worktree_id: resolved.worktree_id,
             },
-            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
+            required_capabilities: [AgentCapability::McpWiring, AgentCapability::SystemPrompt]
+                .into_iter()
+                .collect(),
         };
         let authorization = RuntimeAuthorization {
             runtime,

@@ -53,6 +53,43 @@ pub trait ClaudeProvisioner {
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure>;
 }
 
+/// Render daemon-owned MCP servers as Claude's inline config arguments.
+///
+/// The unified `usagi` server is always first. `usagi-llm` follows only when a
+/// trusted model is enabled. `serde_json` keeps command paths and model tokens
+/// opaque even if this helper is exercised independently of settings
+/// validation.
+#[must_use]
+pub fn mcp_arguments(usagi_command: &str, local_llm_model: Option<&str>) -> Vec<String> {
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "usagi".to_owned(),
+        serde_json::json!({
+            "command": usagi_command,
+            "args": ["mcp"],
+        }),
+    );
+    if let Some(model) = local_llm_model {
+        servers.insert(
+            "usagi-llm".to_owned(),
+            serde_json::json!({
+                "command": usagi_command,
+                "args": ["llm-mcp", "--model", model],
+            }),
+        );
+    }
+    let mut arguments = vec![
+        "--mcp-config".to_owned(),
+        serde_json::json!({ "mcpServers": servers }).to_string(),
+        "--allowedTools".to_owned(),
+        "mcp__usagi".to_owned(),
+    ];
+    if local_llm_model.is_some() {
+        arguments.push("mcp__usagi-llm".to_owned());
+    }
+    arguments
+}
+
 /// An [`AgentAdapter`] for the code-defined `claude` profile.
 #[derive(Debug)]
 pub struct ClaudeAdapter<P> {
@@ -85,6 +122,7 @@ impl<P> ClaudeAdapter<P> {
                     AgentCapability::Headless,
                     AgentCapability::PhaseReporting,
                     AgentCapability::McpWiring,
+                    AgentCapability::SystemPrompt,
                 ],
                 [LaunchMode::Interactive, LaunchMode::Headless],
             ),
@@ -301,7 +339,12 @@ mod tests {
                     EnvironmentVariableName::new("CLAUDE_TOKEN").unwrap(),
                     "secret".into(),
                 )],
-                vec!["--settings".into(), "/scoped/claude.json".into()],
+                vec![
+                    "--settings".into(),
+                    "/scoped/claude.json".into(),
+                    "--append-system-prompt".into(),
+                    "ephemeral system prompt".into(),
+                ],
             ),
         }
     }
@@ -318,9 +361,15 @@ mod tests {
         let durable = serde_json::to_string(&resolved.snapshot).unwrap();
         assert!(!durable.contains("CLAUDE_TOKEN"));
         assert!(!durable.contains("/scoped/claude.json"));
+        assert!(!durable.contains("ephemeral system prompt"));
         assert_eq!(
             resolved.provision.arguments(),
-            ["--settings", "/scoped/claude.json"]
+            [
+                "--settings",
+                "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
+            ]
         );
         assert!(resolved.provider_resume.is_none());
     }
@@ -344,6 +393,8 @@ mod tests {
             [
                 "--settings",
                 "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
                 "--session-id",
                 reference.native_session_id.expose_sensitive(),
             ]
@@ -372,6 +423,8 @@ mod tests {
             [
                 "--settings",
                 "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
                 "--resume",
                 reference.native_session_id.expose_sensitive(),
             ]
@@ -516,6 +569,48 @@ mod tests {
     }
 
     #[test]
+    fn mcp_arguments_add_local_llm_after_usagi_only_when_enabled() {
+        let disabled = mcp_arguments("/opt/usagi", None);
+        let disabled_config: serde_json::Value = serde_json::from_str(&disabled[1]).unwrap();
+        assert_eq!(
+            disabled_config["mcpServers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["usagi"]
+        );
+        assert_eq!(disabled[3], "mcp__usagi");
+        assert!(!disabled.join(" ").contains("usagi-llm"));
+
+        let enabled = mcp_arguments("/opt/usagi", Some("qwen2.5-coder:7b"));
+        let enabled_config: serde_json::Value = serde_json::from_str(&enabled[1]).unwrap();
+        assert_eq!(
+            enabled_config["mcpServers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["usagi", "usagi-llm"]
+        );
+        assert_eq!(
+            enabled_config["mcpServers"]["usagi-llm"]["args"],
+            serde_json::json!(["llm-mcp", "--model", "qwen2.5-coder:7b"])
+        );
+        assert_eq!(&enabled[3..], ["mcp__usagi", "mcp__usagi-llm"]);
+    }
+
+    #[test]
+    fn mcp_arguments_json_escape_untrusted_values() {
+        let model = "x\"}],\"owned\":{\"command\":\"pwned";
+        let arguments = mcp_arguments("/opt/\"usagi", Some(model));
+        let config: serde_json::Value = serde_json::from_str(&arguments[1]).unwrap();
+        assert_eq!(config["mcpServers"]["usagi-llm"]["command"], "/opt/\"usagi");
+        assert_eq!(config["mcpServers"]["usagi-llm"]["args"][2], model);
+        assert!(config["mcpServers"]["owned"].is_null());
+    }
+
+    #[test]
     fn exposes_its_profile_and_validates_its_own_durable_snapshot() {
         let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 3);
         assert_eq!(
@@ -523,6 +618,12 @@ mod tests {
             DefaultModel::Claude.profile_id()
         );
         assert_eq!(adapter.profile().revision, 3);
+        assert!(
+            adapter
+                .profile()
+                .capabilities
+                .contains(&AgentCapability::SystemPrompt)
+        );
         let snapshot = adapter.resolve(&request()).unwrap().snapshot;
         assert_eq!(
             adapter.validate_snapshot(&snapshot).unwrap(),

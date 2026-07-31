@@ -15,7 +15,8 @@
 //! - [`workspace`] — global registry 上の workspace open（path 解決・登録・touch）と、
 //!   welcome 画面向け recent overview の構築。
 //! - [`workspace_guard`] — エージェントのツール呼び出しを cwd（session / root モード）に応じて
-//!   許可判定する純粋ロジック。Claude の `PreToolUse` フックが呼ぶ `guard-workspace` の中身。
+//!   許可判定するロジック。session モードの symlink 解決は read-only filesystem 照会を行う。
+//!   Claude の `PreToolUse` フックが呼ぶ `guard-workspace` の中身。
 //! - [`vt_screen`] — raw PTY バイト列を `rows × cols` の文字グリッドへ解釈する純粋な
 //!   VT parser（`VtScreen`）。TUI と daemon が共有する単一 parser authority で、
 //!   描画（selection / link / cursor marker）は presentation 側に残す。

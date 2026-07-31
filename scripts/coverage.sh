@@ -13,8 +13,11 @@
 # 計測対象は v2 workspace（ルートの bin パッケージ + crates/ 配下の 3 クレート）。
 # v1/ は退避された旧実装で、workspace から exclude されているため計測に含まれない。
 #
-# 計測から外す item は、ソースコードの `#[coverage(off)]` を正本とする。
-# ファイル名ベースの除外は使わず、理由と使用条件は document/06-conventions.md に従う。
+# 計測から外す Rust item は、ソースコードの `#[coverage(off)]` を正本とする。
+# Cargo build script はテスト対象ではなく、cargo-llvm-cov のキャッシュ状態によって
+# report へ混入することがあるため、集計時にファイル名で一律除外する。
+# それ以外のファイル名ベースの除外は使わず、理由と使用条件は
+# document/06-conventions.md に従う。
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
@@ -31,7 +34,9 @@ coverage_off_lint() {
 # （usagi / usagi-*。document/02-architecture.md）に一致する glob で全パッケージを
 # 明示的に選ぶ。
 coverage_report() {
-  cargo llvm-cov report -p 'usagi*' "$@"
+  cargo llvm-cov report -p 'usagi*' \
+    --ignore-filename-regex '(^|/)build\.rs$' \
+    "$@"
 }
 
 # ローカルで exclusion lint、計測、100% 強制までを一括実行する。
@@ -45,6 +50,7 @@ coverage_enforce() {
   coverage_off_lint || return 1
   # runner はインストール済みツールに左右されず、CI と同じ cargo test に固定する。
   cargo llvm-cov --workspace --no-clean \
+    --ignore-filename-regex '(^|/)build\.rs$' \
     --fail-under-lines "$COVERAGE_MIN" \
     --fail-under-functions "$COVERAGE_MIN"
 }

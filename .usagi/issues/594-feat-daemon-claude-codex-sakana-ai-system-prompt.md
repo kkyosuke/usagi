@@ -1,14 +1,14 @@
 ---
 number: 594
 title: feat(daemon): Claude/Codex/sakana.ai 起動へ system prompt を配線する
-status: todo
+status: done
 priority: high
 labels: [daemon, agent, claude, codex]
 dependson: [593]
 related: [142, 530, 537]
 parent: 592
 created_at: 2026-07-31T00:12:38.550549+00:00
-updated_at: 2026-07-31T00:12:38.550549+00:00
+updated_at: 2026-07-31T01:32:06.367363+00:00
 ---
 
 ## 目的

@@ -5,6 +5,7 @@
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::agent::prompt::session_system_prompt;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -37,6 +39,7 @@ use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::claude_sandbox::{self, SandboxMode};
 use usagi_core::usecase::client::{
     ClientError, ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient,
@@ -49,6 +52,7 @@ use usagi_daemon::infrastructure::generation_registry::{
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::resource_store::{AllocatorFile, ShardArchiveFiles};
+use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointCleanup, EndpointLocator, SecureUnixListener, connect_generation, ensure_private_dir,
     ensure_private_dir_all, peer_pid, read_locator, retire_stale_current_preserving,
@@ -79,10 +83,12 @@ use usagi_daemon::usecase::authority::standby::{
 };
 use usagi_daemon::usecase::authority::workers::{ClientWorkers, ConnectionShutdown};
 use usagi_daemon::usecase::claude::{
-    ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner, scoped_settings_json,
+    ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
+    mcp_arguments as claude_product_mcp_arguments, scoped_settings_json,
 };
 use usagi_daemon::usecase::codex::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner,
+    mcp_arguments as codex_product_mcp_arguments,
 };
 use usagi_daemon::usecase::custody::{Custody, CustodyProbe, NodeIdentity};
 use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
@@ -117,8 +123,8 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
 use usagi_daemon::usecase::session_runtime::{
-    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, SystemGit, WorktreeTeardown,
-    perform_create, perform_remove,
+    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, WorktreeTeardown, perform_create,
+    perform_remove,
 };
 use usagi_daemon::usecase::session_teardown::{
     TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
@@ -408,6 +414,21 @@ impl CodexProvisioner for RootCodexProvisioner {
             .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        let mode = sandbox_mode(context);
+        let local_llm_model = context
+            .inject_mcp
+            .then(|| configured_local_llm_model(&self.data_home))
+            .flatten();
+        let mut arguments = context
+            .inject_mcp
+            .then(|| codex_integration_arguments(&self.mcp_command, local_llm_model.as_deref()))
+            .transpose()
+            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
+            .unwrap_or_default();
+        arguments.extend(codex_system_prompt_arguments(
+            mode,
+            local_llm_model.is_some(),
+        ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root);
         Ok(CodexProvision {
             working_directory,
@@ -418,12 +439,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                     mcp_environment(context, &self.data_home, &workspace_root)
                         .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
                 ),
-                context
-                    .inject_mcp
-                    .then(|| codex_integration_arguments(&self.mcp_command))
-                    .transpose()
-                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
-                    .unwrap_or_default(),
+                arguments,
             ),
         })
     }
@@ -454,9 +470,13 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // `guard-workspace` フックは session 起動だけに配線し、root 起動では書き込みの境界を
         // sandbox の writable root に委ねる。
         let mode = sandbox_mode(context);
+        let local_llm_model = context
+            .inject_mcp
+            .then(|| configured_local_llm_model(&self.data_home))
+            .flatten();
         let mut arguments = context
             .inject_mcp
-            .then(|| claude_mcp_arguments(&self.mcp_command))
+            .then(|| claude_mcp_arguments(&self.mcp_command, local_llm_model.as_deref()))
             .transpose()
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
@@ -464,6 +484,10 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             claude_settings_arguments(&self.mcp_command, mode)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
         );
+        arguments.extend(claude_system_prompt_arguments(
+            mode,
+            local_llm_model.is_some(),
+        ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root);
         let mut spawn = SpawnProvision::new(
             launch_environment(
@@ -557,6 +581,19 @@ fn claude_settings_arguments(usagi: &Path, mode: SandboxMode) -> Result<Vec<Stri
         "--settings".to_owned(),
         scoped_settings_json(usagi, mode == SandboxMode::Session),
     ])
+}
+
+/// The scope-specific system prompt passed as one opaque argv value. Unlike the
+/// hook command payload, this never crosses a shell or JSON boundary.
+fn claude_system_prompt_arguments(mode: SandboxMode, local_llm_delegation: bool) -> Vec<String> {
+    claude_prompt_arguments(session_system_prompt(
+        mode == SandboxMode::Root,
+        local_llm_delegation,
+    ))
+}
+
+fn claude_prompt_arguments(prompt: String) -> Vec<String> {
+    vec!["--append-system-prompt".to_owned(), prompt]
 }
 
 /// The configured environment for a launch in `workspace_root`, or nothing when
@@ -655,26 +692,15 @@ fn mcp_environment(
 /// Product-specific MCP and structured-hook launch arguments. They stay ephemeral in
 /// [`SpawnProvision`] so the durable launch plan never stores configuration
 /// paths or rendered product payloads.
-fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
+fn codex_integration_arguments(
+    command: &Path,
+    local_llm_model: Option<&str>,
+) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
     let hook_command = format!("{} codex-session-capture", shell_quote(command));
     let hook_command = serde_json::to_string(&hook_command).map_err(|_| ())?;
-    let command = serde_json::to_string(command).map_err(|_| ())?;
-    Ok(vec![
-        "-c".into(),
-        format!("mcp_servers.usagi.command = {command}"),
-        "-c".into(),
-        r#"mcp_servers.usagi.args = ["mcp"]"#.into(),
-        // This is deliberately scoped to the daemon-provisioned `usagi` MCP
-        // server. Codex keeps its normal approval policy for shell commands,
-        // file edits, network access, and every other MCP server.
-        // Codex starts stdio MCP servers with an explicit environment allowlist.
-        // Forward the daemon-selected data home and runtime-fenced credential
-        // so the MCP child reaches the owning daemon and proves its owner.
-        "-c".into(),
-        r#"mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT", "USAGI_MCP_CALLER_CREDENTIAL"]"#.into(),
-        "-c".into(),
-        r#"mcp_servers.usagi.default_tools_approval_mode = "approve""#.into(),
+    let mut arguments = codex_product_mcp_arguments(command, local_llm_model);
+    arguments.extend([
         // SessionStart is Codex's documented structured lifecycle channel. It
         // sends a JSON object containing the current `session_id` on stdin.
         // Restrict capture to a newly-created provider conversation: explicit
@@ -685,34 +711,77 @@ fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
         format!(
             r#"hooks.SessionStart = [{{ matcher = "^startup$", hooks = [{{ type = "command", command = {hook_command}, timeout = 10 }}] }}]"#
         ),
-    ])
+    ]);
+    Ok(arguments)
+}
+
+/// The scope-specific system prompt rendered as one Codex `-c` assignment.
+/// Both argv elements stay ephemeral and precede the durable product argv.
+fn codex_system_prompt_arguments(mode: SandboxMode, local_llm_delegation: bool) -> Vec<String> {
+    codex_developer_instructions_arguments(&session_system_prompt(
+        mode == SandboxMode::Root,
+        local_llm_delegation,
+    ))
+}
+
+fn codex_developer_instructions_arguments(prompt: &str) -> Vec<String> {
+    vec![
+        "-c".to_owned(),
+        format!("developer_instructions={}", toml_basic_string(prompt)),
+    ]
+}
+
+/// Renders a TOML basic string without involving a shell. The prompt contains
+/// newlines, and callers may supply quotes, backslashes, or control characters,
+/// so every character TOML forbids literally is escaped.
+fn toml_basic_string(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len() + 2);
+    rendered.push('"');
+    for character in text.chars() {
+        match character {
+            '\\' => rendered.push_str(r"\\"),
+            '"' => rendered.push_str(r#"\""#),
+            '\u{0008}' => rendered.push_str(r"\b"),
+            '\t' => rendered.push_str(r"\t"),
+            '\n' => rendered.push_str(r"\n"),
+            '\u{000c}' => rendered.push_str(r"\f"),
+            '\r' => rendered.push_str(r"\r"),
+            character if character.is_control() => {
+                write!(&mut rendered, r"\u{:04X}", u32::from(character))
+                    .expect("writing to a String cannot fail");
+            }
+            character => rendered.push(character),
+        }
+    }
+    rendered.push('"');
+    rendered
 }
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
-fn claude_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
+fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    let config = serde_json::json!({
-        "mcpServers": {
-            "usagi": {
-                "command": command,
-                "args": ["mcp"],
-            }
+    Ok(claude_product_mcp_arguments(command, local_llm_model))
+}
+
+/// Read the daemon-owned global setting at provision time. An unreadable file
+/// fails closed to disabled; a hand-edited model has already been sanitized by
+/// [`Storage::load_settings`].
+fn configured_local_llm_model(data_home: &Path) -> Option<String> {
+    match Storage::new(data_home).load_settings() {
+        Ok(settings) => settings
+            .local_llm
+            .enabled
+            .then_some(settings.local_llm.model),
+        Err(error) => {
+            ErrorLog::record(&format!(
+                "could not read global settings for local LLM: {error}"
+            ));
+            None
         }
-    });
-    // Pre-approve only the injected `usagi` server's tools so the agent never
-    // hits a consent prompt for usagi MCP calls.  Claude scopes `mcp__<server>`
-    // to that one server (wildcards are unsupported), so Bash, file edits, other
-    // MCP servers, and network stay under the normal permission model — this is
-    // deliberately narrower than `--dangerously-skip-permissions`.
-    Ok(vec![
-        "--mcp-config".into(),
-        config.to_string(),
-        "--allowedTools".into(),
-        "mcp__usagi".into(),
-    ])
+    }
 }
 
 /// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
@@ -1017,16 +1086,7 @@ impl PtySpawner for AgentPty {
         // (Claude), the spawned child is the usagi binary running
         // `claude-sandbox … -- <program> …`, so the product only ever runs
         // confined; the durable snapshot still records the bare product program.
-        let (program, mut argv) = match provision.sandbox_launcher() {
-            Some(launcher) => {
-                let mut argv = launcher.prefix.clone();
-                argv.push(plan.program.clone());
-                (launcher.program.clone(), argv)
-            }
-            None => (plan.program.clone(), Vec::new()),
-        };
-        argv.extend(provision.arguments().iter().cloned());
-        argv.extend(plan.argv.iter().cloned());
+        let (program, argv) = provisioned_agent_command(&plan.program, &plan.argv, provision);
         let environment = provision.compose_environment(&self.environment);
         let pty = PtyTerminal::spawn_with(
             &program,
@@ -1092,6 +1152,24 @@ impl PtySpawner for AgentPty {
         release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
         Ok(())
     }
+}
+
+fn provisioned_agent_command(
+    product_program: &str,
+    durable_argv: &[String],
+    provision: &SpawnProvision,
+) -> (String, Vec<String>) {
+    let (program, mut argv) = match provision.sandbox_launcher() {
+        Some(launcher) => {
+            let mut argv = launcher.prefix.clone();
+            argv.push(product_program.to_owned());
+            (launcher.program.clone(), argv)
+        }
+        None => (product_program.to_owned(), Vec::new()),
+    };
+    argv.extend(provision.arguments().iter().cloned());
+    argv.extend(durable_argv.iter().cloned());
+    (program, argv)
 }
 
 fn send_agent_observation(
@@ -1801,7 +1879,7 @@ fn start_session_teardown_worker(
     let signal = Arc::new(TeardownSignal::new());
     spawn_session_teardown_worker(
         SharedSessionTeardown::new(sessions),
-        WorktreeTeardown::new(SystemGit),
+        WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
         Arc::clone(&signal),
         shutdown,
         SESSION_TEARDOWN_TICK,
@@ -1825,28 +1903,37 @@ where
         .spawn(move || {
             let cancel = Arc::clone(&shutdown);
             let cancelled = move || cancel.is_requested();
+            // The first drain resumes a teardown left `Deleting` by a previous
+            // daemon. Afterwards durable state can only gain pending work
+            // through an admission notification. A periodic re-read is needed
+            // only while durable finalization is failing.
+            let mut should_drain = true;
             while !shutdown.is_requested() {
-                for report in drain_pending_teardowns(&journal, &effect, &cancelled) {
-                    if let Some(error) = report.effect_error {
-                        ErrorLog::record(&format!(
-                            "session teardown failed for \"{}\": {error}",
-                            report.name
-                        ));
-                    }
-                    if let Some(error) = report.finalize_error {
-                        ErrorLog::record(&format!(
-                            "session teardown outcome could not be recorded for \"{}\": {error}",
-                            report.name
-                        ));
+                let mut retry_finalization = false;
+                if should_drain {
+                    for report in drain_pending_teardowns(&journal, &effect, &cancelled) {
+                        if let Some(error) = report.effect_error {
+                            ErrorLog::record(&format!(
+                                "session teardown failed for \"{}\": {error}",
+                                report.name
+                            ));
+                        }
+                        if let Some(error) = report.finalize_error {
+                            retry_finalization = true;
+                            ErrorLog::record(&format!(
+                                "session teardown outcome could not be recorded for \"{}\": {error}",
+                                report.name
+                            ));
+                        }
                     }
                 }
                 if shutdown.is_requested() {
                     break;
                 }
                 // An admitted removal wakes this immediately; the tick only
-                // re-derives the pending set so a teardown whose finalization
-                // failed is retried without another request.
-                signal.wait(tick);
+                // re-derives the pending set while a teardown whose
+                // finalization failed still needs retrying.
+                should_drain = signal.wait(tick) || retry_finalization;
             }
         })
 }
@@ -2311,9 +2398,15 @@ fn open_session_runtime(
     state_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> std::io::Result<SharedSessionRuntime> {
-    SessionRuntime::open(repo_root, state_dir, generation, SystemGit)
-        .map(|runtime| Arc::new(Mutex::new(runtime)))
-        .map_err(|error| std::io::Error::other(error.safe_message()))
+    SessionRuntime::open(
+        repo_root,
+        state_dir,
+        generation,
+        SystemGit,
+        SystemSessionWorktreeIo,
+    )
+    .map(|runtime| Arc::new(Mutex::new(runtime)))
+    .map_err(|error| std::io::Error::other(error.safe_message()))
 }
 
 /// Reads the root selected by the durable session store, rather than the
@@ -10341,53 +10434,54 @@ mod tests {
     /// scripted effect failure, so the worker's logging arms are both exercised.
     struct FakeTeardownJournal {
         pending: Arc<Mutex<Vec<usagi_daemon::usecase::session_teardown::PendingTeardown>>>,
+        pending_calls: Arc<AtomicUsize>,
         finalize_error: Option<String>,
     }
     impl TeardownJournal for FakeTeardownJournal {
         fn pending(&self) -> Vec<usagi_daemon::usecase::session_teardown::PendingTeardown> {
-            self.pending.lock().unwrap().clone()
+            let pending = self.pending.lock().unwrap().clone();
+            self.pending_calls.fetch_add(1, Ordering::AcqRel);
+            pending
         }
         fn finish(
             &self,
             teardown: &usagi_daemon::usecase::session_teardown::PendingTeardown,
             _outcome: Result<(), String>,
         ) -> Result<(), String> {
+            if let Some(error) = &self.finalize_error {
+                return Err(error.clone());
+            }
             self.pending
                 .lock()
                 .unwrap()
                 .retain(|pending| pending.name != teardown.name);
-            self.finalize_error.clone().map_or(Ok(()), Err)
+            Ok(())
         }
     }
 
     struct FakeTeardownEffect {
         torn_down: Arc<Mutex<Vec<String>>>,
         shutdown: Arc<ShutdownRequest>,
+        shutdown_after: usize,
     }
     impl TeardownEffect for FakeTeardownEffect {
         fn tear_down(
             &self,
             teardown: &usagi_daemon::usecase::session_teardown::PendingTeardown,
         ) -> Result<(), String> {
-            self.torn_down.lock().unwrap().push(teardown.name.clone());
-            // End the worker as soon as it has taken the admitted work, so the
-            // test observes exactly one drain.
-            self.shutdown.request();
+            let mut torn_down = self.torn_down.lock().unwrap();
+            torn_down.push(teardown.name.clone());
+            if torn_down.len() == self.shutdown_after {
+                self.shutdown.request();
+            }
             Err("worktree is busy".into())
         }
     }
 
     #[test]
     fn production_teardown_worker_drains_an_admitted_removal_and_honors_shutdown() {
-        let pending = Arc::new(Mutex::new(vec![
-            usagi_daemon::usecase::session_teardown::PendingTeardown {
-                session_id: SessionId::new(),
-                operation_id: usagi_core::domain::id::OperationId::new(),
-                name: "one".into(),
-                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
-                force: false,
-            },
-        ]));
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let pending_calls = Arc::new(AtomicUsize::new(0));
         let shutdown = Arc::new(ShutdownRequest::new());
         let torn_down = Arc::new(Mutex::new(Vec::new()));
         let signal = Arc::new(TeardownSignal::new());
@@ -10395,21 +10489,39 @@ mod tests {
         let handle = spawn_session_teardown_worker(
             FakeTeardownJournal {
                 pending: Arc::clone(&pending),
+                pending_calls: Arc::clone(&pending_calls),
                 finalize_error: Some("session lifecycle owner is unavailable".into()),
             },
             FakeTeardownEffect {
                 torn_down: Arc::clone(&torn_down),
                 shutdown: Arc::clone(&shutdown),
+                shutdown_after: 1,
             },
             Arc::clone(&signal),
             Arc::clone(&shutdown),
             Duration::from_millis(1),
         )
         .unwrap();
+
+        while pending_calls.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        pending
+            .lock()
+            .unwrap()
+            .push(usagi_daemon::usecase::session_teardown::PendingTeardown {
+                session_id: SessionId::new(),
+                operation_id: usagi_core::domain::id::OperationId::new(),
+                name: "one".into(),
+                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
+                force: false,
+            });
+        signal.notify();
         handle.join().unwrap();
 
         assert_eq!(torn_down.lock().unwrap().as_slice(), ["one"]);
-        assert!(pending.lock().unwrap().is_empty());
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert_eq!(pending_calls.load(Ordering::Acquire), 2);
 
         // A worker started under shutdown takes no work at all.
         let already_stopped = Arc::new(ShutdownRequest::new());
@@ -10418,11 +10530,13 @@ mod tests {
         spawn_session_teardown_worker(
             FakeTeardownJournal {
                 pending: Arc::clone(&pending),
+                pending_calls: Arc::new(AtomicUsize::new(0)),
                 finalize_error: None,
             },
             FakeTeardownEffect {
                 torn_down: Arc::clone(&untouched),
                 shutdown: Arc::clone(&already_stopped),
+                shutdown_after: 1,
             },
             signal,
             already_stopped,
@@ -10432,6 +10546,75 @@ mod tests {
         .join()
         .unwrap();
         assert!(untouched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn production_teardown_worker_does_not_reread_an_idle_journal_on_each_tick() {
+        let pending_calls = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let handle = spawn_session_teardown_worker(
+            FakeTeardownJournal {
+                pending: Arc::new(Mutex::new(Vec::new())),
+                pending_calls: Arc::clone(&pending_calls),
+                finalize_error: None,
+            },
+            FakeTeardownEffect {
+                torn_down: Arc::new(Mutex::new(Vec::new())),
+                shutdown: Arc::clone(&shutdown),
+                shutdown_after: 1,
+            },
+            Arc::new(TeardownSignal::new()),
+            Arc::clone(&shutdown),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+
+        while pending_calls.load(Ordering::Acquire) == 0 {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(pending_calls.load(Ordering::Acquire), 1);
+
+        shutdown.request();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn production_teardown_worker_retries_a_failed_finalization_on_the_tick() {
+        let pending = Arc::new(Mutex::new(vec![
+            usagi_daemon::usecase::session_teardown::PendingTeardown {
+                session_id: SessionId::new(),
+                operation_id: usagi_core::domain::id::OperationId::new(),
+                name: "one".into(),
+                session_root: PathBuf::from("/repo/.usagi/sessions/one"),
+                force: false,
+            },
+        ]));
+        let pending_calls = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let torn_down = Arc::new(Mutex::new(Vec::new()));
+
+        spawn_session_teardown_worker(
+            FakeTeardownJournal {
+                pending,
+                pending_calls: Arc::clone(&pending_calls),
+                finalize_error: Some("session lifecycle owner is unavailable".into()),
+            },
+            FakeTeardownEffect {
+                torn_down: Arc::clone(&torn_down),
+                shutdown: Arc::clone(&shutdown),
+                shutdown_after: 2,
+            },
+            Arc::new(TeardownSignal::new()),
+            shutdown,
+            Duration::from_millis(1),
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+
+        assert_eq!(torn_down.lock().unwrap().as_slice(), ["one", "one"]);
+        assert_eq!(pending_calls.load(Ordering::Acquire), 2);
     }
 
     /// Prepares `<data>/daemon` with an acquired instance lock and a registered
@@ -10911,7 +11094,7 @@ mod tests {
         let command = Path::new("/opt/usagi/bin/usagi");
 
         assert_eq!(
-            codex_integration_arguments(command).unwrap(),
+            codex_integration_arguments(command, None).unwrap(),
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
@@ -10928,13 +11111,211 @@ mod tests {
             ]
         );
         assert_eq!(
-            claude_mcp_arguments(command).unwrap(),
+            claude_mcp_arguments(command, None).unwrap(),
             [
                 "--mcp-config",
                 r#"{"mcpServers":{"usagi":{"args":["mcp"],"command":"/opt/usagi/bin/usagi"}}}"#,
                 "--allowedTools",
                 "mcp__usagi",
             ]
+        );
+    }
+
+    #[test]
+    fn product_mcp_arguments_append_local_llm_and_keep_payloads_parseable() {
+        let command = Path::new("/opt/usagi/bin/usagi");
+        let model = "qwen2.5-coder:7b";
+
+        let codex = codex_integration_arguments(command, Some(model)).unwrap();
+        let usagi_position = codex
+            .iter()
+            .position(|value| value.starts_with("mcp_servers.usagi.command"))
+            .unwrap();
+        let local_position = codex
+            .iter()
+            .position(|value| value.starts_with("mcp_servers.usagi-llm.command"))
+            .unwrap();
+        assert!(usagi_position < local_position);
+        for assignment in codex
+            .iter()
+            .filter(|value| value.starts_with("mcp_servers.") || value.starts_with("features."))
+        {
+            toml::from_str::<toml::Value>(assignment).unwrap();
+        }
+
+        let claude = claude_mcp_arguments(command, Some(model)).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
+        assert_eq!(
+            config["mcpServers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["usagi", "usagi-llm"]
+        );
+        assert_eq!(
+            config["mcpServers"]["usagi-llm"]["args"],
+            serde_json::json!(["llm-mcp", "--model", model])
+        );
+        assert_eq!(&claude[3..], ["mcp__usagi", "mcp__usagi-llm"]);
+    }
+
+    #[test]
+    fn local_llm_setting_is_sanitized_before_daemon_provisioning() {
+        use usagi_core::domain::settings::{LocalLlm, Settings};
+
+        let data_home = tempfile::tempdir().unwrap();
+        let storage = Storage::new(data_home.path());
+        assert_eq!(configured_local_llm_model(data_home.path()), None);
+
+        storage
+            .save_settings(&Settings {
+                local_llm: LocalLlm {
+                    enabled: true,
+                    model: "x\"], owned = \"pwned'; #".to_owned(),
+                },
+                ..Settings::default()
+            })
+            .unwrap();
+        assert_eq!(
+            configured_local_llm_model(data_home.path()).as_deref(),
+            Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
+        );
+    }
+
+    #[test]
+    fn system_prompt_arguments_follow_scope_once_and_stay_parseable() {
+        use usagi_core::domain::agent::prompt::{
+            local_llm_delegation_prompt, root_prompt, session_worktree_prompt,
+        };
+
+        for (mode, expected) in [
+            (SandboxMode::Root, root_prompt()),
+            (SandboxMode::Session, session_worktree_prompt()),
+        ] {
+            let claude = claude_system_prompt_arguments(mode, false);
+            assert_eq!(claude, ["--append-system-prompt", expected]);
+            assert_eq!(
+                claude
+                    .iter()
+                    .filter(|argument| argument.as_str() == "--append-system-prompt")
+                    .count(),
+                1
+            );
+
+            let codex = codex_system_prompt_arguments(mode, false);
+            assert_eq!(codex[0], "-c");
+            assert_eq!(
+                codex
+                    .iter()
+                    .filter(|argument| argument.starts_with("developer_instructions="))
+                    .count(),
+                1
+            );
+            let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
+            assert_eq!(parsed["developer_instructions"].as_str(), Some(expected));
+        }
+
+        // A later resolve (including a resume replacement) regenerates from
+        // its current scope instead of retaining the previous provision.
+        assert_ne!(
+            claude_system_prompt_arguments(SandboxMode::Root, false),
+            claude_system_prompt_arguments(SandboxMode::Session, false)
+        );
+        assert_ne!(
+            codex_system_prompt_arguments(SandboxMode::Root, false),
+            codex_system_prompt_arguments(SandboxMode::Session, false)
+        );
+
+        let claude = claude_system_prompt_arguments(SandboxMode::Session, true);
+        assert!(claude[1].contains(local_llm_delegation_prompt()));
+        let codex = codex_system_prompt_arguments(SandboxMode::Session, true);
+        let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
+        assert!(
+            parsed["developer_instructions"]
+                .as_str()
+                .unwrap()
+                .contains(local_llm_delegation_prompt())
+        );
+    }
+
+    #[test]
+    fn prompt_renderers_preserve_opaque_argv_and_escape_toml_controls() {
+        let prompt = "don't reinterpret \"quotes\", C:\\work\nnext\tline\u{0000}\u{007f}";
+
+        let claude = claude_prompt_arguments(prompt.to_owned());
+        assert_eq!(claude, ["--append-system-prompt", prompt]);
+        assert_eq!(claude.len(), 2);
+
+        let codex = codex_developer_instructions_arguments(prompt);
+        assert_eq!(codex[0], "-c");
+        assert!(codex[1].contains(r#"\"quotes\""#));
+        assert!(codex[1].contains(r"C:\\work\nnext\tline\u0000\u007F"));
+        let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
+        assert_eq!(parsed["developer_instructions"].as_str(), Some(prompt));
+    }
+
+    #[test]
+    fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
+        let mut codex_arguments =
+            codex_integration_arguments(Path::new("/opt/usagi/bin/usagi"), None).unwrap();
+        codex_arguments.extend(codex_system_prompt_arguments(SandboxMode::Session, false));
+        codex_arguments.extend(["resume".to_owned(), "provider-session".to_owned()]);
+        let codex = SpawnProvision::new([], codex_arguments);
+        let (_, argv) = provisioned_agent_command(
+            "codex",
+            &["--".to_owned(), "user prompt".to_owned()],
+            &codex,
+        );
+        let developer = argv
+            .iter()
+            .position(|argument| argument.starts_with("developer_instructions="))
+            .unwrap();
+        let resume = argv
+            .iter()
+            .position(|argument| argument == "resume")
+            .unwrap();
+        let separator = argv.iter().position(|argument| argument == "--").unwrap();
+        assert!(developer < resume);
+        assert!(resume < separator);
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| argument.starts_with("developer_instructions="))
+                .count(),
+            1
+        );
+
+        let prompt = session_system_prompt(false, false);
+        let mut claude = SpawnProvision::new(
+            [],
+            claude_system_prompt_arguments(SandboxMode::Session, false),
+        );
+        claude.set_sandbox_launcher(SandboxLauncher {
+            program: "/opt/usagi/bin/usagi".to_owned(),
+            prefix: vec!["claude-sandbox".to_owned(), "--".to_owned()],
+        });
+        claude.append_sensitive_arguments(["--resume".to_owned(), "provider-session".to_owned()]);
+        let (program, argv) =
+            provisioned_agent_command("claude", &["user prompt".to_owned()], &claude);
+        assert_eq!(program, "/opt/usagi/bin/usagi");
+        assert_eq!(
+            argv,
+            [
+                "claude-sandbox",
+                "--",
+                "claude",
+                "--append-system-prompt",
+                prompt.as_str(),
+                "--resume",
+                "provider-session",
+                "user prompt",
+            ]
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|argument| argument.as_str() == "--append-system-prompt")
+                .count(),
+            1
         );
     }
 
@@ -11707,6 +12088,81 @@ mod tests {
             .unwrap();
 
         assert_eq!(launch.snapshot.working_directory, original_root);
+    }
+
+    #[test]
+    fn root_composition_resolves_an_available_session_by_stable_id() {
+        struct SuccessfulGit;
+        impl usagi_core::infrastructure::git::GitRunner for SuccessfulGit {
+            fn run(
+                &self,
+                _: &Path,
+                _: &[&str],
+            ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+                Ok(usagi_core::infrastructure::git::GitOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        struct NoopSessionWorktreeIo;
+        impl usagi_daemon::usecase::session_runtime::SessionWorktreeIo for NoopSessionWorktreeIo {
+            fn remove_file_best_effort(&self, _: &Path) {}
+            fn path_occupied(&self, _: &Path) -> bool {
+                false
+            }
+            fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+                Some(path.to_path_buf())
+            }
+            fn is_repo_root(&self, _: &Path) -> bool {
+                false
+            }
+            fn is_linked_worktree(&self, _: &Path) -> bool {
+                true
+            }
+            fn build_session_tree(
+                &self,
+                _: &dyn usagi_core::infrastructure::git::GitRunner,
+                _: &Path,
+                _: &Path,
+                _: &str,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn remove_session_tree(
+                &self,
+                _: &dyn usagi_core::infrastructure::git::GitRunner,
+                _: &Path,
+                _: bool,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                temporary.path().join("repository"),
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                SuccessfulGit,
+                NoopSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        perform_create(
+            &runtime,
+            &SuccessfulGit,
+            &usagi_core::domain::id::OperationId::new().to_string(),
+            &serde_json::json!({"name": "one"}),
+        )
+        .unwrap();
+
+        let runtime = runtime.lock().unwrap();
+        let session_id = runtime.session_id("one").unwrap();
+        assert!(runtime.session_scope_by_id(session_id).is_ok());
     }
 
     /// One process's durable runtime state over a real data directory.

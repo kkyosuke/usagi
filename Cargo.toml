@@ -43,6 +43,7 @@ dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+toml.workspace = true
 
 [build-dependencies]
 sha2.workspace = true

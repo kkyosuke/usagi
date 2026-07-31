@@ -1,13 +1,13 @@
 ---
 number: 587
 title: perf(tui): frame loop の無条件 notify_all と不要な terminal_view clone を無くす
-status: todo
+status: done
 priority: medium
 labels: [tui, performance]
 dependson: []
 related: []
 created_at: 2026-07-30T10:47:50.727899+00:00
-updated_at: 2026-07-30T10:47:50.727899+00:00
+updated_at: 2026-07-30T23:19:18.165075+00:00
 ---
 
 ## 背景

@@ -566,6 +566,7 @@ v1 から機能を再実装するときの置き場所の指針。
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
 | planned restart 中の client 側 request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | `crates/core/src/usecase/owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
+| local LLM の trusted model 語彙と optional MCP / delegation prompt 配線 | 設定語彙・sanitize は `crates/core/src/domain/settings/`、Claude / Codex の product encoding は `crates/daemon/src/usecase/{claude,codex}`、設定読出しと prompt bool の合成は `src/runtime/daemon.rs`（wire 契約の正本は [7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)） |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
@@ -599,6 +600,13 @@ negotiation capability、terminal authorization、lifecycle capability とは別
 `program` と `argv` を持つ。environment は名前の allowlist だけを durable に扱い、値・secret・
 adapter private config は含めない。
 
+system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。選択軸は
+`LaunchScope.session_id` の有無と trusted local LLM 設定だけであり、`session_id` が無い launch は main
+チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の本文を使う。
+`SystemPrompt` は `McpWiring` と同じ必須 agent capability として fail-closed に検証する一方、選択・合成した
+system prompt 本文は ephemeral な adapter materialization であり、`LaunchRequest`、`LaunchPlan`、
+`DurableLaunchSnapshot` には保存しない（設計判断は issue #592）。
+
 daemon が snapshot を再生するときは schema と profile revision を検証する。不一致、unknown profile、
 request capability 不足、plan provenance 不一致は typed error で fail-closed とし、最新 catalog から
 黙って別の意味へ再解決しない。実 executable 検査、設定 materialization、secret 注入、PTY spawn は
@@ -608,7 +616,9 @@ Codex / Claude adapter は daemon の terminal launch 子層である `usecase::
 model の解釈、config / MCP / hook の payload はそれぞれの provisioner 内部だけが扱う。adapter は共通の
 `AgentAdapter` として reservation 前に durable snapshot と `SpawnProvision` を組み立て、runtime は snapshot を
 保存してから provision を PTY spawner へ一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal
-stream、error detail に残らない。
+stream、error detail に残らない。optional local LLM の MCP server と delegation instruction も同じ
+ephemeral provision にだけ載せる（配線条件と順序は
+[7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線) が正本）。
 
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
 credential、secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・
@@ -810,9 +820,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   session モードは session worktree の外を狙う file 書き込みを拒否し、root モードはコーディネータの
   リポジトリ変更（全 file 書き込みツールと read-only allowlist 外の shell command）を拒否する。malformed・
   未知の呼び出しは fail-closed で拒否し、拒否は Claude の `PreToolUse` 契約どおり stdout の
-  `hookSpecificOutput`（`permissionDecision: "deny"`、終了コード 0）で返す。判定の純粋ロジックは
-  `usagi-core` の [`usecase::workspace_guard`] にあり、`cli/hooks/guard_workspace` はその薄い stdin → stdout
-  シム（実 stdin は合成ルートが束ねる）。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
+  `hookSpecificOutput`（`permissionDecision: "deny"`、終了コード 0）で返す。判定ロジックは
+  `usagi-core` の [`usecase::workspace_guard`] にある。ただし session モードの path 判定は、symlink 経由の
+  worktree 脱出を正しく拒否するため、`canonicalize` と path existence の read-only filesystem 照会を
+  usecase 内で直接行うため純粋関数ではない。`cli/hooks/guard_workspace` は stdin → stdout の変換とこの判定の
+  呼び出しを担う薄い adapter で、実 stdin は合成ルートが束ねる。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
   `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。報告は
@@ -836,15 +848,19 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 
 ### Claude 起動の多層防御
 
-Claude の live な起動経路は、常に次の 2 層を同時に配線する。合成ルートの Claude provisioner が
+Claude の live な起動経路は、常に次の 3 層を同時に配線する。合成ルートの Claude provisioner が
 起動 scope（managed session があるか）から `mode` を選び、`--settings` のフック JSON と launcher を
 同じ provisioning で組む。
 
 | 層 | 何を止めるか | 配線 |
 |---|---|---|
+| agent instruction | root coordinator と session worktree の責務・作業範囲の取り違え | core SSoT の scope 別 system prompt → `--append-system-prompt <prompt>` |
 | 論理境界（`PreToolUse` フック） | worktree の外を狙うツール呼び出し | `--settings` の `PreToolUse` → `usagi guard-workspace`（session 起動のみ） |
 | hard boundary（OS sandbox） | 許可 root 外への**すべての**書き込み | `usagi claude-sandbox --mode <mode> --writable-root … -- claude …` |
 
+- **system prompt**: `usagi-core` の `domain::agent::prompt` が持つ scope 別本文を、非 durable な
+  `SpawnProvision` の `--append-system-prompt` に 1 つの argv 値として載せる。本文は shell / JSON
+  escaping を介さず、`LaunchPlan` / `DurableLaunchSnapshot` に保存しない。
 - **起動 argv**: 子プロセスは product ではなく launcher（`usagi` バイナリ）で、
   `usagi claude-sandbox --mode <session|root> [--writable-root <path>]… -- claude <product 引数…>` になる。
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
@@ -865,6 +881,10 @@ Claude の live な起動経路は、常に次の 2 層を同時に配線する�
   ことを許す。`bwrap` を持たない Linux CI でも live 配線（launcher・`--settings`・PTY ライフサイクル）を
   E2E で通すためのもので、**shipping ビルドには存在しない**（合成ルートが `cfg!(debug_assertions)` を渡すため、
   release ビルドでは常に無効）。
+
+Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
+既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
+resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 
 ## 入口面 MCP の tool dispatch
 

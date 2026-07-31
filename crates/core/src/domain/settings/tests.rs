@@ -1,5 +1,6 @@
 use super::{
-    AvailableModels, DefaultModel, EnvBindings, LocalSettings, ModalSelectionMode, Settings, Theme,
+    AvailableModels, DEFAULT_LOCAL_LLM_MODEL, DefaultModel, EnvBindings, LOCAL_LLM_MODELS,
+    LocalLlm, LocalSettings, ModalSelectionMode, Settings, Theme,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -47,7 +48,35 @@ fn settings_default_uses_the_system_theme() {
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
     assert!(settings.issue_enabled);
     assert!(settings.memory_enabled);
+    assert_eq!(settings.local_llm, LocalLlm::default());
+    assert!(!settings.local_llm.enabled);
+    assert_eq!(settings.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
     assert!(settings.env.is_empty());
+}
+
+#[test]
+fn local_llm_model_is_sanitized_to_the_closed_vocabulary() {
+    for model in LOCAL_LLM_MODELS {
+        let settings = Settings {
+            local_llm: LocalLlm {
+                enabled: true,
+                model: model.to_owned(),
+            },
+            ..Settings::default()
+        };
+        assert_eq!(settings.sanitized().local_llm.model, model);
+    }
+
+    let settings = Settings {
+        local_llm: LocalLlm {
+            enabled: true,
+            model: "x'; touch /tmp/pwned; #\"\\\n".to_owned(),
+        },
+        ..Settings::default()
+    }
+    .sanitized();
+    assert!(settings.local_llm.enabled);
+    assert_eq!(settings.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
 }
 
 #[test]
@@ -58,6 +87,10 @@ fn settings_round_trip_through_json() {
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: false,
+        local_llm: LocalLlm {
+            enabled: true,
+            model: "qwen2.5-coder:3b".to_owned(),
+        },
         env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
     };
     let json = serde_json::to_string(&settings).unwrap();
@@ -67,6 +100,7 @@ fn settings_round_trip_through_json() {
     assert!(json.contains("\"default_model\":\"claude\""));
     assert!(json.contains("\"issue_enabled\":false"));
     assert!(json.contains("\"memory_enabled\":false"));
+    assert!(json.contains("\"local_llm\":{\"enabled\":true,\"model\":\"qwen2.5-coder:3b\"}"));
     let back: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(back, settings);
     // Exercise the derived Clone / Debug.
@@ -234,6 +268,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         default_model: DefaultModel::Claude,
         issue_enabled: true,
         memory_enabled: false,
+        local_llm: LocalLlm::default(),
         env: EnvBindings::new(),
     };
     let local = LocalSettings {
@@ -250,6 +285,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             default_model: DefaultModel::OpenAi,
             issue_enabled: false,
             memory_enabled: false,
+            local_llm: LocalLlm::default(),
             env: EnvBindings::new(),
         }
     );
@@ -333,6 +369,10 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: true,
+        local_llm: LocalLlm {
+            enabled: true,
+            model: "qwen2.5-coder:3b".to_owned(),
+        },
         env: EnvBindings::new(),
     };
     let local = LocalSettings::from(&settings);
@@ -344,6 +384,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             default_model: DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: true,
+            local_llm: LocalLlm::default(),
             env: EnvBindings::new(),
         }
     );

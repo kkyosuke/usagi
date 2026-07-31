@@ -40,7 +40,12 @@ impl FakeProvisioner {
                         EnvironmentVariableName::new("CODEX_TOKEN").unwrap(),
                         "secret-value".into(),
                     )],
-                    vec!["--config".into(), "/scoped/codex.toml".into()],
+                    vec![
+                        "--config".into(),
+                        "/scoped/codex.toml".into(),
+                        "-c".into(),
+                        "developer_instructions=\"ephemeral system prompt\"".into(),
+                    ],
                 ),
             })),
             calls: Vec::new(),
@@ -106,7 +111,12 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
     );
     assert_eq!(
         resolved.provision.arguments(),
-        ["--config", "/scoped/codex.toml"]
+        [
+            "--config",
+            "/scoped/codex.toml",
+            "-c",
+            "developer_instructions=\"ephemeral system prompt\"",
+        ]
     );
     assert_eq!(
         resolved
@@ -122,6 +132,12 @@ fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
     let mut adapter = CodexAdapter::sakana(FakeProvisioner::ready());
     assert_eq!(adapter.profile().id.as_str(), "sakana-ai");
     assert_eq!(adapter.profile().display_name, "sakana.ai");
+    assert!(
+        adapter
+            .profile()
+            .capabilities
+            .contains(&AgentCapability::SystemPrompt)
+    );
     assert_eq!(
         adapter.profile().capabilities,
         CodexAdapter::new(FakeProvisioner::ready())
@@ -209,6 +225,8 @@ fn renders_resume_only_without_an_initial_prompt() {
         [
             "--config",
             "/scoped/codex.toml",
+            "-c",
+            "developer_instructions=\"ephemeral system prompt\"",
             "resume",
             "structured-codex-session"
         ]
@@ -348,6 +366,7 @@ fn durable_snapshot_contains_no_provisioned_values_and_fails_closed_on_revision_
     assert!(!serialized.contains("secret"));
     assert!(!serialized.contains("credential"));
     assert!(!serialized.contains("scoped/codex.toml"));
+    assert!(!serialized.contains("ephemeral system prompt"));
     assert!(adapter.validate_snapshot(&resolved.snapshot).is_ok());
 
     let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), 2);
@@ -391,7 +410,15 @@ impl PtySpawner for FakeSpawner {
         provision: &SpawnProvision,
         _: &TerminalRef,
     ) -> Result<ProcessIdentity, crate::usecase::runtime::SpawnFailure> {
-        assert_eq!(provision.arguments(), ["--config", "/scoped/codex.toml"]);
+        assert_eq!(
+            provision.arguments(),
+            [
+                "--config",
+                "/scoped/codex.toml",
+                "-c",
+                "developer_instructions=\"ephemeral system prompt\"",
+            ]
+        );
         assert_eq!(
             provision
                 .environment()

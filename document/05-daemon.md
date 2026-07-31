@@ -677,7 +677,7 @@ tick の長さに依存しない。
 |---|---|---|
 | PR refresh | 250 ms | 検出直後の PR に title / state が付くまでの遅れ（[PR refresh scheduler](#pr-refresh-scheduler)） |
 | daemon custody | 1 s | 権威を失った daemon が自分を回収するまでの遅れ（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） |
-| session teardown | 1 s | finalization に失敗した teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
+| session teardown | 1 s | finalization に失敗している間だけ teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
 | decision maintenance | 250 ms | 期限切れの decision が `Pending` として読める残り時間 |
 | retention GC | 30 s | idle 時に age budget と最小可視 TTL を反映するまでの遅れ（[final retention と aggregate GC](#final-retention-と-aggregate-gc)） |
 
@@ -717,7 +717,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 |---|---|
 | queue | 新設しない。`lifecycle == deleting` かつ `delete_plan` を持つ record が未完了 teardown の集合である（durable state から導出） |
 | 並列度 | worker は 1 本・直列。N 件の削除が同時に filesystem を飽和させない。queue 深さは session 数で有界 |
-| 起床 | 受理が worker を即時起床させる。加えて 1 秒 tick で pending を再導出し、確定に失敗した teardown を retry する |
+| 起床 | 起動時に pending を一度導出して中断分を resume し、以後は受理通知で即時起床する。確定に失敗している間だけ 1 秒 tick で pending を再導出して retry し、待機中の tick では durable state を読まない |
 | 冪等性 | 同一 `operation_id` の再送は journal replay。`deleting` な session への新しい `operation_id` は進行中 operation を返し、teardown を二重投入しない |
 | resume | 中断された delete は `failed` に落とさず `deleting` のまま残し、次の daemon 起動で worker が再開する。teardown は「対象が無ければ成功」で冪等なので、途中まで削除された tree に安全に再実行できる |
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
@@ -969,9 +969,11 @@ Codex / Claude の Agent launch は `McpWiring` capability を要求し、daemon
 子 MCP server として起動する。製品ごとの MCP 設定は adapter provision が spawn 時だけに渡すため、設定 payload は
 public launch plan、durable snapshot、IPC response に残らない。注入した usagi MCP tool は agent が確認なしで
 呼べる。Codex は spawn 時に `mcp_servers.usagi.default_tools_approval_mode = "approve"` を渡し、注入した
-`usagi` server だけを事前許可する。子 server には `USAGI_HOME` と caller credential だけを forward する。
-詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も注入した `usagi`
-server のツールだけを事前許可する（`--allowedTools mcp__usagi`）。したがって他の MCP server・shell・ファイル編集・
+`usagi` server を事前許可する。子 server には daemon 接続に必要な環境だけを forward する。
+詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も
+`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Global local LLM 設定が有効なときだけ
+両 product は optional `usagi-llm` も追加して事前許可する（条件・順序・prompt 合成の正本は
+[7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)）。それ以外の MCP server・shell・ファイル編集・
 network の permission model は通常どおり維持され、無効化・緩和しない。
 
 daemon が起動した MCP child だけには、live Agent runtime に結び付く opaque な caller credential を
