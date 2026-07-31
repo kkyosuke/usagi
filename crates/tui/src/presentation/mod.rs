@@ -705,35 +705,54 @@ fn forward_live_terminal_input(
     true
 }
 
-/// Give drawer-local reserved keys to the drawer before the selected root Agent
-/// can turn them into PTY bytes. `None` means ordinary terminal input keeps its
-/// normal forwarding path; `Some` means the drawer uniquely owned the key.
-fn handle_director_reserved_input(
-    runtime: &mut WorkspaceRuntime,
-    key: &Key,
-) -> Option<Vec<Effect>> {
-    if runtime.state().overlay().is_some() || !runtime.state().director_drawer_open() {
-        return None;
+/// The frontmost workspace surface that owns one input before PTY forwarding,
+/// pane controls, and the Home reducer get a chance to observe it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceForegroundInputOwner {
+    /// The Director CLI picker, including its launch-pending projection, is an
+    /// exclusive owner. Its small reserved-key vocabulary is reduced locally;
+    /// every other user input is consumed inertly.
+    DirectorPicker,
+    /// No exclusive foreground surface owns the input at this routing seam.
+    Downstream,
+}
+
+fn workspace_foreground_input_owner(runtime: &WorkspaceRuntime) -> WorkspaceForegroundInputOwner {
+    if runtime.state().overlay().is_none()
+        && runtime.state().director_drawer_open()
+        && (runtime.state().director_launching().is_some()
+            || !matches!(runtime.state().director_new(), DirectorNew::Idle))
+    {
+        WorkspaceForegroundInputOwner::DirectorPicker
+    } else {
+        WorkspaceForegroundInputOwner::Downstream
     }
-    // Keep the state/key matrix explicit: nested `matches!` expansions obscure
-    // the one production branch that the line-coverage gate must observe.
-    #[allow(clippy::match_like_matches_macro)]
-    let owns = match (runtime.state().director_new(), key) {
-        (
-            DirectorNew::Choosing(_) | DirectorNew::Empty,
-            Key::Up
-            | Key::Down
-            | Key::Enter
-            | Key::Escape
-            | Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew),
+}
+
+/// Route an input owned by the Director picker. Resize and runtime wake events
+/// are not user input and keep flowing so geometry and backend progress cannot
+/// stall behind the foreground owner.
+fn handle_director_picker_input(runtime: &mut WorkspaceRuntime, key: &Key) -> Option<Vec<Effect>> {
+    if workspace_foreground_input_owner(runtime) == WorkspaceForegroundInputOwner::DirectorPicker {
+        return match key {
+            Key::Resize | Key::Other => None,
+            _ => Some(runtime.handle_key(key.clone())),
+        };
+    }
+    // The conversation is not exclusive because its selected root Agent owns
+    // ordinary terminal input. Its drawer-local open/close operations still
+    // precede PTY forwarding and the Home reducer.
+    if runtime.state().overlay().is_none()
+        && runtime.state().director_drawer_open()
+        && matches!(
+            key,
+            Key::Escape | Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew)
         )
-        | (
-            DirectorNew::Idle,
-            Key::Escape | Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew),
-        ) => true,
-        _ => false,
-    };
-    owns.then(|| runtime.handle_key(key.clone()))
+    {
+        Some(runtime.handle_key(key.clone()))
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -750,7 +769,7 @@ fn route_workspace_input_before_reducer(
     term: &mut dyn Terminal,
     key: &Key,
 ) -> WorkspaceInputRoute {
-    if let Some(effects) = handle_director_reserved_input(runtime, key) {
+    if let Some(effects) = handle_director_picker_input(runtime, key) {
         WorkspaceInputRoute::Drawer(effects)
     } else if forward_live_terminal_input(ui, runtime, controls, term, key) {
         WorkspaceInputRoute::Forwarded
@@ -5239,19 +5258,21 @@ fn drive_workspace_controller(
         // Live-terminal view controls the reducer does not own (scroll, tab close,
         // pointer drag / copy — design §4.2) are handled before the key reaches
         // the Home reducer.
-        if intercept_live_terminal_control(
-            &key,
-            &mut ui,
-            &mut runtime,
-            &mut controls,
-            term,
-            browser.as_mut(),
-            &mut pending_targets,
-            height,
-            width,
-            terminal_rows_len,
-            terminal_scroll,
-        ) {
+        if input_route == WorkspaceInputRoute::Unhandled
+            && intercept_live_terminal_control(
+                &key,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                term,
+                browser.as_mut(),
+                &mut pending_targets,
+                height,
+                width,
+                terminal_rows_len,
+                terminal_scroll,
+            )
+        {
             continue;
         }
         let effects = if let WorkspaceInputRoute::Drawer(effects) = input_route {
@@ -15821,6 +15842,265 @@ mod tests {
                 (root_agent.clone(), b"x".to_vec()),
                 (root_agent, b"\r".to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The production route matrix intentionally names every input vocabulary variant.
+    fn production_route_makes_director_picker_the_exclusive_foreground_owner() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root_agent = scoped_terminal_ref(workspace, None);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RestoreInventoryPort {
+                    entries: vec![TerminalInventoryEntry {
+                        terminal: root_agent,
+                        kind: TerminalKind::Agent,
+                        live: true,
+                    }],
+                    fail: false,
+                    inputs: Arc::clone(&inputs),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
+            DefaultModel::Claude,
+        );
+        restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let open_picker = Key::Live(LiveTerminalAction::DirectorNew);
+        assert!(runtime.handle_key(open_picker).is_empty());
+
+        let inert_inputs = vec![
+            Key::Live(LiveTerminalAction::Switch),
+            Key::Live(LiveTerminalAction::OpenCloseupModal),
+            Key::Live(LiveTerminalAction::NextTab),
+            Key::Live(LiveTerminalAction::PreviousTab),
+            Key::Live(LiveTerminalAction::MoveTabNext),
+            Key::Live(LiveTerminalAction::MoveTabPrevious),
+            Key::Live(LiveTerminalAction::Agent),
+            Key::Live(LiveTerminalAction::DirectorNew),
+            Key::Live(LiveTerminalAction::CloseTab),
+            Key::Live(LiveTerminalAction::ResumeTab),
+            Key::Live(LiveTerminalAction::QuitConfirmation),
+            Key::Live(LiveTerminalAction::ScrollUp),
+            Key::Live(LiveTerminalAction::ScrollDown),
+            Key::Passthrough(b"raw".to_vec()),
+            Key::Paste("paste".to_owned()),
+            Key::TerminalCopy {
+                fallback: b"copy".to_vec(),
+            },
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 40,
+                row: 5,
+            }),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Drag,
+                column: 41,
+                row: 5,
+            }),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Up,
+                column: 41,
+                row: 5,
+            }),
+            Key::Left,
+            Key::Right,
+            Key::Home,
+            Key::End,
+            Key::Delete,
+            Key::LineStart,
+            Key::LineEnd,
+            Key::SelectLeft,
+            Key::SelectRight,
+            Key::SelectHome,
+            Key::SelectEnd,
+            Key::Backspace,
+            Key::Tab,
+            Key::Quit,
+            Key::CtrlQ,
+            Key::CtrlD,
+            Key::Char('x'),
+            Key::Click { column: 1, row: 1 },
+        ];
+        let pane_before = runtime.active_pane().clone();
+        for key in &inert_inputs {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    key,
+                ),
+                WorkspaceInputRoute::Drawer(Vec::new()),
+                "picker did not own {key:?}"
+            );
+        }
+        assert_eq!(runtime.active_pane(), &pane_before);
+        assert!(inputs.lock().unwrap().is_empty());
+
+        // Runtime-only wakeups cross the owner gate. Backend events are drained
+        // before this seam by the production loop; Resize/Other are its terminal
+        // wake vocabulary and likewise stay downstream.
+        for key in [Key::Resize, Key::Other] {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    &key,
+                ),
+                WorkspaceInputRoute::Unhandled,
+            );
+        }
+
+        // Escape returns Choosing to the drawer conversation. The very next
+        // ordinary input is routed to the focused root Agent, with no stale
+        // picker ownership carried across events.
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Escape,
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new()),
+        );
+        assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Char('z'),
+            ),
+            WorkspaceInputRoute::Forwarded,
+        );
+        inputs.lock().unwrap().clear();
+
+        // Empty has the same exclusive ownership even though it has no
+        // selectable row and Enter cannot launch anything.
+        runtime.set_agent_models(AvailableModels::default(), DefaultModel::Claude);
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
+                .is_empty()
+        );
+        assert_eq!(runtime.state().director_new(), DirectorNew::Empty);
+        for key in inert_inputs
+            .iter()
+            .chain([Key::Up, Key::Down, Key::Enter].iter())
+        {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    key,
+                ),
+                WorkspaceInputRoute::Drawer(Vec::new()),
+                "empty projection did not own {key:?}"
+            );
+        }
+        assert!(inputs.lock().unwrap().is_empty());
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Escape,
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new()),
+        );
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
+            DefaultModel::Claude,
+        );
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
+                .is_empty()
+        );
+
+        // Reserved picker operations remain live. Navigation stays local,
+        // Enter emits exactly one launch, and launch-pending remains exclusive.
+        for key in [Key::Down, Key::Up] {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    &key,
+                ),
+                WorkspaceInputRoute::Drawer(Vec::new()),
+            );
+        }
+        let WorkspaceInputRoute::Drawer(launch) = route_workspace_input_before_reducer(
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &Key::Enter,
+        ) else {
+            panic!("picker Enter was not owned");
+        };
+        assert!(matches!(
+            launch.as_slice(),
+            [Effect::LaunchAgent { session: None, .. }]
+        ));
+        assert!(runtime.state().director_launching().is_some());
+        for key in &inert_inputs {
+            assert_eq!(
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    &mut term,
+                    key,
+                ),
+                WorkspaceInputRoute::Drawer(Vec::new()),
+                "launching projection did not own {key:?}"
+            );
+        }
+        assert!(inputs.lock().unwrap().is_empty());
+
+        // The Director chord still closes the foreground owner. The immediately
+        // following ordinary input uses the restored downstream PTY route.
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Live(LiveTerminalAction::Director),
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new()),
+        );
+        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Char('z'),
+            ),
+            WorkspaceInputRoute::Unhandled,
         );
     }
 

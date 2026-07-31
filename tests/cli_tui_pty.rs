@@ -1838,13 +1838,21 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     send(&mut master, b"claude-root-one\r");
     wait_for_screen_since(&captured, reopened_baseline, "claude-input:claude-root-one");
     // With a live root Agent selected, the production classifier and frame-loop
-    // priority still reserve Ctrl-O plain n for the drawer picker. Escape
-    // cancels only the picker and sends neither key to the Agent PTY.
+    // make the picker the exclusive foreground owner. Ordinary bytes, bracketed
+    // paste, and pane-control chords cannot reach or mutate the root Agent behind
+    // it. Escape cancels only the picker; the next ordinary input reaches the PTY.
     send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, reopened_baseline, "↑↓: select");
+    send(&mut master, b"picker-leak");
+    send(&mut master, b"\x1b[200~paste-leak\nsecond-line\x1b[201~");
+    send(&mut master, b"\x0fx\x0f]\x0f\x0e\x0fu");
     send(&mut master, b"\x1b");
     wait_for_screen_absent_since(&captured, reopened_baseline, "↑↓: select");
-    wait_for_screen_since(&captured, reopened_baseline, "claude-input:claude-root-one");
+    send(&mut master, b"after-picker\r");
+    wait_for_screen_since(&captured, reopened_baseline, "claude-input:after-picker");
+    let picker_screen = screen_since(&captured, reopened_baseline).unwrap_or_default();
+    assert!(!picker_screen.contains("picker-leak"), "{picker_screen}");
+    assert!(!picker_screen.contains("paste-leak"), "{picker_screen}");
     let ordered = wait_for_agent_intent(home.path(), |intent| {
         intent.targets.iter().any(|target| {
             target.session_id.is_none()
