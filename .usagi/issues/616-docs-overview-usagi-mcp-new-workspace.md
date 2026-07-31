@@ -1,13 +1,13 @@
 ---
 number: 616
 title: docs: overview の usagi mcp と New workspace の実装契約を同期する
-status: todo
+status: done
 priority: medium
 labels: [review, docs, mcp, tui, correctness]
 dependson: []
 related: [240, 341, 601]
-created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+created_at: 2026-07-31T06:00:00+00:00
+updated_at: 2026-07-31T21:40:53.353133+00:00
 ---
 
 ## Finding（P2 docs drift）

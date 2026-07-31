@@ -54,7 +54,7 @@ v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)�
 | `usagi daemon status` | daemon が稼働中か、stale record が回収可能かを表示する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。`stop` と同じく live runtime があれば `--force` なしでは拒否する（[planned replacement](05-daemon.md#planned-replacement)） |
 | `usagi daemon` | daemon を前景で serve する（通常は `start` が起動する内部経路） |
-| `usagi mcp` | 入口面（MCP）の ready 行（`usagi v<version> mcp ready`）を表示する |
+| `usagi mcp` | daemon へ接続し（停止中は自動起動）、接続後は stdin の EOF まで stdio JSON-RPC server を実行する。daemon に接続できなければ server を開始せず failure status で終了する（[MCP の起動と経路](07-mcp.md#起動と経路)） |
 | `usagi <不正な引数>` | [process argv contract](02-architecture.md#process-argv-contract) に従い、clap の利用方法エラーとして拒否する |
 
 Welcome 画面は対話的に動く。合成ルートが端末を raw mode + 代替スクリーンにして、TUI 面の
@@ -75,8 +75,9 @@ Unite では Space で複数の workspace を選び、Enter で registry 順に�
 
 Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面）へ進む。`↑↓` でフィールドを移り、
 モード選択では `←→` で Clone / Existing を切り替え、テキスト欄では文字入力・Backspace・`←→` の
-キャレット移動で編集する。Esc で Welcome へ戻る。フォームの確定（実際の作成）は作成処理が入るまで
-留まる。
+キャレット移動で編集する。Enter で Clone の作成または Existing の登録を実行し、成功するとその
+workspace を開いて Home へ遷移する。失敗時は notice を表示し、入力中の draft を保ったまま New に留まる。
+入力検証と作成フローの詳細は [TUI の画面と入力](03-tui.md#画面と入力) を正本とする。Esc で Welcome へ戻る。
 
 Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。`Global` の Theme / Modal mode と、
 `Workspace init` の Agent / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
