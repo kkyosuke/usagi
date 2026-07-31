@@ -1,14 +1,14 @@
 ---
 number: 593
 title: feat(core): agent launch に system prompt SSoT と capability を追加する
-status: in-progress
+status: done
 priority: high
 labels: [core, agent, review]
 dependson: []
 related: [139]
 parent: 592
 created_at: 2026-07-31T00:12:05.285547+00:00
-updated_at: 2026-07-31T00:45:57.518259+00:00
+updated_at: 2026-07-31T00:51:16.362973+00:00
 ---
 
 ## 目的
