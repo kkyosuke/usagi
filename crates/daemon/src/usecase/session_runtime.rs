@@ -1,14 +1,10 @@
 //! Durable daemon-owned managed-session runtime.
 //!
 //! The reducer and store in `usagi-core` deliberately have no process or git
-//! dependency.  This adapter is their only daemon-side effect owner: it
-//! durably reserves an operation before invoking git, then applies the exact
-//! completion fence captured from the reservation.
+//! dependency. This usecase durably reserves an operation before invoking
+//! injected Git and filesystem ports, then applies the exact completion fence
+//! captured from the reservation.
 
-#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract
-
-use std::ffi::OsStr;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -21,8 +17,7 @@ use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState,
 };
-use usagi_core::infrastructure::git::list_worktrees;
-use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
+use usagi_core::infrastructure::git::{GitRunner, list_worktrees};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
@@ -105,22 +100,40 @@ pub struct SessionScope {
     pub path: PathBuf,
 }
 
-/// Real git seam kept here so the daemon crate owns the worktree effect while
-/// unit tests inject a deterministic runner.
-pub struct SystemGit;
-impl GitRunner for SystemGit {
-    fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()?;
-        Ok(GitOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
+/// Filesystem/worktree effects required by the session lifecycle usecase.
+///
+/// The production implementation lives in `infrastructure`; unit tests inject
+/// deterministic fakes so validation, reconciliation, parsing, and error
+/// mapping remain measurable without touching the host filesystem.
+pub trait SessionWorktreeIo {
+    fn remove_file_best_effort(&self, path: &Path);
+    fn path_occupied(&self, path: &Path) -> bool;
+    fn canonical_path(&self, path: &Path) -> Option<PathBuf>;
+    fn is_repo_root(&self, path: &Path) -> bool;
+    fn is_linked_worktree(&self, path: &Path) -> bool;
+    /// Builds the complete session worktree layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a Git or filesystem effect fails.
+    fn build_session_tree(
+        &self,
+        git: &dyn GitRunner,
+        workspace_root: &Path,
+        destination: &Path,
+        branch: &str,
+    ) -> anyhow::Result<()>;
+    /// Removes nested linked worktrees and the containing session tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a Git or filesystem effect fails.
+    fn remove_session_tree(
+        &self,
+        git: &dyn GitRunner,
+        session_root: &Path,
+        force: bool,
+    ) -> anyhow::Result<()>;
 }
 
 /// One daemon process's session writer.  Callers serialize it across IPC
@@ -131,6 +144,7 @@ pub struct SessionRuntime {
     generation: DaemonGeneration,
     store: DaemonLifecycleStore,
     git: Box<dyn GitRunner + Send>,
+    io: Arc<dyn SessionWorktreeIo + Send + Sync>,
 }
 
 /// Outcome of [`SessionRuntime::begin_create`]: either an outcome fully resolved
@@ -151,6 +165,7 @@ struct SessionCreateInFlight {
     workspace_root: PathBuf,
     destination: PathBuf,
     branch: String,
+    io: Arc<dyn SessionWorktreeIo + Send + Sync>,
 }
 
 /// Outcome of [`SessionRuntime::begin_remove`].
@@ -283,20 +298,22 @@ impl TeardownJournal for SharedSessionTeardown {
 /// The real worktree teardown: nested linked worktrees are removed with Git
 /// before the session tree itself. `NotFound` counts as success, so a resumed
 /// teardown can safely re-run over a partially removed tree.
-pub struct WorktreeTeardown<G: GitRunner> {
+pub struct WorktreeTeardown<G: GitRunner, I: SessionWorktreeIo> {
     git: G,
+    io: I,
 }
 
-impl<G: GitRunner> WorktreeTeardown<G> {
+impl<G: GitRunner, I: SessionWorktreeIo> WorktreeTeardown<G, I> {
     #[must_use]
-    pub const fn new(git: G) -> Self {
-        Self { git }
+    pub const fn new(git: G, io: I) -> Self {
+        Self { git, io }
     }
 }
 
-impl<G: GitRunner> TeardownEffect for WorktreeTeardown<G> {
+impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, I> {
     fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
-        remove_session_tree(&self.git, &teardown.session_root, teardown.force)
+        self.io
+            .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
             .map_err(|error| error.to_string())
     }
 }
@@ -365,11 +382,12 @@ impl SessionRuntime {
     ///
     /// The root this binds is the one [`Self::bound_workspace_root`] predicts for
     /// the same `state_dir`; a fixture test pins the two together.
-    pub fn open<G: GitRunner + Send + 'static>(
+    pub fn open<G: GitRunner + Send + 'static, I: SessionWorktreeIo + Send + Sync + 'static>(
         candidate_repo_root: PathBuf,
         state_dir: &Path,
         generation: DaemonGeneration,
         git: G,
+        io: I,
     ) -> Result<Self, SessionRuntimeError> {
         let store = DaemonLifecycleStore::new(state_dir);
         let repo_root = if let Some((repository_root, mut state)) = store
@@ -391,7 +409,7 @@ impl SessionRuntime {
             {
                 state
             } else {
-                adopt_legacy_workspace_sessions(&candidate_repo_root, &git)?
+                adopt_legacy_workspace_sessions(&candidate_repo_root, &git, &io)?
                     .unwrap_or_else(|| WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now()))
             };
             store
@@ -401,7 +419,7 @@ impl SessionRuntime {
             // on the `Some(..)` branch wins and the legacy file is never read
             // again. Removing it is best-effort cleanup, so a failure here must
             // not fail daemon startup over an otherwise-ignored stale file.
-            let _ = std::fs::remove_file(&legacy_lifecycle);
+            io.remove_file_best_effort(&legacy_lifecycle);
             candidate_repo_root
         };
         let root_worktree_id = store
@@ -413,8 +431,9 @@ impl SessionRuntime {
             generation,
             store,
             git: Box::new(git),
+            io: Arc::new(io),
         };
-        if is_repo_root(&runtime.repo_root) {
+        if runtime.io.is_repo_root(&runtime.repo_root) {
             migrate_usagi_ignore_rules(&runtime.repo_root)
                 .map_err(|_| SessionRuntimeError::Storage)?;
         }
@@ -538,16 +557,15 @@ impl SessionRuntime {
     ///
     /// Returns a safe storage or unknown-session error.
     pub fn session_id(&self, name: &str) -> Result<SessionId, SessionRuntimeError> {
-        self.state()?
-            .sessions
-            .into_iter()
-            .find(|session| {
-                session.name == name
-                    && session.lifecycle
-                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-            })
-            .map(|session| session.session_id)
-            .ok_or(SessionRuntimeError::UnknownSession)
+        for session in self.state()?.sessions {
+            if session.name == name
+                && session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            {
+                return Ok(session.session_id);
+            }
+        }
+        Err(SessionRuntimeError::UnknownSession)
     }
 
     /// Resolves an available stable session identity to its trusted worktree.
@@ -560,25 +578,24 @@ impl SessionRuntime {
         session_id: SessionId,
     ) -> Result<SessionScope, SessionRuntimeError> {
         let state = self.state()?;
-        let session = state
-            .sessions
-            .into_iter()
-            .find(|session| {
-                session.session_id == session_id
-                    && session.lifecycle
-                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-            })
-            .ok_or(SessionRuntimeError::UnknownSession)?;
-        Ok(SessionScope {
-            workspace_id: state.workspace_id,
-            session_id,
-            worktree_id: session.worktree_id,
-            path: self
-                .repo_root
-                .join(STATE_DIR)
-                .join(SESSIONS_DIR)
-                .join(session.name),
-        })
+        for session in state.sessions {
+            if session.session_id == session_id
+                && session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            {
+                return Ok(SessionScope {
+                    workspace_id: state.workspace_id,
+                    session_id,
+                    worktree_id: session.worktree_id,
+                    path: self
+                        .repo_root
+                        .join(STATE_DIR)
+                        .join(SESSIONS_DIR)
+                        .join(session.name),
+                });
+            }
+        }
+        Err(SessionRuntimeError::UnknownSession)
     }
 
     /// # Errors
@@ -683,7 +700,7 @@ impl SessionRuntime {
         // durable snapshot cannot represent such a stale path, so the client
         // cannot catch it from its displayed session names alone.  Use
         // `symlink_metadata` so even a dangling symlink is treated as occupied.
-        if fs::symlink_metadata(&path).is_ok() {
+        if self.io.path_occupied(&path) {
             return Err(SessionRuntimeError::SessionWorkspaceExists(name));
         }
         let operation = journal(operation_id, self.generation, semantic_key);
@@ -710,6 +727,7 @@ impl SessionRuntime {
             name,
             workspace_root: self.repo_root.clone(),
             destination: path,
+            io: Arc::clone(&self.io),
         }))
     }
 
@@ -719,7 +737,7 @@ impl SessionRuntime {
         git: &dyn GitRunner,
         in_flight: &SessionCreateInFlight,
     ) -> anyhow::Result<()> {
-        build_session_tree(
+        in_flight.io.build_session_tree(
             git,
             &in_flight.workspace_root,
             &in_flight.destination,
@@ -801,9 +819,10 @@ impl SessionRuntime {
         match self.begin_remove(operation_id, payload)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
-                let outcome =
-                    remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
-                        .map_err(|error| error.to_string());
+                let outcome = self
+                    .io
+                    .remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
+                    .map_err(|error| error.to_string());
                 self.finish_teardown(&pending, outcome)
             }
         }
@@ -1052,7 +1071,12 @@ impl SessionRuntime {
             None => false,
         };
         let state = self.state()?;
-        let candidates = validated_legacy_sessions(&self.repo_root, &state, self.git.as_ref())?;
+        let candidates = validated_legacy_sessions(
+            &self.repo_root,
+            &state,
+            self.git.as_ref(),
+            self.io.as_ref(),
+        )?;
         let names = candidates
             .iter()
             .map(|record| record.name.clone())
@@ -1148,8 +1172,9 @@ impl SessionRuntime {
 fn adopt_legacy_workspace_sessions(
     repository_root: &Path,
     git: &dyn GitRunner,
+    io: &dyn SessionWorktreeIo,
 ) -> Result<Option<WorkspaceLifecycleState>, SessionRuntimeError> {
-    let sessions = validated_legacy_sessions_without_v2(repository_root, git)
+    let sessions = validated_legacy_sessions_without_v2(repository_root, git, io)
         .map_err(|_| SessionRuntimeError::Storage)?;
     if sessions.is_empty() {
         return Ok(None);
@@ -1173,14 +1198,15 @@ fn validated_legacy_sessions(
     repository_root: &Path,
     v2: &WorkspaceLifecycleState,
     git: &dyn GitRunner,
+    io: &dyn SessionWorktreeIo,
 ) -> Result<Vec<usagi_core::domain::session::SessionRecord>, SessionRuntimeError> {
-    let records = validated_legacy_sessions_without_v2(repository_root, git)?;
-    if records.iter().any(|record| {
-        v2.sessions
-            .iter()
-            .any(|session| session.name == record.name)
-    }) {
-        return Err(SessionRuntimeError::Rejected);
+    let records = validated_legacy_sessions_without_v2(repository_root, git, io)?;
+    for record in &records {
+        for session in &v2.sessions {
+            if session.name == record.name {
+                return Err(SessionRuntimeError::Rejected);
+            }
+        }
     }
     Ok(records)
 }
@@ -1188,6 +1214,7 @@ fn validated_legacy_sessions(
 fn validated_legacy_sessions_without_v2(
     repository_root: &Path,
     git: &dyn GitRunner,
+    io: &dyn SessionWorktreeIo,
 ) -> Result<Vec<usagi_core::domain::session::SessionRecord>, SessionRuntimeError> {
     let Some(legacy) = WorkspaceStateStore::new(repository_root)
         .load()
@@ -1208,10 +1235,10 @@ fn validated_legacy_sessions_without_v2(
         let expected_branch = format!("usagi/{}", record.name);
         if !valid_legacy_name(&record.name)
             || !names.insert(record.name.clone())
-            || !is_linked_worktree(&expected)
-            || canonical_path(&record.root) != canonical_path(&expected)
+            || !io.is_linked_worktree(&expected)
+            || io.canonical_path(&record.root) != io.canonical_path(&expected)
             || !worktrees.iter().any(|worktree| {
-                canonical_path(&worktree.path) == canonical_path(&expected)
+                io.canonical_path(&worktree.path) == io.canonical_path(&expected)
                     && worktree.branch.as_deref() == Some(expected_branch.as_str())
             })
         {
@@ -1228,115 +1255,6 @@ fn valid_legacy_name(name: &str) -> bool {
         && name
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-}
-
-fn canonical_path(path: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok()
-}
-
-/// Mirror the v1 session layout: a repository at the workspace root becomes a
-/// worktree at the session root; otherwise every repository found below the
-/// workspace is checked out at the matching relative path and plain entries are
-/// copied. Usagi metadata and Git internals never enter the mirror.
-fn build_session_tree(
-    git: &dyn GitRunner,
-    workspace_root: &Path,
-    destination: &Path,
-    branch: &str,
-) -> anyhow::Result<()> {
-    if is_repo_root(workspace_root) {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        return add_worktree(git, workspace_root, destination, branch, None);
-    }
-    fs::create_dir_all(destination)?;
-    mirror_directory(git, workspace_root, destination, branch)
-}
-
-fn mirror_directory(
-    git: &dyn GitRunner,
-    source: &Path,
-    destination: &Path,
-    branch: &str,
-) -> anyhow::Result<()> {
-    let mut entries = fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in entries {
-        let name = entry.file_name();
-        if skipped_entry(&name) {
-            continue;
-        }
-        let source = entry.path();
-        let target = destination.join(&name);
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            // A `.git` file denotes an existing linked worktree. It is neither
-            // a source repository nor a directory to recurse into.
-            if is_linked_worktree(&source) {
-                continue;
-            }
-            if is_repo_root(&source) {
-                add_worktree(git, &source, &target, branch, None)?;
-            } else {
-                fs::create_dir_all(&target)?;
-                mirror_directory(git, &source, &target, branch)?;
-            }
-        } else {
-            fs::copy(source, target)?;
-        }
-    }
-    Ok(())
-}
-
-/// Remove every linked worktree in a mirrored session before removing copied
-/// directories and files. Children are removed first so Git never sees a
-/// parent directory that still contains a registered nested worktree.
-fn remove_session_tree(
-    git: &dyn GitRunner,
-    session_root: &Path,
-    force: bool,
-) -> anyhow::Result<()> {
-    let mut worktrees = Vec::new();
-    collect_session_worktrees(session_root, &mut worktrees)?;
-    worktrees.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for worktree in worktrees {
-        remove_worktree(git, &worktree, &worktree, force)?;
-    }
-    match fs::remove_dir_all(session_root) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn collect_session_worktrees(directory: &Path, worktrees: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    if !directory.exists() {
-        return Ok(());
-    }
-    if is_linked_worktree(directory) {
-        worktrees.push(directory.into());
-        return Ok(());
-    }
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            collect_session_worktrees(&entry.path(), worktrees)?;
-        }
-    }
-    Ok(())
-}
-
-fn is_repo_root(path: &Path) -> bool {
-    path.join(".git").exists()
-}
-
-fn is_linked_worktree(path: &Path) -> bool {
-    path.join(".git").is_file()
-}
-
-fn skipped_entry(name: &OsStr) -> bool {
-    name == OsStr::new(".git") || name == OsStr::new(STATE_DIR)
 }
 
 fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
@@ -1453,11 +1371,13 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::session_worktree::SystemSessionWorktreeIo;
     use crate::usecase::session_teardown::drain_pending_teardowns;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
+    use usagi_core::infrastructure::git::GitOutput;
 
     struct FakeGit(bool);
     impl FakeGit {
@@ -1466,6 +1386,84 @@ mod tests {
         }
         fn fail() -> Self {
             Self(false)
+        }
+    }
+
+    struct FakeSessionWorktreeIo {
+        occupied: bool,
+        build_calls: Arc<AtomicUsize>,
+    }
+
+    struct FailingSessionWorktreeIo;
+
+    impl SessionWorktreeIo for FailingSessionWorktreeIo {
+        fn remove_file_best_effort(&self, _: &Path) {}
+        fn path_occupied(&self, _: &Path) -> bool {
+            false
+        }
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            Some(path.into())
+        }
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            false
+        }
+        fn build_session_tree(
+            &self,
+            _: &dyn GitRunner,
+            _: &Path,
+            _: &Path,
+            _: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("injected remove failure"))
+        }
+    }
+
+    impl SessionWorktreeIo for FakeSessionWorktreeIo {
+        fn remove_file_best_effort(&self, _: &Path) {}
+
+        fn path_occupied(&self, _: &Path) -> bool {
+            self.occupied
+        }
+
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            Some(path.to_path_buf())
+        }
+
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            true
+        }
+
+        fn build_session_tree(
+            &self,
+            git: &dyn GitRunner,
+            workspace_root: &Path,
+            _: &Path,
+            _: &str,
+        ) -> anyhow::Result<()> {
+            self.build_calls.fetch_add(1, Ordering::SeqCst);
+            let output = git.run(workspace_root, &["worktree", "add"])?;
+            if output.success {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "git worktree add failed: {}",
+                    output.stderr
+                ))
+            }
+        }
+
+        fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 
@@ -1511,6 +1509,44 @@ mod tests {
                 stdout: self.porcelain.clone(),
                 stderr: String::new(),
             })
+        }
+    }
+
+    enum ScriptedGitResult {
+        Output {
+            success: bool,
+            stdout: &'static str,
+            stderr: &'static str,
+        },
+        Error,
+    }
+
+    struct ScriptedGit {
+        results: Mutex<std::collections::VecDeque<ScriptedGitResult>>,
+    }
+
+    impl ScriptedGit {
+        fn new(results: impl IntoIterator<Item = ScriptedGitResult>) -> Self {
+            Self {
+                results: Mutex::new(results.into_iter().collect()),
+            }
+        }
+    }
+
+    impl GitRunner for ScriptedGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            match self.results.lock().unwrap().pop_front().unwrap() {
+                ScriptedGitResult::Output {
+                    success,
+                    stdout,
+                    stderr,
+                } => Ok(GitOutput {
+                    success,
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
+                }),
+                ScriptedGitResult::Error => Err(anyhow::anyhow!("injected Git IO failure")),
+            }
         }
     }
 
@@ -1586,12 +1622,72 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             git,
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         (tmp, runtime)
     }
     fn operation() -> String {
         OperationId::new().to_string()
+    }
+
+    #[test]
+    fn session_runtime_fake_git_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::fail(),
+            FakeSessionWorktreeIo {
+                occupied: false,
+                build_calls: Arc::clone(&calls),
+            },
+        )
+        .unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name": "one"}))
+            .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            error,
+            SessionRuntimeError::SessionWorkspaceCreationFailed {
+                name: "one".into(),
+                detail: "no".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn session_runtime_fake_fs_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            FakeSessionWorktreeIo {
+                occupied: true,
+                build_calls: Arc::clone(&calls),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name": "occupied"}),
+            ),
+            Err(SessionRuntimeError::SessionWorkspaceExists(
+                "occupied".into()
+            ))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     fn legacy_record(name: &str, root: PathBuf) -> usagi_core::domain::session::SessionRecord {
@@ -1634,6 +1730,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             WorktreeListingGit { porcelain },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let session = first.state().unwrap().sessions[0].clone();
@@ -1646,6 +1743,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let restored = restarted.state().unwrap().sessions[0].clone();
@@ -1673,6 +1771,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         );
         assert!(matches!(result, Err(SessionRuntimeError::Storage)));
         assert!(!state_dir.join("sessions.json").exists());
@@ -1711,6 +1810,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             WorktreeListingGit { porcelain },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let before = std::fs::read(state_dir.join("sessions.json")).unwrap();
@@ -1741,6 +1841,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         assert_eq!(
@@ -1785,6 +1886,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             WorktreeListingGit { porcelain },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let before = std::fs::read(state_dir.join("sessions.json")).unwrap();
@@ -1905,6 +2007,7 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             BranchExistsGit,
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -1947,6 +2050,7 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             WorkspaceExistsGit,
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2043,6 +2147,7 @@ mod tests {
             CountingGit {
                 calls: Arc::clone(&calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2070,6 +2175,7 @@ mod tests {
             RecordingGit {
                 calls: Arc::clone(&calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         runtime
@@ -2178,6 +2284,7 @@ mod tests {
             CountingGit {
                 calls: Arc::clone(&first_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2195,6 +2302,7 @@ mod tests {
             CountingGit {
                 calls: Arc::clone(&replay_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let replayed = restarted
@@ -2221,6 +2329,7 @@ mod tests {
                 succeeds: false,
                 calls: Arc::clone(&first_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2253,6 +2362,7 @@ mod tests {
                 succeeds: true,
                 calls: Arc::clone(&restart_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let reopened = restarted
@@ -2275,6 +2385,7 @@ mod tests {
                 succeeds: true,
                 calls: Arc::clone(&create_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         creator
@@ -2295,6 +2406,7 @@ mod tests {
                 succeeds: false,
                 calls: Arc::clone(&first_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let failed = first
@@ -2326,6 +2438,7 @@ mod tests {
                 succeeds: true,
                 calls: Arc::clone(&restart_calls),
             },
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let reopened = restarted
@@ -2378,6 +2491,7 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         // Both the completed `Available` session and the interrupted work,
@@ -2446,6 +2560,7 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         let repaired = reopened.state().unwrap();
@@ -2477,6 +2592,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         first
@@ -2489,6 +2605,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2526,6 +2643,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2554,7 +2672,9 @@ mod tests {
         std::fs::write(workspace.join("docs/guide.md"), "guide").unwrap();
 
         let git = RecordingGit::new();
-        build_session_tree(&git, &workspace, &destination, "usagi/feature").unwrap();
+        SystemSessionWorktreeIo
+            .build_session_tree(&git, &workspace, &destination, "usagi/feature")
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(destination.join("README.md")).unwrap(),
@@ -2598,6 +2718,7 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
 
@@ -2631,6 +2752,7 @@ mod tests {
             &state_dir,
             DaemonGeneration::new(),
             FakeGit::ok(),
+            SystemSessionWorktreeIo,
         )
         .unwrap();
         assert_eq!(runtime.repository_root(), first);
@@ -2643,9 +2765,14 @@ mod tests {
             SessionRuntime::bound_workspace_root(&state_dir, second.clone()).unwrap(),
             first
         );
-        let reopened =
-            SessionRuntime::open(second, &state_dir, DaemonGeneration::new(), FakeGit::ok())
-                .unwrap();
+        let reopened = SessionRuntime::open(
+            second,
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
         assert_eq!(reopened.repository_root(), first);
     }
 
@@ -2661,6 +2788,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_id_reports_unreadable_state() {
+        let (tmp, mut runtime) = runtime(FakeGit::ok());
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name": "one"}))
+            .unwrap();
+        let session_id = runtime.session_id("one").unwrap();
+        assert!(runtime.session_scope_by_id(session_id).is_ok());
+        assert_eq!(
+            runtime.session_id("missing"),
+            Err(SessionRuntimeError::UnknownSession)
+        );
+        std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
+
+        assert_eq!(runtime.session_id("one"), Err(SessionRuntimeError::Storage));
+    }
+
+    #[test]
+    fn pending_teardowns_skip_incomplete_delete_records() {
+        let (_tmp, runtime) = runtime(FakeGit::ok());
+        let mut missing_plan =
+            ManagedSession::new_creating("missing-plan".into(), OperationId::new(), Utc::now());
+        missing_plan.lifecycle = SessionLifecycle::Deleting;
+        let mut missing_operation = ManagedSession::new_creating(
+            "missing-operation".into(),
+            OperationId::new(),
+            Utc::now(),
+        );
+        missing_operation.lifecycle = SessionLifecycle::Deleting;
+        missing_operation.delete_plan = Some(DeletePlan {
+            targets: vec!["missing-operation".into()],
+            force: false,
+        });
+        missing_operation.operation_id = None;
+
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.state_revision += 1;
+        state.sessions = vec![missing_plan, missing_operation];
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+
+        assert!(runtime.pending_teardowns().unwrap().is_empty());
+    }
+
     /// A Git runner that records whether the shared session lock was free at the
     /// moment Git ran. `perform_create`/`perform_remove` must release the lock
     /// before invoking Git, so a same-thread `try_lock` succeeds here.
@@ -2670,12 +2841,11 @@ mod tests {
     }
     impl GitRunner for LockProbeGit {
         fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
-            if let Some(runtime) = self.runtime.upgrade()
-                && runtime.try_lock().is_ok()
-            {
-                self.observed_unlocked
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
+            let runtime = self.runtime.upgrade().expect("runtime remains alive");
+            self.observed_unlocked.store(
+                runtime.try_lock().is_ok(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
             Ok(GitOutput {
                 success: true,
                 stdout: String::new(),
@@ -2768,9 +2938,12 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let reports = drain_pending_teardowns(
             &SharedSessionTeardown::new(Arc::clone(&runtime)),
-            &WorktreeTeardown::new(CountingGit {
-                calls: Arc::clone(&calls),
-            }),
+            &WorktreeTeardown::new(
+                CountingGit {
+                    calls: Arc::clone(&calls),
+                },
+                SystemSessionWorktreeIo,
+            ),
             &|| false,
         );
         assert_eq!(reports[0].effect_error, None);
@@ -2863,7 +3036,7 @@ mod tests {
         perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
         drain_pending_teardowns(
             &SharedSessionTeardown::new(Arc::clone(&runtime)),
-            &WorktreeTeardown::new(FakeGit::ok()),
+            &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
             &|| false,
         );
         assert!(
@@ -2889,6 +3062,7 @@ mod tests {
                 &state_dir,
                 DaemonGeneration::new(),
                 FakeGit::ok(),
+                SystemSessionWorktreeIo,
             )
             .unwrap(),
         ));
@@ -2907,6 +3081,7 @@ mod tests {
                 &state_dir,
                 DaemonGeneration::new(),
                 FakeGit::ok(),
+                SystemSessionWorktreeIo,
             )
             .unwrap(),
         ));
@@ -2921,7 +3096,7 @@ mod tests {
         // generation journaled.
         drain_pending_teardowns(
             &SharedSessionTeardown::new(Arc::clone(&restarted)),
-            &WorktreeTeardown::new(FakeGit::ok()),
+            &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
             &|| false,
         );
         assert!(!session_root.exists());
@@ -3008,7 +3183,7 @@ mod tests {
         perform_remove(&runtime, &signal, &remove_op, &json!({"name":"one"})).unwrap();
         drain_pending_teardowns(
             &SharedSessionTeardown::new(Arc::clone(&runtime)),
-            &WorktreeTeardown::new(FakeGit::ok()),
+            &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
             &|| false,
         );
         let replayed_remove =
@@ -3061,5 +3236,409 @@ mod tests {
             ),
             Err(SessionRuntimeError::Storage)
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn production_logic_coverage_contract() {
+        let path = Path::new("/fake");
+        let failing_io = FailingSessionWorktreeIo;
+        failing_io.remove_file_best_effort(path);
+        assert!(!failing_io.path_occupied(path));
+        assert_eq!(failing_io.canonical_path(path), Some(path.into()));
+        assert!(!failing_io.is_repo_root(path));
+        assert!(!failing_io.is_linked_worktree(path));
+        failing_io
+            .build_session_tree(&FakeGit::ok(), path, path, "branch")
+            .unwrap();
+        let fake_io = FakeSessionWorktreeIo {
+            occupied: false,
+            build_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        assert_eq!(fake_io.canonical_path(path), Some(path.into()));
+        assert!(fake_io.is_linked_worktree(path));
+        fake_io
+            .remove_session_tree(&FakeGit::ok(), path, false)
+            .unwrap();
+        PoisoningGit {
+            runtime: std::sync::Weak::new(),
+        }
+        .run(path, &[])
+        .unwrap();
+
+        let messages = [
+            (
+                SessionRuntimeError::InvalidRequest,
+                "invalid session request",
+            ),
+            (
+                SessionRuntimeError::InvalidOperation,
+                "invalid operation identity",
+            ),
+            (
+                SessionRuntimeError::DuplicateOperation,
+                "operation identity conflicts with an existing request",
+            ),
+            (
+                SessionRuntimeError::IdempotencyConflict,
+                "operation id was reused with a different request",
+            ),
+            (
+                SessionRuntimeError::AgentFailure {
+                    code: ErrorCode::Internal,
+                    message: "agent".into(),
+                },
+                "agent",
+            ),
+            (
+                SessionRuntimeError::ScopeUnavailable,
+                "session scope is not available",
+            ),
+            (SessionRuntimeError::UnknownSession, "session was not found"),
+            (
+                SessionRuntimeError::Rejected,
+                "could not create the session worktree; see the daemon log for details",
+            ),
+            (
+                SessionRuntimeError::Storage,
+                "daemon could not persist session lifecycle state",
+            ),
+        ];
+        for (error, expected) in messages {
+            assert_eq!(error.safe_message(), expected);
+        }
+        assert_eq!(
+            worktree_failure_detail("\u{1}"),
+            "Git rejected workspace creation"
+        );
+        assert_eq!(
+            session_name(&json!({"name": ""})),
+            Err(SessionRuntimeError::InvalidRequest)
+        );
+        assert_eq!(session_name(&json!({"label": "alias"})), Ok("alias".into()));
+        assert_eq!(
+            WorktreeTeardown::new(FakeGit::ok(), FailingSessionWorktreeIo).tear_down(
+                &PendingTeardown {
+                    session_id: SessionId::new(),
+                    operation_id: OperationId::new(),
+                    name: "one".into(),
+                    session_root: PathBuf::from("/fake"),
+                    force: false,
+                }
+            ),
+            Err("injected remove failure".into())
+        );
+
+        let (tmp, mut runtime) = runtime(FakeGit::ok());
+        let state = runtime.state().unwrap();
+        assert_eq!(
+            runtime.resolve_root_scope(WorkspaceId::new(), runtime.root_worktree_id()),
+            Err(SessionRuntimeError::ScopeUnavailable)
+        );
+        let create = runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"scope"}),
+            )
+            .unwrap();
+        let session_id = create.body["sessions"][0]["session_id"]
+            .as_str()
+            .and_then(|value| SessionId::parse(value).ok())
+            .unwrap();
+        let scope = runtime.session_scope_by_id(session_id).unwrap();
+        assert_eq!(
+            scope.path,
+            tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("scope")
+        );
+        assert_eq!(
+            runtime.session_scope_by_id(SessionId::new()),
+            Err(SessionRuntimeError::UnknownSession)
+        );
+        assert_eq!(
+            runtime
+                .resolve_root_scope(state.workspace_id, runtime.root_worktree_id())
+                .unwrap(),
+            tmp.path()
+        );
+
+        let remove_operation = operation();
+        runtime
+            .handle(
+                SessionAction::Remove,
+                &remove_operation,
+                &json!({"name":"scope"}),
+            )
+            .unwrap();
+        runtime
+            .handle(
+                SessionAction::Remove,
+                &remove_operation,
+                &json!({"name":"scope"}),
+            )
+            .unwrap();
+
+        let _ = runtime
+            .begin_create(&operation(), &json!({"name":"unfinished"}))
+            .unwrap();
+        let current = runtime.state().unwrap();
+        let journal = current.operations.last().unwrap();
+        assert_eq!(
+            runtime.replay(&current, journal),
+            Err(SessionRuntimeError::DurableFailure(
+                "session operation did not complete; explicit recovery required".into()
+            ))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn status_projects_each_git_state_and_failure() {
+        use ScriptedGitResult::Output;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let git = ScriptedGit::new([
+            Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "main\n",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: " M file\n",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "usagi/dirty\n",
+                stderr: "",
+            },
+            Output {
+                success: false,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "usagi/synced\n",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            Output {
+                success: true,
+                stdout: "usagi/local\n",
+                stderr: "",
+            },
+            Output {
+                success: false,
+                stdout: "",
+                stderr: "",
+            },
+        ]);
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            git,
+            FakeSessionWorktreeIo {
+                occupied: false,
+                build_calls: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .unwrap();
+        for name in ["dirty", "synced", "local"] {
+            runtime
+                .handle(SessionAction::Create, &operation(), &json!({"name": name}))
+                .unwrap();
+        }
+        let reply = runtime
+            .handle(SessionAction::Status, &operation(), &json!({}))
+            .unwrap();
+        assert_eq!(reply.body["sessions"][0]["worktrees"][0]["status"], "dirty");
+        assert_eq!(
+            reply.body["sessions"][1]["worktrees"][0]["status"],
+            "synced"
+        );
+        assert_eq!(reply.body["sessions"][2]["worktrees"][0]["status"], "local");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            ScriptedGit::new([Output {
+                success: false,
+                stdout: "",
+                stderr: "",
+            }]),
+            FakeSessionWorktreeIo {
+                occupied: false,
+                build_calls: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.handle(SessionAction::Status, &operation(), &json!({})),
+            Err(SessionRuntimeError::Storage)
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            ScriptedGit::new([
+                Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                Output {
+                    success: true,
+                    stdout: "main\n",
+                    stderr: "",
+                },
+                Output {
+                    success: false,
+                    stdout: "",
+                    stderr: "",
+                },
+                Output {
+                    success: true,
+                    stdout: "usagi/one\n",
+                    stderr: "",
+                },
+                Output {
+                    success: false,
+                    stdout: "",
+                    stderr: "",
+                },
+            ]),
+            FakeSessionWorktreeIo {
+                occupied: false,
+                build_calls: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .unwrap();
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert_eq!(
+            runtime.handle(SessionAction::Status, &operation(), &json!({})),
+            Err(SessionRuntimeError::Storage)
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            ScriptedGit::new([ScriptedGitResult::Error, ScriptedGitResult::Error]),
+            FakeSessionWorktreeIo {
+                occupied: false,
+                build_calls: Arc::new(AtomicUsize::new(0)),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"error"})
+            ),
+            Err(SessionRuntimeError::SessionWorkspaceCreationFailed { .. })
+        ));
+        assert_eq!(
+            runtime.handle(SessionAction::Status, &operation(), &json!({})),
+            Err(SessionRuntimeError::Storage)
+        );
+    }
+
+    #[test]
+    fn empty_legacy_state_and_unowned_reconcile_are_noops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        WorkspaceStateStore::new(&repository)
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                sessions: Vec::new(),
+                root_notes: Scratchpad::default(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        assert!(
+            validated_legacy_sessions_without_v2(
+                &repository,
+                &FakeGit::ok(),
+                &SystemSessionWorktreeIo,
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        let state_dir = tmp.path().join("daemon");
+        let mut runtime = SessionRuntime::open(
+            repository.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
+        let mut state = runtime.state().unwrap();
+        let mut unowned =
+            ManagedSession::new_creating("unowned".into(), OperationId::new(), Utc::now());
+        unowned.operation_id = None;
+        state.sessions.push(unowned);
+        let revision = state.state_revision;
+        state.state_revision += 1;
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+        runtime.reconcile().unwrap();
+    }
+
+    #[test]
+    fn shared_teardown_reports_storage_failure() {
+        let (tmp, runtime) = runtime(FakeGit::ok());
+        let shared = Arc::new(Mutex::new(runtime));
+        std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
+        let pending = PendingTeardown {
+            session_id: SessionId::new(),
+            operation_id: OperationId::new(),
+            name: "missing".into(),
+            session_root: tmp.path().join("missing"),
+            force: false,
+        };
+        assert_eq!(
+            SharedSessionTeardown::new(shared).finish(&pending, Ok(())),
+            Err("daemon could not persist session lifecycle state".into())
+        );
     }
 }

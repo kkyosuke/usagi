@@ -49,6 +49,7 @@ use usagi_daemon::infrastructure::generation_registry::{
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::resource_store::{AllocatorFile, ShardArchiveFiles};
+use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointCleanup, EndpointLocator, SecureUnixListener, connect_generation, ensure_private_dir,
     ensure_private_dir_all, peer_pid, read_locator, retire_stale_current_preserving,
@@ -117,8 +118,8 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
 use usagi_daemon::usecase::session_runtime::{
-    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, SystemGit, WorktreeTeardown,
-    perform_create, perform_remove,
+    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, WorktreeTeardown, perform_create,
+    perform_remove,
 };
 use usagi_daemon::usecase::session_teardown::{
     TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
@@ -1801,7 +1802,7 @@ fn start_session_teardown_worker(
     let signal = Arc::new(TeardownSignal::new());
     spawn_session_teardown_worker(
         SharedSessionTeardown::new(sessions),
-        WorktreeTeardown::new(SystemGit),
+        WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
         Arc::clone(&signal),
         shutdown,
         SESSION_TEARDOWN_TICK,
@@ -2320,9 +2321,15 @@ fn open_session_runtime(
     state_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> std::io::Result<SharedSessionRuntime> {
-    SessionRuntime::open(repo_root, state_dir, generation, SystemGit)
-        .map(|runtime| Arc::new(Mutex::new(runtime)))
-        .map_err(|error| std::io::Error::other(error.safe_message()))
+    SessionRuntime::open(
+        repo_root,
+        state_dir,
+        generation,
+        SystemGit,
+        SystemSessionWorktreeIo,
+    )
+    .map(|runtime| Arc::new(Mutex::new(runtime)))
+    .map_err(|error| std::io::Error::other(error.safe_message()))
 }
 
 /// Reads the root selected by the durable session store, rather than the
@@ -11806,6 +11813,81 @@ mod tests {
             .unwrap();
 
         assert_eq!(launch.snapshot.working_directory, original_root);
+    }
+
+    #[test]
+    fn root_composition_resolves_an_available_session_by_stable_id() {
+        struct SuccessfulGit;
+        impl usagi_core::infrastructure::git::GitRunner for SuccessfulGit {
+            fn run(
+                &self,
+                _: &Path,
+                _: &[&str],
+            ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+                Ok(usagi_core::infrastructure::git::GitOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        struct NoopSessionWorktreeIo;
+        impl usagi_daemon::usecase::session_runtime::SessionWorktreeIo for NoopSessionWorktreeIo {
+            fn remove_file_best_effort(&self, _: &Path) {}
+            fn path_occupied(&self, _: &Path) -> bool {
+                false
+            }
+            fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+                Some(path.to_path_buf())
+            }
+            fn is_repo_root(&self, _: &Path) -> bool {
+                false
+            }
+            fn is_linked_worktree(&self, _: &Path) -> bool {
+                true
+            }
+            fn build_session_tree(
+                &self,
+                _: &dyn usagi_core::infrastructure::git::GitRunner,
+                _: &Path,
+                _: &Path,
+                _: &str,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn remove_session_tree(
+                &self,
+                _: &dyn usagi_core::infrastructure::git::GitRunner,
+                _: &Path,
+                _: bool,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                temporary.path().join("repository"),
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                SuccessfulGit,
+                NoopSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        perform_create(
+            &runtime,
+            &SuccessfulGit,
+            &usagi_core::domain::id::OperationId::new().to_string(),
+            &serde_json::json!({"name": "one"}),
+        )
+        .unwrap();
+
+        let runtime = runtime.lock().unwrap();
+        let session_id = runtime.session_id("one").unwrap();
+        assert!(runtime.session_scope_by_id(session_id).is_ok());
     }
 
     /// One process's durable runtime state over a real data directory.
