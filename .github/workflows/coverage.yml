@@ -33,14 +33,9 @@ jobs:
         . ./scripts/coverage.sh
         coverage_off_lint
 
-    # The nightly published on 2026-07-31 makes cargo-llvm-cov 0.8.7 report the build script
-    # without --include-build-script, exposing code that is outside the test
-    # target and making the unchanged 100% gate impossible. Keep the last known
-    # good nightly until that compiler/tool interaction is fixed upstream.
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+      uses: dtolnay/rust-toolchain@nightly
       with:
-        toolchain: nightly-2026-07-30
         components: llvm-tools-preview
 
     - name: Rust Cache
