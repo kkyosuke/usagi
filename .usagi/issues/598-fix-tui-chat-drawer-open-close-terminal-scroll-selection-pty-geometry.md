@@ -1,13 +1,13 @@
 ---
 number: 598
 title: fix(tui): chat drawer の open/close が terminal scroll / selection と PTY geometry を壊さないようにする
-status: in-progress
+status: done
 priority: medium
 labels: [tui, bug, terminal, agent]
 dependson: [596]
 related: [577, 597]
 created_at: 2026-07-31T11:06:02.375573+00:00
-updated_at: 2026-07-31T12:09:10.667829+00:00
+updated_at: 2026-07-31T12:34:37.201046+00:00
 ---
 
 ## 症状
