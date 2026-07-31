@@ -8,7 +8,7 @@ dependson: []
 related: [139]
 parent: 592
 created_at: 2026-07-31T00:12:05.285547+00:00
-updated_at: 2026-07-31T00:12:05.285547+00:00
+updated_at: 2026-07-31T00:30:59.283082+00:00
 ---
 
 ## 目的
@@ -21,9 +21,11 @@ updated_at: 2026-07-31T00:12:05.285547+00:00
 
 `#139` が `AgentCapability` / `LaunchPlan` の土台を作った際の設計（capability は closed vocabulary、adapter は既存実装のまま追加型だけ先行させる）を踏襲する。
 
+**「main とそれ以外」の対応関係**: この issue で言う `is_root` の二値は、[.agents/workflow.md](../../.agents/workflow.md) が定義する「リポジトリのルート（**main** のチェックアウト）で直接作業している場合」と「usagi セッション worktree（`usagi/<name>` ブランチ）内で起動している場合」の区別そのものである。root = main チェックアウトで動くコーディネータ = `ROOT_PROMPT`、session = `usagi/<name>` の worktree = `SESSION_WORKTREE_PROMPT`。追加の判定軸（例えば root が実際にどの git ブランチをチェックアウトしているか）は設けない。`LaunchScope.session_id.is_none()` だけで一意に決まる。
+
 ## 変更方針
 
-- `usagi-core`（例: `crates/core/src/domain/agent/prompt.rs` のような新モジュール、または既存 `domain/agent/mod.rs` 内）に次を追加する。
+- `usagi-core`(例: `crates/core/src/domain/agent/prompt.rs` のような新モジュール、または既存 `domain/agent/mod.rs` 内)に次を追加する。
   - `root_prompt() -> &'static str` / `session_worktree_prompt() -> &'static str` / `local_llm_delegation_prompt() -> &'static str`: v1 の `ROOT_PROMPT` / `SESSION_WORKTREE_PROMPT` / `LOCAL_LLM_PROMPT` と**バイト完全一致**のテキストを移植する（operator に見える指示文を変えない）。
   - `session_system_prompt(is_root: bool, local_llm_delegation: bool) -> String`: v1 の `session_system_prompt(is_root, is_gemini_agy, local_llm_model)` から `is_gemini_agy` 分岐を除いた版（v2 に Gemini/Antigravity adapter が無いため）。`is_root` は呼び出し側が `LaunchRequest.scope.session_id.is_none()` から渡す（`src/runtime/daemon.rs` の既存 `sandbox_mode` と同じ判定式を再利用させる設計にし、判定ロジックの二重化を避ける）。
 - `AgentCapability` に `SystemPrompt` variant を追加する（`#[serde(rename_all = "snake_case")]` により `"system_prompt"`）。
@@ -46,7 +48,7 @@ updated_at: 2026-07-31T00:12:05.285547+00:00
 - 実運用の `LaunchRequest` 生成箇所すべてで `required_capabilities` に `SystemPrompt` が含まれる。
 - `SystemPrompt` capability を宣言しない profile に対して `required_capabilities` が `SystemPrompt` を含む `LaunchRequest` を渡すと、`validate_request` が `UnsupportedCapability` を返すことをテストで示す（fail-closed の回帰テスト）。
 - 既存の `Agent`/`LaunchRequest`/`DurableLaunchSnapshot` の JSON round-trip・snapshot schema 互換性が壊れない（新 capability variant の追加は additive）。
-- `document/02-architecture.md` の Agent launch boundary 節に、system prompt が何によって選ばれるか（`LaunchScope.session_id` の有無・trusted local LLM 設定）と、それが durable snapshot に**保存されない**設計（#592 参照）が追記されている。
+- `document/02-architecture.md` の Agent launch boundary 節に、system prompt が何によって選ばれるか（`LaunchScope.session_id` の有無＝main チェックアウトの root か `usagi/<name>` session worktree か・trusted local LLM 設定）と、それが durable snapshot に**保存されない**設計（#592 参照）が追記されている。
 
 ## テスト方針
 
@@ -60,3 +62,4 @@ updated_at: 2026-07-31T00:12:05.285547+00:00
 - Claude の `--append-system-prompt` / Codex の `-c developer_instructions=` への実配線（#592 の「Claude/Codex/sakana.ai 配線」issue）。
 - local LLM MCP（`usagi-llm`）の実装・設定・delegation flag の実 trigger（#592 の「local LLM MCP 配線」issue）。
 - Gemini/Antigravity 向けの opening-prompt-lead フォールバック設計。
+- root/session 以外の追加判定軸（実際のチェックアウトブランチ名によるオーバーライド等）を設けること。
