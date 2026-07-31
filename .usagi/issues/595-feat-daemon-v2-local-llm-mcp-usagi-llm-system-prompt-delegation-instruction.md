@@ -1,14 +1,14 @@
 ---
 number: 595
 title: feat(daemon): v2 に local LLM MCP (usagi-llm) 配線を追加し system prompt の delegation instruction を有効化する
-status: in-progress
+status: done
 priority: medium
 labels: [daemon, agent, mcp]
 dependson: [593, 594]
 related: [32]
 parent: 592
 created_at: 2026-07-31T00:13:01.936046+00:00
-updated_at: 2026-07-31T01:56:27.335579+00:00
+updated_at: 2026-07-31T02:11:19.317718+00:00
 ---
 
 ## 目的
