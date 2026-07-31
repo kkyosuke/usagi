@@ -273,6 +273,15 @@ fn drawer_body(
         if content_capacity > before + 2 {
             rows.push(Style::new().dim().paint("Esc returns to conversations."));
         }
+    } else if let Some(view) = &projection.terminal_view {
+        rows.extend(widgets::live_terminal::render(
+            view,
+            width,
+            height.saturating_sub(rows.len()),
+            content_capacity,
+            footer_hint,
+        ));
+        return rows;
     } else if projection.conversations.is_empty() {
         let before = content_capacity.saturating_sub(3) / 2;
         rows.extend(std::iter::repeat_n(String::new(), before));
@@ -295,15 +304,6 @@ fn drawer_body(
             };
             rows.push(Style::new().dim().paint(detail));
         }
-    } else if let Some(view) = &projection.terminal_view {
-        rows.extend(widgets::live_terminal::render(
-            view,
-            width,
-            height.saturating_sub(rows.len()),
-            content_capacity,
-            footer_hint,
-        ));
-        return rows;
     } else if let Some(detail) = &projection.interrupted_detail {
         rows.push(Style::new().dim().paint(detail));
     }
@@ -510,6 +510,29 @@ mod tests {
         assert!(text.contains("agent output two"));
         assert!(text.contains("agent output three"));
         assert!(!text.contains("No chat conversations yet"));
+    }
+
+    #[test]
+    fn terminal_rows_render_even_when_conversation_inventory_is_empty() {
+        let projection = WorkspaceAgentDrawerProjection {
+            terminal_view: Some(TerminalViewProjection {
+                rows: vec!["live output without inventory".to_owned()],
+                row_offset: 0,
+                total_rows: 1,
+                scroll: 0,
+                feedback: None,
+            }),
+            ..WorkspaceAgentDrawerProjection::default()
+        };
+        let body = drawer_body(52, 9, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("live output without inventory"));
+        assert!(!body.contains("No chat conversations yet"));
+        assert!(!body.contains("Chat inventory is not connected."));
     }
 
     #[test]

@@ -383,7 +383,10 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
-admission の両方で拒否する。`Ctrl-O n` または `[ New ]` の mouse-down hit で drawer を開いて
+admission の両方で拒否する。live Agent の continuation が intent context 未作成、未 observe、CAS 後の投影遅延で
+まだ得られない場合も terminal fence を identity として selector に残し、provider metadata を含まない `Agent` を
+fallback label にする。terminal view がある frame は conversation inventory の有無にかかわらず PTY 出力を描き、
+terminal view も conversation も無い場合だけ empty state を描く。`Ctrl-O n` または `[ New ]` の mouse-down hit で drawer を開いて
 合成ルートから注入された install 済み CLI だけを `claude`、`codex`、`sakana.ai` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は conversation order / selection と drawer open
