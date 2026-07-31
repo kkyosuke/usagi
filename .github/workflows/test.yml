@@ -14,7 +14,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  changes:
+    name: Detect Rust gate changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - id: classify
+      name: Classify changed paths
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      run: scripts/ci/required-contexts.sh changed "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  rust-lint:
+    name: Rust lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -37,7 +56,10 @@ jobs:
     - name: Clippy
       run: cargo clippy --workspace --all-targets -- -D warnings
 
-  full-test:
+  full-test-run:
+    name: Rust full test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -85,8 +107,48 @@ jobs:
     - name: Test release verification artifacts
       run: bash scripts/tests/release-verification-artifacts.sh
 
+  policy-checks:
+    name: Lightweight repository policy checks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Test required context contract
+      run: bash scripts/tests/required-contexts.sh
+
     - name: Test root README contract checker
       run: bash scripts/tests/root-readme.sh
 
     - name: Enforce root README contract
       run: bash scripts/ci/root-readme.sh README.md
+
+  test:
+    name: test
+    if: always()
+    needs: [changes, rust-lint]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Report Rust lint result
+      env:
+        CHANGES_RESULT: ${{ needs.changes.result }}
+        REQUIRED: ${{ needs.changes.outputs.rust }}
+        RUN_RESULT: ${{ needs.rust-lint.result }}
+      run: |
+        scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT"
+
+  full-test:
+    name: full-test
+    if: always()
+    needs: [changes, full-test-run, policy-checks]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Report full test result
+      env:
+        CHANGES_RESULT: ${{ needs.changes.result }}
+        REQUIRED: ${{ needs.changes.outputs.rust }}
+        RUN_RESULT: ${{ needs.full-test-run.result }}
+        POLICY_RESULT: ${{ needs.policy-checks.result }}
+      run: |
+        scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT" "$POLICY_RESULT"

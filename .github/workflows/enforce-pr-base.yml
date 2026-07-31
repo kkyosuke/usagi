@@ -6,6 +6,7 @@ on:
 
 jobs:
   enforce-base-main:
+    name: enforce-base-main
     runs-on: ubuntu-latest
     steps:
       - name: Ensure PR targets main

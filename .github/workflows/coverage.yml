@@ -16,7 +16,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  coverage:
+  changes:
+    name: Detect coverage gate changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - id: classify
+      name: Classify changed paths
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: scripts/ci/required-contexts.sh changed "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  coverage-run:
+    name: Rust coverage
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -90,3 +109,18 @@ jobs:
         coverage_report \
           --fail-under-lines "$COVERAGE_MIN" \
           --fail-under-functions "$COVERAGE_MIN"
+
+  coverage:
+    name: coverage
+    if: always()
+    needs: [changes, coverage-run]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Report coverage result
+      env:
+        CHANGES_RESULT: ${{ needs.changes.result }}
+        REQUIRED: ${{ needs.changes.outputs.rust }}
+        RUN_RESULT: ${{ needs.coverage-run.result }}
+      run: |
+        scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT"

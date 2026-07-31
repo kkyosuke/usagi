@@ -174,7 +174,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 crate・module の test | `cargo fmt --all -- --check` / `cargo check --workspace --all-targets` / 変更箇所に対応する `cargo test -p <crate>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
 | push 前（ローカル） | Markdown link check（Markdown 差分あり） | `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
-| PR・CI（最終 full gate） | fmt / clippy / full test / coverage 100% / Markdown link check | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
+| PR・CI（最終 full gate） | 対象差分の fmt / clippy / full test / coverage 100% / Markdown link check と、全 PR での aggregate context 報告 | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する。対象外差分は重い job を省略し、stable aggregate は success を報告する |
 
 PR は Draft で開き、上表の CI 必須チェックが green になってから Ready for review にする（[プルリクエスト](#プルリクエスト)）。
 最終的な full gate（clippy / full test / coverage 100%）の green は CI で確認するのが正であり、ローカルで先取りして
@@ -335,18 +335,31 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/test.yml` | `main` への push / PR | fmt / clippy と full test（`--workspace`）を独立 job で並列実行（`ubuntu-latest`） |
+| `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy と full test（`--workspace`）を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
 | `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 出荷物 v1 の実 PTY TUI E2E。PR / merge queue では `v1/Cargo.toml` の `[package].version` が base と異なる場合だけ実行し、通常 PR の重い test を回避する |
 | `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
-| `.github/workflows/coverage.yml` | PR | `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR コメント + Job Summary）・100% 未満で失敗 |
-| `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
+| `.github/workflows/coverage.yml` | PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR コメント + Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
+| `.github/workflows/markdown-link-check.yml` | `main` への push / PR | Markdown 対象差分ではリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証し、全差分で `markdown-link-check` aggregate を報告 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
 
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 - `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の v2 正本と `v1/` へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
+- required status check の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
+  `enforce-base-main`、`full-test`、`coverage`、`markdown-link-check` を GitHub Actions（integration ID
+  `15368`）の required context として持つ。各 workflow は path filter をイベントに置かず、軽量な差分判定後に対象の重い job だけを
+  実行する。aggregate job は `if: always()` で判定 job と実行 job の結果を検査するため、Rust、Markdown-only、既知の静的 asset の
+  どの PR でも同じ context 名を報告し、判定失敗や対象 job 失敗を success へ変換しない。未知 path は fail-safe で Rust gate 対象とする。
+- `scripts/ci/required-contexts.sh audit-workflows` は contract の workflow / job / context 名を照合し、rename drift を検出する。
+  `scripts/tests/required-contexts.sh` は Rust、Markdown-only、無関係 path の分類と aggregate、ruleset payload の fixture を検証する。
+  workflow 名や job 名を変更するときは、ruleset を先に変更して存在しない context を required にせず、同じ変更で contract と fixture を
+  更新する。
+- ruleset 更新では、更新直前の GET response を保存し、`scripts/ci/required-contexts.sh prepare-ruleset` で update payload と
+  rollback payload を生成する。PUT 後は GET response へ `verify-ruleset` を実行する。失敗時は保存した rollback payload を同じ ruleset へ
+  PUT する。bypass policy は RepositoryRole ID `5`（admin）の `always` だけを許可し、通常 merge は required context と 1 approval を
+  必須にする。bypass や admin merge は障害復旧など明示的に承認された操作に限り、通常の workflow rollout には使用しない。
 - `coverage.yml` は 100% 計測の前に `scripts/coverage-off-lint.rb` を実行する。lint 自体は `scripts/tests/coverage-off-lint.sh` の fixture（許可 IO、禁止 reducer、理由欠落、stale、追加、削除、期限切れ）で検証し、`test.yml` でも実行する。
 - カバレッジ未達（100% 未満）のとき、`coverage.yml` は `cargo llvm-cov report --json` から**未達ファイルと未達関数**（ファイル path・関数名・宣言行・関数率/行率・不足量・未達行レンジ）のレポートを生成し、PR コメント（同一リポジトリ PR。`marocchino/sticky-pull-request-comment` の header + recreate で再実行時も 1 件に更新）と Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも一覧が見え、コメント投稿は `continue-on-error` で **coverage gate の合否（exit code）から独立**させる。関数カバレッジは JSON summary（generic の単相化をマージした集計＝gate と一致。lcov の per-monomorphization な `FN/FNDA` を数えると gate と食い違う）を使い、関数名は `c++filt`（binutils。Rust v0 を demangle）で可読化する。出力はファイル/関数/行レンジの上限で切り詰め、超過分は明示する。レポート生成は `scripts/coverage-report-comment.rb`（Ruby, stdlib のみ）に抽出し、`scripts/tests/coverage-report-comment.sh` の fixture test（`test.yml` の script-tests job で実行）で固定する。閾値・対象パッケージ選択の SSoT は `scripts/coverage.sh`。
 - TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれから `[package].version` を読む。したがって、同じ `v1/Cargo.toml` を編集しても version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。

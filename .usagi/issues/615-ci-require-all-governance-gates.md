@@ -1,13 +1,13 @@
 ---
 number: 615
 title: ci: main ruleset で full-test coverage Markdown gate を必須化する
-status: todo
+status: done
 priority: high
 labels: [review, ci, governance, security, test]
 dependson: []
 related: [203, 601]
 created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+updated_at: 2026-08-01T00:00:00+09:00
 ---
 
 ## Finding（P1 CI/governance）
