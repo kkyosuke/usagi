@@ -157,7 +157,11 @@ impl DaemonLifecycleStore {
     }
 
     fn load_persisted(&self) -> Result<Option<PersistedLifecycle>> {
-        json_file::read(&self.state_path())
+        let persisted: Option<PersistedLifecycle> = json_file::read(&self.state_path())?;
+        if let Some(persisted) = &persisted {
+            persisted.state.validate().map_err(anyhow::Error::msg)?;
+        }
+        Ok(persisted)
     }
 }
 
@@ -322,5 +326,44 @@ mod tests {
         store.replace_if_revision(0, &replacement).unwrap();
         assert_eq!(store.load().unwrap(), Some(replacement));
         assert_eq!(store.ensure_root_worktree_id().unwrap(), generated);
+    }
+
+    #[test]
+    fn every_durable_read_rejects_invalid_lifecycle_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DaemonLifecycleStore::new(tmp.path());
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        state.sessions.push(
+            crate::domain::session_lifecycle::ManagedSession::adopt_available(
+                "../victim".into(),
+                now(),
+            ),
+        );
+        let persisted = PersistedLifecycle {
+            repository_root: PathBuf::from("/repository"),
+            root_worktree_id: Some(WorktreeId::new()),
+            state,
+        };
+        json_file::write_atomic(tmp.path(), &store.state_path(), &persisted).unwrap();
+
+        assert!(store.load().is_err());
+        assert!(store.load_with_workspace().is_err());
+        assert!(store.ensure_root_worktree_id().is_err());
+        assert!(
+            store
+                .apply(
+                    DaemonGeneration::new(),
+                    LifecycleEvent::RequestCancel {
+                        operation_id: OperationId::new(),
+                    },
+                    now(),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .replace_if_revision(0, &WorkspaceLifecycleState::new(WorkspaceId::new(), now()),)
+                .is_err()
+        );
     }
 }

@@ -324,6 +324,7 @@ pub struct LifecycleFormatVersion {
 pub enum LifecycleError {
     UnsupportedFormat,
     UnsupportedVersion,
+    InvalidSessionName,
     DuplicateSessionName,
     InvalidTransition,
     StaleCompletion,
@@ -364,6 +365,13 @@ impl WorkspaceLifecycleState {
         }
         if self.version.major != Self::MAJOR || self.version.minor != 0 {
             return Err(LifecycleError::UnsupportedVersion);
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for session in &self.sessions {
+            validate_session_name(&session.name)?;
+            if !names.insert(&session.name) {
+                return Err(LifecycleError::DuplicateSessionName);
+            }
         }
         Ok(())
     }
@@ -473,6 +481,7 @@ pub fn reduce(
     state.validate()?;
     match event {
         LifecycleEvent::ReserveCreate { name, operation } => {
+            validate_session_name(&name)?;
             if state.sessions.iter().any(|s| s.name == name) {
                 return Err(LifecycleError::DuplicateSessionName);
             }
@@ -561,6 +570,28 @@ pub fn reduce(
             state.changed(now);
             Ok(())
         }
+    }
+}
+
+/// Validates the canonical, path-safe spelling used for every managed session.
+///
+/// The same predicate guards request admission, reducer events, and durable
+/// snapshots. A valid name is one non-empty path component and therefore can
+/// never be absolute, contain `..`, or introduce a platform separator.
+///
+/// # Errors
+///
+/// Returns [`LifecycleError::InvalidSessionName`] for a non-canonical name.
+pub fn validate_session_name(name: &str) -> Result<(), LifecycleError> {
+    if !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        Ok(())
+    } else {
+        Err(LifecycleError::InvalidSessionName)
     }
 }
 
@@ -876,6 +907,53 @@ mod tests {
         assert_eq!(state.operations[0].status, OperationStatus::Failed);
         state.format = "legacy".into();
         assert_eq!(state.validate(), Err(LifecycleError::UnsupportedFormat));
+    }
+
+    #[test]
+    fn lifecycle_validation_rejects_noncanonical_and_duplicate_session_names() {
+        for name in [
+            "",
+            "/tmp/victim",
+            "../victim",
+            "nested/victim",
+            "nested\\victim",
+        ] {
+            let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+            state
+                .sessions
+                .push(ManagedSession::adopt_available(name.into(), now()));
+            assert_eq!(state.validate(), Err(LifecycleError::InvalidSessionName));
+        }
+
+        let mut duplicate = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        duplicate
+            .sessions
+            .push(ManagedSession::adopt_available("same".into(), now()));
+        duplicate
+            .sessions
+            .push(ManagedSession::adopt_available("same".into(), now()));
+        assert_eq!(
+            duplicate.validate(),
+            Err(LifecycleError::DuplicateSessionName)
+        );
+    }
+
+    #[test]
+    fn reducer_rejects_noncanonical_names_without_mutating_state() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        assert_eq!(
+            reduce(
+                &mut state,
+                LifecycleEvent::ReserveCreate {
+                    name: "../victim".into(),
+                    operation: op(),
+                },
+                now(),
+            ),
+            Err(LifecycleError::InvalidSessionName)
+        );
+        assert!(state.sessions.is_empty());
+        assert!(state.operations.is_empty());
     }
 
     #[test]

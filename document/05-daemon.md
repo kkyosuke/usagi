@@ -722,6 +722,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | resume | 中断された delete は `failed` に落とさず `deleting` のまま残し、次の daemon 起動で worker が再開する。teardown は「対象が無ければ成功」で冪等なので、途中まで削除された tree に安全に再実行できる |
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため、失敗 record を remove すれば同名 create が再び通る |
+| path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
 
 client 側の表示は既存の投影で足りる。受理直後から `deleting` 行が見え、完了で消える。TUI は `deleting` 行を
 削除中の行として描画し、`SessionLifecycle::capabilities` により attach も再 remove もできない。MCP の
