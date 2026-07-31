@@ -728,19 +728,19 @@ pub enum Feedback {
 pub struct AppState {
     route: Route,
     overlay: Option<Overlay>,
-    /// Home's right-anchored Workspace Agent drawer. It is deliberately not an
+    /// Home's right-anchored Director mode drawer. It is deliberately not an
     /// [`Overlay`] variant: existing modal overlays retain entry precedence,
     /// while an already-open drawer is the frontmost input owner and swallows
     /// every background action until Escape or its toggle closes it.
-    workspace_agent_drawer_open: bool,
-    /// Local `New` flow inside the Workspace Agent drawer. Candidate
+    director_drawer_open: bool,
+    /// Local `New` flow inside the Director mode drawer. Candidate
     /// availability is injected with [`AvailableModels`]; opening and moving
     /// this picker performs no daemon work.
-    workspace_agent_new: WorkspaceAgentNew,
+    director_new: DirectorNew,
     /// One root launch submitted from the picker. It remains fenced until the
     /// shell reports the matching completion, so repeated Enter cannot mint a
     /// second operation while the first request is in flight.
-    workspace_agent_launching: Option<OperationId>,
+    director_launching: Option<OperationId>,
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     decisions: Vec<UserDecision>,
@@ -818,7 +818,7 @@ pub enum ExitChoice {
 /// installed CLI never opens a zero-row picker and therefore cannot submit a
 /// daemon request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorkspaceAgentNew {
+pub enum DirectorNew {
     /// The conversation drawer is visible without its CLI chooser.
     #[default]
     Idle,
@@ -877,9 +877,9 @@ impl AppState {
         Self {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
-            workspace_agent_drawer_open: false,
-            workspace_agent_new: WorkspaceAgentNew::Idle,
-            workspace_agent_launching: None,
+            director_drawer_open: false,
+            director_new: DirectorNew::Idle,
+            director_launching: None,
             note_editor: None,
             environment_editor: None,
             decisions: Vec::new(),
@@ -924,20 +924,20 @@ impl AppState {
     pub const fn overlay(&self) -> Option<Overlay> {
         self.overlay
     }
-    /// Whether the frontmost Workspace Agent drawer owns Home input.
+    /// Whether the frontmost Director mode drawer owns Home input.
     #[must_use]
-    pub const fn workspace_agent_drawer_open(&self) -> bool {
-        self.workspace_agent_drawer_open
+    pub const fn director_drawer_open(&self) -> bool {
+        self.director_drawer_open
     }
     /// Current local state of the drawer's explicit Agent CLI chooser.
     #[must_use]
-    pub const fn workspace_agent_new(&self) -> WorkspaceAgentNew {
-        self.workspace_agent_new
+    pub const fn director_new(&self) -> DirectorNew {
+        self.director_new
     }
     /// Operation currently fenced by the drawer's root launch flow.
     #[must_use]
-    pub const fn workspace_agent_launching(&self) -> Option<OperationId> {
-        self.workspace_agent_launching
+    pub const fn director_launching(&self) -> Option<OperationId> {
+        self.director_launching
     }
     /// Home sidebar mascot animation frame. Only [`AppEvent::Tick`] advances it.
     #[must_use]
@@ -1377,12 +1377,12 @@ pub enum AppKey {
     CtrlQ,
     /// Open the detach confirmation from a reserved live-pane action.
     OpenQuitConfirmation,
-    /// Toggle the frontmost Workspace Agent drawer. Opening is ignored while an
+    /// Toggle the frontmost Director mode drawer. Opening is ignored while an
     /// existing modal overlay owns input; while open, this and Escape are the
     /// only keys that mutate Home state.
-    ToggleWorkspaceAgentDrawer,
-    /// Open the Workspace Agent drawer and its explicit New CLI picker.
-    OpenWorkspaceAgentNew,
+    ToggleDirectorDrawer,
+    /// Open the Director mode drawer and its explicit New CLI picker.
+    OpenDirectorNew,
     /// workspace scope overlay を開く。
     OpenOverview,
     /// target scope overlay を開く。
@@ -1532,7 +1532,7 @@ pub enum AppEvent {
     /// The shell finished exactly one drawer-originated workspace-root Agent
     /// launch. A mismatched operation is ignored, preserving the in-flight
     /// fence against stale or replayed completions.
-    WorkspaceAgentLaunchFinished(OperationId),
+    DirectorLaunchFinished(OperationId),
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -2397,7 +2397,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             // Reconnect snapshots contain only known rows, so they preserve a
             // deliberate dismiss and never steal focus.
             if state.overlay.is_none()
-                && !state.workspace_agent_drawer_open
+                && !state.director_drawer_open
                 && let Some(decision) = state
                     .decisions
                     .iter()
@@ -2479,7 +2479,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
             state.has_live_pane = has_live_pane;
-            if state.workspace_agent_drawer_open {
+            if state.director_drawer_open {
                 return Vec::new();
             }
             if matches!(state.route, Route::Home(HomeMode::Closeup)) {
@@ -2502,7 +2502,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             state.has_pane_tab = has_pane_tab;
-            if state.workspace_agent_drawer_open {
+            if state.director_drawer_open {
                 return Vec::new();
             }
             if !matches!(state.route, Route::Home(HomeMode::Closeup)) {
@@ -2599,9 +2599,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.feedback = Some(feedback);
             Vec::new()
         }
-        AppEvent::WorkspaceAgentLaunchFinished(operation) => {
-            if state.workspace_agent_launching == Some(operation) {
-                state.workspace_agent_launching = None;
+        AppEvent::DirectorLaunchFinished(operation) => {
+            if state.director_launching == Some(operation) {
+                state.director_launching = None;
             }
             Vec::new()
         }
@@ -2630,7 +2630,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 }
             } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
                 && state.overlay.is_none()
-                && !state.workspace_agent_drawer_open
+                && !state.director_drawer_open
             {
                 // A create accepted by the daemon later failed. Surface the safe
                 // message as a dismissible dialog over Home. The form was already
@@ -2746,17 +2746,17 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(overlay) = state.overlay {
         return update_overlay(state, overlay, key);
     }
-    if state.workspace_agent_drawer_open {
-        return update_workspace_agent_drawer_key(state, key);
+    if state.director_drawer_open {
+        return update_director_drawer_key(state, key);
     }
-    if matches!(key, AppKey::ToggleWorkspaceAgentDrawer) {
-        state.workspace_agent_drawer_open = true;
-        state.workspace_agent_new = WorkspaceAgentNew::Idle;
+    if matches!(key, AppKey::ToggleDirectorDrawer) {
+        state.director_drawer_open = true;
+        state.director_new = DirectorNew::Idle;
         return Vec::new();
     }
-    if matches!(key, AppKey::OpenWorkspaceAgentNew) {
-        state.workspace_agent_drawer_open = true;
-        open_workspace_agent_new(state);
+    if matches!(key, AppKey::OpenDirectorNew) {
+        state.director_drawer_open = true;
+        open_director_new(state);
         return Vec::new();
     }
     if !matches!(key, AppKey::CtrlC) {
@@ -2790,29 +2790,29 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
 }
 
-fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
-    if matches!(key, AppKey::ToggleWorkspaceAgentDrawer) {
-        state.workspace_agent_drawer_open = false;
-        state.workspace_agent_new = WorkspaceAgentNew::Idle;
+fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    if matches!(key, AppKey::ToggleDirectorDrawer) {
+        state.director_drawer_open = false;
+        state.director_new = DirectorNew::Idle;
         return Vec::new();
     }
-    match (state.workspace_agent_new, key) {
-        (WorkspaceAgentNew::Idle, AppKey::OpenWorkspaceAgentNew) => {
-            open_workspace_agent_new(state);
+    match (state.director_new, key) {
+        (DirectorNew::Idle, AppKey::OpenDirectorNew) => {
+            open_director_new(state);
             Vec::new()
         }
-        (WorkspaceAgentNew::Idle, AppKey::Escape) => {
-            state.workspace_agent_drawer_open = false;
+        (DirectorNew::Idle, AppKey::Escape) => {
+            state.director_drawer_open = false;
             Vec::new()
         }
-        (WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty, AppKey::Escape) => {
-            state.workspace_agent_new = WorkspaceAgentNew::Idle;
+        (DirectorNew::Choosing(_) | DirectorNew::Empty, AppKey::Escape) => {
+            state.director_new = DirectorNew::Idle;
             Vec::new()
         }
-        (WorkspaceAgentNew::Choosing(selected), AppKey::Up) => {
+        (DirectorNew::Choosing(selected), AppKey::Up) => {
             let candidates = state.available_models.iter().collect::<Vec<_>>();
             if candidates.is_empty() {
-                state.workspace_agent_new = WorkspaceAgentNew::Empty;
+                state.director_new = DirectorNew::Empty;
                 return Vec::new();
             }
             let index = candidates
@@ -2820,13 +2820,13 @@ fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<E
                 .position(|candidate| *candidate == selected)
                 .unwrap_or(0);
             let previous = (index + candidates.len() - 1) % candidates.len();
-            state.workspace_agent_new = WorkspaceAgentNew::Choosing(candidates[previous]);
+            state.director_new = DirectorNew::Choosing(candidates[previous]);
             Vec::new()
         }
-        (WorkspaceAgentNew::Choosing(selected), AppKey::Down) => {
+        (DirectorNew::Choosing(selected), AppKey::Down) => {
             let candidates = state.available_models.iter().collect::<Vec<_>>();
             if candidates.is_empty() {
-                state.workspace_agent_new = WorkspaceAgentNew::Empty;
+                state.director_new = DirectorNew::Empty;
                 return Vec::new();
             }
             let index = candidates
@@ -2834,15 +2834,13 @@ fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<E
                 .position(|candidate| *candidate == selected)
                 .unwrap_or(0);
             let next = (index + 1) % candidates.len();
-            state.workspace_agent_new = WorkspaceAgentNew::Choosing(candidates[next]);
+            state.director_new = DirectorNew::Choosing(candidates[next]);
             Vec::new()
         }
-        (WorkspaceAgentNew::Choosing(selected), AppKey::Enter)
-            if state.workspace_agent_launching.is_none() =>
-        {
+        (DirectorNew::Choosing(selected), AppKey::Enter) if state.director_launching.is_none() => {
             let operation_id = OperationId::new();
-            state.workspace_agent_new = WorkspaceAgentNew::Idle;
-            state.workspace_agent_launching = Some(operation_id);
+            state.director_new = DirectorNew::Idle;
+            state.director_launching = Some(operation_id);
             vec![Effect::LaunchAgent {
                 workspace: state.workspace,
                 session: None,
@@ -2857,12 +2855,12 @@ fn update_workspace_agent_drawer_key(state: &mut AppState, key: AppKey) -> Vec<E
     }
 }
 
-fn open_workspace_agent_new(state: &mut AppState) {
-    if state.workspace_agent_launching.is_some() {
+fn open_director_new(state: &mut AppState) {
+    if state.director_launching.is_some() {
         return;
     }
-    state.workspace_agent_new = if state.available_models.is_empty() {
-        WorkspaceAgentNew::Empty
+    state.director_new = if state.available_models.is_empty() {
+        DirectorNew::Empty
     } else {
         let selected = if state.available_models.contains(state.default_model) {
             state.default_model
@@ -2873,7 +2871,7 @@ fn open_workspace_agent_new(state: &mut AppState) {
                 .next()
                 .expect("non-empty availability has a first candidate")
         };
-        WorkspaceAgentNew::Choosing(selected)
+        DirectorNew::Choosing(selected)
     };
 }
 
@@ -3203,8 +3201,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::OpenQuitConfirmation
-        | AppKey::ToggleWorkspaceAgentDrawer
-        | AppKey::OpenWorkspaceAgentNew
+        | AppKey::ToggleDirectorDrawer
+        | AppKey::OpenDirectorNew
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
         | AppKey::SelectNoteSection(_)
@@ -3828,7 +3826,7 @@ fn update_pointer(
     row: u16,
     at: std::time::Duration,
 ) -> Vec<Effect> {
-    if state.overlay.is_some() || state.workspace_agent_drawer_open {
+    if state.overlay.is_some() || state.director_drawer_open {
         state.pending_session_click = None;
         return Vec::new();
     }
@@ -4847,7 +4845,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_drawer_toggle_preserves_background_state_and_owns_input() {
+    fn director_drawer_toggle_preserves_background_state_and_owns_input() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
         let _ = update(
@@ -4876,14 +4874,8 @@ mod tests {
             state.closeup_action_forced,
         );
 
-        assert!(
-            update(
-                &mut state,
-                AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer)
-            )
-            .is_empty()
-        );
-        assert!(state.workspace_agent_drawer_open());
+        assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+        assert!(state.director_drawer_open());
         for event in [
             AppEvent::Key(AppKey::Up),
             AppEvent::Key(AppKey::CtrlA),
@@ -4897,7 +4889,7 @@ mod tests {
             },
         ] {
             assert!(update(&mut state, event).is_empty());
-            assert!(state.workspace_agent_drawer_open());
+            assert!(state.director_drawer_open());
             assert_eq!(
                 (
                     state.route(),
@@ -4914,7 +4906,7 @@ mod tests {
         }
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-        assert!(!state.workspace_agent_drawer_open());
+        assert!(!state.director_drawer_open());
         assert_eq!(
             (
                 state.route(),
@@ -4928,19 +4920,13 @@ mod tests {
             ),
             background
         );
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
-        assert!(!state.workspace_agent_drawer_open());
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert!(!state.director_drawer_open());
     }
 
     #[test]
-    fn workspace_agent_new_picker_has_deterministic_candidates_and_cancel() {
+    fn director_new_picker_has_deterministic_candidates_and_cancel() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
         state.set_agent_models(
@@ -4948,17 +4934,14 @@ mod tests {
             DefaultModel::OpenAi,
         );
         let background = (state.selected(), state.active(), state.route());
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
 
         // A missing configured default highlights the first installed candidate
         // in vocabulary order without confirming it.
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::Claude)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::Claude)
         );
         assert_eq!(
             (state.selected(), state.active(), state.route()),
@@ -4967,25 +4950,25 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::SakanaAi)
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::Claude)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::Claude)
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Up));
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::SakanaAi)
         );
 
         // Escape cancels only the chooser; the drawer and every background
         // selection remain unchanged.
         assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
-        assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Idle);
-        assert!(state.workspace_agent_drawer_open());
+        assert_eq!(state.director_new(), DirectorNew::Idle);
+        assert!(state.director_drawer_open());
         assert_eq!(
             (state.selected(), state.active(), state.route()),
             background
@@ -4993,7 +4976,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_frontmost_transition_table_keeps_modal_and_background_ownership_unique() {
+    fn director_frontmost_transition_table_keeps_modal_and_background_ownership_unique() {
         struct Case {
             name: &'static str,
             modal: bool,
@@ -5007,7 +4990,7 @@ mod tests {
             Case {
                 name: "modal blocks drawer entry",
                 modal: true,
-                events: vec![AppKey::ToggleWorkspaceAgentDrawer],
+                events: vec![AppKey::ToggleDirectorDrawer],
                 drawer_open: false,
                 picker_open: false,
                 launches: 0,
@@ -5015,10 +4998,7 @@ mod tests {
             Case {
                 name: "toggle closes drawer",
                 modal: false,
-                events: vec![
-                    AppKey::ToggleWorkspaceAgentDrawer,
-                    AppKey::ToggleWorkspaceAgentDrawer,
-                ],
+                events: vec![AppKey::ToggleDirectorDrawer, AppKey::ToggleDirectorDrawer],
                 drawer_open: false,
                 picker_open: false,
                 launches: 0,
@@ -5026,7 +5006,7 @@ mod tests {
             Case {
                 name: "picker escape returns to drawer",
                 modal: false,
-                events: vec![AppKey::OpenWorkspaceAgentNew, AppKey::Escape],
+                events: vec![AppKey::OpenDirectorNew, AppKey::Escape],
                 drawer_open: true,
                 picker_open: false,
                 launches: 0,
@@ -5034,7 +5014,7 @@ mod tests {
             Case {
                 name: "picker confirmation launches root only",
                 modal: false,
-                events: vec![AppKey::OpenWorkspaceAgentNew, AppKey::Enter],
+                events: vec![AppKey::OpenDirectorNew, AppKey::Enter],
                 drawer_open: true,
                 picker_open: false,
                 launches: 1,
@@ -5055,13 +5035,13 @@ mod tests {
                 .flat_map(|key| update(&mut state, AppEvent::Key(key)))
                 .collect::<Vec<_>>();
             assert_eq!(
-                state.workspace_agent_drawer_open(),
+                state.director_drawer_open(),
                 case.drawer_open,
                 "{}",
                 case.name
             );
             assert_eq!(
-                matches!(state.workspace_agent_new(), WorkspaceAgentNew::Choosing(_)),
+                matches!(state.director_new(), DirectorNew::Choosing(_)),
                 case.picker_open,
                 "{}",
                 case.name
@@ -5076,7 +5056,7 @@ mod tests {
                 case.name
             );
             assert!(
-                state.overlay().is_none() || !state.workspace_agent_drawer_open(),
+                state.overlay().is_none() || !state.director_drawer_open(),
                 "{}",
                 case.name
             );
@@ -5084,19 +5064,16 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_new_picker_covers_default_single_and_empty_availability() {
+    fn director_new_picker_covers_default_single_and_empty_availability() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
 
         state.set_agent_models(AvailableModels::all(), DefaultModel::SakanaAi);
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::SakanaAi)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::SakanaAi)
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
 
@@ -5104,46 +5081,43 @@ mod tests {
             AvailableModels::new([DefaultModel::OpenAi]),
             DefaultModel::Claude,
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::OpenAi)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::OpenAi)
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Up));
         assert_eq!(
-            state.workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::OpenAi)
+            state.director_new(),
+            DirectorNew::Choosing(DefaultModel::OpenAi)
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
 
         state.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
-        assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Empty);
-        assert_eq!(state.workspace_agent_launching(), None);
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+        assert_eq!(state.director_new(), DirectorNew::Empty);
+        assert_eq!(state.director_launching(), None);
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
 
         // A composition-policy refresh racing an already-open chooser degrades
         // either movement direction to the same safe empty state.
         for key in [AppKey::Up, AppKey::Down] {
-            state.workspace_agent_new = WorkspaceAgentNew::Choosing(DefaultModel::Claude);
+            state.director_new = DirectorNew::Choosing(DefaultModel::Claude);
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
-            assert_eq!(state.workspace_agent_new(), WorkspaceAgentNew::Empty);
+            assert_eq!(state.director_new(), DirectorNew::Empty);
         }
     }
 
     #[test]
-    fn workspace_agent_picker_submits_one_explicit_root_launch_until_matching_finish() {
+    fn director_picker_submits_one_explicit_root_launch_until_matching_finish() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
         state.set_agent_models(
             AvailableModels::new([DefaultModel::SakanaAi]),
             DefaultModel::SakanaAi,
         );
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
         let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
         let [
             Effect::LaunchAgent {
@@ -5162,26 +5136,23 @@ mod tests {
             profile.as_ref().map(AgentProfileId::as_str),
             Some("sakana-ai")
         );
-        assert_eq!(state.workspace_agent_launching(), Some(*operation_id));
+        assert_eq!(state.director_launching(), Some(*operation_id));
 
         // Reopening New, double Enter, and a stale completion cannot cross the
         // operation fence.
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         let _ = update(
             &mut state,
-            AppEvent::WorkspaceAgentLaunchFinished(OperationId::new()),
+            AppEvent::DirectorLaunchFinished(OperationId::new()),
         );
-        assert_eq!(state.workspace_agent_launching(), Some(*operation_id));
-        let _ = update(
-            &mut state,
-            AppEvent::WorkspaceAgentLaunchFinished(*operation_id),
-        );
-        assert_eq!(state.workspace_agent_launching(), None);
+        assert_eq!(state.director_launching(), Some(*operation_id));
+        let _ = update(&mut state, AppEvent::DirectorLaunchFinished(*operation_id));
+        assert_eq!(state.director_launching(), None);
     }
 
     #[test]
-    fn workspace_agent_picker_maps_each_cli_fixture_to_one_explicit_profile() {
+    fn director_picker_maps_each_cli_fixture_to_one_explicit_profile() {
         let workspace = WorkspaceId::new();
         for (model, expected) in [
             (DefaultModel::Claude, "claude"),
@@ -5190,11 +5161,8 @@ mod tests {
         ] {
             let mut state = AppState::home(workspace, Vec::new());
             state.set_agent_models(AvailableModels::new([model]), model);
-            let _ = update(
-                &mut state,
-                AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-            );
-            let _ = update(&mut state, AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
+            let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
             let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
             assert!(matches!(
                 effects.as_slice(),
@@ -5208,7 +5176,7 @@ mod tests {
     }
 
     #[test]
-    fn every_existing_modal_blocks_workspace_agent_drawer_entry() {
+    fn every_existing_modal_blocks_director_drawer_entry() {
         let (workspace, first, _) = ids();
         for overlay in [
             Overlay::Overview,
@@ -5255,13 +5223,10 @@ mod tests {
                 | Overlay::QuitConfirmation
                 | Overlay::CreateSessionError => {}
             }
-            for key in [
-                AppKey::ToggleWorkspaceAgentDrawer,
-                AppKey::OpenWorkspaceAgentNew,
-            ] {
+            for key in [AppKey::ToggleDirectorDrawer, AppKey::OpenDirectorNew] {
                 assert!(update(&mut state, AppEvent::Key(key)).is_empty());
                 assert_eq!(state.overlay(), Some(overlay));
-                assert!(!state.workspace_agent_drawer_open());
+                assert!(!state.director_drawer_open());
             }
         }
     }

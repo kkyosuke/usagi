@@ -6382,7 +6382,7 @@ mod tests {
         assert_eq!(
             classify_follow_up(live_key(KeyCode::Char('n'), Modifiers::default())),
             Some(Key::Live(
-                usagi_tui::usecase::terminal_input::LiveTerminalAction::WorkspaceAgentNew
+                usagi_tui::usecase::terminal_input::LiveTerminalAction::DirectorNew
             ))
         );
         assert_eq!(

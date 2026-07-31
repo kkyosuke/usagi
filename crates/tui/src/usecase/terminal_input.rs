@@ -177,14 +177,14 @@ pub enum LiveTerminalAction {
     MoveTabPrevious,
     /// Open or reattach the agent pane.
     Agent,
-    /// Toggle the Home Workspace Agent drawer (`Ctrl-O Ctrl-G`). It is the frontmost
+    /// Toggle the Home Director mode drawer (`Ctrl-O Ctrl-G`). It is the frontmost
     /// Home surface: opening it never mutates the background route, selection, or
     /// active managed session, and re-issuing it closes the drawer.
-    WorkspaceAgent,
-    /// Open the Home Workspace Agent drawer and its explicit New CLI picker
+    Director,
+    /// Open the Home Director mode drawer and its explicit New CLI picker
     /// (`Ctrl-O n`). Plain `n` is intentionally distinct from `Ctrl-N`, which
     /// remains [`LiveTerminalAction::NextTab`].
-    WorkspaceAgentNew,
+    DirectorNew,
     /// Close the active tab.
     CloseTab,
     /// Explicitly resume the selected interrupted Agent tab (#510). Nothing else
@@ -282,7 +282,7 @@ impl LiveInputClassifier {
         self.leader_at = None;
         if leader_alive {
             if bytes == [7] {
-                return LiveInputOutput::Action(LiveTerminalAction::WorkspaceAgent);
+                return LiveInputOutput::Action(LiveTerminalAction::Director);
             }
             return LiveInputOutput::Swallowed;
         }
@@ -397,7 +397,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return Some(LiveTerminalAction::CloseTab);
     }
     if is_ctrl_g(key) {
-        return Some(LiveTerminalAction::WorkspaceAgent);
+        return Some(LiveTerminalAction::Director);
     }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
     // not own: scroll the PTY output and close the focused tab. A
@@ -407,7 +407,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return None;
     }
     match key.code {
-        KeyCode::Char('n') => Some(LiveTerminalAction::WorkspaceAgentNew),
+        KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
@@ -701,7 +701,7 @@ mod tests {
             },
             Case {
                 follow_up: key(KeyCode::Char('n')),
-                action: LiveTerminalAction::WorkspaceAgentNew,
+                action: LiveTerminalAction::DirectorNew,
             },
             Case {
                 follow_up: ctrl('p'),
@@ -709,11 +709,11 @@ mod tests {
             },
             Case {
                 follow_up: ctrl('g'),
-                action: LiveTerminalAction::WorkspaceAgent,
+                action: LiveTerminalAction::Director,
             },
             Case {
                 follow_up: key(KeyCode::Char('\u{7}')),
-                action: LiveTerminalAction::WorkspaceAgent,
+                action: LiveTerminalAction::Director,
             },
             // View controls the reducer does not own: tab close and scroll.
             Case {
@@ -772,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_chord_distinguishes_ctrl_g_from_plain_g() {
+    fn director_chord_distinguishes_ctrl_g_from_plain_g() {
         for follow_up in [
             ctrl('g'),
             key(KeyCode::Char('\u{7}')),
@@ -785,7 +785,7 @@ mod tests {
             );
             assert_eq!(
                 classifier.classify(Duration::from_millis(1), follow_up),
-                LiveInputOutput::Action(LiveTerminalAction::WorkspaceAgent)
+                LiveInputOutput::Action(LiveTerminalAction::Director)
             );
         }
 
@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_follow_up_is_plain_terminal_input_after_leader_timeout() {
+    fn director_follow_up_is_plain_terminal_input_after_leader_timeout() {
         let mut classifier = LiveInputClassifier::default();
         assert_eq!(
             classifier.classify(T0, ctrl('o')),

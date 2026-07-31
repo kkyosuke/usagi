@@ -1,4 +1,4 @@
-//! Shared live-terminal viewport rendering for the Closeup pane and chat drawer.
+//! Shared live-terminal viewport rendering for the Closeup pane and director drawer.
 
 use crate::presentation::theme::Style;
 use crate::presentation::widgets;

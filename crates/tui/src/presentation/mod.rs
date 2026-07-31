@@ -43,6 +43,9 @@ use crate::presentation::metrics::{MetricsBackend, MetricsProjection};
 use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
+use crate::presentation::views::director_drawer::{
+    self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+};
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::quit_modal;
@@ -53,9 +56,6 @@ use crate::presentation::views::workspace::{
     Workspace as WorkspaceView, home_header_action_at, render_home, render_home_at,
     terminal_point_at,
 };
-use crate::presentation::views::workspace_agent_drawer::{
-    self, WorkspaceAgentConversation, WorkspaceAgentDrawerProjection, WorkspaceAgentNewProjection,
-};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::{
     AgentReopenChoice, PaneRestoreTarget, WorkspaceRuntime,
@@ -65,8 +65,8 @@ use crate::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, EnvironmentEntry, ExitChoice, Feedback,
-    NewRequest, Notice, OperationResult, Overlay, PendingToken, Target, WorkspaceAgentNew,
+    AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
+    Feedback, NewRequest, Notice, OperationResult, Overlay, PendingToken, Target,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -708,29 +708,28 @@ fn forward_live_terminal_input(
 /// Give drawer-local reserved keys to the drawer before the selected root Agent
 /// can turn them into PTY bytes. `None` means ordinary terminal input keeps its
 /// normal forwarding path; `Some` means the drawer uniquely owned the key.
-fn handle_workspace_agent_reserved_input(
+fn handle_director_reserved_input(
     runtime: &mut WorkspaceRuntime,
     key: &Key,
 ) -> Option<Vec<Effect>> {
-    if runtime.state().overlay().is_some() || !runtime.state().workspace_agent_drawer_open() {
+    if runtime.state().overlay().is_some() || !runtime.state().director_drawer_open() {
         return None;
     }
     // Keep the state/key matrix explicit: nested `matches!` expansions obscure
     // the one production branch that the line-coverage gate must observe.
     #[allow(clippy::match_like_matches_macro)]
-    let owns = match (runtime.state().workspace_agent_new(), key) {
+    let owns = match (runtime.state().director_new(), key) {
         (
-            WorkspaceAgentNew::Choosing(_) | WorkspaceAgentNew::Empty,
+            DirectorNew::Choosing(_) | DirectorNew::Empty,
             Key::Up
             | Key::Down
             | Key::Enter
             | Key::Escape
-            | Key::Live(LiveTerminalAction::WorkspaceAgent | LiveTerminalAction::WorkspaceAgentNew),
+            | Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew),
         )
         | (
-            WorkspaceAgentNew::Idle,
-            Key::Escape
-            | Key::Live(LiveTerminalAction::WorkspaceAgent | LiveTerminalAction::WorkspaceAgentNew),
+            DirectorNew::Idle,
+            Key::Escape | Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew),
         ) => true,
         _ => false,
     };
@@ -751,7 +750,7 @@ fn route_workspace_input_before_reducer(
     term: &mut dyn Terminal,
     key: &Key,
 ) -> WorkspaceInputRoute {
-    if let Some(effects) = handle_workspace_agent_reserved_input(runtime, key) {
+    if let Some(effects) = handle_director_reserved_input(runtime, key) {
         WorkspaceInputRoute::Drawer(effects)
     } else if forward_live_terminal_input(ui, runtime, controls, term, key) {
         WorkspaceInputRoute::Forwarded
@@ -3148,8 +3147,8 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
-        LiveTerminalAction::WorkspaceAgent => Some(AppKey::ToggleWorkspaceAgentDrawer),
-        LiveTerminalAction::WorkspaceAgentNew => Some(AppKey::OpenWorkspaceAgentNew),
+        LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
+        LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::CloseTab
         | LiveTerminalAction::ResumeTab
@@ -3170,13 +3169,9 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
-fn foreground_terminal_geometry(
-    height: usize,
-    width: usize,
-    workspace_agent_open: bool,
-) -> Geometry {
-    if workspace_agent_open {
-        let viewport = workspace_agent_drawer::terminal_viewport(height, width);
+fn foreground_terminal_geometry(height: usize, width: usize, director_open: bool) -> Geometry {
+    if director_open {
+        let viewport = director_drawer::terminal_viewport(height, width);
         Geometry {
             cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
                 .expect("clamped drawer terminal width fits u16"),
@@ -3494,32 +3489,30 @@ fn controller_terminal_view(
 ///
 /// Stable identity and selection remain in the pane/intent reducers. This
 /// adapter exposes only safe labels and the already-rendered VT rows.
-fn workspace_agent_drawer_projection(
+fn director_drawer_projection(
     ui: &WorkspaceUi,
     runtime: &WorkspaceRuntime,
     terminal_view: Option<&TerminalViewProjection>,
-) -> WorkspaceAgentDrawerProjection {
-    if !runtime.state().workspace_agent_drawer_open() {
-        return WorkspaceAgentDrawerProjection::default();
+) -> DirectorDrawerProjection {
+    if !runtime.state().director_drawer_open() {
+        return DirectorDrawerProjection::default();
     }
     let pane = runtime.active_pane();
     let selected = pane.selected();
     let mut conversations = Vec::new();
     for tab in pane.tabs() {
         let conversation = match tab {
-            PaneTab::Live(live) if live.kind == PaneKind::Agent => {
-                Some(WorkspaceAgentConversation {
-                    label: AgentTabIntent::safe_label_or_fallback(
-                        ui.agent_continuation_for(&live.terminal),
-                    ),
-                    selected: matches!(
-                        selected,
-                        PaneSelection::Tab(TabSelection::Live(terminal))
-                            if terminal.fences(&live.terminal)
-                    ),
-                })
-            }
-            PaneTab::Interrupted(interrupted) => Some(WorkspaceAgentConversation {
+            PaneTab::Live(live) if live.kind == PaneKind::Agent => Some(DirectorConversation {
+                label: AgentTabIntent::safe_label_or_fallback(
+                    ui.agent_continuation_for(&live.terminal),
+                ),
+                selected: matches!(
+                    selected,
+                    PaneSelection::Tab(TabSelection::Live(terminal))
+                        if terminal.fences(&live.terminal)
+                ),
+            }),
+            PaneTab::Interrupted(interrupted) => Some(DirectorConversation {
                 label: interrupted.tab.safe_label(),
                 selected: matches!(
                     selected,
@@ -3528,7 +3521,7 @@ fn workspace_agent_drawer_projection(
                 ),
             }),
             PaneTab::Pending(pending) if pending.kind == PaneKind::Agent => {
-                Some(WorkspaceAgentConversation {
+                Some(DirectorConversation {
                     label: "Agent (starting)".to_owned(),
                     selected: matches!(
                         selected,
@@ -3561,18 +3554,18 @@ fn workspace_agent_drawer_projection(
     } else {
         None
     };
-    WorkspaceAgentDrawerProjection {
+    DirectorDrawerProjection {
         conversations,
         terminal_view,
         interrupted_detail,
         feedback,
-        new: if runtime.state().workspace_agent_launching().is_some() {
-            WorkspaceAgentNewProjection::Launching
+        new: if runtime.state().director_launching().is_some() {
+            DirectorNewProjection::Launching
         } else {
-            match runtime.state().workspace_agent_new() {
-                WorkspaceAgentNew::Idle => WorkspaceAgentNewProjection::Ready,
-                WorkspaceAgentNew::Empty => WorkspaceAgentNewProjection::Empty,
-                WorkspaceAgentNew::Choosing(selected) => {
+            match runtime.state().director_new() {
+                DirectorNew::Idle => DirectorNewProjection::Ready,
+                DirectorNew::Empty => DirectorNewProjection::Empty,
+                DirectorNew::Choosing(selected) => {
                     let candidates = runtime
                         .state()
                         .available_models()
@@ -3585,7 +3578,7 @@ fn workspace_agent_drawer_projection(
                         .iter()
                         .position(|model| model == selected)
                         .unwrap_or(0);
-                    WorkspaceAgentNewProjection::Choosing {
+                    DirectorNewProjection::Choosing {
                         candidates,
                         selected,
                     }
@@ -4175,8 +4168,8 @@ fn handle_terminal_pointer(
     pointer: PointerEvent,
 ) -> bool {
     let point_at = |column, row| {
-        if runtime.state().workspace_agent_drawer_open() {
-            workspace_agent_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
+        if runtime.state().director_drawer_open() {
+            director_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
         } else {
             terminal_point_at(height, width, rows_len, scroll, column, row)
         }
@@ -4244,12 +4237,8 @@ fn copy_terminal_selection(controls: &mut LiveTerminalControls, term: &mut dyn T
     controls.record_copy(&text, result);
 }
 
-fn select_workspace_agent_tab(
-    key: &Key,
-    ui: &mut WorkspaceUi,
-    runtime: &mut WorkspaceRuntime,
-) -> bool {
-    if !runtime.state().workspace_agent_drawer_open() {
+fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) -> bool {
+    if !runtime.state().director_drawer_open() {
         return false;
     }
     let direction = match key {
@@ -4281,7 +4270,7 @@ fn select_workspace_agent_tab(
     true
 }
 
-fn is_workspace_agent_new_click(
+fn is_director_new_click(
     key: &Key,
     runtime: &WorkspaceRuntime,
     height: usize,
@@ -4296,16 +4285,13 @@ fn is_workspace_agent_new_click(
         }) => (*column, *row),
         _ => return false,
     };
-    runtime.state().workspace_agent_drawer_open()
-        && matches!(
-            runtime.state().workspace_agent_new(),
-            WorkspaceAgentNew::Idle
-        )
-        && runtime.state().workspace_agent_launching().is_none()
-        && workspace_agent_drawer::new_button_at(height, width, column, row, false)
+    runtime.state().director_drawer_open()
+        && matches!(runtime.state().director_new(), DirectorNew::Idle)
+        && runtime.state().director_launching().is_none()
+        && director_drawer::new_button_at(height, width, column, row, false)
 }
 
-fn is_workspace_agent_new_pointer(
+fn is_director_new_pointer(
     key: &Key,
     runtime: &WorkspaceRuntime,
     height: usize,
@@ -4317,8 +4303,8 @@ fn is_workspace_agent_new_pointer(
         }
         _ => return false,
     };
-    runtime.state().workspace_agent_drawer_open()
-        && workspace_agent_drawer::new_button_at(height, width, column, row, false)
+    runtime.state().director_drawer_open()
+        && director_drawer::new_button_at(height, width, column, row, false)
 }
 
 /// Intercept the live-terminal view controls the Home reducer does not own —
@@ -4339,12 +4325,12 @@ fn intercept_live_terminal_control(
     rows_len: usize,
     scroll: usize,
 ) -> bool {
-    if is_workspace_agent_new_click(key, runtime, height, width) {
+    if is_director_new_click(key, runtime, height, width) {
         // Let the frame-loop action branch return the resulting launch effect
         // to the normal backend dispatcher.
         return false;
     }
-    if is_workspace_agent_new_pointer(key, runtime, height, width) {
+    if is_director_new_pointer(key, runtime, height, width) {
         // The whole pointer gesture belongs to the drawer chrome. In
         // particular a second Down while Choosing and its Up are inert instead
         // of becoming picker Enter or a background terminal/pane click.
@@ -4370,7 +4356,7 @@ fn intercept_live_terminal_control(
     if !runtime.wants_pane_control_input() && pane_only_control {
         return true;
     }
-    if !select_workspace_agent_tab(key, ui, runtime) {
+    if !select_director_tab(key, ui, runtime) {
         match key {
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
@@ -4506,11 +4492,11 @@ fn home_frame_material(
             .with_metrics(metrics)
             .with_git_diffs(git_diffs)
             .with_terminal_view(
-                (!runtime.state().workspace_agent_drawer_open())
+                (!runtime.state().director_drawer_open())
                     .then_some(terminal_view)
                     .flatten(),
             )
-            .with_workspace_agent_drawer(runtime.workspace_agent_projection().clone())
+            .with_director_drawer(runtime.director_projection().clone())
             .with_create_pending(create_pending.map(str::to_owned))
             .with_overlay_modals(
                 runtime.overview_modal().cloned(),
@@ -4717,8 +4703,8 @@ fn drain_controller_host_actions(
                 if matches!(request.target, Target::Root(_)) {
                     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
                         Notice::new(format!(
-                            "{} chat accepts Agent conversations only",
-                            workspace_agent_drawer::CHAT_ICON
+                            "{} director accepts Agent conversations only",
+                            director_drawer::DIRECTOR_ICON
                         )),
                     )));
                     continue;
@@ -4870,7 +4856,7 @@ fn drain_pane_completions_into_runtime(
                     }
                 }
                 if matches!(target, Target::Root(_)) {
-                    let _ = runtime.apply_event(AppEvent::WorkspaceAgentLaunchFinished(operation));
+                    let _ = runtime.apply_event(AppEvent::DirectorLaunchFinished(operation));
                 }
             }
             PaneLaunchOutcome::ResumeExact {
@@ -5173,19 +5159,15 @@ fn drive_workspace_controller(
             width: u16::try_from(width).unwrap_or(u16::MAX),
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
-        let geometry = foreground_terminal_geometry(
-            height,
-            width,
-            runtime.state().workspace_agent_drawer_open(),
-        );
+        let geometry =
+            foreground_terminal_geometry(height, width, runtime.state().director_drawer_open());
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
         ui.sync_foreground_terminal(runtime.focused_terminal().as_ref(), geometry);
         ui.resize_terminals(geometry);
         let (terminal_view, terminal_rows_len, terminal_scroll) =
             poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
-        let drawer_projection =
-            workspace_agent_drawer_projection(&ui, &runtime, terminal_view.as_ref());
-        runtime.set_workspace_agent_projection(drawer_projection);
+        let drawer_projection = director_drawer_projection(&ui, &runtime, terminal_view.as_ref());
+        runtime.set_director_projection(drawer_projection);
         if ui.take_terminal_reconnected() {
             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Feedback(
                 Feedback::Reconnected,
@@ -5274,8 +5256,8 @@ fn drive_workspace_controller(
         }
         let effects = if let WorkspaceInputRoute::Drawer(effects) = input_route {
             effects
-        } else if is_workspace_agent_new_click(&key, &runtime, height, width) {
-            runtime.apply_event(AppEvent::Key(AppKey::OpenWorkspaceAgentNew))
+        } else if is_director_new_click(&key, &runtime, height, width) {
+            runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
             // Header rendering and hit-testing share one layout projection, so
             // CJK breadcrumbs, notice presence, and narrow clipping cannot move
@@ -5284,8 +5266,8 @@ fn drive_workspace_controller(
                 home_header_action_at(width, &material.projection, column, row)
             });
             match header_action {
-                Some(HomeHeaderAction::WorkspaceAgent) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+                Some(HomeHeaderAction::Director) => {
+                    runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
                 }
                 Some(HomeHeaderAction::Decisions) => {
                     runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
@@ -6275,8 +6257,8 @@ mod tests {
         AgentTabSlotIntent, AgentTabTargetProjection,
     };
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, Effect, EnvironmentEntry, NewRequest, Overlay,
-        PendingToken, SessionCreateIntent, TabDirection, Target, WorkspaceAgentNew,
+        AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry, NewRequest, Overlay,
+        PendingToken, SessionCreateIntent, TabDirection, Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -6463,12 +6445,12 @@ mod tests {
             Some(AppEvent::Key(AppKey::CtrlA))
         );
         assert_eq!(
-            app_event_from_key(Key::Live(LiveTerminalAction::WorkspaceAgent)),
-            Some(AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer))
+            app_event_from_key(Key::Live(LiveTerminalAction::Director)),
+            Some(AppEvent::Key(AppKey::ToggleDirectorDrawer))
         );
         assert_eq!(
-            app_event_from_key(Key::Live(LiveTerminalAction::WorkspaceAgentNew)),
-            Some(AppEvent::Key(AppKey::OpenWorkspaceAgentNew))
+            app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
+            Some(AppEvent::Key(AppKey::OpenDirectorNew))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
@@ -8164,10 +8146,10 @@ mod tests {
             AvailableModels::new([DefaultModel::Claude]),
             DefaultModel::Claude,
         );
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(
             runtime
-                .handle_key(Key::Live(LiveTerminalAction::WorkspaceAgentNew))
+                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
                 .is_empty()
         );
         let effects = runtime.handle_key(Key::Enter);
@@ -8207,7 +8189,7 @@ mod tests {
         );
 
         assert!(pending.is_empty());
-        assert_eq!(runtime.state().workspace_agent_launching(), None);
+        assert_eq!(runtime.state().director_launching(), None);
         assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
         let intent = durable.lock().unwrap();
         assert_eq!(intent.targets.len(), 1);
@@ -8219,8 +8201,8 @@ mod tests {
 
         let tabs = runtime.active_pane().tabs().to_vec();
         let _ = runtime.handle_key(Key::Escape);
-        assert!(!runtime.state().workspace_agent_drawer_open());
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        assert!(!runtime.state().director_drawer_open());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.active_pane().tabs(), tabs.as_slice());
         assert_eq!(
             mutations
@@ -11759,7 +11741,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // One shell matrix fixes drawer mouse and pane ownership.
-    fn workspace_agent_drawer_consumes_shell_pane_controls_without_background_mutation() {
+    fn director_drawer_consumes_shell_pane_controls_without_background_mutation() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
@@ -11775,8 +11757,8 @@ mod tests {
                 detaches: Arc::new(Mutex::new(Vec::new())),
             }),
         );
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
-        assert!(runtime.state().workspace_agent_drawer_open());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(runtime.state().director_drawer_open());
         let tabs_before = runtime.active_pane().tabs().to_vec();
         let mut controls = LiveTerminalControls::default();
         let rows = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
@@ -11786,25 +11768,18 @@ mod tests {
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
         let mut pending = std::collections::HashMap::new();
-        let drawer = super::workspace_agent_drawer::geometry(20, 80);
+        let drawer = super::director_drawer::geometry(20, 80);
         let new_click = Key::Click {
             column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
             row: u16::try_from(drawer.top + 1).unwrap(),
         };
-        assert!(super::is_workspace_agent_new_click(
-            &new_click, &runtime, 20, 80
-        ));
+        assert!(super::is_director_new_click(&new_click, &runtime, 20, 80));
         let new_pointer = Key::Pointer(PointerEvent {
             kind: PointerKind::Down,
             column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
             row: u16::try_from(drawer.top + 1).unwrap(),
         });
-        assert!(super::is_workspace_agent_new_click(
-            &new_pointer,
-            &runtime,
-            20,
-            80
-        ));
+        assert!(super::is_director_new_click(&new_pointer, &runtime, 20, 80));
         assert!(!intercept_live_terminal_control(
             &new_pointer,
             &mut ui,
@@ -11824,11 +11799,11 @@ mod tests {
             .unwrap()
             .tabs()
             .to_vec();
-        let launch_effects = runtime.apply_event(AppEvent::Key(AppKey::OpenWorkspaceAgentNew));
+        let launch_effects = runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew));
         assert!(launch_effects.is_empty());
         assert!(matches!(
-            runtime.state().workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(_)
+            runtime.state().director_new(),
+            DirectorNew::Choosing(_)
         ));
         assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
         assert_eq!(
@@ -11839,7 +11814,7 @@ mod tests {
                 .tabs(),
             managed_before.as_slice()
         );
-        assert!(!super::is_workspace_agent_new_click(
+        assert!(!super::is_director_new_click(
             &new_pointer,
             &runtime,
             20,
@@ -11883,8 +11858,8 @@ mod tests {
             scroll_before,
         ));
         assert!(matches!(
-            runtime.state().workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(_)
+            runtime.state().director_new(),
+            DirectorNew::Choosing(_)
         ));
         assert_eq!(
             runtime
@@ -11930,7 +11905,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // One fixture covers every admitted and refused drawer slot.
-    fn workspace_agent_projection_and_tab_cycle_cover_every_agent_only_slot() {
+    fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
         let workspace = WorkspaceId::new();
         let live = scoped_terminal_ref(workspace, None);
         let live_continuation = AgentContinuationRef::new();
@@ -11963,8 +11938,8 @@ mod tests {
                 }),
             );
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
-        assert!(super::select_workspace_agent_tab(
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
             &mut runtime,
@@ -11988,10 +11963,10 @@ mod tests {
 
         // Closed drawers deliberately project nothing.
         assert_eq!(
-            super::workspace_agent_drawer_projection(&ui, &runtime, None),
-            super::WorkspaceAgentDrawerProjection::default()
+            super::director_drawer_projection(&ui, &runtime, None),
+            super::DirectorDrawerProjection::default()
         );
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         let terminal_view = TerminalViewProjection {
             rows: vec!["retained output".to_owned()],
             row_offset: 0,
@@ -11999,8 +11974,7 @@ mod tests {
             scroll: 0,
             feedback: Some("reconnecting".to_owned()),
         };
-        let projected =
-            super::workspace_agent_drawer_projection(&ui, &runtime, Some(&terminal_view));
+        let projected = super::director_drawer_projection(&ui, &runtime, Some(&terminal_view));
         assert_eq!(projected.conversations.len(), 2);
         assert!(projected.conversations[0].selected);
         assert_eq!(projected.terminal_view, Some(terminal_view));
@@ -12016,7 +11990,7 @@ mod tests {
             feedback: None,
         };
         assert_eq!(
-            super::workspace_agent_drawer_projection(&ui, &runtime, Some(&quiet_terminal_view))
+            super::director_drawer_projection(&ui, &runtime, Some(&quiet_terminal_view))
                 .terminal_view,
             Some(quiet_terminal_view)
         );
@@ -12025,7 +11999,7 @@ mod tests {
         // successor. That selection owns no VT, so its safe detail is rendered.
         let mut pending_targets = std::collections::HashMap::new();
         super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending_targets);
-        let interrupted_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        let interrupted_projection = super::director_drawer_projection(&ui, &runtime, None);
         assert!(interrupted_projection.conversations[0].selected);
         assert_eq!(
             interrupted_projection.interrupted_detail.as_deref(),
@@ -12038,7 +12012,7 @@ mod tests {
             None,
             "safe retry feedback".to_owned(),
         );
-        let failed_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        let failed_projection = super::director_drawer_projection(&ui, &runtime, None);
         assert_eq!(
             failed_projection.interrupted_detail.as_deref(),
             Some(interrupted.safe_detail())
@@ -12047,7 +12021,7 @@ mod tests {
             failed_projection.feedback.as_deref(),
             Some("safe retry feedback")
         );
-        assert!(super::select_workspace_agent_tab(
+        assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
             &mut runtime,
@@ -12062,7 +12036,7 @@ mod tests {
                 )),
             ),
         );
-        let pending_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        let pending_projection = super::director_drawer_projection(&ui, &runtime, None);
         assert!(
             pending_projection
                 .conversations
@@ -12119,7 +12093,7 @@ mod tests {
             Target::Root(workspace),
             crate::usecase::application::pane::PaneEvent::Resolved { operation: diff },
         );
-        let filtered = super::workspace_agent_drawer_projection(&ui, &runtime, None);
+        let filtered = super::director_drawer_projection(&ui, &runtime, None);
         assert_eq!(filtered.conversations.len(), 3);
         assert!(
             filtered
@@ -12149,17 +12123,17 @@ mod tests {
                 0,
             ));
         }
-        assert!(!super::select_workspace_agent_tab(
+        assert!(!super::select_director_tab(
             &Key::Char('x'),
             &mut ui,
             &mut runtime,
         ));
-        assert!(super::select_workspace_agent_tab(
+        assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
             &mut runtime,
         ));
-        assert!(super::select_workspace_agent_tab(
+        assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::PreviousTab),
             &mut ui,
             &mut runtime,
@@ -12174,7 +12148,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_projection_covers_picker_empty_and_launching_states() {
+    fn director_projection_covers_picker_empty_and_launching_states() {
         let workspace = WorkspaceId::new();
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
@@ -12183,11 +12157,11 @@ mod tests {
             AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
             DefaultModel::SakanaAi,
         );
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgentNew));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
         assert_eq!(
-            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
-            super::WorkspaceAgentNewProjection::Choosing {
+            super::director_drawer_projection(&ui, &runtime, None).new,
+            super::DirectorNewProjection::Choosing {
                 candidates: vec!["claude".to_owned(), "sakana.ai".to_owned()],
                 selected: 1,
             }
@@ -12195,10 +12169,10 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Escape);
         runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgentNew));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
         assert_eq!(
-            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
-            super::WorkspaceAgentNewProjection::Empty
+            super::director_drawer_projection(&ui, &runtime, None).new,
+            super::DirectorNewProjection::Empty
         );
 
         let _ = runtime.handle_key(Key::Escape);
@@ -12206,17 +12180,17 @@ mod tests {
             AvailableModels::new([DefaultModel::Claude]),
             DefaultModel::Claude,
         );
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgentNew));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
         let effects = runtime.handle_key(Key::Enter);
         assert!(matches!(effects.as_slice(), [Effect::LaunchAgent { .. }]));
         assert_eq!(
-            super::workspace_agent_drawer_projection(&ui, &runtime, None).new,
-            super::WorkspaceAgentNewProjection::Launching
+            super::director_drawer_projection(&ui, &runtime, None).new,
+            super::DirectorNewProjection::Launching
         );
     }
 
     #[test]
-    fn workspace_agent_tab_cycle_fails_closed_when_intent_cannot_commit() {
+    fn director_tab_cycle_fails_closed_when_intent_cannot_commit() {
         let workspace = WorkspaceId::new();
         let first = scoped_terminal_ref(workspace, None);
         let second = scoped_terminal_ref(workspace, None);
@@ -12268,13 +12242,13 @@ mod tests {
                 interrupted: Vec::new(),
             }],
         ));
-        assert!(!super::select_workspace_agent_tab(
+        assert!(!super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
             &mut runtime,
         ));
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
-        assert!(super::select_workspace_agent_tab(
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(super::select_director_tab(
             &Key::Live(LiveTerminalAction::NextTab),
             &mut ui,
             &mut runtime,
@@ -12290,7 +12264,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_pointer_uses_the_drawer_viewport() {
+    fn director_pointer_uses_the_drawer_viewport() {
         let workspace = WorkspaceId::new();
         let terminal = scoped_terminal_ref(workspace, None);
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
@@ -12322,7 +12296,7 @@ mod tests {
                 interrupted: Vec::new(),
             }],
         ));
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         ui.start_terminal_session(terminal, foreground_terminal_geometry(20, 80, true));
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
@@ -12371,7 +12345,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("󰚩 chat accepts Agent conversations only")
+            Some("󰚩 director accepts Agent conversations only")
         );
 
         ui.pane_completion_sender
@@ -14694,7 +14668,7 @@ mod tests {
         controls.extend_selection(TerminalPoint { row: 0, column: 6 });
         let _ = controls.finish_drag();
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
         ui.sync_foreground_terminal(Some(&root), drawer_geometry);
         ui.resize_terminals(drawer_geometry);
@@ -14708,7 +14682,7 @@ mod tests {
         controls.extend_selection(TerminalPoint { row: 0, column: 5 });
         let _ = controls.finish_drag();
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(managed.clone()));
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
         ui.resize_terminals(managed_geometry);
@@ -14719,7 +14693,7 @@ mod tests {
             Some("managed")
         );
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkspaceAgent));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
         ui.sync_foreground_terminal(Some(&root), drawer_geometry);
         ui.resize_terminals(drawer_geometry);
@@ -15698,7 +15672,7 @@ mod tests {
         // This is the same production ordering used by the frame loop: the
         // closed drawer leaves the resolved chord for the reducer, which opens
         // both drawer and picker without sending anything to the managed pane.
-        let new = Key::Live(LiveTerminalAction::WorkspaceAgentNew);
+        let new = Key::Live(LiveTerminalAction::DirectorNew);
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
@@ -15710,10 +15684,10 @@ mod tests {
             WorkspaceInputRoute::Unhandled
         );
         assert!(runtime.handle_key(new).is_empty());
-        assert!(runtime.state().workspace_agent_drawer_open());
+        assert!(runtime.state().director_drawer_open());
         assert!(matches!(
-            runtime.state().workspace_agent_new(),
-            WorkspaceAgentNew::Choosing(DefaultModel::Claude)
+            runtime.state().director_new(),
+            DirectorNew::Choosing(DefaultModel::Claude)
         ));
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
 
@@ -15723,7 +15697,7 @@ mod tests {
                 &mut runtime,
                 &mut controls,
                 &mut term,
-                &Key::Live(LiveTerminalAction::WorkspaceAgentNew),
+                &Key::Live(LiveTerminalAction::DirectorNew),
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
@@ -15733,12 +15707,12 @@ mod tests {
                 &mut runtime,
                 &mut controls,
                 &mut term,
-                &Key::Live(LiveTerminalAction::WorkspaceAgent),
+                &Key::Live(LiveTerminalAction::Director),
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
-        assert!(!runtime.state().workspace_agent_drawer_open());
-        let reopen = Key::Live(LiveTerminalAction::WorkspaceAgentNew);
+        assert!(!runtime.state().director_drawer_open());
+        let reopen = Key::Live(LiveTerminalAction::DirectorNew);
         assert_eq!(
             route_workspace_input_before_reducer(
                 &mut ui,
@@ -15772,10 +15746,7 @@ mod tests {
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
-        assert_eq!(
-            runtime.state().workspace_agent_new(),
-            WorkspaceAgentNew::Idle
-        );
+        assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
         assert!(inputs.lock().unwrap().is_empty());
 
         assert_eq!(
@@ -15812,7 +15783,7 @@ mod tests {
                 &mut runtime,
                 &mut controls,
                 &mut term,
-                &Key::Live(LiveTerminalAction::WorkspaceAgentNew),
+                &Key::Live(LiveTerminalAction::DirectorNew),
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
@@ -15843,7 +15814,7 @@ mod tests {
             ),
             WorkspaceInputRoute::Drawer(Vec::new())
         );
-        assert!(!runtime.state().workspace_agent_drawer_open());
+        assert!(!runtime.state().director_drawer_open());
         assert_eq!(
             *inputs.lock().unwrap(),
             vec![
@@ -19882,19 +19853,19 @@ mod tests {
         }
     }
 
-    fn has_workspace_agent_drawer(frames: &[Vec<String>]) -> bool {
+    fn has_director_drawer(frames: &[Vec<String>]) -> bool {
         frames.iter().any(|frame| {
             let text = frame.join("\n");
-            text.contains("󰚩 chat")
-                && text.contains("No chat conversations yet")
+            text.contains("󰚩 director")
+                && text.contains("No conversations yet")
                 && text.contains("[ New ]")
         })
     }
 
     #[test]
-    fn direct_welcome_recent_and_open_entries_share_the_workspace_agent_drawer_shell() {
+    fn direct_welcome_recent_and_open_entries_share_the_director_drawer_shell() {
         let mut direct = FakeTerminal::with_keys(&[
-            Key::Live(LiveTerminalAction::WorkspaceAgent),
+            Key::Live(LiveTerminalAction::Director),
             Key::Escape,
             Key::CtrlQ,
             Key::Char('q'),
@@ -19919,11 +19890,11 @@ mod tests {
             .unwrap(),
             Exit::Quit
         );
-        assert!(has_workspace_agent_drawer(&direct.frames));
+        assert!(has_director_drawer(&direct.frames));
 
         let mut recent_term = FakeTerminal::with_keys(&[
             Key::Char('1'),
-            Key::Live(LiveTerminalAction::WorkspaceAgent),
+            Key::Live(LiveTerminalAction::Director),
             Key::Escape,
             Key::CtrlQ,
             Key::Char('q'),
@@ -19936,12 +19907,12 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert!(has_workspace_agent_drawer(&recent_term.frames));
+        assert!(has_director_drawer(&recent_term.frames));
 
         let mut open_term = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Enter,
-            Key::Live(LiveTerminalAction::WorkspaceAgent),
+            Key::Live(LiveTerminalAction::Director),
             Key::Escape,
             Key::CtrlQ,
             Key::Char('q'),
@@ -19954,7 +19925,7 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert!(has_workspace_agent_drawer(&open_term.frames));
+        assert!(has_director_drawer(&open_term.frames));
     }
 
     /// A terminal that only implements the required port methods keeps the old

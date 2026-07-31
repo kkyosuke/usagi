@@ -24,12 +24,10 @@ use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::decision_modal;
+use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
-use crate::presentation::views::workspace_agent_drawer::{
-    self, CHAT_ICON, WorkspaceAgentDrawerProjection,
-};
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
@@ -216,11 +214,11 @@ pub struct HomeProjection {
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
-    /// Frontmost Workspace Agent drawer material. The empty default is the only
+    /// Frontmost Director mode drawer material. The empty default is the only
     /// projection currently connected; later runtime work can populate its
     /// conversation selector and terminal rows through
-    /// [`Self::with_workspace_agent_drawer`].
-    workspace_agent_drawer: Option<WorkspaceAgentDrawerProjection>,
+    /// [`Self::with_director_drawer`].
+    director_drawer: Option<DirectorDrawerProjection>,
 }
 
 /// Left-sidebar draft for the inline new-session input.
@@ -327,9 +325,9 @@ impl HomeProjection {
             // the reducer never owns the pending name because its snapshot arrives
             // through the daemon transport, not `AppState`.
             create_pending: None,
-            workspace_agent_drawer: state
-                .workspace_agent_drawer_open()
-                .then(WorkspaceAgentDrawerProjection::default),
+            director_drawer: state
+                .director_drawer_open()
+                .then(DirectorDrawerProjection::default),
         }
     }
 
@@ -438,12 +436,9 @@ impl HomeProjection {
     /// controller-owned open/closed state. A closed drawer ignores supplied
     /// material, keeping runtime inventory from opening UI implicitly.
     #[must_use]
-    pub fn with_workspace_agent_drawer(
-        mut self,
-        projection: WorkspaceAgentDrawerProjection,
-    ) -> Self {
-        if self.workspace_agent_drawer.is_some() {
-            self.workspace_agent_drawer = Some(projection);
+    pub fn with_director_drawer(mut self, projection: DirectorDrawerProjection) -> Self {
+        if self.director_drawer.is_some() {
+            self.director_drawer = Some(projection);
         }
         self
     }
@@ -744,7 +739,7 @@ fn mode_toggle(current: Mode) -> String {
 /// narrow-width clipping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeHeaderAction {
-    WorkspaceAgent,
+    Director,
     Decisions,
 }
 
@@ -786,17 +781,17 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
         Style::new().dim().paint(" > "),
         Role::Success.style().bold().paint(&home.workspace_name),
     );
-    let workspace_agent = if home.workspace_agent_drawer.is_some() {
+    let director = if home.director_drawer.is_some() {
         Role::Accent
             .style()
             .bold()
             .reverse()
-            .paint(&format!("[ {CHAT_ICON} chat ]"))
+            .paint(&format!("[ {DIRECTOR_ICON} director ]"))
     } else {
         Role::Accent
             .style()
             .bold()
-            .paint(&format!("[ {CHAT_ICON} chat ]"))
+            .paint(&format!("[ {DIRECTOR_ICON} director ]"))
     };
     let notice = (!home.unread_decision_ids.is_empty())
         .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
@@ -805,7 +800,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
     // Preserve the drawer entry first, then the mode indicator, then the notice.
     // Whole optional segments are admitted only when they fit; the breadcrumb
     // receives the remaining cells and is the only normal-width clipped field.
-    let mut right_segments = vec![(Some(HomeHeaderAction::WorkspaceAgent), workspace_agent)];
+    let mut right_segments = vec![(Some(HomeHeaderAction::Director), director)];
     let mut used = widgets::display_width(&right_segments[0].1);
     let mode_width = widgets::display_width(&mode);
     if used.saturating_add(2).saturating_add(mode_width) <= width {
@@ -826,7 +821,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
         return HomeHeaderLayout {
             line: widgets::pad_to_width(&button, width),
             actions: (button_width > 0)
-                .then_some((HomeHeaderAction::WorkspaceAgent, 0..button_width))
+                .then_some((HomeHeaderAction::Director, 0..button_width))
                 .into_iter()
                 .collect(),
         };
@@ -1133,8 +1128,8 @@ pub fn render_home_at(
         split,
     ));
     frame.truncate(height);
-    let frame = if let Some(drawer) = &home.workspace_agent_drawer {
-        workspace_agent_drawer::render_over(height, width, &frame, drawer)
+    let frame = if let Some(drawer) = &home.director_drawer {
+        director_drawer::render_over(height, width, &frame, drawer)
     } else {
         frame
     };
@@ -1866,9 +1861,8 @@ mod tests {
         terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
-    use crate::presentation::views::workspace_agent_drawer::{
-        CHAT_ICON, WorkspaceAgentConversation, WorkspaceAgentDrawerProjection,
-        WorkspaceAgentNewProjection,
+    use crate::presentation::views::director_drawer::{
+        DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
@@ -2060,10 +2054,10 @@ mod tests {
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
-        assert!(strip(&layout.line).contains(&format!("{CHAT_ICON} chat")));
+        assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} director")));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
-            .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::WorkspaceAgent))
+            .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
             .collect::<Vec<_>>();
         let notice_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Decisions))
@@ -2073,7 +2067,7 @@ mod tests {
         for column in workspace_columns {
             assert_eq!(
                 home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
-                Some(HomeHeaderAction::WorkspaceAgent)
+                Some(HomeHeaderAction::Director)
             );
         }
         for column in notice_columns {
@@ -2085,10 +2079,7 @@ mod tests {
         assert_eq!(home_header_action_at(100, &home, 99, 1), None);
         let closed_line = home_header_layout(100, &home).line;
 
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
         home = HomeProjection::from_state(&state, "日本語 workspace", Path::new("/work"), &[]);
         // The open drawer highlights the header button (adds the reverse SGR
         // attribute), so its rendered header differs from the closed one.
@@ -2122,13 +2113,13 @@ mod tests {
     #[test]
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
-        let material = WorkspaceAgentDrawerProjection {
-            conversations: vec![WorkspaceAgentConversation {
+        let material = DirectorDrawerProjection {
+            conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
             }],
             terminal_view: Some(TerminalViewProjection {
-                rows: vec!["workspace agent output".to_owned()],
+                rows: vec!["director agent output".to_owned()],
                 row_offset: 0,
                 total_rows: 1,
                 scroll: 0,
@@ -2136,26 +2127,23 @@ mod tests {
             }),
             interrupted_detail: None,
             feedback: None,
-            new: WorkspaceAgentNewProjection::default(),
+            new: DirectorNewProjection::default(),
         };
 
         let closed_state = AppState::home(workspace, Vec::new());
         let closed = HomeProjection::from_state(&closed_state, "atlas", Path::new("/work"), &[])
-            .with_workspace_agent_drawer(material.clone());
+            .with_director_drawer(material.clone());
         let closed_text = render_home(20, 100, &closed).join("\n");
         assert!(!closed_text.contains("root conversation"));
-        assert!(!closed_text.contains("workspace agent output"));
+        assert!(!closed_text.contains("director agent output"));
 
         let mut open_state = AppState::home(workspace, Vec::new());
-        let _ = update(
-            &mut open_state,
-            AppEvent::Key(AppKey::ToggleWorkspaceAgentDrawer),
-        );
+        let _ = update(&mut open_state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
         let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &[])
-            .with_workspace_agent_drawer(material);
+            .with_director_drawer(material);
         let open_text = render_home(20, 100, &open).join("\n");
         assert!(open_text.contains("root conversation"));
-        assert!(open_text.contains("workspace agent output"));
+        assert!(open_text.contains("director agent output"));
     }
 
     #[test]
