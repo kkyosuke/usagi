@@ -3429,7 +3429,19 @@ mod tests {
     #[test]
     fn teardown_confinement_preserves_absent_target_idempotency() {
         let remove_calls = Arc::new(AtomicUsize::new(0));
-        WorktreeTeardown::new(FakeGit::ok(), ConfinementIo::new(Arc::clone(&remove_calls)))
+        let io_contract = ConfinementIo::new(Arc::clone(&remove_calls));
+        io_contract.remove_file_best_effort(Path::new("/unused"));
+        assert!(!io_contract.is_repo_root(Path::new("/unused")));
+        assert!(!io_contract.is_linked_worktree(Path::new("/unused")));
+        io_contract
+            .build_session_tree(
+                &FakeGit::ok(),
+                Path::new("/source"),
+                Path::new("/destination"),
+                "branch",
+            )
+            .unwrap();
+        WorktreeTeardown::new(FakeGit::ok(), io_contract)
             .tear_down(&confined_teardown())
             .unwrap();
         assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
