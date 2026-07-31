@@ -12,6 +12,7 @@
 //! プリミティブである。
 
 pub mod icon;
+pub mod live_terminal;
 pub mod loading;
 pub mod mascot;
 pub mod modal;

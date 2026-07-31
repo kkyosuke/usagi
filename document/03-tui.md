@@ -1173,9 +1173,15 @@ pane tab に復元する。root scope の generic Terminal / Diff は復元し�
 両 generation が inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
+Workspace Agent drawer の live terminal 本文は Closeup 右ペインと同じ viewport component を使う。retained
+scrollback 全行を受け取る選択中の frame でも、本文は live bottom を基準に `scroll` を反映した window だけを描き、
+表示幅で clip する。copy・選択・link 操作の feedback は本文へ追加せず footer に表示し、feedback がある frame では
+drawer の key hint より feedback を優先する。interrupted Agent の safe reason は terminal 本文ではなく専用の detail
+行に表示する。
+
 この inventory 復元は provider conversation resume を開始しない。managed session の `identity_unknown` /
 interrupted Agent は sidebar の第 2 行、root scope の interrupted Agent は Workspace Agent drawer の選択中
-conversation body に、ID を含まない safe reason を表示する。TUI 起動、workspace open、daemon reconnect は
+conversation の専用 detail 行に、ID を含まない safe reason を表示する。TUI 起動、workspace open、daemon reconnect は
 resume を自動送信せず、managed session は `session resume <name>`、root scope は drawer で選択した tab の
 `Ctrl-O r` を必須とする。
 

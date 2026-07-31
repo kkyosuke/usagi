@@ -6,6 +6,7 @@
 //! conversation/terminal rows.
 
 use crate::presentation::theme::{Role, Style};
+use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::terminal_selection::TerminalPoint;
 
@@ -53,7 +54,11 @@ pub enum WorkspaceAgentNewProjection {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceAgentDrawerProjection {
     pub conversations: Vec<WorkspaceAgentConversation>,
-    pub terminal_rows: Vec<String>,
+    pub terminal_view: Option<TerminalViewProjection>,
+    /// Safe reason for a selected interrupted conversation, outside PTY output.
+    pub interrupted_detail: Option<String>,
+    /// Drawer feedback used when the selected conversation has no live terminal.
+    pub feedback: Option<String>,
     pub new: WorkspaceAgentNewProjection,
 }
 
@@ -131,7 +136,7 @@ pub fn terminal_point_at(
     if column >= viewport.cols || content_row >= viewport.rows {
         return None;
     }
-    let start = rows_len.saturating_sub(viewport.rows.saturating_add(scroll));
+    let start = widgets::live_terminal::window_start(rows_len, viewport.rows, scroll);
     Some(TerminalPoint {
         row: start + content_row,
         column,
@@ -250,9 +255,7 @@ fn drawer_body(
             .collect();
     }
 
-    let footer = Style::new()
-        .dim()
-        .paint("Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close");
+    let footer_hint = "Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close";
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if matches!(projection.new, WorkspaceAgentNewProjection::Empty) {
         let before = content_capacity.saturating_sub(3) / 2;
@@ -292,18 +295,25 @@ fn drawer_body(
             };
             rows.push(Style::new().dim().paint(detail));
         }
-    } else {
-        rows.extend(
-            projection
-                .terminal_rows
-                .iter()
-                .take(content_capacity)
-                .cloned(),
-        );
+    } else if let Some(view) = &projection.terminal_view {
+        rows.extend(widgets::live_terminal::render(
+            view,
+            width,
+            height.saturating_sub(rows.len()),
+            content_capacity,
+            footer_hint,
+        ));
+        return rows;
+    } else if let Some(detail) = &projection.interrupted_detail {
+        rows.push(Style::new().dim().paint(detail));
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
-    rows.push(footer);
+    rows.push(
+        Style::new()
+            .dim()
+            .paint(projection.feedback.as_deref().unwrap_or(footer_hint)),
+    );
     rows.into_iter()
         .map(|row| widgets::clip_to_width(&row, width))
         .collect()
@@ -474,11 +484,19 @@ mod tests {
                     selected: true,
                 },
             ],
-            terminal_rows: vec![
-                "agent output one".to_owned(),
-                "agent output two".to_owned(),
-                "agent output three".to_owned(),
-            ],
+            terminal_view: Some(TerminalViewProjection {
+                rows: vec![
+                    "agent output one".to_owned(),
+                    "agent output two".to_owned(),
+                    "agent output three".to_owned(),
+                ],
+                row_offset: 0,
+                total_rows: 3,
+                scroll: 0,
+                feedback: None,
+            }),
+            interrupted_detail: None,
+            feedback: None,
             new: WorkspaceAgentNewProjection::Ready,
         };
         let frame = render_over(12, 80, &vec![String::new(); 12], &projection);
@@ -492,6 +510,86 @@ mod tests {
         assert!(text.contains("agent output two"));
         assert!(text.contains("agent output three"));
         assert!(!text.contains("No chat conversations yet"));
+    }
+
+    #[test]
+    fn retained_selection_rows_render_the_live_bottom_and_scrolled_windows() {
+        let retained = (0..10).map(|row| format!("row {row}")).collect::<Vec<_>>();
+        let projection = WorkspaceAgentDrawerProjection {
+            conversations: vec![WorkspaceAgentConversation {
+                label: "active".to_owned(),
+                selected: true,
+            }],
+            terminal_view: Some(TerminalViewProjection {
+                rows: retained,
+                row_offset: 0,
+                total_rows: 10,
+                scroll: 0,
+                feedback: Some("copied 2 lines".to_owned()),
+            }),
+            interrupted_detail: None,
+            feedback: None,
+            new: WorkspaceAgentNewProjection::Ready,
+        };
+        let body = drawer_body(52, 9, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &body[2..8],
+            ["row 4", "row 5", "row 6", "row 7", "row 8", "row 9"]
+        );
+        assert!(!body.iter().any(|row| row == "row 0"));
+        assert_eq!(body[8], "copied 2 lines");
+
+        let mut scrolled = projection;
+        scrolled
+            .terminal_view
+            .as_mut()
+            .expect("terminal projection")
+            .scroll = 2;
+        let body = drawer_body(52, 9, &scrolled)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &body[2..8],
+            ["row 2", "row 3", "row 4", "row 5", "row 6", "row 7"]
+        );
+        assert!(!body.iter().any(|row| row == "row 9"));
+
+        let drawer = geometry(12, 80);
+        assert_eq!(
+            terminal_point_at(
+                12,
+                80,
+                10,
+                0,
+                u16::try_from(drawer.left + 2).unwrap(),
+                u16::try_from(drawer.top + 3).unwrap(),
+            ),
+            Some(TerminalPoint { row: 4, column: 0 })
+        );
+    }
+
+    #[test]
+    fn interrupted_detail_has_a_dedicated_body_row_and_feedback_owns_the_footer() {
+        let projection = WorkspaceAgentDrawerProjection {
+            conversations: vec![WorkspaceAgentConversation {
+                label: "interrupted".to_owned(),
+                selected: true,
+            }],
+            terminal_view: None,
+            interrupted_detail: Some("identity unavailable".to_owned()),
+            feedback: Some("resume failed safely".to_owned()),
+            new: WorkspaceAgentNewProjection::Ready,
+        };
+        let body = drawer_body(52, 9, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>();
+        assert_eq!(body[2], "identity unavailable");
+        assert_eq!(body[8], "resume failed safely");
     }
 
     #[test]
@@ -551,7 +649,9 @@ mod tests {
                 label: "会話の履歴".to_owned(),
                 selected: true,
             }],
-            terminal_rows: Vec::new(),
+            terminal_view: None,
+            interrupted_detail: None,
+            feedback: None,
             new: WorkspaceAgentNewProjection::Ready,
         };
         for (height, width) in [(0, 0), (1, 1), (3, 8), (12, 56), (24, 200)] {

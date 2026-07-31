@@ -3527,25 +3527,29 @@ fn workspace_agent_drawer_projection(
             conversations.push(conversation);
         }
     }
-    let mut terminal_rows = if let Some(view) = terminal_view {
-        view.rows.clone()
+    let mut terminal_view = terminal_view.cloned();
+    if let Some(view) = &mut terminal_view
+        && view.feedback.is_none()
+    {
+        view.feedback = pane.error().map(str::to_owned);
+    }
+    let interrupted_detail = if terminal_view.is_none() {
+        runtime
+            .focused_interrupted()
+            .map(|interrupted| interrupted.safe_detail().to_owned())
     } else {
-        Vec::new()
+        None
     };
-    if terminal_rows.is_empty()
-        && let Some(interrupted) = runtime.focused_interrupted()
-    {
-        terminal_rows.push(interrupted.safe_detail().to_owned());
-    }
-    if let Some(feedback) = terminal_view
-        .and_then(|view| view.feedback.as_deref())
-        .or_else(|| pane.error())
-    {
-        terminal_rows.push(feedback.to_owned());
-    }
+    let feedback = if terminal_view.is_none() {
+        pane.error().map(str::to_owned)
+    } else {
+        None
+    };
     WorkspaceAgentDrawerProjection {
         conversations,
-        terminal_rows,
+        terminal_view,
+        interrupted_detail,
+        feedback,
         new: if runtime.state().workspace_agent_launching().is_some() {
             WorkspaceAgentNewProjection::Launching
         } else {
@@ -11980,9 +11984,22 @@ mod tests {
             super::workspace_agent_drawer_projection(&ui, &runtime, Some(&terminal_view));
         assert_eq!(projected.conversations.len(), 2);
         assert!(projected.conversations[0].selected);
+        assert_eq!(projected.terminal_view, Some(terminal_view));
+        assert_eq!(projected.interrupted_detail, None);
+
+        // A live projection without control feedback still crosses the seam as
+        // a projection; the adapter never converts its rows into drawer lines.
+        let quiet_terminal_view = TerminalViewProjection {
+            rows: vec!["quiet retained output".to_owned()],
+            row_offset: 0,
+            total_rows: 1,
+            scroll: 0,
+            feedback: None,
+        };
         assert_eq!(
-            projected.terminal_rows,
-            vec!["retained output".to_owned(), "reconnecting".to_owned()]
+            super::workspace_agent_drawer_projection(&ui, &runtime, Some(&quiet_terminal_view))
+                .terminal_view,
+            Some(quiet_terminal_view)
         );
 
         // Closing the selected live slot durably chooses the interrupted
@@ -11991,19 +12008,25 @@ mod tests {
         super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending_targets);
         let interrupted_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
         assert!(interrupted_projection.conversations[0].selected);
-        assert_eq!(interrupted_projection.terminal_rows.len(), 1);
+        assert_eq!(
+            interrupted_projection.interrupted_detail.as_deref(),
+            Some(interrupted.safe_detail())
+        );
+        assert_eq!(interrupted_projection.terminal_view, None);
         runtime.fail_tab_resume_for(
             Target::Root(workspace),
             interrupted_continuation,
             None,
             "safe retry feedback".to_owned(),
         );
+        let failed_projection = super::workspace_agent_drawer_projection(&ui, &runtime, None);
         assert_eq!(
-            super::workspace_agent_drawer_projection(&ui, &runtime, None).terminal_rows,
-            vec![
-                interrupted.safe_detail().to_owned(),
-                "safe retry feedback".to_owned()
-            ]
+            failed_projection.interrupted_detail.as_deref(),
+            Some(interrupted.safe_detail())
+        );
+        assert_eq!(
+            failed_projection.feedback.as_deref(),
+            Some("safe retry feedback")
         );
         assert!(super::select_workspace_agent_tab(
             &Key::Live(LiveTerminalAction::NextTab),
