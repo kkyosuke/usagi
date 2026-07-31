@@ -171,7 +171,7 @@ fn create_owned_temp(path: &Path) -> Result<OwnedTemp> {
         match options.open(&candidate) {
             Ok(file) => {
                 let identity = identify_open_temp(&file)
-                    .with_context(|| format!("unsafe atomic temp {}", candidate.display()))?;
+                    .context(format!("unsafe atomic temp {}", candidate.display()))?;
                 let temp = OwnedTemp {
                     path: candidate,
                     file,
@@ -180,17 +180,16 @@ fn create_owned_temp(path: &Path) -> Result<OwnedTemp> {
                 #[cfg(all(test, unix))]
                 tamper_temp_after_create(&temp)?;
                 let secured = make_temp_private(&temp.file)
-                    .with_context(|| format!("failed to secure {}", temp.path.display()))
+                    .context(format!("failed to secure {}", temp.path.display()))
                     .and_then(|()| {
                         verify_open_temp(&temp.file)
-                            .with_context(|| format!("unsafe atomic temp {}", temp.path.display()))
+                            .context(format!("unsafe atomic temp {}", temp.path.display()))
                     })
                     .and_then(|()| {
                         #[cfg(all(test, unix))]
                         tamper_temp_before_path_verify(&temp)?;
-                        verify_temp_path(&temp.path, &temp.file, temp.identity).with_context(|| {
-                            format!("unsafe atomic temp path {}", temp.path.display())
-                        })
+                        verify_temp_path(&temp.path, &temp.file, temp.identity)
+                            .context(format!("unsafe atomic temp path {}", temp.path.display()))
                     });
                 return match secured {
                     Ok(()) => Ok(temp),
@@ -199,8 +198,7 @@ fn create_owned_temp(path: &Path) -> Result<OwnedTemp> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to create {}", candidate.display()));
+                return Err(error).context(format!("failed to create {}", candidate.display()));
             }
         }
     }
@@ -465,17 +463,17 @@ fn write_atomically_inner(
         anyhow::bail!("injected atomic write failure for {}", path.display());
     }
     verify_temp_path(&temp.path, &temp.file, temp.identity)
-        .with_context(|| format!("unsafe atomic temp path {}", temp.path.display()))?;
+        .context(format!("unsafe atomic temp path {}", temp.path.display()))?;
     temp.file
         .write_all(bytes)
-        .with_context(|| format!("failed to write {}", temp.path.display()))?;
+        .context(format!("failed to write {}", temp.path.display()))?;
     if durable {
         temp.file
             .sync_all()
-            .with_context(|| format!("failed to flush {}", temp.path.display()))?;
+            .context(format!("failed to flush {}", temp.path.display()))?;
     }
     verify_temp_path(&temp.path, &temp.file, temp.identity)
-        .with_context(|| format!("unsafe atomic temp path {}", temp.path.display()))?;
+        .context(format!("unsafe atomic temp path {}", temp.path.display()))?;
     #[cfg(test)]
     if take_atomic_write_failpoint(path, AtomicWriteStage::Rename) {
         anyhow::bail!("injected atomic rename failure for {}", path.display());
