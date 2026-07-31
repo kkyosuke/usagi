@@ -349,6 +349,37 @@ fn a_config_save_keeps_the_workspace_owned_env() {
 }
 
 #[test]
+fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
+    let latest = Settings {
+        theme: Theme::Light,
+        default_model: DefaultModel::SakanaAi,
+        local_llm: LocalLlm {
+            enabled: true,
+            model: "qwen2.5-coder:3b".to_owned(),
+        },
+        env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
+        ..Settings::default()
+    };
+    let config_draft = Settings {
+        theme: Theme::Dark,
+        modal_selection_mode: ModalSelectionMode::Prompt,
+        default_model: DefaultModel::Claude,
+        issue_enabled: false,
+        memory_enabled: false,
+        ..Settings::default()
+    };
+
+    let saved = latest.clone().with_config(&config_draft);
+    assert_eq!(saved.theme, Theme::Dark);
+    assert_eq!(saved.modal_selection_mode, ModalSelectionMode::Prompt);
+    assert_eq!(saved.default_model, DefaultModel::Claude);
+    assert!(!saved.issue_enabled);
+    assert!(!saved.memory_enabled);
+    assert_eq!(saved.local_llm, latest.local_llm);
+    assert_eq!(saved.env, latest.env);
+}
+
+#[test]
 fn local_settings_ignore_global_only_and_unknown_workspace_values() {
     let local: LocalSettings = serde_json::from_str(
         r#"{"theme":"future","modal_selection_mode":"future","default_model":"future"}"#,

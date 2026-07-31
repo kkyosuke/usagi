@@ -3065,7 +3065,10 @@ impl SettingsPort for PersistentSettingsPort {
         match scope {
             SettingsScope::Global => {
                 let _lock = self.storage.lock().map_err(io_error)?;
-                self.storage.save_settings(settings).map_err(io_error)?;
+                let latest = self.storage.load_settings().map_err(io_error)?;
+                self.storage
+                    .save_settings(&latest.with_config(settings))
+                    .map_err(io_error)?;
             }
             SettingsScope::Workspace => {
                 let workspace = self
@@ -3073,8 +3076,9 @@ impl SettingsPort for PersistentSettingsPort {
                     .as_ref()
                     .ok_or_else(|| io_error("workspace settings require an opened workspace"))?;
                 let _lock = workspace.lock().map_err(io_error)?;
+                let latest = workspace.load().map_err(io_error)?;
                 workspace
-                    .save(&LocalSettings::from(settings))
+                    .save(&latest.with_config(settings))
                     .map_err(io_error)?;
             }
         }
@@ -6841,6 +6845,58 @@ mod tests {
     }
 
     #[test]
+    fn global_config_save_merges_into_updates_made_after_the_modal_opened() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temporary.path());
+        storage.save_settings(&Settings::default()).unwrap();
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(temporary.path()),
+            workspace: None,
+        };
+
+        // This snapshot is the Config draft captured when the modal opens.
+        let mut draft = port.read(SettingsScope::Global).unwrap();
+        draft.theme = Theme::Dark;
+        draft.default_model = usagi_core::domain::settings::DefaultModel::Claude;
+        draft.issue_enabled = false;
+
+        // A dedicated settings surface commits after Config opened. It also
+        // changes owned fields to pin the documented last-Config-writer-wins
+        // policy for same-field conflicts.
+        let concurrent = Settings {
+            theme: Theme::Light,
+            default_model: usagi_core::domain::settings::DefaultModel::SakanaAi,
+            local_llm: usagi_core::domain::settings::LocalLlm {
+                enabled: true,
+                model: "qwen2.5-coder:3b".to_owned(),
+            },
+            env: [(
+                "GH_TOKEN".to_owned(),
+                "op://Private/GitHub/token".to_owned(),
+            )]
+            .into_iter()
+            .collect(),
+            ..Settings::default()
+        };
+        storage.save_settings(&concurrent).unwrap();
+
+        port.save(SettingsScope::Global, &draft).unwrap();
+        let mut reopened = PersistentSettingsPort {
+            storage,
+            workspace: None,
+        };
+        let saved = reopened.read(SettingsScope::Global).unwrap();
+        assert_eq!(saved.theme, Theme::Dark);
+        assert_eq!(
+            saved.default_model,
+            usagi_core::domain::settings::DefaultModel::Claude
+        );
+        assert!(!saved.issue_enabled);
+        assert_eq!(saved.local_llm, concurrent.local_llm);
+        assert_eq!(saved.env, concurrent.env);
+    }
+
+    #[test]
     fn settings_scope_routing_projects_global_storage_failures() {
         let temporary = tempfile::tempdir().unwrap();
         let storage_file = temporary.path().join("not-a-directory");
@@ -6930,6 +6986,67 @@ mod tests {
             reopened.read(SettingsScope::Workspace).unwrap(),
             changed_global
         );
+    }
+
+    #[test]
+    fn workspace_config_save_preserves_the_latest_local_environment_and_reads_back() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let local_store = WorkspaceSettingsStore::new(&workspace);
+        let original = LocalSettings {
+            default_model: Some(usagi_core::domain::settings::DefaultModel::OpenAi),
+            env: [("PROJECT".to_owned(), "usagi".to_owned())]
+                .into_iter()
+                .collect(),
+            ..LocalSettings::default()
+        };
+        local_store.save(&original).unwrap();
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        port.select_workspace(&workspace).unwrap();
+
+        // Capture the modal's stale effective view, then let the environment
+        // editor and another Config writer update the local document.
+        let mut draft = port.read(SettingsScope::Workspace).unwrap();
+        draft.default_model = usagi_core::domain::settings::DefaultModel::Claude;
+        draft.memory_enabled = false;
+        let concurrent = LocalSettings {
+            default_model: Some(usagi_core::domain::settings::DefaultModel::SakanaAi),
+            env: [
+                ("PROJECT".to_owned(), "usagi".to_owned()),
+                ("RUST_LOG".to_owned(), "debug".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            ..original
+        };
+        local_store.save(&concurrent).unwrap();
+
+        port.save(SettingsScope::Workspace, &draft).unwrap();
+        let raw = local_store.load().unwrap();
+        assert_eq!(raw.env, concurrent.env);
+        assert_eq!(
+            raw.default_model,
+            Some(usagi_core::domain::settings::DefaultModel::Claude)
+        );
+        assert_eq!(raw.memory_enabled, Some(false));
+
+        let mut reopened = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        reopened.select_workspace(&workspace).unwrap();
+        let effective = reopened.read(SettingsScope::Workspace).unwrap();
+        assert_eq!(
+            effective.default_model,
+            usagi_core::domain::settings::DefaultModel::Claude
+        );
+        assert!(!effective.memory_enabled);
+        assert_eq!(effective.env, concurrent.env);
     }
 
     #[test]
