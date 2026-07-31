@@ -15,7 +15,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
-    WorkspaceLifecycleState,
+    WorkspaceLifecycleState, validate_session_name,
 };
 use usagi_core::infrastructure::git::{GitRunner, list_worktrees};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
@@ -140,6 +140,7 @@ pub trait SessionWorktreeIo {
 /// connections; the store also locks every reducer mutation for crash safety.
 pub struct SessionRuntime {
     repo_root: PathBuf,
+    data_home: PathBuf,
     root_worktree_id: WorktreeId,
     generation: DaemonGeneration,
     store: DaemonLifecycleStore,
@@ -312,6 +313,7 @@ impl<G: GitRunner, I: SessionWorktreeIo> WorktreeTeardown<G, I> {
 
 impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, I> {
     fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
+        validate_teardown_target(&self.io, teardown)?;
         self.io
             .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
             .map_err(|error| error.to_string())
@@ -390,6 +392,10 @@ impl SessionRuntime {
         io: I,
     ) -> Result<Self, SessionRuntimeError> {
         let store = DaemonLifecycleStore::new(state_dir);
+        let data_home = state_dir
+            .parent()
+            .ok_or(SessionRuntimeError::Storage)?
+            .to_path_buf();
         let repo_root = if let Some((repository_root, mut state)) = store
             .load_with_workspace()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -427,6 +433,7 @@ impl SessionRuntime {
             .map_err(|_| SessionRuntimeError::Storage)?;
         let mut runtime = Self {
             repo_root,
+            data_home,
             root_worktree_id,
             generation,
             store,
@@ -901,6 +908,9 @@ impl SessionRuntime {
             pending: PendingTeardown {
                 session_id,
                 operation_id,
+                repository_root: self.repo_root.clone(),
+                data_home: self.data_home.clone(),
+                session_container: self.session_container(),
                 session_root: self.session_root(&name),
                 name,
                 force,
@@ -932,6 +942,9 @@ impl SessionRuntime {
                 Some(PendingTeardown {
                     session_id: session.session_id,
                     operation_id: session.operation_id?,
+                    repository_root: self.repo_root.clone(),
+                    data_home: self.data_home.clone(),
+                    session_container: self.session_container(),
                     session_root: self.session_root(&session.name),
                     name: session.name.clone(),
                     force: plan.force,
@@ -1023,7 +1036,11 @@ impl SessionRuntime {
     }
 
     fn session_root(&self, name: &str) -> PathBuf {
-        self.repo_root.join(STATE_DIR).join(SESSIONS_DIR).join(name)
+        self.session_container().join(name)
+    }
+
+    fn session_container(&self) -> PathBuf {
+        self.repo_root.join(STATE_DIR).join(SESSIONS_DIR)
     }
 
     fn replay(
@@ -1250,11 +1267,7 @@ fn validated_legacy_sessions_without_v2(
 }
 
 fn valid_legacy_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    validate_session_name(name).is_ok()
 }
 
 fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
@@ -1263,15 +1276,66 @@ fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
         .or_else(|| payload.get("label"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|name| {
-            !name.is_empty()
-                && name.len() <= 64
-                && name
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
-        })
+        .filter(|name| validate_session_name(name).is_ok())
         .ok_or(SessionRuntimeError::InvalidRequest)?;
     Ok(name.to_owned())
+}
+
+fn validate_teardown_target(
+    io: &dyn SessionWorktreeIo,
+    teardown: &PendingTeardown,
+) -> Result<(), String> {
+    validate_session_name(&teardown.name)
+        .map_err(|_| "refusing teardown outside the managed session container".to_owned())?;
+    let expected_container = teardown.repository_root.join(STATE_DIR).join(SESSIONS_DIR);
+    let expected_target = expected_container.join(&teardown.name);
+    if teardown.session_container != expected_container
+        || teardown.session_root != expected_target
+        || teardown.session_root.parent() != Some(teardown.session_container.as_path())
+    {
+        return Err("refusing teardown outside the managed session container".into());
+    }
+
+    let canonical_repository = io
+        .canonical_path(&teardown.repository_root)
+        .ok_or_else(|| "could not resolve the managed repository root".to_owned())?;
+    let canonical_data_home = io
+        .canonical_path(&teardown.data_home)
+        .ok_or_else(|| "could not resolve the daemon data home".to_owned())?;
+    let canonical_container = io
+        .canonical_path(&teardown.session_container)
+        .ok_or_else(|| "could not resolve the managed session container".to_owned())?;
+    if canonical_container != canonical_repository.join(STATE_DIR).join(SESSIONS_DIR) {
+        return Err("refusing teardown through a symlinked session ancestor".into());
+    }
+    if protected_teardown_target(
+        &canonical_container,
+        &canonical_repository,
+        &canonical_data_home,
+    ) {
+        return Err("refusing teardown of a protected filesystem root".into());
+    }
+
+    if io.path_occupied(&teardown.session_root) {
+        let canonical_target = io
+            .canonical_path(&teardown.session_root)
+            .ok_or_else(|| "could not resolve the managed session target".to_owned())?;
+        if canonical_target != canonical_container.join(&teardown.name)
+            || protected_teardown_target(
+                &canonical_target,
+                &canonical_repository,
+                &canonical_data_home,
+            )
+        {
+            return Err("refusing teardown outside the managed session container".into());
+        }
+    }
+    Ok(())
+}
+
+fn protected_teardown_target(target: &Path, repository: &Path, data_home: &Path) -> bool {
+    let filesystem_root = target.ancestors().last();
+    target == repository || target == data_home || filesystem_root == Some(target)
 }
 
 /// Parse the optional destructive-removal flag without coercing malformed JSON.
@@ -1395,6 +1459,54 @@ mod tests {
     }
 
     struct FailingSessionWorktreeIo;
+
+    struct ConfinementIo {
+        canonical: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
+        occupied: bool,
+        remove_calls: Arc<AtomicUsize>,
+    }
+
+    impl ConfinementIo {
+        fn new(remove_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                canonical: std::collections::BTreeMap::new(),
+                occupied: false,
+                remove_calls,
+            }
+        }
+    }
+
+    impl SessionWorktreeIo for ConfinementIo {
+        fn remove_file_best_effort(&self, _: &Path) {}
+        fn path_occupied(&self, _: &Path) -> bool {
+            self.occupied
+        }
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            self.canonical
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| Some(path.into()))
+        }
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            false
+        }
+        fn build_session_tree(
+            &self,
+            _: &dyn GitRunner,
+            _: &Path,
+            _: &Path,
+            _: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+            self.remove_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     impl SessionWorktreeIo for FailingSessionWorktreeIo {
         fn remove_file_best_effort(&self, _: &Path) {}
@@ -1629,6 +1741,19 @@ mod tests {
     }
     fn operation() -> String {
         OperationId::new().to_string()
+    }
+
+    fn confined_teardown() -> PendingTeardown {
+        PendingTeardown {
+            session_id: SessionId::new(),
+            operation_id: OperationId::new(),
+            name: "one".into(),
+            repository_root: PathBuf::from("/repo"),
+            data_home: PathBuf::from("/data"),
+            session_container: PathBuf::from("/repo/.usagi/sessions"),
+            session_root: PathBuf::from("/repo/.usagi/sessions/one"),
+            force: false,
+        }
     }
 
     #[test]
@@ -3109,6 +3234,215 @@ mod tests {
     }
 
     #[test]
+    fn restart_rejects_persisted_path_names_without_touching_a_sentinel() {
+        for name in [
+            "/tmp/victim",
+            "../victim",
+            "nested/victim",
+            "nested\\victim",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(tmp.path().join(".git")).unwrap();
+            let state_dir = tmp.path().join("daemon");
+            let mut runtime = SessionRuntime::open(
+                tmp.path().to_path_buf(),
+                &state_dir,
+                DaemonGeneration::new(),
+                FakeGit::ok(),
+                FakeSessionWorktreeIo {
+                    occupied: false,
+                    build_calls: Arc::new(AtomicUsize::new(0)),
+                },
+            )
+            .unwrap();
+            runtime
+                .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+                .unwrap();
+            let state_path = state_dir.join("sessions.json");
+            let mut document: Value =
+                serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+            document["state"]["sessions"][0]["name"] = Value::String(name.into());
+            std::fs::write(&state_path, serde_json::to_vec(&document).unwrap()).unwrap();
+            let sentinel = tmp.path().join("victim/sentinel");
+            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+            std::fs::write(&sentinel, "keep").unwrap();
+            drop(runtime);
+
+            let git_calls = Arc::new(AtomicUsize::new(0));
+            let reopened = SessionRuntime::open(
+                tmp.path().to_path_buf(),
+                &state_dir,
+                DaemonGeneration::new(),
+                CountingGit {
+                    calls: Arc::clone(&git_calls),
+                },
+                SystemSessionWorktreeIo,
+            );
+
+            assert!(matches!(reopened, Err(SessionRuntimeError::Storage)));
+            assert!(sentinel.exists(), "malicious persisted name was {name}");
+            assert_eq!(git_calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_teardown_rejects_a_symlinked_session_ancestor_with_zero_effect() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        let data_home = tmp.path().join("data");
+        let victim_session = tmp.path().join("victim/one");
+        std::fs::create_dir_all(repository.join(STATE_DIR)).unwrap();
+        std::fs::create_dir_all(&data_home).unwrap();
+        std::fs::create_dir_all(&victim_session).unwrap();
+        let sentinel = victim_session.join("sentinel");
+        std::fs::write(&sentinel, "keep").unwrap();
+        let container = repository.join(STATE_DIR).join(SESSIONS_DIR);
+        symlink(tmp.path().join("victim"), &container).unwrap();
+        let git_calls = Arc::new(AtomicUsize::new(0));
+        let teardown = PendingTeardown {
+            session_id: SessionId::new(),
+            operation_id: OperationId::new(),
+            name: "one".into(),
+            repository_root: repository,
+            data_home,
+            session_container: container.clone(),
+            session_root: container.join("one"),
+            force: true,
+        };
+
+        let result = WorktreeTeardown::new(
+            CountingGit {
+                calls: Arc::clone(&git_calls),
+            },
+            SystemSessionWorktreeIo,
+        )
+        .tear_down(&teardown);
+
+        assert!(result.unwrap_err().contains("symlinked session ancestor"));
+        assert!(sentinel.exists());
+        assert_eq!(git_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn protected_roots_are_never_valid_teardown_targets() {
+        let repository = Path::new("/repository");
+        let data_home = Path::new("/data");
+        assert!(protected_teardown_target(repository, repository, data_home));
+        assert!(protected_teardown_target(data_home, repository, data_home));
+        assert!(protected_teardown_target(
+            Path::new("/"),
+            repository,
+            data_home
+        ));
+        assert!(!protected_teardown_target(
+            Path::new("/repository/.usagi/sessions/one"),
+            repository,
+            data_home,
+        ));
+    }
+
+    #[test]
+    fn teardown_confinement_errors_have_zero_git_and_filesystem_effects() {
+        let git_calls = Arc::new(AtomicUsize::new(0));
+        let remove_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut invalid_name = confined_teardown();
+        invalid_name.name = "../victim".into();
+        let mut mismatched_shape = confined_teardown();
+        mismatched_shape.session_root = PathBuf::from("/repo");
+
+        let cases = [
+            (invalid_name, ConfinementIo::new(Arc::clone(&remove_calls))),
+            (
+                mismatched_shape,
+                ConfinementIo::new(Arc::clone(&remove_calls)),
+            ),
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.canonical.insert(PathBuf::from("/repo"), None);
+                (confined_teardown(), io)
+            },
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.canonical.insert(PathBuf::from("/data"), None);
+                (confined_teardown(), io)
+            },
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.canonical
+                    .insert(PathBuf::from("/repo/.usagi/sessions"), None);
+                (confined_teardown(), io)
+            },
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.canonical.insert(
+                    PathBuf::from("/repo/.usagi/sessions"),
+                    Some(PathBuf::from("/escape")),
+                );
+                (confined_teardown(), io)
+            },
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.canonical.insert(
+                    PathBuf::from("/data"),
+                    Some(PathBuf::from("/repo/.usagi/sessions")),
+                );
+                (confined_teardown(), io)
+            },
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.occupied = true;
+                io.canonical
+                    .insert(PathBuf::from("/repo/.usagi/sessions/one"), None);
+                (confined_teardown(), io)
+            },
+            {
+                let mut io = ConfinementIo::new(Arc::clone(&remove_calls));
+                io.occupied = true;
+                io.canonical.insert(
+                    PathBuf::from("/repo/.usagi/sessions/one"),
+                    Some(PathBuf::from("/victim")),
+                );
+                (confined_teardown(), io)
+            },
+        ];
+
+        for (teardown, io) in cases {
+            assert!(
+                WorktreeTeardown::new(
+                    CountingGit {
+                        calls: Arc::clone(&git_calls),
+                    },
+                    io,
+                )
+                .tear_down(&teardown)
+                .is_err()
+            );
+        }
+        assert_eq!(git_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(remove_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn teardown_confinement_preserves_absent_target_idempotency() {
+        let remove_calls = Arc::new(AtomicUsize::new(0));
+        WorktreeTeardown::new(FakeGit::ok(), ConfinementIo::new(Arc::clone(&remove_calls)))
+            .tear_down(&confined_teardown())
+            .unwrap();
+        assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
+
+        let mut occupied = ConfinementIo::new(Arc::clone(&remove_calls));
+        occupied.occupied = true;
+        WorktreeTeardown::new(FakeGit::ok(), occupied)
+            .tear_down(&confined_teardown())
+            .unwrap();
+        assert_eq!(remove_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn finalizing_a_teardown_twice_reports_durable_truth_without_a_stale_write() {
         let (_tmp, rt) = runtime(FakeGit::ok());
         let runtime = Arc::new(Mutex::new(rt));
@@ -3322,7 +3656,10 @@ mod tests {
                     session_id: SessionId::new(),
                     operation_id: OperationId::new(),
                     name: "one".into(),
-                    session_root: PathBuf::from("/fake"),
+                    repository_root: PathBuf::from("/repo"),
+                    data_home: PathBuf::from("/data"),
+                    session_container: PathBuf::from("/repo/.usagi/sessions"),
+                    session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                     force: false,
                 }
             ),
@@ -3633,6 +3970,9 @@ mod tests {
             session_id: SessionId::new(),
             operation_id: OperationId::new(),
             name: "missing".into(),
+            repository_root: tmp.path().into(),
+            data_home: tmp.path().into(),
+            session_container: tmp.path().join(STATE_DIR).join(SESSIONS_DIR),
             session_root: tmp.path().join("missing"),
             force: false,
         };

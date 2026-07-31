@@ -32,6 +32,9 @@ pub struct PendingTeardown {
     pub session_id: SessionId,
     pub operation_id: OperationId,
     pub name: String,
+    pub repository_root: PathBuf,
+    pub data_home: PathBuf,
+    pub session_container: PathBuf,
     pub session_root: PathBuf,
     pub force: bool,
 }
@@ -162,6 +165,9 @@ mod tests {
             session_id: SessionId::new(),
             operation_id: OperationId::new(),
             name: name.to_owned(),
+            repository_root: PathBuf::from("/repo"),
+            data_home: PathBuf::from("/data"),
+            session_container: PathBuf::from("/repo/.usagi/sessions"),
             session_root: PathBuf::from("/repo/.usagi/sessions").join(name),
             force: false,
         }
