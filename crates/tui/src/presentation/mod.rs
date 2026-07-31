@@ -11959,6 +11959,21 @@ mod tests {
         assert_eq!(projected.terminal_view, Some(terminal_view));
         assert_eq!(projected.interrupted_detail, None);
 
+        // A live projection without control feedback still crosses the seam as
+        // a projection; the adapter never converts its rows into drawer lines.
+        let quiet_terminal_view = TerminalViewProjection {
+            rows: vec!["quiet retained output".to_owned()],
+            row_offset: 0,
+            total_rows: 1,
+            scroll: 0,
+            feedback: None,
+        };
+        assert_eq!(
+            super::workspace_agent_drawer_projection(&ui, &runtime, Some(&quiet_terminal_view))
+                .terminal_view,
+            Some(quiet_terminal_view)
+        );
+
         // Closing the selected live slot durably chooses the interrupted
         // successor. That selection owns no VT, so its safe detail is rendered.
         let mut pending_targets = std::collections::HashMap::new();

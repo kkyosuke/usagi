@@ -135,4 +135,13 @@ mod tests {
         assert_eq!(widgets::strip_ansi(&rows[2]), "");
         assert_eq!(widgets::strip_ansi(&rows[3]), "copied 1 line");
     }
+
+    #[test]
+    fn render_handles_empty_and_footer_only_regions() {
+        let view = TerminalViewProjection::default();
+        assert!(render(&view, 80, 0, 0, "keys").is_empty());
+        let footer_only = render(&view, 80, 1, 8, "keys");
+        assert_eq!(footer_only.len(), 1);
+        assert_eq!(widgets::strip_ansi(&footer_only[0]), "keys");
+    }
 }
