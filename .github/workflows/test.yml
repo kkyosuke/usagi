@@ -84,3 +84,9 @@ jobs:
 
     - name: Test release verification artifacts
       run: bash scripts/tests/release-verification-artifacts.sh
+
+    - name: Test root README contract checker
+      run: bash scripts/tests/root-readme.sh
+
+    - name: Enforce root README contract
+      run: bash scripts/ci/root-readme.sh README.md
