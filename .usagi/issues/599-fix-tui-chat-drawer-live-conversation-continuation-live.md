@@ -1,13 +1,13 @@
 ---
 number: 599
 title: fix(tui): chat drawer の live conversation が continuation 欠落で消え、live 出力まで捨てられる
-status: todo
+status: done
 priority: medium
 labels: [tui, bug, agent]
 dependson: []
 related: [577, 597]
 created_at: 2026-07-31T11:06:29.292562+00:00
-updated_at: 2026-07-31T11:06:29.292562+00:00
+updated_at: 2026-07-31T12:23:46.434065+00:00
 ---
 
 ## 症状

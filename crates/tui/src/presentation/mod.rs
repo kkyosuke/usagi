@@ -3491,11 +3491,10 @@ fn workspace_agent_drawer_projection(
     for tab in pane.tabs() {
         let conversation = match tab {
             PaneTab::Live(live) if live.kind == PaneKind::Agent => {
-                let Some(continuation) = ui.agent_continuation_for(&live.terminal) else {
-                    continue;
-                };
                 Some(WorkspaceAgentConversation {
-                    label: AgentTabIntent::safe_label(continuation),
+                    label: AgentTabIntent::safe_label_or_fallback(
+                        ui.agent_continuation_for(&live.terminal),
+                    ),
                     selected: matches!(
                         selected,
                         PaneSelection::Tab(TabSelection::Live(terminal))
@@ -12062,12 +12061,21 @@ mod tests {
                 kind: PaneKind::Terminal,
             }),
         );
+        let unobserved_agent = scoped_terminal_ref(workspace, None);
         runtime.inject_pane_event_for_test(
             Target::Root(workspace),
             crate::usecase::application::pane::PaneEvent::Restore(LivePane {
-                terminal: scoped_terminal_ref(workspace, None),
+                terminal: unobserved_agent.clone(),
                 kind: PaneKind::Agent,
             }),
+        );
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Select(
+                crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Live(
+                    unobserved_agent,
+                )),
+            ),
         );
         let generic_pending = OperationId::new();
         runtime.inject_pane_event_for_test(
@@ -12092,7 +12100,13 @@ mod tests {
             crate::usecase::application::pane::PaneEvent::Resolved { operation: diff },
         );
         let filtered = super::workspace_agent_drawer_projection(&ui, &runtime, None);
-        assert_eq!(filtered.conversations.len(), 2);
+        assert_eq!(filtered.conversations.len(), 3);
+        assert!(
+            filtered
+                .conversations
+                .iter()
+                .any(|conversation| conversation.label == "Agent" && conversation.selected)
+        );
 
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();

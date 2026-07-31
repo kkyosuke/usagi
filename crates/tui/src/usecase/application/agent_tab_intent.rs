@@ -70,6 +70,12 @@ impl AgentTabIntent {
         format!("Agent {}", &id[..8])
     }
 
+    /// A safe live-tab label when observation has not supplied a continuation.
+    #[must_use]
+    pub fn safe_label_or_fallback(continuation: Option<AgentContinuationRef>) -> String {
+        continuation.map_or_else(|| "Agent".to_owned(), Self::safe_label)
+    }
+
     /// Validate the workspace scope and stable-key uniqueness of persisted
     /// state before it participates in reconciliation.
     ///
@@ -793,6 +799,11 @@ mod tests {
         assert_eq!(reopened.targets[0].tabs.len(), 2);
         assert!(!intent.dismissed.contains(&closed));
         assert_eq!(AgentTabIntent::safe_label(closed).len(), "Agent ".len() + 8);
+        assert_eq!(
+            AgentTabIntent::safe_label_or_fallback(Some(closed)),
+            AgentTabIntent::safe_label(closed)
+        );
+        assert_eq!(AgentTabIntent::safe_label_or_fallback(None), "Agent");
     }
 
     #[test]
