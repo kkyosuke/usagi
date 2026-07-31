@@ -2328,6 +2328,19 @@ mod tests {
     }
 
     #[test]
+    fn input_ordering_mismatch_disables_input_without_claiming_daemon_unavailability() {
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.fail_at(TerminalError::OrderingMismatch, Instant::now());
+
+        assert_eq!(session.state(), SessionState::Disconnected);
+        assert_eq!(
+            session.error(),
+            Some("terminal input ordering is out of sync; input is disabled")
+        );
+    }
+
+    #[test]
     fn poll_transport_failure_reports_orphaned_and_disables_input() {
         let mut port = FakePort {
             attach: vec![Ok(attach(1, 0, b"", false))],

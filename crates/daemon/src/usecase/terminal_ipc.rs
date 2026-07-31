@@ -1603,6 +1603,8 @@ mod tests {
         let errors = [
             GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable),
             GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
+            GenericTerminalError::Terminal(RegistryError::IdempotencyExpired),
+            GenericTerminalError::Terminal(RegistryError::SequenceGap),
             GenericTerminalError::SpawnFailed,
             GenericTerminalError::UnknownTerminal,
             GenericTerminalError::TerminalGenerationMismatch,
@@ -1627,6 +1629,8 @@ mod tests {
         let expected = [
             ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,
+            ErrorCode::IdempotencyExpired,
+            ErrorCode::SequenceGap,
             ErrorCode::Unavailable,
             ErrorCode::StaleTarget,
             ErrorCode::StaleTarget,

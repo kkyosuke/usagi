@@ -6457,6 +6457,14 @@ mod tests {
                 ErrorCode::ResourceExhausted,
             ),
             (
+                RuntimeError::Terminal(RegistryError::IdempotencyExpired),
+                ErrorCode::IdempotencyExpired,
+            ),
+            (
+                RuntimeError::Terminal(RegistryError::SequenceGap),
+                ErrorCode::SequenceGap,
+            ),
+            (
                 RuntimeError::Terminal(RegistryError::StaleTarget),
                 ErrorCode::StaleTarget,
             ),
