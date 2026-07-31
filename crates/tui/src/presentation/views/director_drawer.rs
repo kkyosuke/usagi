@@ -1,4 +1,4 @@
-//! Workspace Agent drawer shell.
+//! Director mode drawer shell.
 //!
 //! This view owns only presentation and geometry. It does not inventory,
 //! launch, resume, attach, or forward input to an Agent runtime. The controller
@@ -20,7 +20,7 @@ const MIN_BACKGROUND_WIDTH: usize = 24;
 ///
 /// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
 /// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
-pub const CHAT_ICON: char = '\u{f06a9}';
+pub const DIRECTOR_ICON: char = '\u{f06a9}';
 
 /// One presentation-safe conversation choice.
 ///
@@ -28,14 +28,14 @@ pub const CHAT_ICON: char = '\u{f06a9}';
 /// associate this display value with its own stable key and feed the selected
 /// projection into this shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceAgentConversation {
+pub struct DirectorConversation {
     pub label: String,
     pub selected: bool,
 }
 
 /// Presentation-safe state of the drawer's explicit `New` chooser.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum WorkspaceAgentNewProjection {
+pub enum DirectorNewProjection {
     /// The chooser is closed and New may be opened.
     #[default]
     Ready,
@@ -52,19 +52,19 @@ pub enum WorkspaceAgentNewProjection {
 
 /// Pure material accepted by the drawer renderer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkspaceAgentDrawerProjection {
-    pub conversations: Vec<WorkspaceAgentConversation>,
+pub struct DirectorDrawerProjection {
+    pub conversations: Vec<DirectorConversation>,
     pub terminal_view: Option<TerminalViewProjection>,
     /// Safe reason for a selected interrupted conversation, outside PTY output.
     pub interrupted_detail: Option<String>,
     /// Drawer feedback used when the selected conversation has no live terminal.
     pub feedback: Option<String>,
-    pub new: WorkspaceAgentNewProjection,
+    pub new: DirectorNewProjection,
 }
 
 /// Right-anchored drawer rectangle in terminal cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkspaceAgentDrawerGeometry {
+pub struct DirectorDrawerGeometry {
     pub left: usize,
     pub top: usize,
     pub width: usize,
@@ -75,7 +75,7 @@ pub struct WorkspaceAgentDrawerGeometry {
 /// Future Agent terminal viewport inside the drawer, independent from the
 /// managed-session Closeup pane's viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkspaceAgentTerminalViewport {
+pub struct DirectorTerminalViewport {
     pub rows: usize,
     pub cols: usize,
 }
@@ -86,13 +86,13 @@ pub struct WorkspaceAgentTerminalViewport {
 /// would leave less than 24 columns of background, the drawer becomes full
 /// width. A zero terminal dimension follows the TUI-wide 80×24 normalization.
 #[must_use]
-pub fn geometry(raw_height: usize, raw_width: usize) -> WorkspaceAgentDrawerGeometry {
+pub fn geometry(raw_height: usize, raw_width: usize) -> DirectorDrawerGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let desired = width.saturating_mul(3) / 5;
     let coexist_width = desired.clamp(MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH).min(width);
     let full_width = width.saturating_sub(coexist_width) < MIN_BACKGROUND_WIDTH;
     let drawer_width = if full_width { width } else { coexist_width };
-    WorkspaceAgentDrawerGeometry {
+    DirectorDrawerGeometry {
         left: width.saturating_sub(drawer_width),
         // Home's top header remains visible and owns the drawer toggle button.
         top: 1.min(height),
@@ -106,12 +106,12 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> WorkspaceAgentDrawerGeom
 ///
 /// This intentionally does not call `workspace::terminal_viewport`: the drawer
 /// has its own border, selector, breathing row, and footer chrome. Runtime work
-/// can therefore resize a Workspace Agent terminal without confusing it with
+/// can therefore resize a director terminal without confusing it with
 /// the managed-session Closeup terminal.
 #[must_use]
-pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> WorkspaceAgentTerminalViewport {
+pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> DirectorTerminalViewport {
     let drawer = geometry(raw_height, raw_width);
-    WorkspaceAgentTerminalViewport {
+    DirectorTerminalViewport {
         // top/bottom borders + selector + separator/breathing row + footer
         rows: drawer.height.saturating_sub(5),
         // left/right borders and one cell of padding on both sides
@@ -171,7 +171,7 @@ pub fn render_over(
     raw_height: usize,
     raw_width: usize,
     base: &[String],
-    projection: &WorkspaceAgentDrawerProjection,
+    projection: &DirectorDrawerProjection,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let drawer = geometry(raw_height, raw_width);
@@ -196,7 +196,7 @@ pub fn render_over(
     let title = Role::Accent
         .style()
         .bold()
-        .paint(&format!("{CHAT_ICON} chat"));
+        .paint(&format!("{DIRECTOR_ICON} director"));
     let panel = modal::boxed(&title, inner_width, &body);
 
     // The panel is `drawer.height` rows and is anchored at `drawer.top`, so it
@@ -212,11 +212,7 @@ pub fn render_over(
     frame
 }
 
-fn drawer_body(
-    width: usize,
-    height: usize,
-    projection: &WorkspaceAgentDrawerProjection,
-) -> Vec<String> {
+fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjection) -> Vec<String> {
     if height == 0 {
         return Vec::new();
     }
@@ -225,7 +221,7 @@ fn drawer_body(
         rows.push(Style::new().dim().paint(&"─".repeat(width)));
     }
 
-    if let WorkspaceAgentNewProjection::Choosing {
+    if let DirectorNewProjection::Choosing {
         candidates,
         selected,
     } = &projection.new
@@ -257,7 +253,7 @@ fn drawer_body(
 
     let footer_hint = "Ctrl-O n / New: choose CLI  ·  Esc / Ctrl-O Ctrl-G: close";
     let content_capacity = height.saturating_sub(rows.len() + 1);
-    if matches!(projection.new, WorkspaceAgentNewProjection::Empty) {
+    if matches!(projection.new, DirectorNewProjection::Empty) {
         let before = content_capacity.saturating_sub(3) / 2;
         rows.extend(std::iter::repeat_n(String::new(), before));
         if content_capacity > before {
@@ -286,21 +282,20 @@ fn drawer_body(
         let before = content_capacity.saturating_sub(3) / 2;
         rows.extend(std::iter::repeat_n(String::new(), before));
         if content_capacity > before {
-            rows.push(
-                Role::Accent
-                    .style()
-                    .bold()
-                    .paint("No chat conversations yet"),
-            );
+            rows.push(Role::Accent.style().bold().paint("No conversations yet"));
         }
         if content_capacity > before + 1 {
-            rows.push(Style::new().dim().paint("Chat inventory is not connected."));
+            rows.push(
+                Style::new()
+                    .dim()
+                    .paint("Conversation inventory is not connected."),
+            );
         }
         if content_capacity > before + 2 {
-            let detail = if matches!(projection.new, WorkspaceAgentNewProjection::Launching) {
-                "Waiting for the daemon to start the chat."
+            let detail = if matches!(projection.new, DirectorNewProjection::Launching) {
+                "Waiting for the daemon to start the conversation."
             } else {
-                "Choose New to start a chat."
+                "Choose New to start a conversation."
             };
             rows.push(Style::new().dim().paint(detail));
         }
@@ -319,7 +314,7 @@ fn drawer_body(
         .collect()
 }
 
-fn selector_row(width: usize, projection: &WorkspaceAgentDrawerProjection) -> String {
+fn selector_row(width: usize, projection: &DirectorDrawerProjection) -> String {
     let selected = projection
         .conversations
         .iter()
@@ -328,7 +323,7 @@ fn selector_row(width: usize, projection: &WorkspaceAgentDrawerProjection) -> St
         .map_or("No conversations", |conversation| {
             conversation.label.as_str()
         });
-    let new = if matches!(projection.new, WorkspaceAgentNewProjection::Launching) {
+    let new = if matches!(projection.new, DirectorNewProjection::Launching) {
         Style::new().dim().paint("[ Starting… ]")
     } else {
         Role::Accent.style().bold().paint("[ New ]")
@@ -351,7 +346,7 @@ mod tests {
     fn geometry_clamps_normal_boundary_and_wide_sizes() {
         assert_eq!(
             geometry(24, 100),
-            WorkspaceAgentDrawerGeometry {
+            DirectorDrawerGeometry {
                 left: 40,
                 top: 1,
                 width: 60,
@@ -375,11 +370,11 @@ mod tests {
         assert_eq!(zero, geometry(24, 80));
         assert_eq!(
             terminal_viewport(0, 0),
-            WorkspaceAgentTerminalViewport { rows: 18, cols: 52 }
+            DirectorTerminalViewport { rows: 18, cols: 52 }
         );
         assert_eq!(
             terminal_viewport(1, 1),
-            WorkspaceAgentTerminalViewport { rows: 0, cols: 0 }
+            DirectorTerminalViewport { rows: 0, cols: 0 }
         );
     }
 
@@ -387,7 +382,7 @@ mod tests {
     fn terminal_viewport_is_independent_from_the_closeup_right_pane() {
         assert_eq!(
             terminal_viewport(24, 100),
-            WorkspaceAgentTerminalViewport { rows: 18, cols: 56 }
+            DirectorTerminalViewport { rows: 18, cols: 56 }
         );
         assert_ne!(
             (
@@ -442,7 +437,7 @@ mod tests {
         let base = (0..24)
             .map(|row| format!("background {row}"))
             .collect::<Vec<_>>();
-        let frame = render_over(24, 100, &base, &WorkspaceAgentDrawerProjection::default());
+        let frame = render_over(24, 100, &base, &DirectorDrawerProjection::default());
         assert_eq!(frame.len(), 24);
         assert!(frame.iter().all(|line| display_width(line) == 100));
         let text = frame
@@ -450,10 +445,10 @@ mod tests {
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains(&format!("{CHAT_ICON} chat")));
+        assert!(text.contains(&format!("{DIRECTOR_ICON} director")));
         assert!(text.contains("Conversation  [No conversations]"));
         assert!(text.contains("[ New ]"));
-        assert!(text.contains("No chat conversations yet"));
+        assert!(text.contains("No conversations yet"));
         assert!(text.contains("Ctrl-O n / New: choose CLI"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
@@ -461,25 +456,25 @@ mod tests {
 
     #[test]
     fn empty_drawer_omits_detail_when_height_is_too_small() {
-        let body = drawer_body(40, 3, &WorkspaceAgentDrawerProjection::default());
+        let body = drawer_body(40, 3, &DirectorDrawerProjection::default());
         let text = body
             .iter()
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(body.len(), 3);
-        assert!(!text.contains("Choose New to start a chat."));
+        assert!(!text.contains("Choose New to start a conversation."));
     }
 
     #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
-        let projection = WorkspaceAgentDrawerProjection {
+        let projection = DirectorDrawerProjection {
             conversations: vec![
-                WorkspaceAgentConversation {
+                DirectorConversation {
                     label: "older".to_owned(),
                     selected: false,
                 },
-                WorkspaceAgentConversation {
+                DirectorConversation {
                     label: "active conversation".to_owned(),
                     selected: true,
                 },
@@ -497,7 +492,7 @@ mod tests {
             }),
             interrupted_detail: None,
             feedback: None,
-            new: WorkspaceAgentNewProjection::Ready,
+            new: DirectorNewProjection::Ready,
         };
         let frame = render_over(12, 80, &vec![String::new(); 12], &projection);
         let text = frame
@@ -509,12 +504,12 @@ mod tests {
         assert!(text.contains("agent output one"));
         assert!(text.contains("agent output two"));
         assert!(text.contains("agent output three"));
-        assert!(!text.contains("No chat conversations yet"));
+        assert!(!text.contains("No conversations yet"));
     }
 
     #[test]
     fn terminal_rows_render_even_when_conversation_inventory_is_empty() {
-        let projection = WorkspaceAgentDrawerProjection {
+        let projection = DirectorDrawerProjection {
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["live output without inventory".to_owned()],
                 row_offset: 0,
@@ -522,7 +517,7 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
-            ..WorkspaceAgentDrawerProjection::default()
+            ..DirectorDrawerProjection::default()
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -531,15 +526,15 @@ mod tests {
             .join("\n");
 
         assert!(body.contains("live output without inventory"));
-        assert!(!body.contains("No chat conversations yet"));
-        assert!(!body.contains("Chat inventory is not connected."));
+        assert!(!body.contains("No conversations yet"));
+        assert!(!body.contains("Conversation inventory is not connected."));
     }
 
     #[test]
     fn retained_selection_rows_render_the_live_bottom_and_scrolled_windows() {
         let retained = (0..10).map(|row| format!("row {row}")).collect::<Vec<_>>();
-        let projection = WorkspaceAgentDrawerProjection {
-            conversations: vec![WorkspaceAgentConversation {
+        let projection = DirectorDrawerProjection {
+            conversations: vec![DirectorConversation {
                 label: "active".to_owned(),
                 selected: true,
             }],
@@ -552,7 +547,7 @@ mod tests {
             }),
             interrupted_detail: None,
             feedback: None,
-            new: WorkspaceAgentNewProjection::Ready,
+            new: DirectorNewProjection::Ready,
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -597,15 +592,15 @@ mod tests {
 
     #[test]
     fn interrupted_detail_has_a_dedicated_body_row_and_feedback_owns_the_footer() {
-        let projection = WorkspaceAgentDrawerProjection {
-            conversations: vec![WorkspaceAgentConversation {
+        let projection = DirectorDrawerProjection {
+            conversations: vec![DirectorConversation {
                 label: "interrupted".to_owned(),
                 selected: true,
             }],
             terminal_view: None,
             interrupted_detail: Some("identity unavailable".to_owned()),
             feedback: Some("resume failed safely".to_owned()),
-            new: WorkspaceAgentNewProjection::Ready,
+            new: DirectorNewProjection::Ready,
         };
         let body = drawer_body(52, 9, &projection)
             .into_iter()
@@ -617,8 +612,8 @@ mod tests {
 
     #[test]
     fn picker_and_safe_empty_state_render_without_clipping_cjk() {
-        let picker = WorkspaceAgentDrawerProjection {
-            new: WorkspaceAgentNewProjection::Choosing {
+        let picker = DirectorDrawerProjection {
+            new: DirectorNewProjection::Choosing {
                 candidates: vec![
                     "claude".to_owned(),
                     "codex".to_owned(),
@@ -626,7 +621,7 @@ mod tests {
                 ],
                 selected: 2,
             },
-            ..WorkspaceAgentDrawerProjection::default()
+            ..DirectorDrawerProjection::default()
         };
         let frame = render_over(12, 56, &[], &picker);
         let text = frame
@@ -640,9 +635,9 @@ mod tests {
         assert!(text.contains("Enter: launch"));
         assert!(frame.iter().all(|line| display_width(line) == 56));
 
-        let empty = WorkspaceAgentDrawerProjection {
-            new: WorkspaceAgentNewProjection::Empty,
-            ..WorkspaceAgentDrawerProjection::default()
+        let empty = DirectorDrawerProjection {
+            new: DirectorNewProjection::Empty,
+            ..DirectorDrawerProjection::default()
         };
         let text = render_over(12, 56, &[], &empty)
             .iter()
@@ -652,9 +647,9 @@ mod tests {
         assert!(text.contains("No Agent CLI installed"));
         assert!(text.contains("Install claude, codex, or sakana.ai"));
 
-        let launching = WorkspaceAgentDrawerProjection {
-            new: WorkspaceAgentNewProjection::Launching,
-            ..WorkspaceAgentDrawerProjection::default()
+        let launching = DirectorDrawerProjection {
+            new: DirectorNewProjection::Launching,
+            ..DirectorDrawerProjection::default()
         };
         let text = render_over(12, 56, &[], &launching)
             .iter()
@@ -662,20 +657,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("[ Starting… ]"));
-        assert!(text.contains("Waiting for the daemon to start the chat."));
+        assert!(text.contains("Waiting for the daemon to start the conversation."));
     }
 
     #[test]
     fn renderer_handles_tiny_resize_and_cjk_choice_without_style_leak() {
-        let projection = WorkspaceAgentDrawerProjection {
-            conversations: vec![WorkspaceAgentConversation {
+        let projection = DirectorDrawerProjection {
+            conversations: vec![DirectorConversation {
                 label: "会話の履歴".to_owned(),
                 selected: true,
             }],
             terminal_view: None,
             interrupted_detail: None,
             feedback: None,
-            new: WorkspaceAgentNewProjection::Ready,
+            new: DirectorNewProjection::Ready,
         };
         for (height, width) in [(0, 0), (1, 1), (3, 8), (12, 56), (24, 200)] {
             let frame = render_over(height, width, &[], &projection);

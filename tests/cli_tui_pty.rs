@@ -242,20 +242,21 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
-/// 100-column Home header の右端にある Workspace Agent button を実 mouse event で押す。
+/// 100-column Home header の右端にある指示モード button を実 mouse event で押す。
 ///
-/// SGR mouse coordinates are one-based. The button is the rightmost 19 cells, so
-/// column 90 is safely inside it even when the mode segment is also present.
-fn click_workspace_agent_button(master: &mut File) {
+/// SGR mouse coordinates are one-based. The button is right-aligned and occupies
+/// the rightmost 14 cells, so column 91 is safely inside it even when the mode
+/// segment is also present.
+fn click_director_button(master: &mut File) {
     send(master, b"\x1b[<0;91;1M\x1b[<0;91;1m");
 }
 
 /// Click `[ New ]` in the 100-column drawer selector row.
-fn click_workspace_agent_new(master: &mut File) {
+fn click_director_new(master: &mut File) {
     send(master, b"\x1b[<0;96;3M\x1b[<0;96;3m");
 }
 
-fn toggle_workspace_agent_with_key(master: &mut File) {
+fn toggle_director_with_key(master: &mut File) {
     send(master, b"\x0f\x07");
 }
 
@@ -941,7 +942,7 @@ fn select_tab_by_label(
     }
 }
 
-/// Workspace Agent drawer の conversation selector を実キーで巡回する。
+/// Director mode drawer の conversation selector を実キーで巡回する。
 ///
 /// Drawer は Closeup の tab strip ではなく、選択中 conversation だけを
 /// `Conversation  [label]` として描くため、marker ではなく selector の closed
@@ -1682,9 +1683,9 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let first_baseline = capture_len(&captured);
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
-    click_workspace_agent_button(&mut master);
-    wait_for_screen_since(&captured, first_baseline, "󰚩 chat");
-    click_workspace_agent_new(&mut master);
+    click_director_button(&mut master);
+    wait_for_screen_since(&captured, first_baseline, "󰚩 director");
+    click_director_new(&mut master);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
     // Confirm it through the picker. Replay/idempotency is asserted below from
@@ -1719,7 +1720,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
     send(&mut master, b"codex-initial\r");
     wait_for_screen_since(&captured, first_baseline, "codex-input:codex-initial");
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, first_baseline, "[switch]");
     let status = quit_from_switch(&mut master, &mut first, &captured, first_baseline);
     assert!(
@@ -1797,7 +1798,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let reopened_baseline = capture_len(&captured);
     let mut reopened = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_baseline);
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "codex-input:codex-initial");
     let observed = wait_for_agent_tabs(home.path(), 3);
     let codex = continuation_for(&observed, &codex_terminal);
@@ -1877,7 +1878,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     // Close the drawer to restore Switch, then enter the managed session. Only
     // its selected Claude attaches; closing
     // the tab writes a continuation-scoped dismissal and leaves its PTY alive.
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "[switch]");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, reopened_baseline, "[closeup]");
@@ -1911,7 +1912,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let mut reopened_for_kill =
         spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, reopened_for_kill_baseline);
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(
         &captured,
         reopened_for_kill_baseline,
@@ -1946,7 +1947,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
                     == [root_claude, codex]
         })
     });
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_for_kill_baseline, "[switch]");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, reopened_for_kill_baseline, "Type a command:");
@@ -2001,9 +2002,9 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let after_kill_baseline = capture_len(&captured);
     let mut after_kill = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, after_kill_baseline);
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, after_kill_baseline, "codex-input:codex-one");
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, after_kill_baseline, "[switch]");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, after_kill_baseline, "[closeup]");
@@ -2027,9 +2028,9 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let second_reopen_baseline = capture_len(&captured);
     let mut second_reopen = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, second_reopen_baseline);
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, second_reopen_baseline, "codex-input:codex-one");
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, second_reopen_baseline, "[switch]");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, second_reopen_baseline, "[closeup]");
@@ -2243,7 +2244,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     let cold_baseline = capture_len(&captured);
     let mut cold = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, cold_baseline);
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     select_drawer_conversation_by_label(
         &mut master,
         &captured,
@@ -2408,7 +2409,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     // ── 6. The managed session resumes through the same UX and fencing. Its
     // history is closed with `Ctrl-O x` (a continuation-scoped dismissal) and
     // brought back with `reopen`; neither starts a provider.
-    toggle_workspace_agent_with_key(&mut master);
+    toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, cold_baseline, "[switch]");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, cold_baseline, "[closeup]");
@@ -2566,9 +2567,9 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, baseline);
 
-    toggle_workspace_agent_with_key(&mut master);
-    wait_for_screen_since(&captured, baseline, "No chat conversations yet");
-    click_workspace_agent_new(&mut master);
+    toggle_director_with_key(&mut master);
+    wait_for_screen_since(&captured, baseline, "No conversations yet");
+    click_director_new(&mut master);
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
     assert!(agent_processes(home.path(), 0).is_empty());
 
@@ -2581,13 +2582,13 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     send(&mut master, b"\x11");
     thread::sleep(Duration::from_millis(200));
     let narrow = screen_since(&captured, baseline).unwrap_or_default();
-    assert!(narrow.contains("󰚩 chat"), "{narrow}");
+    assert!(narrow.contains("󰚩 director"), "{narrow}");
     assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
 
     send(&mut master, b"\x1b");
-    wait_for_screen_since(&captured, baseline, "No chat conversations yet");
+    wait_for_screen_since(&captured, baseline, "No conversations yet");
     send(&mut master, b"\x1b");
-    wait_for_screen_absent_since(&captured, baseline, "No chat conversations yet");
+    wait_for_screen_absent_since(&captured, baseline, "No conversations yet");
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"\r");

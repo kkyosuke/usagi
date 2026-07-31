@@ -1,13 +1,13 @@
 ---
 number: 600
 title: docs(tui): chat drawer を「指示モード（Director mode）」として命名し、名称の SSoT を 1 つにする
-status: todo
+status: done
 priority: medium
 labels: [tui, docs, naming, agent, refactor]
 dependson: []
 related: [576, 580, 597]
 created_at: 2026-07-31T11:07:06.532956+00:00
-updated_at: 2026-07-31T11:07:06.532956+00:00
+updated_at: 2026-07-31T12:36:11.930701+00:00
 ---
 
 ## 目的

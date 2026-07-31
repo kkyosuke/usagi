@@ -13,7 +13,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
-- [Workspace Agent drawer](#workspace-agent-drawer)
+- [指示モード（Director mode）](#指示モードdirector-mode)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
@@ -346,8 +346,8 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
-| `Ctrl-O` `Ctrl-G` | WorkspaceAgent | [Workspace Agent drawer](#workspace-agent-drawer) を toggle する |
-| `Ctrl-O` `n` | WorkspaceAgentNew | drawer を開き、明示的な New CLI picker を表示する |
+| `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
+| `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
@@ -365,18 +365,22 @@ control byte と semantic control event は同じ global shortcut に解決す�
 
 Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択が無い場合は PTY へ SIGINT として送る。
 
-## Workspace Agent drawer
+## 指示モード（Director mode）
 
-Home header の右端には Nerd Font の robot glyph を使う `[ 󰚩 chat ]` button を表示し、drawer title も
-`󰚩 chat` とする。glyph は既存の CPU / memory / mode icon と同じく直接描画し、対応しない font や狭幅でも
+root scope（`session_id: None`）の Agent へ指示を出し、session を作らせる面を**指示モード**（英語 / identifier は
+`director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
+（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
+
+Home header の右端には Nerd Font の robot glyph を使う `[ 󰚩 director ]` button を表示し、drawer title も
+`󰚩 director` とする。glyph は既存の CPU / memory / mode icon と同じく直接描画し、対応しない font や狭幅でも
 Unicode display width による clip と hit-test を維持する。workspace breadcrumb、mode toggle、
 pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
 そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
 と hit-test は同じ terminal cell を指す。
 
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
-Workspace Agent drawer state を toggle する。drawer は Home header の下から右端へ重なる。通常幅は端末幅の
-60% とし、56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
+指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
+56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
 同時に保てない幅では全幅へ縮退する。背景 Home は ANSI span ごと dim にし、header は表示したままにする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。
@@ -1174,19 +1178,19 @@ runtime bridge を確認する手順である。profile の install 状態、認
 
 daemon は terminal / Agent runtime の権威 owner であり、TUI を閉じても runtime は daemon 内で継続する。
 そのため workspace を開き直した（同じ client の再 open、または 2 つ目の client の open）とき、root scope の
-**live Agent** は Workspace Agent drawer（ユーザー向け表示は `󰚩 chat`）、各 available session scope の **live Agent / Terminal** は Closeup の
-pane tab に復元する。root scope の generic Terminal / Diff は復元しない。planned restart 中は active と draining の
+**live Agent** は[指示モード](#指示モードdirector-mode)、各 available session scope の
+**live Agent / Terminal** は Closeup の pane tab に復元する。root scope の generic Terminal / Diff は復元しない。planned restart 中は active と draining の
 両 generation が inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
-Workspace Agent drawer の live terminal 本文は Closeup 右ペインと同じ viewport component を使う。retained
+指示モードの live terminal 本文は Closeup 右ペインと同じ viewport component を使う。retained
 scrollback 全行を受け取る選択中の frame でも、本文は live bottom を基準に `scroll` を反映した window だけを描き、
 表示幅で clip する。copy・選択・link 操作の feedback は本文へ追加せず footer に表示し、feedback がある frame では
 drawer の key hint より feedback を優先する。interrupted Agent の safe reason は terminal 本文ではなく専用の detail
 行に表示する。
 
 この inventory 復元は provider conversation resume を開始しない。managed session の `identity_unknown` /
-interrupted Agent は sidebar の第 2 行、root scope の interrupted Agent は Workspace Agent drawer の選択中
+interrupted Agent は sidebar の第 2 行、root scope の interrupted Agent は指示モードの選択中
 conversation の専用 detail 行に、ID を含まない safe reason を表示する。TUI 起動、workspace open、daemon reconnect は
 resume を自動送信せず、managed session は `session resume <name>`、root scope は drawer で選択した tab の
 `Ctrl-O r` を必須とする。
@@ -1371,7 +1375,7 @@ planned restart は resume request を作らない。要求は選択中の exact
 ### surface ごとの表示と操作
 
 投影された interrupted tab は target ごとの pane registry entry に入り、root と managed session の history は
-互いに混ざらない。root は Workspace Agent drawer の conversation selector、managed session は Closeup の live tab と
+互いに混ざらない。root は[指示モード](#指示モードdirector-mode)の conversation selector、managed session は Closeup の live tab と
 同じ tab strip に表示する。live restore は live membership だけを所有し、interrupted tab の membership・順序・
 selection は projection だけが所有する。
 
