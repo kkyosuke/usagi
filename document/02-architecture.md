@@ -599,6 +599,13 @@ negotiation capability、terminal authorization、lifecycle capability とは別
 `program` と `argv` を持つ。environment は名前の allowlist だけを durable に扱い、値・secret・
 adapter private config は含めない。
 
+system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。選択軸は
+`LaunchScope.session_id` の有無と trusted local LLM 設定だけであり、`session_id` が無い launch は main
+チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の本文を使う。
+`SystemPrompt` は `McpWiring` と同じ必須 agent capability として fail-closed に検証する一方、選択・合成した
+system prompt 本文は ephemeral な adapter materialization であり、`LaunchRequest`、`LaunchPlan`、
+`DurableLaunchSnapshot` には保存しない（設計判断は issue #592）。
+
 daemon が snapshot を再生するときは schema と profile revision を検証する。不一致、unknown profile、
 request capability 不足、plan provenance 不一致は typed error で fail-closed とし、最新 catalog から
 黙って別の意味へ再解決しない。実 executable 検査、設定 materialization、secret 注入、PTY spawn は

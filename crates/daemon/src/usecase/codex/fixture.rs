@@ -122,6 +122,12 @@ fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
     let mut adapter = CodexAdapter::sakana(FakeProvisioner::ready());
     assert_eq!(adapter.profile().id.as_str(), "sakana-ai");
     assert_eq!(adapter.profile().display_name, "sakana.ai");
+    assert!(
+        adapter
+            .profile()
+            .capabilities
+            .contains(&AgentCapability::SystemPrompt)
+    );
     assert_eq!(
         adapter.profile().capabilities,
         CodexAdapter::new(FakeProvisioner::ready())
