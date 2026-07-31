@@ -146,6 +146,11 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 | Global | build channel ごとの user data directory にある `settings.json` | Theme と Modal mode はすべての workspace に適用する。Agent・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Issue・Memory だけを保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
 
+Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
+merge して atomic write する。Global Config は Theme・Modal mode・Agent・Issue・Memory を所有し、`env` と
+`local_llm` を保持する。Workspace Config は Agent・Issue・Memory を所有し、workspace の `env` を保持する。
+同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
+
 Agent は `default_model`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
 `default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai`）であり、Config 画面の
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、

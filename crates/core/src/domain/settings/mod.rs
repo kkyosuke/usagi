@@ -300,6 +300,23 @@ impl Settings {
         self
     }
 
+    /// Replace the fields owned by the Config surface, keeping settings owned
+    /// by dedicated editors and runtime integrations.
+    ///
+    /// Config saves merge their draft into the latest persisted document. This
+    /// prevents a Config modal opened earlier from rolling back a concurrent
+    /// environment or local-LLM update. If another Config writer changed the
+    /// same owned field, the writer that saves last deliberately wins.
+    #[must_use]
+    pub fn with_config(mut self, settings: &Self) -> Self {
+        self.theme = settings.theme;
+        self.modal_selection_mode = settings.modal_selection_mode;
+        self.default_model = settings.default_model;
+        self.issue_enabled = settings.issue_enabled;
+        self.memory_enabled = settings.memory_enabled;
+        self
+    }
+
     /// Apply workspace-owned Agent, Issue, Memory, and environment values over
     /// this global baseline. Theme and modal interaction always remain global.
     ///
