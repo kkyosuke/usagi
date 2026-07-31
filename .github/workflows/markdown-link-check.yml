@@ -3,22 +3,33 @@ name: Markdown Link Check
 on:
   push:
     branches: [ "main" ]
-    paths:
-      - '**.md'
-      - 'lychee.toml'
-      - '.github/workflows/markdown-link-check.yml'
   pull_request:
     branches: [ "main" ]
-    paths:
-      - '**.md'
-      - 'lychee.toml'
-      - '.github/workflows/markdown-link-check.yml'
 
 permissions:
   contents: read
 
 jobs:
-  link-check:
+  changes:
+    name: Detect Markdown gate changes
+    runs-on: ubuntu-latest
+    outputs:
+      markdown: ${{ steps.classify.outputs.markdown }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Classify changed paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: scripts/ci/required-contexts.sh changed "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  link-check-run:
+    name: Markdown links
+    needs: changes
+    if: needs.changes.outputs.markdown == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -42,3 +53,18 @@ jobs:
         env:
           # github.com のリンクをレートリミットを抑えて検証するため。
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  markdown-link-check:
+    name: markdown-link-check
+    if: always()
+    needs: [changes, link-check-run]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Report Markdown link result
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.markdown }}
+          RUN_RESULT: ${{ needs.link-check-run.result }}
+        run: |
+          scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT"
