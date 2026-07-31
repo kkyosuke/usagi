@@ -85,6 +85,7 @@ impl<P> ClaudeAdapter<P> {
                     AgentCapability::Headless,
                     AgentCapability::PhaseReporting,
                     AgentCapability::McpWiring,
+                    AgentCapability::SystemPrompt,
                 ],
                 [LaunchMode::Interactive, LaunchMode::Headless],
             ),
@@ -523,6 +524,12 @@ mod tests {
             DefaultModel::Claude.profile_id()
         );
         assert_eq!(adapter.profile().revision, 3);
+        assert!(
+            adapter
+                .profile()
+                .capabilities
+                .contains(&AgentCapability::SystemPrompt)
+        );
         let snapshot = adapter.resolve(&request()).unwrap().snapshot;
         assert_eq!(
             adapter.validate_snapshot(&snapshot).unwrap(),

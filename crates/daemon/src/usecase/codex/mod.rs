@@ -135,6 +135,7 @@ impl<P> CodexAdapter<P> {
                     AgentCapability::Headless,
                     AgentCapability::PhaseReporting,
                     AgentCapability::McpWiring,
+                    AgentCapability::SystemPrompt,
                 ],
                 [LaunchMode::Interactive, LaunchMode::Headless],
             ),

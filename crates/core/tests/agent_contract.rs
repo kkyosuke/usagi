@@ -95,11 +95,11 @@ fn unsupported_capability_and_unknown_profile_are_typed_rejections() {
     let mut unsupported = request(catalog.profile.id.clone());
     unsupported
         .required_capabilities
-        .insert(AgentCapability::McpWiring);
+        .insert(AgentCapability::SystemPrompt);
     assert_eq!(
         validate_request(&catalog, &unsupported),
         Err(LaunchValidationError::UnsupportedCapability {
-            capability: AgentCapability::McpWiring
+            capability: AgentCapability::SystemPrompt
         })
     );
     let unknown = request(AgentProfileId::new("unknown").unwrap());
