@@ -121,6 +121,12 @@ fn write_shell(path: &Path, count: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn write_two_input_shell(path: &Path) {
+    let script = "#!/bin/sh\nprintf 'shell-ready\\n'\nIFS= read first || exit 1\nprintf 'shell-input:%s\\n' \"$first\"\nIFS= read second || exit 1\nprintf 'shell-input:%s\\n' \"$second\"\n";
+    fs::write(path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 struct Daemon {
     child: Child,
 }
@@ -303,7 +309,7 @@ fn launch(
     )
 }
 
-fn attach(client: &mut impl DaemonClient, terminal: &TerminalRef) -> u64 {
+fn attach_response(client: &mut impl DaemonClient, terminal: &TerminalRef) -> serde_json::Value {
     let reply = client
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Attach,
@@ -316,7 +322,13 @@ fn attach(client: &mut impl DaemonClient, terminal: &TerminalRef) -> u64 {
     let DaemonReply::Ok(body) = reply else {
         panic!("terminal request must not be an operation admission");
     };
-    body["subscription"].as_u64().expect("subscription id")
+    body
+}
+
+fn attach(client: &mut impl DaemonClient, terminal: &TerminalRef) -> u64 {
+    attach_response(client, terminal)["subscription"]
+        .as_u64()
+        .expect("subscription id")
 }
 
 /// The screen a revision 2 snapshot restores to, rendered as retained rows.
@@ -755,6 +767,120 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
         thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One real-daemon detach/reattach/input flow.
+fn drawer_close_reopen_continues_input_on_the_same_daemon_connection() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let shell = bin.join("fixture-shell");
+    write_two_input_shell(&shell);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut client);
+
+    let DaemonReply::Ok(launched) = client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .expect("the fixture login shell launches")
+    else {
+        panic!("generic terminal launch is synchronous");
+    };
+    let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+
+    let first_attach = attach_response(&mut client, &terminal);
+    assert_eq!(first_attach["next_input_seq"], 0);
+    let first_subscription = first_attach["subscription"].as_u64().unwrap();
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription: first_subscription,
+                input_seq: 0,
+                input_operation: Some(OperationId::new()),
+                bytes: b"first\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("the first drawer input reaches the PTY");
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Detach,
+            payload: serde_json::to_value(TerminalRequest::Detach {
+                terminal: terminal.clone(),
+                subscription: first_subscription,
+            })
+            .unwrap(),
+        })
+        .expect("closing the drawer detaches only its subscription");
+
+    let second_attach = attach_response(&mut client, &terminal);
+    assert_eq!(second_attach["next_input_seq"], 1);
+    let second_subscription = second_attach["subscription"].as_u64().unwrap();
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription: second_subscription,
+                input_seq: 1,
+                input_operation: Some(OperationId::new()),
+                bytes: b"second\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("the reopened drawer continues at the daemon ledger cursor");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let DaemonReply::Ok(snapshot) = client
+            .request(DaemonRequest::Terminal {
+                action: TerminalAction::Resync,
+                payload: serde_json::to_value(TerminalRequest::Resync {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            })
+            .expect("the terminal remains readable")
+        else {
+            unreachable!()
+        };
+        let rows = restored_screen(&snapshot);
+        if screen_contains(&rows, "shell-input:first")
+            && screen_contains(&rows, "shell-input:second")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "both drawer inputs never reached the PTY: {rows:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Wait until the fixture provider has recorded `expected` spawns. The fixture

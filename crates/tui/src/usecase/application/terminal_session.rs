@@ -79,6 +79,9 @@ pub struct TerminalAttach {
     pub revision: u64,
     /// The output offset the screen is complete at; polling resumes here.
     pub output_offset: u64,
+    /// The daemon ledger cursor for this connection/client. Older generation-1
+    /// peers omit it, in which case the client falls back to epoch continuity.
+    pub next_input_seq: Option<u64>,
     /// The screen state to rebuild this session's view from.
     pub screen: TerminalAttachScreen,
     /// Whether the terminal has already exited.
@@ -192,6 +195,9 @@ pub enum TerminalError {
     /// The input request may have reached the PTY, but its acknowledgement was
     /// not received or could not be decoded. Blind replay is unsafe.
     InputEffectUnknown,
+    /// The daemon rejected the client's epoch-local input ordering. This is a
+    /// client/ledger synchronization failure, not daemon unavailability.
+    OrderingMismatch,
 }
 
 /// The daemon boundary consumed by [`TerminalSession`].  Every call is fenced by
@@ -374,6 +380,9 @@ impl TerminalInputError {
             Self::Transport(TerminalError::InputEffectUnknown) => {
                 "terminal input acknowledgement was lost; delivery is unknown".to_owned()
             }
+            Self::Transport(TerminalError::OrderingMismatch) => {
+                "terminal input ordering is out of sync; keystroke not delivered".to_owned()
+            }
             Self::Fenced { queued } => format!(
                 "terminal input is held in order behind an unresolved input ({queued} waiting)"
             ),
@@ -488,9 +497,9 @@ pub struct TerminalSession {
     /// terminal's producer queue is fenced, so effect uncertainty is an ordering
     /// constraint and not only a message.
     ///
-    /// It is deliberately independent of `subscription` and `connection_epoch`: a
-    /// fresh subscription restarts `input_seq`, and neither that nor a new
-    /// transport resolves what happened to an operation issued before it.
+    /// It is deliberately independent of `subscription` and `connection_epoch`:
+    /// a replacement subscription adopts the daemon ledger cursor, and neither
+    /// that nor a new transport resolves what happened to an earlier operation.
     unresolved_input: Option<UnresolvedInput>,
     /// Inputs accepted behind the fence, in production order.
     fenced_queue: VecDeque<Vec<u8>>,
@@ -1057,12 +1066,14 @@ impl TerminalSession {
         // fresh ledger. A resync that merely replaces the subscription on the
         // same connection continues the sequence the daemon already expects.
         //
-        // The epoch-local sequence is the *only* thing a fresh subscription
-        // resets. An input operation issued on an earlier epoch is still
-        // outstanding, so `unresolved_input` and the queue fenced behind it are
-        // deliberately preserved here: the reattach that recovers streaming must
-        // not silently declare a lost acknowledgement resolved (#519/#523).
-        if self.connection_epoch != Some(attach.subscription.epoch) {
+        // The attach ledger cursor is authoritative when the peer supplies it;
+        // an older peer falls back to resetting only on a new epoch. An input
+        // operation issued on an earlier epoch may still be outstanding, so
+        // `unresolved_input` and its fenced queue are deliberately preserved:
+        // recovering streaming must not declare a lost acknowledgement resolved.
+        if let Some(next_input_seq) = attach.next_input_seq {
+            self.input_seq = next_input_seq;
+        } else if self.connection_epoch != Some(attach.subscription.epoch) {
             self.input_seq = 0;
         }
         self.connection_epoch = Some(attach.subscription.epoch);
@@ -1137,7 +1148,9 @@ impl TerminalSession {
             }
             TerminalError::Orphaned => SessionState::Orphaned,
             TerminalError::Exited => SessionState::Exited,
-            TerminalError::ResyncRequired | TerminalError::Stale => SessionState::Disconnected,
+            TerminalError::ResyncRequired
+            | TerminalError::Stale
+            | TerminalError::OrderingMismatch => SessionState::Disconnected,
         };
         if error != TerminalError::Exited {
             self.subscription = None;
@@ -1247,6 +1260,9 @@ fn error_message(error: TerminalError) -> &'static str {
         TerminalError::Exited => "terminal has exited",
         TerminalError::InputEffectUnknown => {
             "terminal input acknowledgement was lost; delivery is unknown"
+        }
+        TerminalError::OrderingMismatch => {
+            "terminal input ordering is out of sync; input is disabled"
         }
     }
 }
@@ -1421,6 +1437,7 @@ mod tests {
             },
             revision: 1,
             output_offset: offset,
+            next_input_seq: None,
             screen: checkpoint_of(replay, geometry()),
             exited,
         }
@@ -1716,6 +1733,21 @@ mod tests {
             port.inputs,
             vec![(1, 0, b"a".to_vec()), (2, 0, b"b".to_vec())]
         );
+    }
+
+    #[test]
+    fn daemon_ledger_cursor_is_adopted_when_a_detached_session_was_evicted() {
+        let mut adopted = attach_at(11, 1, 0, b"", false);
+        adopted.next_input_seq = Some(7);
+        let mut port = FakePort {
+            attach: vec![Ok(adopted)],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"a"), Ok(()));
+        assert_eq!(port.inputs, vec![(1, 7, b"a".to_vec())]);
     }
 
     /// The ordering half of #519. An input whose acknowledgement was lost fences
@@ -2313,7 +2345,7 @@ mod tests {
     }
 
     #[test]
-    fn detach_releases_the_subscription_and_reconnect_recovers() {
+    fn detach_releases_the_subscription_and_reconnect_preserves_input_ordering() {
         let mut port = FakePort {
             attach: vec![
                 Ok(attach(4, 0, b"", false)),
@@ -2323,6 +2355,7 @@ mod tests {
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"before"), Ok(()));
         session.detach(&mut port);
         assert_eq!(session.state(), SessionState::Disconnected);
         assert_eq!(port.detached, [4].map(sub));
@@ -2330,9 +2363,44 @@ mod tests {
         session.detach(&mut port);
         assert_eq!(port.detached, [4].map(sub));
         session.connect(&mut port);
+        assert_eq!(session.send_input(&mut port, b"after"), Ok(()));
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "back");
+        assert_eq!(
+            port.inputs,
+            vec![(4, 0, b"before".to_vec()), (5, 1, b"after".to_vec())]
+        );
         assert_eq!(session.terminal().terminal_id, session.terminal.terminal_id);
+    }
+
+    #[test]
+    fn detach_and_reattach_preserve_an_unresolved_input_and_its_fenced_queue() {
+        let mut reattached = attach(5, 0, b"", false);
+        reattached.next_input_seq = Some(1);
+        let mut port = FakePort {
+            attach: vec![Ok(attach(4, 0, b"", false)), Ok(reattached)],
+            input_error_once: Some(TerminalError::InputEffectUnknown),
+            resolutions: vec![Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written,
+            ))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        assert!(session.send_input(&mut port, b"uncertain").is_err());
+        assert!(session.send_input(&mut port, b"queued").is_err());
+        assert_eq!(session.unresolved_input_length(), Some(9));
+        assert_eq!(session.fenced_input_count(), 1);
+
+        session.detach(&mut port);
+        session.connect(&mut port);
+        assert_eq!(session.unresolved_input_length(), Some(9));
+        assert_eq!(session.fenced_input_count(), 1);
+
+        session.poll(&mut port);
+        assert_eq!(session.unresolved_input_length(), None);
+        assert_eq!(session.fenced_input_count(), 0);
+        assert_eq!(port.inputs, vec![(5, 1, b"queued".to_vec())]);
     }
 
     #[derive(Clone, Copy)]
@@ -2432,6 +2500,7 @@ mod tests {
             TerminalInputError::Rejected(TerminalInputOutcome::Failed),
             TerminalInputError::Rejected(TerminalInputOutcome::Ambiguous { applied_prefix: 1 }),
             TerminalInputError::Transport(TerminalError::InputEffectUnknown),
+            TerminalInputError::Transport(TerminalError::OrderingMismatch),
         ];
         for outcome in outcomes {
             assert!(!outcome.message().is_empty());
@@ -2577,6 +2646,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 3, epoch: 1 },
                 revision: 7,
                 output_offset: 64,
+                next_input_seq: None,
                 screen: TerminalAttachScreen::HistoryUnavailable,
                 exited: false,
             })],
@@ -2607,6 +2677,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 3, epoch: 1 },
                 revision: 1,
                 output_offset: 0,
+                next_input_seq: None,
                 screen: TerminalAttachScreen::HistoryUnavailable,
                 exited: true,
             })],
@@ -2635,6 +2706,7 @@ mod tests {
                     subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 1,
                     output_offset: head.len() as u64,
+                    next_input_seq: None,
                     screen: checkpoint_of(head, geometry()),
                     exited: false,
                 })],
@@ -2668,6 +2740,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: head.len() as u64,
+                next_input_seq: None,
                 screen: checkpoint_of(head, geometry()),
                 exited: false,
             })],
@@ -2702,6 +2775,7 @@ mod tests {
             subscription: sub(subscription),
             revision: 2,
             output_offset: 5,
+            next_input_seq: None,
             screen: checkpoint_at(b"wide", interleaved),
             exited: false,
         };
@@ -2749,6 +2823,7 @@ mod tests {
                     subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 2,
                     output_offset: 4,
+                    next_input_seq: None,
                     screen: checkpoint_at(b"wide", Geometry { cols: 40, rows: 4 }),
                     exited: false,
                 }),
@@ -2776,6 +2851,7 @@ mod tests {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
                 output_offset: 4,
+                next_input_seq: None,
                 screen: checkpoint_at(b"wide", daemon_geometry),
                 exited: false,
             })],
@@ -2805,6 +2881,7 @@ mod tests {
             subscription: sub(subscription),
             revision: 4,
             output_offset: 0,
+            next_input_seq: None,
             screen: checkpoint_of(b"rewound", geometry()),
             exited: false,
         };
@@ -2814,6 +2891,7 @@ mod tests {
                     subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 9,
                     output_offset: 3,
+                    next_input_seq: None,
                     screen: checkpoint_of(b"new", geometry()),
                     exited: false,
                 }),
@@ -2848,6 +2926,7 @@ mod tests {
                 subscription: sub(subscription),
                 revision: 1,
                 output_offset: 0,
+                next_input_seq: None,
                 screen: TerminalAttachScreen::Checkpoint(checkpoint),
                 exited: false,
             }
