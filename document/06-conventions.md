@@ -48,15 +48,18 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
 | `uuid` | v2 resource incarnation の typed ID（UUIDv4）と durable operation ID（UUIDv7） | 本依存 |
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
+| `toml` | `usagi-core` の infrastructure（`runtime_model`）による `.usagi/config.toml` の agent runtime / model allowlist 解析 | 本依存 |
 | `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当） | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
+| `shell-words` | `usagi-core` の usecase（`workspace_guard`）による root モードの Bash command の字句分割 | 本依存 |
 | `unicode-width` | 端末セルの表示桁数測定（CJK など全角の 2 桁計上）。`usagi-core` の VT parser（`usecase::vt_screen`）と `usagi-tui` の描画が使う | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
+| `portable-pty` | `usagi-daemon` の infrastructure（`pty`）による PTY の確保、子プロセス起動、入出力・resize・wait | 本依存 |
 | `libc` | 合成ルートでの daemon process-start identity 観測と exact-owner signal | 本依存 |
 | `signal-hook` | 合成ルートで daemon の SIGINT / SIGTERM handler と同期 wait を worker spawn 前に準備する | 本依存 |
 | `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
@@ -64,7 +67,9 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
-JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`unicode-width` は
+JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`toml` は
+`usagi-core` の infrastructure、`shell-words` は同クレートの usecase が使い、いずれも domain には持ち込まない。
+`unicode-width` は
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
 `clap` / `clap_complete` は `usagi-cli` が使う。
@@ -72,6 +77,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 作るためにも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire も直列化する。
+`portable-pty` は `usagi-daemon` の infrastructure に閉じ込め、daemon の usecase 層は PTY ポートを介して使う。
 `crossterm`（実端末 IO）・`libc`（daemon の process-start identity 観測と fenced signal）・`signal-hook`（daemon shutdown signal）・`fs2`（daemon 単一インスタンス
 ロック）は合成ルート（`src/main.rs`）も使い、`usagi-tui` は `Terminal` ポートに対して純粋に振る舞う
 （[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
