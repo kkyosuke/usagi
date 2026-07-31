@@ -17,4 +17,6 @@ pub mod pty;
 /// Durable owner-generation runtime shards and the global resource allocator,
 /// bound to the daemon data directory.
 pub mod resource_store;
+/// Real Git subprocess and filesystem adapters for managed session worktrees.
+pub mod session_worktree;
 pub mod unix_transport;
