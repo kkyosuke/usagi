@@ -13,6 +13,7 @@
 //! merge of the two is [`Settings::with_local`](super::Settings::with_local).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 /// Environment bindings keyed by variable name, in name order.
 ///
@@ -22,6 +23,61 @@ pub type EnvBindings = BTreeMap<String, String>;
 
 /// Value prefix marking a binding as a 1Password secret reference.
 pub const SECRET_REFERENCE_PREFIX: &str = "op://";
+
+/// Maximum bindings accepted in one stored scope or one effective launch.
+pub const MAX_ENV_BINDINGS: usize = 128;
+
+/// Maximum 1Password references accepted in one stored scope or one effective launch.
+pub const MAX_SECRET_REFERENCES: usize = 32;
+
+/// Maximum `op read` children owned by one environment resolution at a time.
+pub const MAX_CONCURRENT_SECRET_READS: usize = 4;
+
+/// A settings document cannot be admitted without exceeding a resource bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvLimitError {
+    TooManyBindings,
+    TooManySecretReferences,
+}
+
+impl fmt::Display for EnvLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooManyBindings => write!(
+                formatter,
+                "environment settings exceed the {MAX_ENV_BINDINGS} binding limit"
+            ),
+            Self::TooManySecretReferences => write!(
+                formatter,
+                "environment settings exceed the {MAX_SECRET_REFERENCES} secret reference limit"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EnvLimitError {}
+
+/// Enforce the resource limits shared by domain, storage, and launch admission.
+///
+/// Counts use the stored map rather than only valid bindings. A hand-edited file
+/// cannot evade the resource bound by padding it with invalid names.
+///
+/// # Errors
+/// Returns the first binding or secret-reference limit that is exceeded.
+pub fn validate_env_limits(bindings: &EnvBindings) -> Result<(), EnvLimitError> {
+    if bindings.len() > MAX_ENV_BINDINGS {
+        return Err(EnvLimitError::TooManyBindings);
+    }
+    if bindings
+        .values()
+        .filter(|value| is_secret_reference(value.trim()))
+        .count()
+        > MAX_SECRET_REFERENCES
+    {
+        return Err(EnvLimitError::TooManySecretReferences);
+    }
+    Ok(())
+}
 
 /// Whether `name` is a portable environment variable name. Deliberately strict,
 /// so a hand-edited settings file cannot smuggle shell syntax into a child
@@ -92,8 +148,9 @@ pub fn format_env_bindings(bindings: &EnvBindings) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvBindings, format_env_bindings, is_secret_reference, is_valid_env_name,
-        parse_env_bindings, valid_bindings,
+        EnvBindings, EnvLimitError, MAX_ENV_BINDINGS, MAX_SECRET_REFERENCES, format_env_bindings,
+        is_secret_reference, is_valid_env_name, parse_env_bindings, valid_bindings,
+        validate_env_limits,
     };
 
     #[test]
@@ -159,5 +216,44 @@ mod tests {
             bindings
         );
         assert!(format_env_bindings(&EnvBindings::new()).is_empty());
+    }
+
+    #[test]
+    fn binding_and_secret_limits_are_one_domain_contract() {
+        let at_binding_limit = (0..MAX_ENV_BINDINGS)
+            .map(|index| (format!("VALUE_{index}"), "literal".to_owned()))
+            .collect();
+        assert_eq!(validate_env_limits(&at_binding_limit), Ok(()));
+
+        let over_binding_limit = (0..=MAX_ENV_BINDINGS)
+            .map(|index| (format!("VALUE_{index}"), "literal".to_owned()))
+            .collect();
+        assert_eq!(
+            validate_env_limits(&over_binding_limit),
+            Err(EnvLimitError::TooManyBindings)
+        );
+
+        let at_secret_limit = (0..MAX_SECRET_REFERENCES)
+            .map(|index| (format!("SECRET_{index}"), format!("op://vault/{index}")))
+            .collect();
+        assert_eq!(validate_env_limits(&at_secret_limit), Ok(()));
+
+        let over_secret_limit = (0..=MAX_SECRET_REFERENCES)
+            .map(|index| (format!("SECRET_{index}"), format!("op://vault/{index}")))
+            .collect();
+        assert_eq!(
+            validate_env_limits(&over_secret_limit),
+            Err(EnvLimitError::TooManySecretReferences)
+        );
+        assert_eq!(
+            EnvLimitError::TooManyBindings.to_string(),
+            format!("environment settings exceed the {MAX_ENV_BINDINGS} binding limit")
+        );
+        assert_eq!(
+            EnvLimitError::TooManySecretReferences.to_string(),
+            format!(
+                "environment settings exceed the {MAX_SECRET_REFERENCES} secret reference limit"
+            )
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::domain::settings::LocalSettings;
+use crate::domain::settings::{LocalSettings, validate_env_limits};
 use crate::infrastructure::paths::project_data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
@@ -44,7 +44,9 @@ impl WorkspaceSettingsStore {
     ///
     /// Returns an error when the settings file cannot be read or parsed.
     pub fn load(&self) -> Result<LocalSettings> {
-        Ok(json_file::read_versioned(&self.path())?.unwrap_or_default())
+        let settings: LocalSettings = json_file::read_versioned(&self.path())?.unwrap_or_default();
+        validate_env_limits(&settings.env)?;
+        Ok(settings)
     }
 
     /// Atomically and durably persist local overrides.
@@ -53,6 +55,7 @@ impl WorkspaceSettingsStore {
     ///
     /// Returns an error when the directory or settings file cannot be written.
     pub fn save(&self, settings: &LocalSettings) -> Result<()> {
+        validate_env_limits(&settings.env)?;
         json_file::write_versioned(&self.dir, &self.path(), settings)
     }
 
@@ -128,5 +131,35 @@ mod tests {
 
         store.initialize(&LocalSettings::default()).unwrap();
         assert_eq!(store.load().unwrap(), initial);
+    }
+
+    #[test]
+    fn load_and_save_refuse_the_domain_env_limit() {
+        use crate::domain::settings::{EnvLimitError, MAX_ENV_BINDINGS};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let store = WorkspaceSettingsStore::new(workspace.path());
+        let oversized = LocalSettings {
+            env: (0..=MAX_ENV_BINDINGS)
+                .map(|index| (format!("VALUE_{index}"), "literal".to_owned()))
+                .collect(),
+            ..LocalSettings::default()
+        };
+        let save_error = store.save(&oversized).unwrap_err();
+        assert!(save_error.downcast_ref::<EnvLimitError>().is_some());
+        assert!(!store.path().exists());
+
+        fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        fs::write(
+            store.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "env": oversized.env,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let load_error = store.load().unwrap_err();
+        assert!(load_error.downcast_ref::<EnvLimitError>().is_some());
     }
 }

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use usagi_core::domain::agent::EnvironmentVariableName;
-use usagi_core::domain::settings::{EnvBindings, Settings};
+use usagi_core::domain::settings::{EnvBindings, EnvLimitError, Settings, validate_env_limits};
 use usagi_core::infrastructure::env_resolver::{OpCli, resolve_parallel};
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -56,25 +56,40 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
     /// The effective bindings for `workspace_root`: the global ones with the
     /// workspace's own layered on top. An unreadable settings file is logged and
     /// treated as "nothing configured", so a damaged file never blocks a launch.
-    fn configured(&self, workspace_root: &Path) -> EnvBindings {
-        let global = self.global.load_settings().unwrap_or_else(|error| {
-            ErrorLog::record(&format!("could not read global settings for env: {error}"));
-            Settings::default()
-        });
-        let local = WorkspaceSettingsStore::new(workspace_root)
-            .load()
-            .unwrap_or_else(|error| {
+    fn configured(&self, workspace_root: &Path) -> Result<EnvBindings, EnvLimitError> {
+        let global = match self.global.load_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                if let Some(limit) = error.downcast_ref::<EnvLimitError>() {
+                    return Err(*limit);
+                }
+                ErrorLog::record(&format!("could not read global settings for env: {error}"));
+                Settings::default()
+            }
+        };
+        let local = match WorkspaceSettingsStore::new(workspace_root).load() {
+            Ok(settings) => settings,
+            Err(error) => {
+                if let Some(limit) = error.downcast_ref::<EnvLimitError>() {
+                    return Err(*limit);
+                }
                 ErrorLog::record(&format!(
                     "could not read workspace settings for env: {error}"
                 ));
                 usagi_core::domain::settings::LocalSettings::default()
-            });
-        global.with_local(&local).env
+            }
+        };
+        let bindings = global.with_local(&local).env;
+        validate_env_limits(&bindings)?;
+        Ok(bindings)
     }
 
     /// The environment values to inject for a launch in `workspace_root`.
-    pub fn resolved(&self, workspace_root: &Path) -> BTreeMap<String, String> {
-        let bindings = self.configured(workspace_root);
+    pub fn resolved(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<BTreeMap<String, String>, EnvLimitError> {
+        let bindings = self.configured(workspace_root)?;
         let mut cache = self
             .cache
             .lock()
@@ -82,9 +97,9 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         if let Some((cached_bindings, values)) = cache.get(workspace_root)
             && *cached_bindings == bindings
         {
-            return values.clone();
+            return Ok(values.clone());
         }
-        let resolved = resolve_parallel(&bindings, &self.resolver);
+        let resolved = resolve_parallel(&bindings, &self.resolver)?;
         for failure in &resolved.failures {
             ErrorLog::record(&format!(
                 "could not resolve environment variable {} from {}: {}",
@@ -95,7 +110,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
             workspace_root.to_path_buf(),
             (bindings, resolved.values.clone()),
         );
-        resolved.values
+        Ok(resolved.values)
     }
 }
 
@@ -204,7 +219,7 @@ mod tests {
         );
         let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
 
-        let first = environment.resolved(workspace.path());
+        let first = environment.resolved(workspace.path()).unwrap();
         assert_eq!(
             first,
             BTreeMap::from([
@@ -219,7 +234,7 @@ mod tests {
         );
 
         // A second launch with unchanged configuration reads no secret again.
-        assert_eq!(environment.resolved(workspace.path()), first);
+        assert_eq!(environment.resolved(workspace.path()).unwrap(), first);
         assert_eq!(
             environment.resolver.reads(),
             ["op://Private/GitHub/token"],
@@ -229,7 +244,10 @@ mod tests {
         // Editing the configuration invalidates the cache.
         write_workspace(workspace.path(), bindings(&[("RUST_LOG", "trace")]));
         assert_eq!(
-            environment.resolved(workspace.path()).get("RUST_LOG"),
+            environment
+                .resolved(workspace.path())
+                .unwrap()
+                .get("RUST_LOG"),
             Some(&"trace".to_owned())
         );
         assert_eq!(environment.resolver.reads().len(), 2);
@@ -246,14 +264,14 @@ mod tests {
         let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
 
         assert_eq!(
-            environment.resolved(first.path()),
+            environment.resolved(first.path()).unwrap(),
             BTreeMap::from([
                 ("SHARED".to_owned(), "yes".to_owned()),
                 ("WHICH".to_owned(), "first".to_owned()),
             ])
         );
         assert_eq!(
-            environment.resolved(second.path()),
+            environment.resolved(second.path()).unwrap(),
             BTreeMap::from([
                 ("SHARED".to_owned(), "yes".to_owned()),
                 ("WHICH".to_owned(), "second".to_owned()),
@@ -272,7 +290,7 @@ mod tests {
         let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
 
         assert_eq!(
-            environment.resolved(workspace.path()),
+            environment.resolved(workspace.path()).unwrap(),
             BTreeMap::from([("PLAIN".to_owned(), "value".to_owned())])
         );
     }
@@ -287,7 +305,80 @@ mod tests {
         std::fs::write(local.path(), "{ broken").unwrap();
         let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
 
-        assert!(environment.resolved(workspace.path()).is_empty());
+        assert!(environment.resolved(workspace.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn merged_limit_is_refused_at_admission_with_zero_secret_reads() {
+        use usagi_core::domain::settings::{EnvLimitError, MAX_ENV_BINDINGS};
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_global(
+            data.path(),
+            (0..MAX_ENV_BINDINGS)
+                .map(|index| (format!("GLOBAL_{index}"), "literal".to_owned()))
+                .collect(),
+        );
+        write_workspace(
+            workspace.path(),
+            bindings(&[("WORKSPACE_SECRET", "op://Private/Secret/value")]),
+        );
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+
+        assert_eq!(
+            environment.resolved(workspace.path()),
+            Err(EnvLimitError::TooManyBindings)
+        );
+        assert!(environment.resolver.reads().is_empty());
+    }
+
+    #[test]
+    fn over_limit_global_or_workspace_load_is_a_safe_admission_error() {
+        use usagi_core::domain::settings::{EnvLimitError, MAX_ENV_BINDINGS};
+
+        let oversized = (0..=MAX_ENV_BINDINGS)
+            .map(|index| (format!("VALUE_{index}"), "literal".to_owned()))
+            .collect::<EnvBindings>();
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            data.path().join("settings.json"),
+            serde_json::to_vec(&Settings {
+                env: oversized.clone(),
+                ..Settings::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let global = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        assert_eq!(
+            global.resolved(workspace.path()),
+            Err(EnvLimitError::TooManyBindings)
+        );
+        assert!(global.resolver.reads().is_empty());
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let local = WorkspaceSettingsStore::new(workspace.path());
+        std::fs::create_dir_all(local.path().parent().unwrap()).unwrap();
+        std::fs::write(
+            local.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "env": oversized,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let workspace_env =
+            UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        assert_eq!(
+            workspace_env.resolved(workspace.path()),
+            Err(EnvLimitError::TooManyBindings)
+        );
+        assert!(workspace_env.resolver.reads().is_empty());
     }
 
     #[test]
