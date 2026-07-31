@@ -339,10 +339,11 @@ impl AgentFixtures {
             usagi = env!("CARGO_BIN_EXE_usagi"),
             count = self.codex_count.display(),
         );
-        // 起動 argv も 1 行として記録し、live 配線（`--settings` のフック JSON）と、Claude の
-        // daemon-issued ID（initial は `--session-id`、resume は同じ ID の `--resume`）を観測する。
+        // 起動 argv も 1 spawn 1 行として記録し、live 配線（`--settings` / system prompt）と、
+        // Claude の daemon-issued ID（initial は `--session-id`、resume は同じ ID の `--resume`）を
+        // 観測する。argv 値に含まれる改行だけを観測ログ上の空白へ正規化する。
         let claude = format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{argv}\"\nprintf 'spawn\\n' >> \"{count}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = --resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = true ]; then printf 'claude-resumed-unique:%s\\n' \"$$\"; else printf 'claude-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s' \"$*\" | tr '\\n' ' ' >> \"{argv}\"\nprintf '\\n' >> \"{argv}\"\nprintf 'spawn\\n' >> \"{count}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = --resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = true ]; then printf 'claude-resumed-unique:%s\\n' \"$$\"; else printf 'claude-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
             argv = self.claude_argv.display(),
             count = self.claude_count.display(),
         );
@@ -1733,16 +1734,34 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let session_claude_terminal =
         launch_agent(home.path(), workspace_id, Some(session_id), "claude");
     wait_for_file_lines(&claude_count, 2);
-    // live 配線: 両 scope の Claude は `usagi claude-sandbox … -- claude` 経由で起動し、`--settings` の
-    // フック JSON を受け取る。`guard-workspace` は session 起動だけに配線される（root は OS sandbox の
-    // writable root に委ねる）。
+    // live 配線: 両 scope の Claude は `usagi claude-sandbox … -- claude` 経由で起動し、
+    // `--settings` のフック JSON と scope 別 system prompt を受け取る。`guard-workspace` は session
+    // 起動だけに配線される（root は OS sandbox の writable root に委ねる）。
     let launched_argv = fs::read_to_string(&claude_argv).unwrap();
     let launched: Vec<&str> = launched_argv.lines().collect();
     assert_eq!(launched.len(), 2, "{launched_argv}");
     assert!(
+        launched.iter().all(|argv| {
+            argv.contains("--settings")
+                && argv.contains("agent-phase running")
+                && argv.matches("--append-system-prompt").count() == 1
+        }),
+        "{launched_argv}"
+    );
+    assert_eq!(
         launched
             .iter()
-            .all(|argv| argv.contains("--settings") && argv.contains("agent-phase running")),
+            .filter(|argv| argv.contains("root ディレクトリ（統括環境）"))
+            .count(),
+        1,
+        "{launched_argv}"
+    );
+    assert_eq!(
+        launched
+            .iter()
+            .filter(|argv| argv.contains("セッション専用の worktree"))
+            .count(),
+        1,
         "{launched_argv}"
     );
     assert_eq!(
@@ -2368,6 +2387,17 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         root_resume_argv[2].contains(&format!("--resume {root_claude_id}")),
         "{root_resume_argv:?}"
     );
+    assert_eq!(
+        root_resume_argv[2]
+            .matches("--append-system-prompt")
+            .count(),
+        1,
+        "{root_resume_argv:?}"
+    );
+    assert!(
+        root_resume_argv[2].contains("root ディレクトリ（統括環境）"),
+        "{root_resume_argv:?}"
+    );
     send(&mut master, b"claude-root-after-resume\r");
     wait_for_screen_since(
         &captured,
@@ -2434,6 +2464,17 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     let session_resume_argv = fixtures.claude_launch_argv();
     assert!(
         session_resume_argv[3].contains(&format!("--resume {session_claude_id}")),
+        "{session_resume_argv:?}"
+    );
+    assert_eq!(
+        session_resume_argv[3]
+            .matches("--append-system-prompt")
+            .count(),
+        1,
+        "{session_resume_argv:?}"
+    );
+    assert!(
+        session_resume_argv[3].contains("セッション専用の worktree"),
         "{session_resume_argv:?}"
     );
     send(&mut master, b"claude-session-after-resume\r");
