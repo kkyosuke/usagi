@@ -566,6 +566,7 @@ v1 から機能を再実装するときの置き場所の指針。
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
 | planned restart 中の client 側 request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | `crates/core/src/usecase/owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
+| local LLM の trusted model 語彙と optional MCP / delegation prompt 配線 | 設定語彙・sanitize は `crates/core/src/domain/settings/`、Claude / Codex の product encoding は `crates/daemon/src/usecase/{claude,codex}`、設定読出しと prompt bool の合成は `src/runtime/daemon.rs`（wire 契約の正本は [7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)） |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
@@ -615,7 +616,9 @@ Codex / Claude adapter は daemon の terminal launch 子層である `usecase::
 model の解釈、config / MCP / hook の payload はそれぞれの provisioner 内部だけが扱う。adapter は共通の
 `AgentAdapter` として reservation 前に durable snapshot と `SpawnProvision` を組み立て、runtime は snapshot を
 保存してから provision を PTY spawner へ一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal
-stream、error detail に残らない。
+stream、error detail に残らない。optional local LLM の MCP server と delegation instruction も同じ
+ephemeral provision にだけ載せる（配線条件と順序は
+[7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線) が正本）。
 
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
 credential、secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・
