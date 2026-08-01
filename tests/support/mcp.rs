@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::{agent::AgentProfileId, settings::Settings};
-use usagi_core::infrastructure::paths::channel_data_dir;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
@@ -48,6 +47,9 @@ pub struct McpHarness {
     workspace: tempfile::TempDir,
     cwd: PathBuf,
     home: tempfile::TempDir,
+    /// この harness が起動する usagi の runtime channel。data directory の割り付けと
+    /// `USAGI_RUNTIME_MODE` の両方がここから決まる。
+    channel: Channel,
     fixture_bin: PathBuf,
     fixture_log: PathBuf,
     process: McpProcess,
@@ -63,25 +65,35 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
-        Self::start_at(None, false, None)
+        Self::start_at(Channel::Local, None, false, None)
+    }
+
+    /// production channel（`USAGI_RUNTIME_MODE=production`）で起動する。
+    ///
+    /// production は `$USAGI_HOME` 自体を selected directory にする唯一の mode なので、
+    /// 「base と selected の関係」を base 側から間違えても local では露見しない。
+    #[must_use]
+    pub fn start_in_production() -> Self {
+        Self::start_at(Channel::Production, None, false, None)
     }
 
     #[must_use]
     pub fn start_in_session(name: &str) -> Self {
-        Self::start_at(Some(name), false, None)
+        Self::start_at(Channel::Local, Some(name), false, None)
     }
 
     #[must_use]
     pub fn start_with_tool_availability(issue: bool, memory: bool) -> Self {
-        Self::start_at(None, false, Some((issue, memory)))
+        Self::start_at(Channel::Local, None, false, Some((issue, memory)))
     }
 
     #[must_use]
     pub fn start_in_nested_session(name: &str) -> Self {
-        Self::start_at(Some(name), true, None)
+        Self::start_at(Channel::Local, Some(name), true, None)
     }
 
     fn start_at(
+        channel: Channel,
         session: Option<&str>,
         nested: bool,
         tool_availability: Option<(bool, bool)>,
@@ -98,7 +110,12 @@ impl McpHarness {
         git(workspace.path(), &["commit", "-qm", "fixture"]);
 
         let home = short_dir("usagi-mcp-home-");
-        configure_tool_availability(home.path(), tool_availability);
+        // production channel では `$USAGI_HOME` 自体が daemon の data directory になるため、
+        // 私有ディレクトリ（0700）でなければ endpoint 検証に落ちる。local channel の
+        // `<home>/local` は usagi 自身が 0700 で作るのでこの差は現れない。
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700))
+            .expect("private daemon data directory");
+        configure_tool_availability(channel, home.path(), tool_availability);
         let fixture_bin = home.path().join("fixture-bin");
         let fixture_log = home.path().join("fixture-agent.log");
         fs::create_dir(&fixture_bin).unwrap();
@@ -146,7 +163,7 @@ impl McpHarness {
             fixture_bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child = usagi_command(home.path(), Channel::Local, &cwd, &["mcp".as_ref()])
+        let mut child = usagi_command(home.path(), channel, &cwd, &["mcp".as_ref()])
             .env("PATH", path)
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdin(Stdio::piped())
@@ -160,6 +177,7 @@ impl McpHarness {
             workspace,
             cwd,
             home,
+            channel,
             fixture_bin,
             fixture_log,
             process: McpProcess {
@@ -231,9 +249,16 @@ impl McpHarness {
         &self.cwd
     }
 
+    /// この harness が起動した daemon の selected data directory。
     #[must_use]
     pub fn data_dir(&self) -> PathBuf {
-        usagi_core::infrastructure::paths::channel_data_dir(self.home.path())
+        self.channel.data_dir(self.home.path())
+    }
+
+    /// `$USAGI_HOME`（mode を適用する前の base）。
+    #[must_use]
+    pub fn home(&self) -> &Path {
+        self.home.path()
     }
 
     #[must_use]
@@ -327,7 +352,7 @@ impl McpHarness {
         );
         let mut child = usagi_command(
             self.home.path(),
-            Channel::Local,
+            self.channel,
             self.workspace.path(),
             &["mcp".as_ref()],
         )
@@ -373,9 +398,9 @@ impl McpHarness {
     }
 }
 
-fn configure_tool_availability(home: &Path, availability: Option<(bool, bool)>) {
+fn configure_tool_availability(channel: Channel, home: &Path, availability: Option<(bool, bool)>) {
     if let Some((issue_enabled, memory_enabled)) = availability {
-        let data_dir = channel_data_dir(home);
+        let data_dir = channel.data_dir(home);
         ensure_private_dir_all(&data_dir).unwrap();
         Storage::new(data_dir)
             .save_settings(&Settings {

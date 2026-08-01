@@ -13,6 +13,7 @@
 //! The two share the `.usagi` basename by convention but are independent
 //! directories with different contents and lifetimes.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -61,6 +62,48 @@ pub enum RuntimeMode {
     Local,
 }
 
+impl RuntimeMode {
+    /// The [`RUNTIME_MODE_ENV`] spelling that selects this mode again.
+    ///
+    /// A child process re-applies the mode from this value, so it is the wire
+    /// half of the [`DataHome`] contract: `base` plus this spelling has to land
+    /// the child on the same directory its parent selected.
+    #[must_use]
+    pub fn as_env_value(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Development => "development",
+            Self::Local => "local",
+        }
+    }
+
+    /// The mode an [`RUNTIME_MODE_ENV`] value selects.
+    ///
+    /// An absent or unrecognised value selects local, the safe default for
+    /// every build profile; production requires an explicit selection.
+    #[must_use]
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        match value {
+            Some("production") => Self::Production,
+            Some("development") => Self::Development,
+            _ => Self::Local,
+        }
+    }
+
+    /// The directory this mode appends to its base, if any.
+    ///
+    /// Production appends nothing — its selected directory *is* the base. That
+    /// asymmetry is the whole reason [`DataHome`] exists.
+    #[must_use]
+    fn child_dir(self) -> Option<&'static str> {
+        match self {
+            Self::Production => None,
+            Self::Local => Some(LOCAL_DIR),
+            Self::Development => Some(DEV_DIR),
+        }
+    }
+}
+
 /// Returns the selected runtime mode.
 ///
 /// [`RUNTIME_MODE_ENV`] accepts `production`, `development`, and `local`.
@@ -68,10 +111,68 @@ pub enum RuntimeMode {
 /// build profile; production requires an explicit selection.
 #[must_use]
 pub fn runtime_mode() -> RuntimeMode {
-    match std::env::var(RUNTIME_MODE_ENV).as_deref() {
-        Ok("production") => RuntimeMode::Production,
-        Ok("development") => RuntimeMode::Development,
-        _ => RuntimeMode::Local,
+    RuntimeMode::from_env_value(std::env::var(RUNTIME_MODE_ENV).ok().as_deref())
+}
+
+/// The two directories one runtime mode relates: the mode-neutral `base` that a
+/// child process receives as [`DATA_DIR_ENV`], and the mode-`selected`
+/// directory below it that this process reads and writes.
+///
+/// This pair is the single place the relation is decided. A caller that holds
+/// only one of the two and re-derives the other by path surgery gets production
+/// wrong: production selects the base *itself*, so "strip one component to get
+/// the base" walks one level **above** it — into the user's home directory —
+/// and that stray path then becomes a child's data home, its settings source,
+/// and a sandbox writable root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataHome {
+    base: PathBuf,
+    mode: RuntimeMode,
+}
+
+impl DataHome {
+    /// Pair a mode-neutral base directory with the mode selected over it.
+    #[must_use]
+    pub fn new(base: impl Into<PathBuf>, mode: RuntimeMode) -> Self {
+        Self {
+            base: base.into(),
+            mode,
+        }
+    }
+
+    /// Recover the pair from an already mode-selected directory.
+    ///
+    /// This is the exact inverse of [`Self::selected`]: it strips only the
+    /// directory the mode itself appends, and only when `selected` really ends
+    /// with it. Anything else is taken to be its own base, so the result never
+    /// climbs above the directory it was handed.
+    #[must_use]
+    pub fn from_selected(selected: impl AsRef<Path>, mode: RuntimeMode) -> Self {
+        let selected = selected.as_ref();
+        let base = mode
+            .child_dir()
+            .filter(|child| selected.file_name() == Some(OsStr::new(child)))
+            .and_then(|_| selected.parent())
+            .unwrap_or(selected);
+        Self::new(base, mode)
+    }
+
+    /// The mode-neutral base. A child re-applies [`Self::mode`] to it.
+    #[must_use]
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
+    /// The directory this mode selects below [`Self::base`].
+    #[must_use]
+    pub fn selected(&self) -> PathBuf {
+        mode_data_dir(&self.base, self.mode)
+    }
+
+    /// The runtime mode that relates the two directories.
+    #[must_use]
+    pub fn mode(&self) -> RuntimeMode {
+        self.mode
     }
 }
 
@@ -106,11 +207,8 @@ pub fn channel_data_dir(base: impl AsRef<Path>) -> PathBuf {
 }
 
 fn mode_data_dir(base: &Path, mode: RuntimeMode) -> PathBuf {
-    match mode {
-        RuntimeMode::Production => base.to_path_buf(),
-        RuntimeMode::Local => base.join(LOCAL_DIR),
-        RuntimeMode::Development => base.join(DEV_DIR),
-    }
+    mode.child_dir()
+        .map_or_else(|| base.to_path_buf(), |child| base.join(child))
 }
 
 /// Resolve the selected-mode runtime-state directory for a project.
@@ -288,6 +386,71 @@ mod tests {
         assert_eq!(
             mode_data_dir(base, RuntimeMode::Development),
             PathBuf::from("/data/dev")
+        );
+    }
+
+    #[test]
+    fn data_home_round_trips_the_base_through_every_mode() {
+        for (mode, selected) in [
+            (RuntimeMode::Production, "/data"),
+            (RuntimeMode::Local, "/data/local"),
+            (RuntimeMode::Development, "/data/dev"),
+        ] {
+            let home = DataHome::new("/data", mode);
+            assert_eq!(home.base(), Path::new("/data"));
+            assert_eq!(home.mode(), mode);
+            assert_eq!(home.selected(), PathBuf::from(selected));
+
+            // The daemon only ever holds the selected directory, so recovering
+            // the base from it must be exact — production included, where the
+            // two are the same directory.
+            let recovered = DataHome::from_selected(selected, mode);
+            assert_eq!(recovered, home);
+            assert_eq!(recovered.base(), Path::new("/data"));
+            assert_ne!(recovered.base(), Path::new("/"));
+        }
+    }
+
+    #[test]
+    fn data_home_from_selected_never_climbs_above_what_it_was_given() {
+        // A selected directory that does not carry the mode's own child is its
+        // own base: stripping a component here would leak the parent.
+        for mode in [
+            RuntimeMode::Production,
+            RuntimeMode::Local,
+            RuntimeMode::Development,
+        ] {
+            assert_eq!(
+                DataHome::from_selected("/home/dev/.usagi", mode).base(),
+                Path::new("/home/dev/.usagi")
+            );
+        }
+        // Only the matching mode's child is stripped.
+        assert_eq!(
+            DataHome::from_selected("/data/local", RuntimeMode::Development).base(),
+            Path::new("/data/local")
+        );
+        // A base whose own name collides with the child directory still round
+        // trips, because only the trailing component is removed.
+        assert_eq!(
+            DataHome::from_selected("/data/local/local", RuntimeMode::Local).base(),
+            Path::new("/data/local")
+        );
+    }
+
+    #[test]
+    fn runtime_mode_env_values_round_trip() {
+        for mode in [
+            RuntimeMode::Production,
+            RuntimeMode::Local,
+            RuntimeMode::Development,
+        ] {
+            assert_eq!(RuntimeMode::from_env_value(Some(mode.as_env_value())), mode);
+        }
+        assert_eq!(RuntimeMode::from_env_value(None), RuntimeMode::Local);
+        assert_eq!(
+            RuntimeMode::from_env_value(Some("bogus")),
+            RuntimeMode::Local
         );
     }
 

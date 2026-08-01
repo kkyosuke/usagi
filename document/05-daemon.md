@@ -477,6 +477,21 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 runtime mode は `USAGI_RUNTIME_MODE=production`（本番モード）、`USAGI_RUNTIME_MODE=development`（開発モード）、または `USAGI_RUNTIME_MODE=local`（ローカルモード）で明示する。production は `$USAGI_HOME` または `~/.usagi` 自体を使い、development はその `dev/` 子 directory、local はその `local/` 子 directory を使う。環境変数を未指定または不正な値にした場合は、debug / release build とも local を既定にする。本番モードは `USAGI_RUNTIME_MODE=production` による明示指定が必要である。プロジェクト内の runtime state も同じ定義を使い、production は `<project_root>/.usagi/`、development は `<project_root>/.usagi/dev/`、local は `<project_root>/.usagi/local/` に保存する。旧 `device/` / `develop/` / `development/` との互換処理は行わない。
 したがって development 中・local mode 中に本番用の record / locator / lock / daemon-owned state へ触れず、必要なら `USAGI_RUNTIME_MODE=development cargo run` で local mode のまま開発用状態を選べる。`USAGI_HOME` を明示しても同じ分離を適用する。daemon が起動する Agent の MCP server には選択した mode も転送するため、Agent の完了報告も同じ daemon に届く。
 
+### Agent child の data home
+
+daemon が起動する Agent child には、mode を適用する**前**の base（`$USAGI_HOME`）と選択中の mode の両方を渡す。child は同じ mode を base に再適用するので、daemon が使っている directory そのものに戻る。base と selected directory の対応は下表のとおりで、production は selected directory が base 自体である。
+
+| mode | base（child の `$USAGI_HOME`） | daemon の selected directory |
+|---|---|---|
+| production | `$USAGI_HOME`（既定 `~/.usagi`） | base 自体 |
+| development | 同上 | `<base>/dev` |
+| local | 同上 | `<base>/local` |
+
+この 2 つは常に 1 つの組として扱い、片方から path 操作でもう片方を導かない。production は base と selected directory が同じ directory なので、「selected directory から 1 階層上が base」と仮定すると data home の**親**（既定では利用者のホームディレクトリ）を選んでしまい、それが child の data home・sandbox の writable root として渡ることになる。
+
+- child の `$USAGI_HOME` と Claude sandbox の writable root には **base** を渡す。child は自分で mode の子 directory を作る必要があるため、selected directory だけでは足りない。
+- daemon 所有の global settings（local LLM の有効/無効とモデル名など）は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
+
 開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
 
 `usagi daemon` の lifecycle command には mode ごとの task を使う。task が決めるのは runtime mode と build profile だけで、`--` の後ろはそのまま `usagi daemon` へ渡す。したがって subcommand と flag の組み合わせは task 側で列挙しない。

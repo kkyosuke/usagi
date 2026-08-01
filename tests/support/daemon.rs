@@ -43,7 +43,9 @@ pub enum Channel {
 }
 
 impl Channel {
-    fn data_dir(self, home: &Path) -> PathBuf {
+    /// この channel の daemon が選ぶ data directory。
+    #[must_use]
+    pub fn data_dir(self, home: &Path) -> PathBuf {
         match self {
             // テストプロセス自身は runtime mode を設定しないため、これは `<home>/local` を返す。
             Self::Local => usagi_core::infrastructure::paths::channel_data_dir(home),

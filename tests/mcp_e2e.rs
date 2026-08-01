@@ -5,6 +5,7 @@
 mod support;
 
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -739,6 +740,60 @@ fi
     let durable: serde_json::Value =
         serde_json::from_slice(&fs::read(decision_path).unwrap()).unwrap();
     assert!(durable["events"].as_array().unwrap().is_empty());
+}
+
+/// The Agent child is handed the **mode-neutral** data home plus the runtime
+/// mode, and re-applying that mode has to land it back on the very directory
+/// the daemon is using.
+///
+/// This is pinned in `production` because it is the only mode whose selected
+/// directory *is* the base: a caller that recovers the base by stripping one
+/// component from the selected directory stays correct under `local` / `dev`
+/// and silently hands production the directory *above* the data home (#608).
+#[test]
+fn production_agent_children_reapply_the_runtime_mode_onto_the_daemon_data_home() {
+    let mut mcp = McpHarness::start_in_production();
+    // production の selected directory は `$USAGI_HOME` そのもの。
+    assert_eq!(mcp.data_dir(), mcp.home());
+
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+printf 'data-home:%s\n' "$USAGI_HOME" >> "$USAGI_MCP_FIXTURE_LOG"
+printf 'runtime-mode:%s\n' "$USAGI_RUNTIME_MODE" >> "$USAGI_MCP_FIXTURE_LOG"
+printf 'credential:%s\n' "$USAGI_MCP_CALLER_CREDENTIAL" >> "$USAGI_MCP_FIXTURE_LOG"
+printf 'fixture-ready\n'
+while IFS= read -r line; do printf 'fixture-input:%s\n' "$line"; done
+"#,
+    );
+    // Waits for the fixture's `credential:` line, so the two lines above it are
+    // already durable by the time this returns.
+    mcp.launch_caller();
+
+    let log = fs::read_to_string(mcp.fixture_log()).unwrap();
+    let logged = |prefix: &str| {
+        log.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("the Agent child logged no {prefix} line:\n{log}"))
+            .to_owned()
+    };
+    let child_home = PathBuf::from(logged("data-home:"));
+    let child_mode = logged("runtime-mode:");
+
+    assert_eq!(child_mode, "production");
+    // The child re-applies the announced mode to the announced home.
+    let resolved = usagi_core::infrastructure::paths::DataHome::new(
+        &child_home,
+        usagi_core::infrastructure::paths::RuntimeMode::from_env_value(Some(&child_mode)),
+    )
+    .selected();
+    assert_eq!(resolved, mcp.data_dir());
+    // And the announced home is never the directory above the data home.
+    assert_ne!(
+        child_home.as_path(),
+        mcp.data_dir().parent().expect("the data home has a parent")
+    );
 }
 
 fn wait_until(mut condition: impl FnMut() -> bool) {
