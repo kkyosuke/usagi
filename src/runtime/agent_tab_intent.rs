@@ -1589,6 +1589,28 @@ mod tests {
                 .dismissed_terminals
                 .contains(&unobserved.terminal)
         );
+
+        // The same close without a successor preview (the merged form a stale
+        // writer replays) is inert on the state and still fenced.
+        let bytes_before = fs::read(store.state_path(workspace)).unwrap();
+        let merged = store
+            .mutate(
+                workspace,
+                newer_selection.intent.revision,
+                AgentTabIntentMutation::DismissTerminal {
+                    terminal: unobserved.terminal.clone(),
+                },
+            )
+            .unwrap();
+        assert!(merged.cas_conflict);
+        assert_eq!(merged.intent.revision, stale_close.intent.revision + 1);
+        assert!(
+            merged
+                .intent
+                .dismissed_terminals
+                .contains(&unobserved.terminal)
+        );
+        assert_ne!(fs::read(store.state_path(workspace)).unwrap(), bytes_before);
     }
 
     #[test]
