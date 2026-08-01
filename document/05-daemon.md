@@ -62,6 +62,9 @@ worktree にする。root が Git repository でない場合は、`.usagi/` と 
 mirror する。走査中に見つけた各 Git repository は session tree 内の同じ相対 path に `usagi/<name>` branch
 の worktree として作成し、plain file と directory は copy する。既存 linked worktree（`.git` が file）は
 source に含めない。remove は mirror 内の worktree を子から順に Git で除去してから copied entries を除去する。
+これらの Git command は継承した `GIT_*` を除いた confined subprocess で起動するため、daemon の環境に
+`GIT_DIR` 等が入っていても対象 repository は `-C` で指したものだけになる
+（[2. アーキテクチャ#Git subprocess の環境 confine](02-architecture.md#git-subprocess-の環境-confine)）。
 
 Git workspace を daemon が最初に開くと、`.usagi/.gitignore` に usagi 管理の ignore rules を書く。`issues/`
 と `memory/` は共有・追跡対象のままにし、session tree、derived index、lock、その他の local metadata は

@@ -7,11 +7,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
+use crate::infrastructure::git::confined_git_command;
 use crate::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::persistence::json_file::{self, write_text_atomic};
 use crate::infrastructure::persistence::store_lock::StoreLock;
@@ -27,16 +27,6 @@ const LEGACY_V2_DIR: &str = "usagi-issue-sequence";
 const LEGACY_V2_FILE: &str = "next";
 const LEGACY_V2_MIGRATION_FILE: &str = "legacy-v2-migrated";
 const LEGACY_V2_SENTINEL_PREFIX: &str = "migrated-to-usagi-issue-numbers:";
-const REPO_SCOPING_ENV: &[&str] = &[
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_COMMON_DIR",
-    "GIT_PREFIX",
-    "GIT_NAMESPACE",
-];
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SequenceFile {
@@ -974,7 +964,7 @@ fn push_materialized_git_legacies(paths: &mut Vec<PathBuf>, worktree: &Path) -> 
     ];
     let worktree_display = worktree.display().to_string();
     for ignored in [false, true] {
-        let mut command = scoped_git_command(worktree);
+        let mut command = confined_git_command(worktree);
         command.args(["ls-files", "-z", "--others"]);
         if ignored {
             command.args(["--ignored", "--exclude-standard"]);
@@ -1029,7 +1019,7 @@ fn push_materialized_git_issue_roots(roots: &mut Vec<PathBuf>, worktree: &Path) 
     const PATHSPECS: [&str; 2] = [".usagi/issues/*.md", ":(glob)**/.usagi/issues/*.md"];
     let worktree_display = worktree.display().to_string();
     for ignored in [false, true] {
-        let mut command = scoped_git_command(worktree);
+        let mut command = confined_git_command(worktree);
         command.args(["ls-files", "-z", "--others"]);
         if ignored {
             command.args(["--ignored", "--exclude-standard"]);
@@ -1123,7 +1113,7 @@ fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
     let known_error = format!("failed to canonicalize known Git worktree {repository_display}");
     let known = fs::canonicalize(repository).context(known_error)?;
     let common_error = format!("failed to resolve Git common dir from {}", known.display());
-    let common_output = scoped_git_command(&known)
+    let common_output = confined_git_command(&known)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
         .context(common_error)?;
@@ -1147,7 +1137,7 @@ fn git_worktree_roots(repository: &Path) -> Result<Vec<PathBuf>> {
     let common = fs::canonicalize(common_text).context(common_error)?;
 
     let worktrees_error = format!("failed to enumerate Git worktrees from {repository_display}");
-    let output = scoped_git_command(repository)
+    let output = confined_git_command(repository)
         .args(["worktree", "list", "--porcelain", "-z"])
         .output()
         .context(worktrees_error)?;
@@ -1215,7 +1205,7 @@ fn validate_conventional_workspace_repository(
 fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Result<()> {
     let candidate_display = candidate.display().to_string();
     let validation_error = format!("failed to validate registered worktree {candidate_display}");
-    let validation = scoped_git_command(candidate)
+    let validation = confined_git_command(candidate)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .context(validation_error)?;
@@ -1225,7 +1215,7 @@ fn validate_registered_worktree(candidate: &Path, expected_common: &Path) -> Res
     );
     let common_error =
         format!("failed to resolve common dir for registered worktree {candidate_display}");
-    let common = scoped_git_command(candidate)
+    let common = confined_git_command(candidate)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
         .context(common_error)?;
@@ -1309,7 +1299,7 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
     // Match the production v1 resolver instead of accepting a merely existing
     // `.git` directory or gitfile target. Environment overrides are removed so
     // validation is anchored to the ancestor boundary inspected above.
-    let mut command = scoped_git_command(&worktree_root);
+    let mut command = confined_git_command(&worktree_root);
     command.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
     let validation_error = format!("failed to validate Git repository {worktree_root_display}");
     let output = command.output().context(validation_error)?;
@@ -1336,15 +1326,6 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
         worktree_root,
         common_dir,
     }))
-}
-
-fn scoped_git_command(repo: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(repo).env("LC_ALL", "C");
-    for variable in REPO_SCOPING_ENV {
-        command.env_remove(variable);
-    }
-    command
 }
 
 /// Find the repository/worktree boundary from an arbitrary nested cwd.
