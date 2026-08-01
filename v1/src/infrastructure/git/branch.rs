@@ -342,11 +342,32 @@ fn count_ahead_behind(repo: &Path, target: &str, branch: &str) -> Option<(usize,
     Some((ahead, behind))
 }
 
-/// Return `true` if `path` (relative to the repository root) exists at `rev`.
-pub fn file_exists_at_rev(repo: &Path, rev: &str, path: &str) -> bool {
-    let rev_path = format!("{rev}:{path}");
-    git_capture(repo, &["cat-file", "-e", &rev_path])
-        .ok()
-        .flatten()
-        .is_some()
+/// The repository-relative paths of every file committed under `dir` at `rev`,
+/// recursively.
+///
+/// Callers ask for the whole listing rather than probing one path because they
+/// know *which* entry they want only by inspecting the names — e.g. resolving an
+/// issue by its `NNN-` prefix, whose committed file name is not derivable from
+/// the issue's current title (the `session_delegate_issue` base-commit precheck).
+///
+/// Returns an empty list when `rev` does not resolve, `dir` holds nothing at that
+/// revision, or `repo` is not a git repository: callers treat all three as "no
+/// candidate is committed", which is what the base-ref precheck reports anyway.
+pub fn files_at_rev(repo: &Path, rev: &str, dir: &str) -> Vec<String> {
+    // `-z` emits NUL-separated raw names, so a path git would otherwise quote
+    // (non-ASCII, embedded whitespace) still round-trips verbatim. `--` keeps a
+    // `dir` beginning with `-` from being parsed as an option.
+    git_capture(
+        repo,
+        &["ls-tree", "-r", "--name-only", "-z", rev, "--", dir],
+    )
+    .ok()
+    .flatten()
+    .map(|out| {
+        out.split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
