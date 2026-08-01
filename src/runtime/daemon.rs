@@ -3145,7 +3145,7 @@ fn dispatch_agent_tool(
                         &serde_json::json!({"name": session_name, "role": requested_role}),
                     )
                     .map_err(|error| {
-                        let code = if matches!(error, SessionRuntimeError::RoleConflict { .. }) {
+                        let code = if matches!(error, SessionRuntimeError::RoleConflict(..)) {
                             ErrorCode::RevisionConflict
                         } else {
                             ErrorCode::InvalidArgument

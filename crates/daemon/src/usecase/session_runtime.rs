@@ -45,24 +45,15 @@ pub enum SessionRuntimeError {
     InvalidOperation,
     DuplicateOperation,
     IdempotencyConflict,
-    RoleConflict {
-        existing: Option<RoleId>,
-        requested: Option<RoleId>,
-    },
+    RoleConflict(Option<RoleId>, Option<RoleId>),
     InvalidRole(String),
     SessionBranchExists(String),
     SessionWorkspaceExists(String),
-    SessionWorkspaceCreationFailed {
-        name: String,
-        detail: String,
-    },
+    SessionWorkspaceCreationFailed { name: String, detail: String },
     DurableFailure(String),
     UnknownSession,
     ScopeUnavailable,
-    AgentFailure {
-        code: ErrorCode,
-        message: String,
-    },
+    AgentFailure { code: ErrorCode, message: String },
     Delivery(String),
     AmbiguousIssue(AmbiguousIssueNumber),
     Rejected,
@@ -79,10 +70,7 @@ impl SessionRuntimeError {
                 "operation identity conflicts with an existing request".into()
             }
             Self::IdempotencyConflict => "operation id was reused with a different request".into(),
-            Self::RoleConflict {
-                existing,
-                requested,
-            } => format!(
+            Self::RoleConflict(existing, requested) => format!(
                 "session role conflict: existing={}, requested={}",
                 existing.as_ref().map_or("<legacy>", RoleId::as_str),
                 requested.as_ref().map_or("<legacy>", RoleId::as_str)
@@ -787,10 +775,10 @@ impl SessionRuntime {
         // `DuplicateSessionName` into a generic rejection.
         if let Some(existing) = existing_session {
             if existing.role_id != role_id {
-                return Err(SessionRuntimeError::RoleConflict {
-                    existing: existing.role_id.clone(),
-                    requested: role_id,
-                });
+                return Err(SessionRuntimeError::RoleConflict(
+                    existing.role_id.clone(),
+                    role_id,
+                ));
             }
             return Ok(SessionCreateStep::Done(SessionReply {
                 operation_id: operation_id.to_string(),
@@ -2511,10 +2499,7 @@ instructions = "code"
                 &operation(),
                 &json!({"name":"one", "role":"coder"}),
             ),
-            Err(SessionRuntimeError::RoleConflict {
-                existing: None,
-                requested: Some(_),
-            })
+            Err(SessionRuntimeError::RoleConflict(None, Some(_)))
         ));
         assert!(matches!(
             runtime.session_role(SessionId::new()),
@@ -2556,7 +2541,7 @@ instructions = "review"
                 &operation(),
                 &json!({"name":"one", "role":"reviewer"}),
             ),
-            Err(SessionRuntimeError::RoleConflict { .. })
+            Err(SessionRuntimeError::RoleConflict(..))
         ));
         assert!(matches!(
             runtime.handle(
