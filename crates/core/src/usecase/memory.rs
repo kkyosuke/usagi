@@ -155,14 +155,14 @@ pub fn search(
         store.summaries()?
     } else {
         store
-            .scan_lenient()?
+            .scan_sources_lenient()?
             .into_iter()
-            .filter(|memory| {
-                memory.name.to_lowercase().contains(&needle)
-                    || memory.title.to_lowercase().contains(&needle)
-                    || memory.body.to_lowercase().contains(&needle)
+            .filter(|source| {
+                source.entry.name.to_lowercase().contains(&needle)
+                    || source.entry.title.to_lowercase().contains(&needle)
+                    || source.entry.body.to_lowercase().contains(&needle)
             })
-            .map(|memory| memory.summary())
+            .map(|source| source.entry.summary(&source.file))
             .collect()
     };
     summaries.retain(|summary| filter.kind.is_none_or(|kind| summary.kind == kind));
@@ -308,6 +308,25 @@ mod tests {
         let unchanged = save_partial(&store, "fact", MemoryPatch::default(), ts(23)).unwrap();
         assert_eq!(unchanged.title, "New");
         assert_eq!(unchanged.kind, MemoryType::Feedback);
+    }
+
+    /// `search` builds its own summaries from a lenient scan, so it must name
+    /// the file on disk just like the indexed listing does.
+    #[test]
+    fn search_reports_the_file_on_disk() {
+        let (_tmp, store) = store();
+        save(&store, spec("alpha", "Needle title"), ts(20)).unwrap();
+        std::fs::rename(
+            store.dir().join("alpha.md"),
+            store.dir().join("renamed-by-hand.md"),
+        )
+        .unwrap();
+
+        let found = search(&store, "needle", &MemoryFilter::default()).unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file, "renamed-by-hand.md");
+        assert!(store.dir().join(&found[0].file).is_file());
     }
 
     #[test]

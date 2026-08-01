@@ -26,6 +26,26 @@ const DIRTY_FILE: &str = ".derived-dirty";
 pub(crate) const INDEX_FORMAT_VERSION: u32 = 2;
 const FINGERPRINT_ALGORITHM: &str = "sha256";
 
+/// A parsed entry together with the exact source file that supplied it.
+///
+/// Summaries report this file name rather than the canonical name derived from
+/// the entry's own fields, so a reader is never handed a path that does not
+/// exist. The two names differ whenever a source was written outside the store
+/// or its title changed since the last write.
+pub(crate) struct MarkdownSource<T> {
+    pub entry: T,
+    pub file: String,
+}
+
+/// The file name a summary reports for the source at `path`.
+pub(crate) fn source_file_name(path: &Path) -> Result<String> {
+    Ok(path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context(format!("source filename is not UTF-8: {}", path.display()))?
+        .to_owned())
+}
+
 /// Store-specific behavior for one kind of markdown entry.
 pub(crate) trait MarkdownEntry: Sync {
     type Entry: Send;
@@ -42,8 +62,11 @@ pub(crate) trait MarkdownEntry: Sync {
     fn parse_markdown(text: &str) -> Result<Self::Entry>;
     fn to_markdown(entry: &Self::Entry) -> String;
     fn file_name(entry: &Self::Entry) -> Result<String>;
-    fn summary(entry: &Self::Entry) -> Self::Summary;
-    fn sort_entries(entries: &mut Vec<Self::Entry>);
+    /// Build a summary for `entry`, reported as living in the source `file`.
+    fn summary(entry: &Self::Entry, file: &str) -> Self::Summary;
+    /// Order sources by the store's identity, then by file name so a duplicated
+    /// identity still lists deterministically rather than in directory order.
+    fn sort_sources(sources: &mut [MarkdownSource<Self::Entry>]);
     fn index_parts(index: Self::IndexFile) -> (u32, String, Vec<Self::Summary>);
     fn index_file_ref<'a>(
         summaries: &'a [Self::Summary],
@@ -116,19 +139,34 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     pub(crate) fn scan(&self) -> Result<Vec<E::Entry>> {
         use rayon::prelude::*;
 
-        let mut entries: Vec<E::Entry> = self
+        let mut sources: Vec<MarkdownSource<E::Entry>> = self
             .entry_files()?
             .into_par_iter()
-            .map(|path| self.read_existing_path(&path))
+            .map(|path| {
+                Ok(MarkdownSource {
+                    entry: self.read_existing_path(&path)?,
+                    file: source_file_name(&path)?,
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
-        E::sort_entries(&mut entries);
-        Ok(entries)
+        E::sort_sources(&mut sources);
+        Ok(sources.into_iter().map(|source| source.entry).collect())
     }
 
     /// Like [`scan`](Self::scan), but records unreadable/unparseable files to the
     /// error log and skips them so one corrupt sibling cannot break listings or
     /// cache rebuilds.
     pub(crate) fn scan_lenient(&self) -> Result<Vec<E::Entry>> {
+        Ok(self
+            .scan_sources_lenient()?
+            .into_iter()
+            .map(|source| source.entry)
+            .collect())
+    }
+
+    /// Like [`scan_lenient`](Self::scan_lenient), but retains the exact file each
+    /// entry came from so summaries can name a source that exists.
+    pub(crate) fn scan_sources_lenient(&self) -> Result<Vec<MarkdownSource<E::Entry>>> {
         use rayon::prelude::*;
 
         let parsed: Vec<(PathBuf, Result<E::Entry>)> = self
@@ -140,10 +178,13 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
             })
             .collect();
 
-        let mut entries = Vec::with_capacity(parsed.len());
+        let mut sources = Vec::with_capacity(parsed.len());
         for (path, entry) in parsed {
             match entry {
-                Ok(entry) => entries.push(entry),
+                Ok(entry) => sources.push(MarkdownSource {
+                    entry,
+                    file: source_file_name(&path)?,
+                }),
                 Err(e) => ErrorLog::record(&format!(
                     "skipping unparseable {} file {}: {e:#}",
                     E::NAME,
@@ -151,8 +192,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
                 )),
             }
         }
-        E::sort_entries(&mut entries);
-        Ok(entries)
+        E::sort_sources(&mut sources);
+        Ok(sources)
     }
 
     /// Paths of every source markdown file in the directory. Empty when the
@@ -301,7 +342,11 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Build summaries directly from source without publishing derived files.
     pub(crate) fn source_summaries(&self) -> Result<Vec<E::Summary>> {
-        Ok(self.scan_lenient()?.iter().map(E::summary).collect())
+        Ok(self
+            .scan_sources_lenient()?
+            .iter()
+            .map(|source| E::summary(&source.entry, &source.file))
+            .collect())
     }
 
     /// Write `index.json` and any store-specific derived artifact.

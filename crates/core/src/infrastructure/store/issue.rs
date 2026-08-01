@@ -20,7 +20,9 @@ use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
-use crate::infrastructure::persistence::markdown_store::{MarkdownEntry, MarkdownStore};
+use crate::infrastructure::persistence::markdown_store::{
+    MarkdownEntry, MarkdownSource, MarkdownStore, source_file_name,
+};
 use crate::infrastructure::persistence::store_lock::StoreLock;
 use crate::infrastructure::store::MutationOutcome;
 use crate::infrastructure::store::issue_number_sequence::{
@@ -128,12 +130,17 @@ impl MarkdownEntry for IssueEntry {
         Ok(entry.file_name())
     }
 
-    fn summary(entry: &Issue) -> IssueSummary {
-        entry.summary()
+    fn summary(entry: &Issue, file: &str) -> IssueSummary {
+        entry.summary(file)
     }
 
-    fn sort_entries(entries: &mut Vec<Issue>) {
-        entries.sort_by_key(|i| i.number);
+    fn sort_sources(sources: &mut [MarkdownSource<Issue>]) {
+        sources.sort_by(|left, right| {
+            left.entry
+                .number
+                .cmp(&right.entry.number)
+                .then_with(|| left.file.cmp(&right.file))
+        });
     }
 
     fn index_parts(index: IndexFile) -> (u32, String, Vec<IssueSummary>) {
@@ -168,9 +175,7 @@ pub(crate) struct IssueSource {
 
 impl IssueSource {
     pub fn summary(self) -> IssueSummary {
-        let mut summary = self.issue.summary();
-        summary.file = self.file;
-        summary
+        self.issue.summary(&self.file)
     }
 }
 
@@ -320,11 +325,7 @@ impl IssueStore {
             if let Some(number) = filename_number {
                 claims.entry(number).or_default().push(path.clone());
             }
-            let file = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context(format!("source filename is not UTF-8: {}", path.display()))?
-                .to_owned();
+            let file = source_file_name(&path)?;
             match self.inner.read_existing_path(&path) {
                 Ok(issue) => sources.push(IssueSource {
                     issue,
@@ -539,33 +540,7 @@ impl IssueStore {
         if self.inner.derived_is_dirty() {
             return self.source_summaries();
         }
-        let files = self.issue_files()?;
-        let mut files_by_number = BTreeMap::new();
-        for path in &files {
-            let Some(number) = number_from_filename(path) else {
-                return self.source_summaries();
-            };
-            let file = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context(format!("source filename is not UTF-8: {}", path.display()))?
-                .to_owned();
-            if files_by_number.insert(number, file).is_some() {
-                return self.source_summaries();
-            }
-        }
-
-        let mut summaries = self.inner.summaries()?;
-        if summaries.len() != files_by_number.len() {
-            return self.source_summaries();
-        }
-        for summary in &mut summaries {
-            let Some(file) = files_by_number.remove(&summary.number) else {
-                return self.source_summaries();
-            };
-            summary.file = file;
-        }
-        Ok(summaries)
+        self.inner.summaries()
     }
 
     fn source_summaries(&self) -> Result<Vec<IssueSummary>> {
@@ -1262,6 +1237,51 @@ mod tests {
         assert_eq!(mismatch_store.summaries().unwrap()[0].file, "002-moved.md");
     }
 
+    /// The cache records the file each summary was read from, so the fast path
+    /// and the rebuild path answer with the same existing file rather than the
+    /// canonical name the next write would use.
+    #[test]
+    fn the_index_records_the_source_file_for_both_the_cached_and_rebuilt_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.dir().join("001-authored-by-hand.md"),
+            issue(1, "Title that never reached the file").to_markdown(),
+        )
+        .unwrap();
+
+        let rebuilt = store.summaries().unwrap();
+        assert_eq!(rebuilt[0].file, "001-authored-by-hand.md");
+        assert!(store.dir().join(&rebuilt[0].file).is_file());
+        assert!(
+            fs::read_to_string(store.index_path())
+                .unwrap()
+                .contains("001-authored-by-hand.md")
+        );
+
+        // The index is now fresh, so this read is served from the cache.
+        assert_eq!(store.summaries().unwrap(), rebuilt);
+    }
+
+    /// Writing canonicalizes the name, and the reported file follows the rename
+    /// rather than lagging on the name the previous write used.
+    #[test]
+    fn a_title_change_renames_the_file_and_the_reported_file_follows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "Old title")).unwrap();
+        assert_eq!(store.summaries().unwrap()[0].file, "001-old-title.md");
+
+        store.write(&issue(1, "New title")).unwrap();
+
+        assert!(!store.dir().join("001-old-title.md").exists());
+        let summaries = store.summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].file, "001-new-title.md");
+        assert!(store.dir().join(&summaries[0].file).is_file());
+    }
+
     #[test]
     fn index_records_the_format_version_and_summaries() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1656,7 +1676,7 @@ mod tests {
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
 
-        let mut cached = issue(1, "One").summary();
+        let mut cached = issue(1, "One").summary("001-one.md");
         cached.title = "Cached title".to_string();
         store.write_index(&[cached]).unwrap();
 
@@ -1671,7 +1691,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
-        let mut cached = issue(1, "One").summary();
+        let mut cached = issue(1, "One").summary("001-one.md");
         cached.title = "Stale cache".to_string();
         store.write_index(&[cached]).unwrap();
 

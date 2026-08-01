@@ -699,6 +699,28 @@ fn list_filters_by_status_priority_label_and_readiness() {
     assert_eq!(ready[0].summary.number, 1);
 }
 
+/// `search` builds its own summaries from a lenient scan, so it is a second
+/// place `file` could go stale. It must name the file on disk — this is the
+/// MCP `issue_search` path a coordinator resolves paths from.
+#[test]
+fn search_reports_the_file_on_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    create(repo, new_issue("Auth bug")).unwrap();
+    let dir = repo.join(".usagi/issues");
+    std::fs::rename(
+        dir.join("001-auth-bug.md"),
+        dir.join("001-renamed-by-hand.md"),
+    )
+    .unwrap();
+
+    let found = search(repo, "auth", &IssueFilter::default()).unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].summary.file, "001-renamed-by-hand.md");
+    assert!(dir.join(&found[0].summary.file).is_file());
+}
+
 #[test]
 fn search_matches_title_and_body_case_insensitively() {
     let tmp = tempfile::tempdir().unwrap();
