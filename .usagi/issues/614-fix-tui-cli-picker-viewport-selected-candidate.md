@@ -1,13 +1,13 @@
 ---
 number: 614
 title: fix(tui): CLI picker viewport を selected candidate に追従させる
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, tui, ux, render, correctness]
 dependson: []
 related: [578, 600]
 created_at: 2026-07-31T06:00:00+00:00
-updated_at: 2026-08-01T00:22:31.700288+00:00
+updated_at: 2026-08-01T00:41:45.061176+00:00
 ---
 
 ## Finding（P2 TUI）
