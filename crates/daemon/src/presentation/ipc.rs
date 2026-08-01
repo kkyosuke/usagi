@@ -332,6 +332,38 @@ pub fn handle_connection_with_terminal_and(
     let Some(admitted) = handshake_admitted(reader, writer, server)? else {
         return Ok(());
     };
+    handle_admitted_connection_with_terminal_and(
+        reader,
+        writer,
+        admitted,
+        fence,
+        terminal,
+        dispatch_request,
+    )
+}
+
+/// Serve a connection whose complete hello has already been read and answered.
+///
+/// The production Unix adapter uses this boundary to hold a daemon-wide permit
+/// and one absolute socket deadline for exactly the pre-handshake phase, then
+/// remove both before entering the established-connection policy below. Keeping
+/// the admitted hello as the input also ensures generation, workspace,
+/// capability, and credential decisions still come exclusively from
+/// [`handshake_admitted`].
+pub fn handle_admitted_connection_with_terminal_and(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    admitted: AdmittedConnection,
+    fence: &dyn ConnectionFence,
+    terminal: &mut dyn TerminalOwner,
+    dispatch_request: &mut dyn FnMut(
+        usagi_core::infrastructure::ipc::RequestId,
+        serde_json::Value,
+        &ServerHello,
+        usagi_core::domain::id::ConnectionId,
+        usagi_core::domain::id::ClientId,
+    ) -> Envelope,
+) -> io::Result<()> {
     let AdmittedConnection {
         hello,
         client_incarnation,

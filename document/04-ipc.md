@@ -59,6 +59,19 @@ transport は u32 big-endian length prefix と JSON payload の frame を運ぶ�
 場合だけ clean close とする。既定 frame 上限は 1 MiB であり、reader は長さを検証してから
 payload を確保する。
 
+daemon は accept 後から `ServerHello` または handshake error の write 完了までを **pre-handshake** として
+daemon-wide に最大 32 connection だけ admit する。上限を超えた socket は worker thread と request state を作る前に
+close する。hello をまだ読んでいない相手へ新しい error frame は送らないため wire state は増えず、daemon の error log には
+peer data・credential・workspace を含まない `capacity exhausted` を記録する。
+
+admit した pre-handshake connection は、prefix read、body read、hello validation、reply write を合わせて 2 秒の単一の
+monotonic completion deadline を持つ。各 socket read / write はその絶対時刻までの残量だけで待つため、partial prefix や
+partial body の到着で deadline は延長されない。timeout、truncated frame、invalid hello、reply write failure は socket を
+close して permit、thread、複製 FD を回収し、理由を秘密を含まない `deadline exceeded` または
+`invalid or incomplete hello` として記録する。handshake が成功した時点で permit と socket deadline を外すため、admit 済みの
+subscription / terminal lane の寿命や idle policy にはならない。shutdown / generation retirement は
+[5. daemon の client worker barrier](05-daemon.md#client-worker-の保持)で pre-handshake を含む全 worker を unblock / join する。
+
 `ClientPolicy.timeout_ms` / `reconnect_attempts` は surface 別（TUI 2s/3、CLI 10s/1、MCP 30s/1）の policy であり、
 CLI・MCP・TUI の per-request 経路は [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget) で
 これを実効化する。TUI の terminal lane はこの policy より小さい
@@ -946,6 +959,11 @@ socket の inode identity を再検証するため、bind 後に endpoint が置
 `publish_recovered_locator` は crash recovery 専用で、listener を所有しない process が committed handoff を roll forward
 するときにだけ使い、endpoint が当該 generation の private directory 内の安全な socket であることを再検証する
 （[5. daemon の cross-process generation authority](05-daemon.md#cross-process-generation-authority)）。
+
+accept は peer UID の一致を確認した後、[pre-handshake admission と deadline](#frame-と-handshake)を適用する。
+credential check は admission permit と worker spawn より前であり、不一致 peer は従来どおり protocol byte を読まずに close する。
+capacity refusal も accepted descriptor 以外を複製せずに close するため、同一 UID の peer が incomplete hello を保持しても
+daemon の thread / FD 使用量は pre-handshake 上限に比例して有界である。
 
 private directory は、検証済みの trusted parent directory の直下に `0700` を mkdir syscall へ指定して作る。
 そのため process が mkdir と事後 chmod の間で停止しても group / other に公開された directory は残らない。

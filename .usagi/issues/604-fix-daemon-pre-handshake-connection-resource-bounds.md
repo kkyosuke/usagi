@@ -1,13 +1,13 @@
 ---
 number: 604
 title: fix(daemon): pre-handshake connection に deadline と同時実行上限を設ける
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, ipc, security, resilience, resource]
 dependson: []
 related: [216, 521, 553]
 created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+updated_at: 2026-08-01T08:37:41+09:00
 ---
 
 ## Finding（P1 runtime/security）

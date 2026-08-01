@@ -3,7 +3,9 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
+use usagi_core::infrastructure::git::{
+    GitOutput, GitRunner, add_worktree, confined_git_command, remove_worktree,
+};
 use usagi_core::infrastructure::paths::STATE_DIR;
 
 use crate::usecase::session_runtime::SessionWorktreeIo;
@@ -12,13 +14,14 @@ use crate::usecase::session_runtime::SessionWorktreeIo;
 pub struct SystemGit;
 
 impl GitRunner for SystemGit {
-    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract
+    /// Every session Git effect — create, the nested worktrees of a mirrored
+    /// tree, remove — reaches the binary here, so confining the environment once
+    /// at this seam scopes all of them. The daemon inherits the environment of
+    /// whoever started it, and an inherited `GIT_DIR` (or any of the rest of the
+    /// namespace) outranks the `-C <repo>` this passes.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract,git_environment_confinement
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()?;
+        let output = confined_git_command(repo).args(args).output()?;
         Ok(GitOutput {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
