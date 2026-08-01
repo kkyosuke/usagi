@@ -198,6 +198,7 @@ mod tests {
                 daemon,
                 LifecycleEvent::ReserveCreate {
                     name: "one".into(),
+                    role_id: None,
                     operation,
                 },
                 now(),
@@ -231,6 +232,7 @@ mod tests {
                     daemon,
                     LifecycleEvent::ReserveCreate {
                         name: "one".into(),
+                        role_id: None,
                         operation
                     },
                     now()
@@ -258,6 +260,7 @@ mod tests {
                     daemon,
                     LifecycleEvent::ReserveCreate {
                         name: "one".into(),
+                        role_id: None,
                         operation,
                     },
                     now(),

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::id::{
     CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
 };
+use crate::domain::role::RoleId;
 
 /// The physical availability of a managed session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +219,10 @@ pub struct ManagedSession {
     /// and survives daemon restart; a display name is never used as its key.
     pub worktree_id: WorktreeId,
     pub name: String,
+    /// Stable role assignment for this incarnation. Missing on legacy records
+    /// and never populated implicitly during migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_id: Option<RoleId>,
     pub lifecycle: SessionLifecycle,
     pub attempt: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,10 +239,21 @@ pub struct ManagedSession {
 impl ManagedSession {
     #[must_use]
     pub fn new_creating(name: String, operation_id: OperationId, now: DateTime<Utc>) -> Self {
+        Self::new_creating_with_role(name, operation_id, now, None)
+    }
+
+    #[must_use]
+    pub fn new_creating_with_role(
+        name: String,
+        operation_id: OperationId,
+        now: DateTime<Utc>,
+        role_id: Option<RoleId>,
+    ) -> Self {
         Self {
             session_id: SessionId::new(),
             worktree_id: WorktreeId::new(),
             name,
+            role_id,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
             operation_id: Some(operation_id),
@@ -257,6 +273,7 @@ impl ManagedSession {
             session_id: SessionId::new(),
             worktree_id: WorktreeId::new(),
             name,
+            role_id: None,
             lifecycle: SessionLifecycle::Available,
             attempt: 1,
             operation_id: None,
@@ -440,6 +457,7 @@ impl WorkspaceLifecycleState {
 pub enum LifecycleEvent {
     ReserveCreate {
         name: String,
+        role_id: Option<RoleId>,
         operation: OperationJournal,
     },
     CreateCompleted {
@@ -480,15 +498,19 @@ pub fn reduce(
 ) -> Result<(), LifecycleError> {
     state.validate()?;
     match event {
-        LifecycleEvent::ReserveCreate { name, operation } => {
+        LifecycleEvent::ReserveCreate {
+            name,
+            role_id,
+            operation,
+        } => {
             validate_session_name(&name)?;
             if state.sessions.iter().any(|s| s.name == name) {
                 return Err(LifecycleError::DuplicateSessionName);
             }
             let id = operation.operation_id;
-            state
-                .sessions
-                .push(ManagedSession::new_creating(name, id, now));
+            state.sessions.push(ManagedSession::new_creating_with_role(
+                name, id, now, role_id,
+            ));
             state.operations.push(operation);
             state.changed(now);
             Ok(())
@@ -734,6 +756,24 @@ mod tests {
         assert!(adopted.operation_id.is_none());
     }
     #[test]
+    fn managed_session_role_is_stable_and_legacy_json_remains_compatible() {
+        let legacy = ManagedSession::adopt_available("legacy".into(), now());
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(wire.get("role_id").is_none());
+        let decoded: ManagedSession = serde_json::from_value(wire).unwrap();
+        assert!(decoded.role_id.is_none());
+
+        let assigned = ManagedSession::new_creating_with_role(
+            "review".into(),
+            OperationId::new(),
+            now(),
+            Some(crate::domain::role::RoleId::new("reviewer").unwrap()),
+        );
+        let decoded: ManagedSession =
+            serde_json::from_value(serde_json::to_value(&assigned).unwrap()).unwrap();
+        assert_eq!(decoded.role_id.unwrap().as_str(), "reviewer");
+    }
+    #[test]
     fn agent_phase_tokens_and_wired_hook_events_stay_a_closed_vocabulary() {
         for phase in AgentPhase::ALL {
             // The token is the wire name, so one vocabulary covers the hook
@@ -772,6 +812,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "a".into(),
+                role_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -809,6 +850,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "x".into(),
+                role_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -846,6 +888,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "x".into(),
+                role_id: None,
                 operation: fresh,
             },
             now(),
@@ -875,6 +918,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "a".into(),
+                role_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -946,6 +990,7 @@ mod tests {
                 &mut state,
                 LifecycleEvent::ReserveCreate {
                     name: "../victim".into(),
+                    role_id: None,
                     operation: op(),
                 },
                 now(),
@@ -993,6 +1038,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "a".into(),
+                role_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1003,6 +1049,7 @@ mod tests {
                 &mut state,
                 LifecycleEvent::ReserveCreate {
                     name: "a".into(),
+                    role_id: None,
                     operation: op()
                 },
                 now()
@@ -1089,6 +1136,7 @@ mod tests {
             &mut available,
             LifecycleEvent::ReserveCreate {
                 name: "b".into(),
+                role_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1186,6 +1234,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "legacy".into(),
+                role_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1263,6 +1312,7 @@ mod tests {
             &mut state,
             LifecycleEvent::ReserveCreate {
                 name: "terminal".into(),
+                role_id: None,
                 operation: operation.clone(),
             },
             now(),

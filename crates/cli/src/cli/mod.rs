@@ -262,6 +262,9 @@ pub enum DaemonCommand {
 pub enum SessionCommand {
     Create {
         name: String,
+        /// Stable session role selected from the effective role catalog.
+        #[arg(long)]
+        role: Option<String>,
     },
     Remove {
         name: String,
@@ -366,9 +369,10 @@ impl Run for Session {
     #[coverage(off)]
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         let (action, payload) = match &self.command {
-            SessionCommand::Create { name } => {
-                (SessionAction::Create, serde_json::json!({"name": name}))
-            }
+            SessionCommand::Create { name, role } => (
+                SessionAction::Create,
+                serde_json::json!({"name": name, "role": role}),
+            ),
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
@@ -695,7 +699,10 @@ mod tests {
             );
         }
         assert!(matches!(
-            SessionCommand::Create { name: "a".into() },
+            SessionCommand::Create {
+                name: "a".into(),
+                role: None,
+            },
             SessionCommand::Create { .. }
         ));
 
@@ -728,6 +735,34 @@ mod tests {
             RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace })
                 if workspace == target.workspace_id
         ));
+    }
+
+    #[test]
+    fn session_create_role_flag_is_forwarded_as_identity_only() {
+        let parsed = Cli::try_parse_from([
+            "usagi",
+            "session",
+            "create",
+            "review-auth",
+            "--role",
+            "reviewer",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        let (outcome, _) = super::execute(parsed);
+        let RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
+            action: usagi_core::usecase::client::SessionAction::Create,
+            payload,
+            ..
+        }) = outcome
+        else {
+            panic!("expected session create request");
+        };
+        assert_eq!(
+            payload,
+            serde_json::json!({"name":"review-auth", "role":"reviewer"})
+        );
     }
 
     /// TUI を開くコマンドは、解析済み引数を保った起動要求を返す。

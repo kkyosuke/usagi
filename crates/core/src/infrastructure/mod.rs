@@ -26,5 +26,6 @@ pub mod gitignore;
 pub mod ipc;
 pub mod paths;
 pub mod persistence;
+pub mod role_catalog;
 pub mod runtime_model;
 pub mod store;

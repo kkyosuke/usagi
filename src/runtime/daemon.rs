@@ -19,7 +19,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::prompt::session_system_prompt;
+use usagi_core::domain::agent::prompt::session_system_prompt_with_role;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -421,6 +421,9 @@ impl CodexProvisioner for RootCodexProvisioner {
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let mode = sandbox_mode(context);
+        let role =
+            effective_role_instruction(&self.sessions, &self.data_home, &workspace_root, context)
+                .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let local_llm_model = context
             .inject_mcp
             .then(|| configured_local_llm_model(&self.data_home))
@@ -433,6 +436,8 @@ impl CodexProvisioner for RootCodexProvisioner {
             .unwrap_or_default();
         arguments.extend(codex_system_prompt_arguments(
             mode,
+            role.as_ref()
+                .map(|(id, instructions)| (id, instructions.as_str())),
             local_llm_model.is_some(),
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
@@ -477,6 +482,9 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // `guard-workspace` フックは session 起動だけに配線し、root 起動では書き込みの境界を
         // sandbox の writable root に委ねる。
         let mode = sandbox_mode(context);
+        let role =
+            effective_role_instruction(&self.sessions, &self.data_home, &workspace_root, context)
+                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let local_llm_model = context
             .inject_mcp
             .then(|| configured_local_llm_model(&self.data_home))
@@ -493,6 +501,8 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         );
         arguments.extend(claude_system_prompt_arguments(
             mode,
+            role.as_ref()
+                .map(|(id, instructions)| (id, instructions.as_str())),
             local_llm_model.is_some(),
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
@@ -598,9 +608,14 @@ fn claude_settings_arguments(usagi: &Path, mode: SandboxMode) -> Result<Vec<Stri
 
 /// The scope-specific system prompt passed as one opaque argv value. Unlike the
 /// hook command payload, this never crosses a shell or JSON boundary.
-fn claude_system_prompt_arguments(mode: SandboxMode, local_llm_delegation: bool) -> Vec<String> {
-    claude_prompt_arguments(session_system_prompt(
+fn claude_system_prompt_arguments(
+    mode: SandboxMode,
+    role: Option<(&usagi_core::domain::role::RoleId, &str)>,
+    local_llm_delegation: bool,
+) -> Vec<String> {
+    claude_prompt_arguments(session_system_prompt_with_role(
         mode == SandboxMode::Root,
+        role,
         local_llm_delegation,
     ))
 }
@@ -731,9 +746,14 @@ fn codex_integration_arguments(
 
 /// The scope-specific system prompt rendered as one Codex `-c` assignment.
 /// Both argv elements stay ephemeral and precede the durable product argv.
-fn codex_system_prompt_arguments(mode: SandboxMode, local_llm_delegation: bool) -> Vec<String> {
-    codex_developer_instructions_arguments(&session_system_prompt(
+fn codex_system_prompt_arguments(
+    mode: SandboxMode,
+    role: Option<(&usagi_core::domain::role::RoleId, &str)>,
+    local_llm_delegation: bool,
+) -> Vec<String> {
+    codex_developer_instructions_arguments(&session_system_prompt_with_role(
         mode == SandboxMode::Root,
+        role,
         local_llm_delegation,
     ))
 }
@@ -850,6 +870,51 @@ fn working_directories(
             .map_err(|_| ()),
     }?;
     Ok((working_directory, workspace_root))
+}
+
+/// Resolves only safe role identity under the session lock, then reads the
+/// current definition from the registered workspace catalog. The instruction
+/// remains in this ephemeral provision path and is never copied into a launch
+/// request, durable snapshot, dispatch record, response, or log.
+fn effective_role_instruction(
+    sessions: &SharedSessionRuntime,
+    data_home: &paths::DataHome,
+    workspace_root: &Path,
+    context: &ProvisionContext,
+) -> Result<Option<(usagi_core::domain::role::RoleId, String)>, ()> {
+    use usagi_core::domain::role::RoleScope;
+
+    let assigned = match context.scope.session_id {
+        Some(session_id) => sessions
+            .lock()
+            .map_err(|_| ())?
+            .session_role(session_id)
+            .map_err(|_| ())?,
+        None => None,
+    };
+    let catalog = usagi_core::infrastructure::role_catalog::load_effective(
+        &data_home.selected(),
+        workspace_root,
+    )
+    .map_err(|_| ())?;
+    let scope = if context.scope.session_id.is_some() {
+        RoleScope::Session
+    } else {
+        RoleScope::Root
+    };
+    // A legacy managed session remains generic even if a catalog is introduced
+    // later. Root launches have no durable session assignment and therefore
+    // resolve the current root default at each launch.
+    let selected = if context.scope.session_id.is_some() && assigned.is_none() {
+        None
+    } else {
+        catalog.resolve(assigned.as_ref(), scope).map_err(|_| ())?
+    };
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let definition = catalog.roles.get(&selected).ok_or(())?;
+    Ok(Some((selected, definition.instructions.clone())))
 }
 
 /// The #268 scope resolver, adapted to the Agent owner's product-neutral
@@ -2919,6 +2984,8 @@ fn dispatch_agent_tool(
     #[derive(Deserialize)]
     struct SessionPayload {
         name: String,
+        #[serde(default)]
+        role: Option<usagi_core::domain::role::RoleId>,
     }
     #[derive(Deserialize)]
     struct DispatchPayload {
@@ -3065,37 +3132,36 @@ fn dispatch_agent_tool(
                     DispatchAgentIntent::New { runtime, model }
                 };
                 let session_name = input.session.name;
-                let session_id = if let Some(id) = session_id_by_name(&snapshot, &session_name) {
-                    id
-                } else {
-                    drop(runtime);
-                    let created = sessions
-                        .lock()
-                        .map_err(|_| {
-                            ProtocolError::new(
-                                ErrorCode::Unavailable,
-                                "session runtime is unavailable",
-                            )
-                        })?
-                        .handle(
-                            usagi_core::usecase::client::SessionAction::Create,
-                            &operation_id,
-                            &serde_json::json!({"name": session_name}),
-                        )
-                        .map_err(|error| {
-                            ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
-                        })?;
-                    let id = session_id_by_name(&created.body, &session_name).ok_or_else(|| {
+                let requested_role = input.session.role;
+                drop(runtime);
+                let created = sessions
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+                    })?
+                    .handle(
+                        usagi_core::usecase::client::SessionAction::Create,
+                        &operation_id,
+                        &serde_json::json!({"name": session_name, "role": requested_role}),
+                    )
+                    .map_err(|error| {
+                        let code = if matches!(error, SessionRuntimeError::RoleConflict { .. }) {
+                            ErrorCode::RevisionConflict
+                        } else {
+                            ErrorCode::InvalidArgument
+                        };
+                        ProtocolError::new(code, error.safe_message())
+                    })?;
+                let session_id =
+                    session_id_by_name(&created.body, &session_name).ok_or_else(|| {
                         ProtocolError::new(
                             ErrorCode::Unavailable,
                             "created session is not available",
                         )
                     })?;
-                    runtime = agent.lock().map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
-                    })?;
-                    id
-                };
+                runtime = agent.lock().map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })?;
                 let scope = SharedScopeResolver(Arc::clone(sessions));
                 let admission = runtime.dispatch(
                     &operation_id,
@@ -3143,9 +3209,25 @@ fn dispatch_agent_tool(
                     ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                 })?;
                 let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                let session_metadata = snapshot
+                    .get("sessions")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|items| {
+                        items.iter().find(|item| {
+                            item.get("session_id") == Some(&serde_json::json!(session_id))
+                        })
+                    });
+                let role_id = session_metadata
+                    .and_then(|item| item.get("role_id"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let role_summary = session_metadata
+                    .and_then(|item| item.get("role_summary"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 Ok((
                     ResponseOutcome::Ok,
-                    serde_json::json!({"session": input.name, "agents": agents}),
+                    serde_json::json!({"session": input.name, "role_id": role_id, "role_summary": role_summary, "agents": agents}),
                 ))
             }
             DispatchToolAction::AgentList => {
@@ -4562,6 +4644,7 @@ fn dispatch_session_action(
                     ),
                 )
             };
+            let requested_role = payload.get("role").cloned();
             if action == SessionAction::DelegateBrief {
                 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
                 use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
@@ -4620,7 +4703,7 @@ fn dispatch_session_action(
                     .handle(
                         SessionAction::Create,
                         operation_id,
-                        &serde_json::json!({"name": name}),
+                        &serde_json::json!({"name": name, "role": requested_role}),
                     )?;
                 let id = sessions
                     .lock()
@@ -4658,7 +4741,7 @@ fn dispatch_session_action(
                 .handle(
                     SessionAction::Create,
                     operation_id,
-                    &serde_json::json!({"name": name}),
+                    &serde_json::json!({"name": name, "role": requested_role}),
                 )?;
             let id = sessions
                 .lock()
@@ -11394,7 +11477,7 @@ mod tests {
             (SandboxMode::Root, root_prompt()),
             (SandboxMode::Session, session_worktree_prompt()),
         ] {
-            let claude = claude_system_prompt_arguments(mode, false);
+            let claude = claude_system_prompt_arguments(mode, None, false);
             assert_eq!(claude, ["--append-system-prompt", expected]);
             assert_eq!(
                 claude
@@ -11404,7 +11487,7 @@ mod tests {
                 1
             );
 
-            let codex = codex_system_prompt_arguments(mode, false);
+            let codex = codex_system_prompt_arguments(mode, None, false);
             assert_eq!(codex[0], "-c");
             assert_eq!(
                 codex
@@ -11420,17 +11503,17 @@ mod tests {
         // A later resolve (including a resume replacement) regenerates from
         // its current scope instead of retaining the previous provision.
         assert_ne!(
-            claude_system_prompt_arguments(SandboxMode::Root, false),
-            claude_system_prompt_arguments(SandboxMode::Session, false)
+            claude_system_prompt_arguments(SandboxMode::Root, None, false),
+            claude_system_prompt_arguments(SandboxMode::Session, None, false)
         );
         assert_ne!(
-            codex_system_prompt_arguments(SandboxMode::Root, false),
-            codex_system_prompt_arguments(SandboxMode::Session, false)
+            codex_system_prompt_arguments(SandboxMode::Root, None, false),
+            codex_system_prompt_arguments(SandboxMode::Session, None, false)
         );
 
-        let claude = claude_system_prompt_arguments(SandboxMode::Session, true);
+        let claude = claude_system_prompt_arguments(SandboxMode::Session, None, true);
         assert!(claude[1].contains(local_llm_delegation_prompt()));
-        let codex = codex_system_prompt_arguments(SandboxMode::Session, true);
+        let codex = codex_system_prompt_arguments(SandboxMode::Session, None, true);
         let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
         assert!(
             parsed["developer_instructions"]
@@ -11438,6 +11521,70 @@ mod tests {
                 .unwrap()
                 .contains(local_llm_delegation_prompt())
         );
+    }
+
+    #[test]
+    fn role_instruction_is_injected_once_for_claude_and_codex_without_entering_user_prompt() {
+        let role = usagi_core::domain::role::RoleId::new("reviewer").unwrap();
+        let instructions = "Review correctness and tests.";
+        let claude = claude_system_prompt_arguments(
+            SandboxMode::Session,
+            Some((&role, instructions)),
+            false,
+        );
+        assert_eq!(claude[0], "--append-system-prompt");
+        assert_eq!(claude[1].matches("<role id=\"reviewer\">").count(), 1);
+        assert_eq!(claude[1].matches(instructions).count(), 1);
+
+        let codex =
+            codex_system_prompt_arguments(SandboxMode::Session, Some((&role, instructions)), false);
+        let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
+        let prompt = parsed["developer_instructions"].as_str().unwrap();
+        assert_eq!(prompt.matches("<role id=\"reviewer\">").count(), 1);
+        assert_eq!(prompt.matches(instructions).count(), 1);
+        assert!(!codex.iter().any(|argument| argument == instructions));
+    }
+
+    #[test]
+    fn root_role_definition_is_resolved_from_the_current_catalog_at_each_launch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().join("workspace");
+        let data = temporary.path().join("data");
+        std::fs::create_dir_all(workspace.join(".usagi")).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let data_home = paths::DataHome::new(&data, paths::RuntimeMode::Production);
+        let sessions = open_session_runtime(
+            workspace.clone(),
+            &data.join("daemon"),
+            DaemonGeneration::new(),
+        )
+        .unwrap();
+        let context = provision_context(None);
+        let catalog = |instructions: &str| {
+            format!(
+                r#"version = 1
+[defaults]
+root = "director"
+[roles.director]
+summary = "Direct"
+scopes = ["root"]
+instructions = "{instructions}"
+"#
+            )
+        };
+
+        std::fs::write(data.join("roles.toml"), catalog("first launch policy")).unwrap();
+        let first = effective_role_instruction(&sessions, &data_home, &workspace, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.0.as_str(), "director");
+        assert_eq!(first.1, "first launch policy");
+
+        std::fs::write(data.join("roles.toml"), catalog("next launch policy")).unwrap();
+        let next = effective_role_instruction(&sessions, &data_home, &workspace, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.1, "next launch policy");
     }
 
     #[test]
@@ -11460,7 +11607,11 @@ mod tests {
     fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
         let mut codex_arguments =
             codex_integration_arguments(Path::new("/opt/usagi/bin/usagi"), None).unwrap();
-        codex_arguments.extend(codex_system_prompt_arguments(SandboxMode::Session, false));
+        codex_arguments.extend(codex_system_prompt_arguments(
+            SandboxMode::Session,
+            None,
+            false,
+        ));
         codex_arguments.extend(["resume".to_owned(), "provider-session".to_owned()]);
         let codex = SpawnProvision::new([], codex_arguments);
         let (_, argv) = provisioned_agent_command(
@@ -11486,10 +11637,10 @@ mod tests {
             1
         );
 
-        let prompt = session_system_prompt(false, false);
+        let prompt = usagi_core::domain::agent::prompt::session_system_prompt(false, false);
         let mut claude = SpawnProvision::new(
             [],
-            claude_system_prompt_arguments(SandboxMode::Session, false),
+            claude_system_prompt_arguments(SandboxMode::Session, None, false),
         );
         claude.set_sandbox_launcher(SandboxLauncher {
             program: "/opt/usagi/bin/usagi".to_owned(),

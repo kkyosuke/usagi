@@ -127,7 +127,7 @@ impl Tool for SessionDispatch {
         "session を upsert し、agent に prompt を即時実行させる"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"session":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string"}},"required":["session","agent","prompt"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"session":{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"}},"required":["name"],"additionalProperties":false},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string"}},"required":["session","agent","prompt"],"additionalProperties":false}"#
     }
 }
 pub struct SessionGet;
@@ -214,7 +214,7 @@ impl Tool for SessionCreate {
         "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、作成は非同期に受理される。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
     }
 }
 
@@ -484,7 +484,7 @@ impl Tool for SessionDelegateIssue {
         "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"]}"#
+        r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"role":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"]}"#
     }
 }
 
@@ -499,6 +499,6 @@ impl Tool for SessionDelegateBrief {
         "事前 issue の無い作業を始めるときに使う。ブリーフからトリアージ/設計セッションを作成し、選択した agent へ直ちに実行を dispatch する。brief と agent 必須。委譲先が worktree 内で issue 化する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]}},"required":["brief","agent"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"role":{"type":"string"},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]}},"required":["brief","agent"],"additionalProperties":false}"#
     }
 }

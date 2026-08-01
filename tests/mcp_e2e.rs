@@ -82,6 +82,85 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
     assert!(lifecycle.contains("mcp-e2e-session"));
 }
 
+#[test]
+fn production_session_roles_default_project_and_conflict_without_instruction_leakage() {
+    let mut mcp = McpHarness::start();
+    fs::write(
+        mcp.workspace().join(".usagi/roles.toml"),
+        r#"version = 1
+[defaults]
+session = "coder"
+[roles.coder]
+summary = "Implement changes"
+scopes = ["session"]
+instructions = "ROLE_SECRET_CODER_INSTRUCTION"
+[roles.reviewer]
+summary = "Review changes"
+scopes = ["session"]
+instructions = "ROLE_SECRET_REVIEWER_INSTRUCTION"
+"#,
+    )
+    .unwrap();
+
+    let defaulted = mcp.tool("session_create", &json!({"name":"role-default"}));
+    assert!(defaulted.get("error").is_none(), "{defaulted}");
+    let explicit = mcp.tool(
+        "session_create",
+        &json!({"name":"role-review", "role":"reviewer"}),
+    );
+    assert!(explicit.get("error").is_none(), "{explicit}");
+    let idempotent = mcp.tool(
+        "session_create",
+        &json!({"name":"role-review", "role":"reviewer"}),
+    );
+    assert!(idempotent.get("error").is_none(), "{idempotent}");
+    let conflict = mcp.tool(
+        "session_create",
+        &json!({"name":"role-review", "role":"coder"}),
+    );
+    assert!(conflict.get("error").is_some(), "{conflict}");
+
+    let list = tool_text(&mcp.tool("session_list", &json!({})));
+    assert!(!list.to_string().contains("ROLE_SECRET_"));
+    let defaulted = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "role-default")
+        .unwrap();
+    assert_eq!(defaulted["role_id"], "coder");
+    assert_eq!(defaulted["role_summary"], "Implement changes");
+    let review = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "role-review")
+        .unwrap();
+    assert_eq!(review["role_id"], "reviewer");
+
+    let lifecycle = fs::read_to_string(mcp.data_dir().join("daemon/sessions.json")).unwrap();
+    assert!(lifecycle.contains("\"role_id\": \"reviewer\""));
+    assert!(!lifecycle.contains("ROLE_SECRET_"));
+
+    fs::write(mcp.workspace().join(".usagi/roles.toml"), "version = 99\n").unwrap();
+    let rejected = mcp.tool("session_create", &json!({"name":"role-invalid"}));
+    assert!(rejected.get("error").is_some(), "{rejected}");
+    assert!(
+        !mcp.workspace()
+            .join(".usagi/sessions/role-invalid")
+            .exists()
+    );
+    let still_visible = tool_text(&mcp.tool("session_list", &json!({})));
+    assert_eq!(still_visible["sessions"].as_array().unwrap().len(), 2);
+    assert!(
+        still_visible["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session["role_summary"].is_null())
+    );
+}
+
 /// `session_remove` returns an acceptance and the daemon's own teardown worker
 /// finishes the worktree removal afterwards. The wiring is what matters here: a
 /// removal that only completed while the MCP request was still open would hold
@@ -146,6 +225,12 @@ fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() 
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();
     mcp.restart_with_credential(&caller_credential);
+    write_session_role_catalog(
+        &mcp,
+        "reviewer",
+        "Review delegated work",
+        "DELEGATE_ROLE_SECRET",
+    );
     mcp.replace_fixture_agent(
         "codex",
         r#"#!/bin/sh
@@ -161,6 +246,7 @@ printf '%s\n%s\n%s\n' \
         "session_delegate_brief",
         &json!({
             "name":"brief-target",
+            "role":"reviewer",
             "brief":"investigate flaky startup",
             "agent":{"runtime":"codex","model":"fixture-codex"}
         }),
@@ -177,6 +263,15 @@ printf '%s\n%s\n%s\n' \
     );
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
     assert!(dispatch.contains("investigate flaky startup"));
+    assert!(!dispatch.contains("DELEGATE_ROLE_SECRET"));
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let delegated_session = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "brief-target")
+        .unwrap();
+    assert_eq!(delegated_session["role_id"], "reviewer");
     wait_until(|| {
         let inbox = mcp.tool("agent_inbox", &json!({}));
         inbox.get("error").is_none()
@@ -565,9 +660,48 @@ fn production_delegate_issue_preserves_ambiguity_without_session_or_queue_side_e
     assert!(branch.stdout.is_empty());
 }
 
+#[test]
+fn production_delegate_issue_assigns_the_selected_role_without_persisting_instructions() {
+    let mut mcp = McpHarness::start();
+    write_session_role_catalog(&mcp, "coder", "Implement an issue", "ISSUE_ROLE_SECRET");
+    fs::create_dir_all(mcp.workspace().join(".usagi/issues")).unwrap();
+    fs::write(
+        mcp.workspace().join(".usagi/issues/001-delegated-role.md"),
+        "---\nnumber: 1\ntitle: Delegated role\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-08-01T00:00:00+00:00\nupdated_at: 2026-08-01T00:00:00+00:00\n---\n\nImplement it.\n",
+    )
+    .unwrap();
+
+    let response = mcp.tool(
+        "session_delegate_issue",
+        &json!({"number":1, "name":"role-issue", "role":"coder"}),
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let delegated = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "role-issue")
+        .unwrap();
+    assert_eq!(delegated["role_id"], "coder");
+    assert_eq!(delegated["role_summary"], "Implement an issue");
+    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
+    assert!(!dispatch.contains("ISSUE_ROLE_SECRET"));
+}
+
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {
     assert!(response.get("error").is_none(), "{response}");
     serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+fn write_session_role_catalog(mcp: &McpHarness, id: &str, summary: &str, instructions: &str) {
+    fs::write(
+        mcp.workspace().join(".usagi/roles.toml"),
+        format!(
+            "version = 1\n[roles.{id}]\nsummary = {summary:?}\nscopes = [\"session\"]\ninstructions = {instructions:?}\n"
+        ),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -812,6 +946,7 @@ fn production_dispatch_worker_complete_reaches_the_caller_inbox() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();
     mcp.restart_with_credential(&caller_credential);
+    write_session_role_catalog(&mcp, "coder", "Dispatch coder", "DISPATCH_ROLE_SECRET");
     mcp.replace_fixture_agent(
         "codex",
         r#"#!/bin/sh
@@ -827,7 +962,7 @@ printf '%s\n%s\n%s\n' \
     let dispatched = mcp.tool(
         "session_dispatch",
         &json!({
-            "session":{"name":"mcp-worker"},
+            "session":{"name":"mcp-worker", "role":"coder"},
             "agent":{"runtime":"codex","model":"fixture-codex"},
             "prompt":"complete through MCP"
         }),
@@ -837,6 +972,10 @@ printf '%s\n%s\n%s\n' \
         serde_json::from_str(dispatched["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(admission["run_id"].is_string());
     assert!(admission["terminal"].is_object());
+
+    let session = tool_text(&mcp.tool("session_get", &json!({"name":"mcp-worker"})));
+    assert_eq!(session["role_id"], "coder");
+    assert_eq!(session["role_summary"], "Dispatch coder");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let message = loop {
@@ -906,5 +1045,6 @@ printf '%s\n%s\n%s\n' \
         );
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(mcp.data_dir().join("daemon/dispatch.json").exists());
+    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
+    assert!(!dispatch.contains("DISPATCH_ROLE_SECRET"));
 }
