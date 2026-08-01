@@ -402,7 +402,7 @@ struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
-    data_home: PathBuf,
+    data_home: paths::DataHome,
     /// The executable this profile launches: `codex`, or `codex-fugu` for the
     /// Codex-compatible `sakana-ai` profile.
     program: &'static str,
@@ -455,7 +455,7 @@ struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
-    data_home: PathBuf,
+    data_home: paths::DataHome,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the sandbox and MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
@@ -543,16 +543,21 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 /// A session launch therefore writes into its own worktree plus the shared usagi
 /// state it must update (issue store, Git common dir, daemon data home), while a
 /// root launch writes into the project root because that *is* its cwd.
+///
+/// The data home is granted as the mode-neutral base rather than the daemon's
+/// selected directory: the child re-applies the runtime mode itself, so it may
+/// still have to create that child directory. Production's base is the selected
+/// directory, so this grants exactly the daemon's own tree — never its parent.
 fn claude_writable_roots(
     working_directory: &Path,
     workspace_root: &Path,
-    data_home: &Path,
+    data_home: &paths::DataHome,
 ) -> Vec<PathBuf> {
     vec![
         working_directory.to_path_buf(),
         workspace_root.join(".usagi"),
         workspace_root.join(".git"),
-        data_home.to_path_buf(),
+        data_home.base().to_path_buf(),
     ]
 }
 
@@ -657,9 +662,14 @@ fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<Environment
     }
 }
 
+/// The child's data-home half of the contract: it receives the mode-neutral
+/// base plus the mode that selects the daemon's own directory below it, so
+/// re-applying the mode lands it on the very directory the daemon is using.
+/// Both values come from the one [`paths::DataHome`] pair, never from separate
+/// derivations that could disagree.
 fn mcp_environment(
     context: &ProvisionContext,
-    data_home: &Path,
+    data_home: &paths::DataHome,
     workspace_root: &Path,
 ) -> Result<Vec<(EnvironmentVariableName, String)>, ()> {
     context
@@ -669,19 +679,14 @@ fn mcp_environment(
                 (
                     EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
                         .expect("literal environment variable name is valid"),
-                    data_home.to_str().ok_or(())?.to_owned(),
+                    data_home.base().to_str().ok_or(())?.to_owned(),
                 ),
                 (
                     EnvironmentVariableName::new(
                         usagi_core::infrastructure::paths::RUNTIME_MODE_ENV,
                     )
                     .expect("literal environment variable name is valid"),
-                    match paths::runtime_mode() {
-                        paths::RuntimeMode::Production => "production",
-                        paths::RuntimeMode::Development => "development",
-                        paths::RuntimeMode::Local => "local",
-                    }
-                    .to_owned(),
+                    data_home.mode().as_env_value().to_owned(),
                 ),
                 (
                     EnvironmentVariableName::new(
@@ -778,8 +783,12 @@ fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result
 /// Read the daemon-owned global setting at provision time. An unreadable file
 /// fails closed to disabled; a hand-edited model has already been sanitized by
 /// [`Storage::load_settings`].
-fn configured_local_llm_model(data_home: &Path) -> Option<String> {
-    match Storage::new(data_home).load_settings() {
+///
+/// Global settings live in the *selected* directory — that is where
+/// `Storage::open_default` and the daemon's own [`UserEnvironment`] write them —
+/// so this reads the same file those writers own, not the mode-neutral base.
+fn configured_local_llm_model(data_home: &paths::DataHome) -> Option<String> {
+    match Storage::new(data_home.selected()).load_settings() {
         Ok(settings) => settings
             .local_llm
             .enabled
@@ -2258,9 +2267,11 @@ fn open_agent_runtime(
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
     // Agent MCP children receive the mode-neutral base. They apply the same
-    // selected runtime mode themselves, so both `dev/` and `local/` reach the
-    // daemon's already-selected directory without adding that child twice.
-    let data_home = data_dir.parent().unwrap_or(data_dir).to_path_buf();
+    // selected runtime mode themselves, so every mode reaches the daemon's
+    // already-selected directory without adding that child twice. Production
+    // selects the base itself, so the pair — not a `parent()` guess — is what
+    // keeps this from resolving one level above the data home (#608).
+    let data_home = paths::DataHome::from_selected(data_dir, paths::runtime_mode());
     // Duplicate registration cannot happen for the two literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
@@ -11352,9 +11363,11 @@ mod tests {
     fn local_llm_setting_is_sanitized_before_daemon_provisioning() {
         use usagi_core::domain::settings::{LocalLlm, Settings};
 
-        let data_home = tempfile::tempdir().unwrap();
-        let storage = Storage::new(data_home.path());
-        assert_eq!(configured_local_llm_model(data_home.path()), None);
+        let base = tempfile::tempdir().unwrap();
+        // Production selects the base itself, so its settings file is the base's.
+        let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
+        let storage = Storage::new(data_home.selected());
+        assert_eq!(configured_local_llm_model(&data_home), None);
 
         storage
             .save_settings(&Settings {
@@ -11366,7 +11379,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            configured_local_llm_model(data_home.path()).as_deref(),
+            configured_local_llm_model(&data_home).as_deref(),
             Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
         );
     }
@@ -11518,6 +11531,85 @@ mod tests {
         }
     }
 
+    /// Every consumer of the Agent child's data home must agree on the base the
+    /// daemon actually runs from, in all three runtime modes and under a custom
+    /// `$USAGI_HOME`. Before #608 the base was guessed as the selected
+    /// directory's `parent()`, which is correct only for `dev/` and `local/`:
+    /// production selects the base itself, so the guess handed the child — and
+    /// the sandbox — the directory *above* the data home.
+    #[test]
+    fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
+        use usagi_core::domain::settings::{LocalLlm, Settings};
+
+        let context = provision_context(Some(SessionId::new()));
+        for mode in [
+            paths::RuntimeMode::Production,
+            paths::RuntimeMode::Development,
+            paths::RuntimeMode::Local,
+        ] {
+            // One custom `$USAGI_HOME` per mode, so a value read from the wrong
+            // directory cannot be satisfied by another mode's leftovers.
+            let home = tempfile::tempdir_in("/tmp").unwrap();
+            let base = home.path();
+            let selected = paths::DataHome::new(base, mode).selected();
+
+            // The daemon holds only its selected directory; this is the one
+            // place the mode-neutral base is recovered from it.
+            let data_home = paths::DataHome::from_selected(&selected, mode);
+            assert_eq!(data_home.base(), base);
+            assert_eq!(data_home.selected(), selected);
+
+            // 1. Child env: the base plus the mode that re-selects `selected`.
+            let environment = mcp_environment(&context, &data_home, Path::new("/repo")).unwrap();
+            let value = |name: &str| {
+                environment
+                    .iter()
+                    .find(|(variable, _)| variable.as_str() == name)
+                    .map_or_else(|| panic!("{name} is injected"), |(_, value)| value.clone())
+            };
+            let child_home = PathBuf::from(value(usagi_core::infrastructure::paths::DATA_DIR_ENV));
+            assert_eq!(child_home, base);
+            let child_mode = value(usagi_core::infrastructure::paths::RUNTIME_MODE_ENV);
+            assert_eq!(child_mode, mode.as_env_value());
+            // Re-applying the announced mode lands the child on the daemon's
+            // own directory — the round trip the E2E pins end to end.
+            assert_eq!(
+                paths::DataHome::new(
+                    &child_home,
+                    paths::RuntimeMode::from_env_value(Some(&child_mode))
+                )
+                .selected(),
+                selected
+            );
+
+            // 2. Settings source: the selected directory the daemon writes.
+            std::fs::create_dir_all(&selected).unwrap();
+            Storage::new(&selected)
+                .save_settings(&Settings {
+                    local_llm: LocalLlm {
+                        enabled: true,
+                        model: usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL.to_owned(),
+                    },
+                    ..Settings::default()
+                })
+                .unwrap();
+            assert_eq!(
+                configured_local_llm_model(&data_home).as_deref(),
+                Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
+            );
+
+            // 3. Sandbox scope: the base, and never the directory above it.
+            let roots = claude_writable_roots(
+                Path::new("/repo/.usagi/sessions/work"),
+                Path::new("/repo"),
+                &data_home,
+            );
+            assert!(roots.contains(&base.to_path_buf()), "{roots:?}");
+            let above = base.parent().expect("a temporary directory has a parent");
+            assert!(!roots.iter().any(|root| root == above), "{roots:?}");
+        }
+    }
+
     #[test]
     fn a_session_claude_is_confined_to_its_worktree_and_gets_the_guard_hook() {
         let usagi = Path::new("/opt/usagi/bin/usagi");
@@ -11528,7 +11620,7 @@ mod tests {
         let roots = claude_writable_roots(
             Path::new("/repo/.usagi/sessions/work"),
             Path::new("/repo"),
-            Path::new("/home/dev/.usagi"),
+            &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),
         );
         assert_eq!(
             roots,
@@ -11588,7 +11680,7 @@ mod tests {
         let roots = claude_writable_roots(
             Path::new("/repo"),
             Path::new("/repo"),
-            Path::new("/home/dev/.usagi"),
+            &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),
         );
         assert!(roots.contains(&PathBuf::from("/repo")));
         let launcher = claude_sandbox_launcher(usagi, mode, &roots).unwrap();

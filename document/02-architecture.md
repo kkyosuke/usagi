@@ -894,7 +894,8 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
 - **起動固有 writable root**: 起動 cwd（session は worktree、root は project root）・workspace の `.usagi`・
-  Git common dir（`<workspace root>/.git`）・usagi state（data home）。普遍領域（`$TMPDIR` / `/tmp` /
+  Git common dir（`<workspace root>/.git`）・usagi state（data home。runtime mode を適用する前の base で、
+  正本は [5. daemon#agent-child-の-data-home](05-daemon.md#agent-child-の-data-home)）。普遍領域（`$TMPDIR` / `/tmp` /
   `/var/tmp`・Claude state・macOS の Keychain / MDS cache）は launcher が足す。session 起動では
   workspace root 自体が writable root に入らないため、親リポジトリの作業ツリーへは書けない。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す

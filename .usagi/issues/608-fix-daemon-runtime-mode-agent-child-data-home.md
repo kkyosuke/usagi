@@ -1,13 +1,13 @@
 ---
 number: 608
 title: fix(daemon): runtime mode に応じて Agent child の data home を導出する
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, agent, config, security, correctness]
 dependson: []
 related: [512, 537, 542]
-created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+created_at: 2026-07-31T06:00:00+00:00
+updated_at: 2026-08-01T00:06:57.350865+00:00
 ---
 
 ## Finding（P1 correctness/security）
