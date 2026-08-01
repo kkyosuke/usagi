@@ -488,7 +488,12 @@ impl SessionRuntime {
                 Ok(SessionReply {
                     operation_id: operation_id.to_owned(),
                     revision: state.state_revision,
-                    body: self.projected_snapshot(&state),
+                    body: projected_snapshot(
+                        &state,
+                        self.root_worktree_id,
+                        &self.data_home,
+                        &self.repo_root,
+                    ),
                 })
             }
             SessionAction::Status => self.status(operation_id),
@@ -656,18 +661,12 @@ impl SessionRuntime {
     /// Returns an error when the durable lifecycle state cannot be read.
     pub fn snapshot(&self) -> Result<Value, SessionRuntimeError> {
         let state = self.state()?;
-        Ok(self.projected_snapshot(&state))
-    }
-
-    fn projected_snapshot(&self, state: &WorkspaceLifecycleState) -> Value {
-        let mut value = snapshot(state, self.root_worktree_id);
-        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
+        Ok(projected_snapshot(
+            &state,
+            self.root_worktree_id,
             &self.data_home,
             &self.repo_root,
-        )
-        .ok();
-        project_role_summaries(&mut value, catalog.as_ref());
-        value
+        ))
     }
 
     /// Resolves only an available, fully fenced managed session to a path.
@@ -1501,9 +1500,20 @@ fn create_semantic_key(name: &str, role_id: Option<&RoleId>) -> String {
     )
 }
 
-/// Keeps catalog-backed display metadata outside the generic runtime so LLVM
-/// coverage does not duplicate this pure projection for every Git/IO adapter
-/// monomorphization.
+fn projected_snapshot(
+    state: &WorkspaceLifecycleState,
+    root_worktree_id: WorktreeId,
+    data_home: &Path,
+    repo_root: &Path,
+) -> Value {
+    let mut value = snapshot(state, root_worktree_id);
+    let catalog =
+        usagi_core::infrastructure::role_catalog::load_effective(data_home, repo_root).ok();
+    project_role_summaries(&mut value, catalog.as_ref());
+    value
+}
+
+/// Applies current catalog display metadata without changing lifecycle truth.
 fn project_role_summaries(value: &mut Value, catalog: Option<&EffectiveRoleCatalog>) {
     let items = value["sessions"]
         .as_array_mut()
