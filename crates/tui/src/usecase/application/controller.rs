@@ -2790,6 +2790,40 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
 }
 
+/// Terminal rows the TUI assumes when it has not observed a size yet. Mirrors
+/// `widgets::normalize_size`; the assertion there keeps the two agreeing.
+pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
+/// Rows the director drawer spends on chrome around the New picker's candidate
+/// rows: the Home header row the drawer hangs under, the panel's top and bottom
+/// borders, the conversation selector, its separator, and the footer hint.
+/// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
+/// keeps the launch gate and the render agreeing on the geometry.
+pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 6;
+
+/// Candidate rows the New picker can draw at `height` terminal rows.
+///
+/// This is the launch gate's half of the picker geometry: a terminal too short
+/// for a single candidate row shows no highlighted CLI, so Enter must not mint
+/// a launch the operator never saw.
+#[must_use]
+pub(crate) fn director_picker_capacity(height: usize) -> usize {
+    let height = if height == 0 {
+        NORMALIZED_TERMINAL_ROWS
+    } else {
+        height
+    };
+    height.saturating_sub(DIRECTOR_PICKER_CHROME_ROWS)
+}
+
+/// Whether the drawer can currently draw the highlighted candidate row. An
+/// unobserved terminal size keeps the picker usable: the renderer normalizes the
+/// same way, so the first frame is never gated on a resize event.
+fn director_picker_shows_selection(state: &AppState) -> bool {
+    state
+        .size
+        .is_none_or(|(_, height)| director_picker_capacity(usize::from(height)) > 0)
+}
+
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if matches!(key, AppKey::ToggleDirectorDrawer) {
         state.director_drawer_open = false;
@@ -2837,7 +2871,9 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             state.director_new = DirectorNew::Choosing(candidates[next]);
             Vec::new()
         }
-        (DirectorNew::Choosing(selected), AppKey::Enter) if state.director_launching.is_none() => {
+        (DirectorNew::Choosing(selected), AppKey::Enter)
+            if state.director_launching.is_none() && director_picker_shows_selection(state) =>
+        {
             let operation_id = OperationId::new();
             state.director_new = DirectorNew::Idle;
             state.director_launching = Some(operation_id);
@@ -2850,7 +2886,8 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
         }
         // Empty, submitted, and unsupported drawer input are all inert. In
         // particular Enter while a root launch is fenced cannot mint a second
-        // operation.
+        // operation, and Enter on a terminal too short to draw the highlighted
+        // candidate cannot launch a CLI the operator never saw.
         _ => Vec::new(),
     }
 }
@@ -5149,6 +5186,77 @@ mod tests {
         assert_eq!(state.director_launching(), Some(*operation_id));
         let _ = update(&mut state, AppEvent::DirectorLaunchFinished(*operation_id));
         assert_eq!(state.director_launching(), None);
+    }
+
+    #[test]
+    fn director_picker_enter_is_inert_while_the_terminal_hides_every_candidate() {
+        // The drawer draws its first candidate row at 7 terminal rows; 6 rows
+        // reach the footer without one, so nothing highlighted is on screen.
+        assert_eq!(director_picker_capacity(7), 1);
+        assert_eq!(director_picker_capacity(6), 0);
+        // An unmeasured terminal falls back to the renderer's normalized size
+        // rather than locking the picker out before the first resize.
+        assert_eq!(
+            director_picker_capacity(0),
+            NORMALIZED_TERMINAL_ROWS - DIRECTOR_PICKER_CHROME_ROWS
+        );
+
+        let workspace = WorkspaceId::new();
+        for (height, launches) in [(6_u16, 0_usize), (7, 1)] {
+            let mut state = AppState::home(workspace, Vec::new());
+            state.set_agent_models(
+                AvailableModels::new([DefaultModel::Claude]),
+                DefaultModel::Claude,
+            );
+            let _ = update(&mut state, AppEvent::Resize { width: 80, height });
+            let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+            let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+            assert_eq!(
+                effects
+                    .iter()
+                    .filter(|effect| matches!(effect, Effect::LaunchAgent { .. }))
+                    .count(),
+                launches,
+                "height {height}"
+            );
+            assert_eq!(
+                state.director_launching().is_some(),
+                launches == 1,
+                "height {height}"
+            );
+            // The refused Enter leaves the chooser open, so growing the terminal
+            // confirms the same selection instead of restarting the flow.
+            assert_eq!(
+                matches!(state.director_new(), DirectorNew::Choosing(_)),
+                launches == 0,
+                "height {height}"
+            );
+        }
+
+        // Growing the refused terminal releases the same selection.
+        let mut state = AppState::home(workspace, Vec::new());
+        state.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude]),
+            DefaultModel::Claude,
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Resize {
+                width: 80,
+                height: 6,
+            },
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        let _ = update(
+            &mut state,
+            AppEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
     }
 
     #[test]

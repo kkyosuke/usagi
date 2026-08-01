@@ -402,6 +402,12 @@ terminal view も conversation も無い場合だけ empty state を描く。`Ct
 状態を変えず picker だけを閉じる。候補が 0 件なら picker を開かず、installation と Config の確認を促す
 safe empty state を表示し、daemon request を発行しない。
 
+picker の viewport は selection に追従し、候補が picker の行数を超える端末でも highlight 中の候補を必ず描く。
+窓の外に残る候補は `↑ N more` / `↓ N more` へ畳むが、この indicator は候補と同じ行数を分け合うため、
+両立できない高さでは候補行を優先して indicator を落とす。候補を 1 行も置けない高さ（drawer chrome が
+端末の 6 行を占めるため 6 行以下、80x6 相当）では footer を `Terminal too short to choose` に替え、
+`Enter` は launch を発行しない。表示されていない CLI が起動することはない。
+
 picker の確定は fresh `OperationId`、`session_id: None`、選択した explicit profile を持つ既存 daemon Agent
 launch path を 1 回だけ呼ぶ。TUI は argv / cwd / provider model path / secret を組み立てない。request 前に root
 pending slot を 1 枚作り、同じ operation・semantic digest・root scope を持つ successful final の exact
