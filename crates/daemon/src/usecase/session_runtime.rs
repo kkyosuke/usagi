@@ -2251,6 +2251,24 @@ mod tests {
     }
 
     #[test]
+    fn role_errors_preserve_their_derived_value_contract() {
+        let errors = [
+            SessionRuntimeError::RoleConflict(
+                Some(RoleId::new("coder").unwrap()),
+                Some(RoleId::new("reviewer").unwrap()),
+            ),
+            SessionRuntimeError::InvalidRole("invalid role".into()),
+        ];
+
+        for error in errors {
+            let cloned = error.clone();
+            assert_eq!(cloned, error);
+            assert_eq!(format!("{cloned:?}"), format!("{error:?}"));
+            assert!(!error.safe_message().is_empty());
+        }
+    }
+
+    #[test]
     fn reports_a_reusable_session_name_when_its_branch_already_exists() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
