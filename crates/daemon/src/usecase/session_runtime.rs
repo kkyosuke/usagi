@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use usagi_core::domain::id::{
     CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
 };
-use usagi_core::domain::role::{RoleId, RoleScope};
+use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState, validate_session_name,
@@ -666,23 +666,7 @@ impl SessionRuntime {
             &self.repo_root,
         )
         .ok();
-        let items = value["sessions"]
-            .as_array_mut()
-            .expect("lifecycle snapshot always contains a sessions array");
-        for item in items {
-            let role_id = item
-                .get("role_id")
-                .cloned()
-                .and_then(|value| serde_json::from_value::<RoleId>(value).ok());
-            let summary = role_id.as_ref().and_then(|id| {
-                catalog
-                    .as_ref()?
-                    .roles
-                    .get(id)
-                    .map(|role| role.summary.clone())
-            });
-            item["role_summary"] = json!(summary);
-        }
+        project_role_summaries(&mut value, catalog.as_ref());
         value
     }
 
@@ -1515,6 +1499,25 @@ fn create_semantic_key(name: &str, role_id: Option<&RoleId>) -> String {
         || format!("create:{name}"),
         |role_id| format!("create:{name}:{}", role_id.as_str()),
     )
+}
+
+/// Keeps catalog-backed display metadata outside the generic runtime so LLVM
+/// coverage does not duplicate this pure projection for every Git/IO adapter
+/// monomorphization.
+fn project_role_summaries(value: &mut Value, catalog: Option<&EffectiveRoleCatalog>) {
+    let items = value["sessions"]
+        .as_array_mut()
+        .expect("lifecycle snapshot always contains a sessions array");
+    for item in items {
+        let role_id = item
+            .get("role_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<RoleId>(value).ok());
+        let summary = role_id
+            .as_ref()
+            .and_then(|id| catalog?.roles.get(id).map(|role| role.summary.clone()));
+        item["role_summary"] = json!(summary);
+    }
 }
 
 /// The completion fence for one session operation, taken from the journal entry
