@@ -751,18 +751,14 @@ mod tests {
         .command
         .unwrap();
         let (outcome, _) = super::execute(parsed);
-        let RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
-            action: usagi_core::usecase::client::SessionAction::Create,
-            payload,
-            ..
-        }) = outcome
-        else {
-            panic!("expected session create request");
-        };
-        assert_eq!(
-            payload,
-            serde_json::json!({"name":"review-auth", "role":"reviewer"})
-        );
+        assert!(matches!(
+            outcome,
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
+                action: usagi_core::usecase::client::SessionAction::Create,
+                payload,
+                ..
+            }) if payload == serde_json::json!({"name":"review-auth", "role":"reviewer"})
+        ));
     }
 
     /// TUI を開くコマンドは、解析済み引数を保った起動要求を返す。

@@ -666,21 +666,22 @@ impl SessionRuntime {
             &self.repo_root,
         )
         .ok();
-        if let Some(items) = value.get_mut("sessions").and_then(Value::as_array_mut) {
-            for item in items {
-                let role_id = item
-                    .get("role_id")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value::<RoleId>(value).ok());
-                let summary = role_id.as_ref().and_then(|id| {
-                    catalog
-                        .as_ref()?
-                        .roles
-                        .get(id)
-                        .map(|role| role.summary.clone())
-                });
-                item["role_summary"] = json!(summary);
-            }
+        let items = value["sessions"]
+            .as_array_mut()
+            .expect("lifecycle snapshot always contains a sessions array");
+        for item in items {
+            let role_id = item
+                .get("role_id")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<RoleId>(value).ok());
+            let summary = role_id.as_ref().and_then(|id| {
+                catalog
+                    .as_ref()?
+                    .roles
+                    .get(id)
+                    .map(|role| role.summary.clone())
+            });
+            item["role_summary"] = json!(summary);
         }
         value
     }
@@ -2544,6 +2545,14 @@ instructions = "review"
             ),
             Err(SessionRuntimeError::RoleConflict { .. })
         ));
+        assert!(matches!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "role":"missing"}),
+            ),
+            Err(SessionRuntimeError::InvalidRole(_))
+        ));
         let id = runtime.session_id("one").unwrap();
         assert_eq!(runtime.session_role(id).unwrap().unwrap().as_str(), "coder");
 
@@ -2581,6 +2590,21 @@ instructions = "changed"
                 .unwrap_err(),
             SessionRuntimeError::InvalidRequest
         );
+
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[roles.reviewer]
+summary = "Review"
+scopes = ["session"]
+instructions = "review"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.handle(SessionAction::Create, &operation(), &json!({"name":"one"})),
+            Err(SessionRuntimeError::InvalidRole(_))
+        ));
     }
 
     #[test]
