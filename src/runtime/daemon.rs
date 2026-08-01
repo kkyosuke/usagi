@@ -73,6 +73,9 @@ use usagi_daemon::usecase::authority::fence::{OwnedRuntime, classify_request};
 use usagi_daemon::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome,
 };
+use usagi_daemon::usecase::authority::pre_handshake::{
+    PRE_HANDSHAKE_CONNECTION_LIMIT, PreHandshakeAdmission,
+};
 use usagi_daemon::usecase::authority::registry::{
     DEFAULT_GENERATION_LIMIT, GenerationRegistry, RegistryDocument,
 };
@@ -1428,6 +1431,11 @@ const SESSION_TEARDOWN_TICK: Duration = Duration::from_secs(1);
 /// descriptor readiness and never reaches it.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
 
+/// One absolute budget for reading and answering the complete first frame.
+/// Established connections have their own policy and are deliberately not
+/// subject to this deadline.
+const PRE_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
+
 /// How often the decision maintenance worker makes due expiries durable and
 /// drains the resolved-decision outbox.
 ///
@@ -2543,6 +2551,8 @@ fn start_ipc_accept_loop(
             // TUIs converge on the same Observed / Dismissed state.
             let visibility =
                 usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility::new();
+            let pre_handshake =
+                PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             // Waiting on the listening descriptor replaces a non-blocking accept
             // that retried every 10 ms. The wake pipe is what lets one wait cover
             // both a new connection and a shutdown request.
@@ -2568,6 +2578,18 @@ fn start_ipc_accept_loop(
                         if shutdown.is_requested() {
                             break;
                         }
+                        let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
+                            // No hello has been read, so sending a framed protocol
+                            // error here would invent a new wire state. Closing the
+                            // sole accepted descriptor is the compatible, minimum-
+                            // resource refusal. The message contains no peer or
+                            // workspace material.
+                            ErrorLog::record(
+                                "daemon pre-handshake connection refused: capacity exhausted",
+                            );
+                            drop(stream);
+                            continue;
+                        };
                         let server = server.clone();
                         let session = Arc::clone(&runtime);
                         let scope_sessions = Arc::clone(&runtime);
@@ -2591,15 +2613,70 @@ fn start_ipc_accept_loop(
                         // proportional to the *live* connections rather than to
                         // every connection this generation has ever served.
                         workers.reap_finished();
-                        let unblock = stream.try_clone().map(AcceptedStream);
+                        let unblock = stream.try_clone().map(AcceptedStream::new);
+                        let worker_completion = unblock.as_ref().ok().cloned();
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
-                                let _ = stream.set_nonblocking(false);
-                                let Ok(mut writer) = stream.try_clone() else {
+                                // The retained shutdown descriptor must not keep
+                                // the peer apparently open after this worker has
+                                // returned. Completion shuts the shared socket on
+                                // every early-return and established-connection
+                                // exit; ClientWorkers still owns the handle needed
+                                // to join the finished thread exactly once.
+                                let _completion =
+                                    ShutdownAcceptedStreamOnDrop(worker_completion);
+                                if stream.set_nonblocking(false).is_err() {
+                                    return;
+                                }
+                                let Ok(writer) = stream.try_clone() else {
                                     return;
                                 };
-                                let mut reader = stream;
+                                let deadline = Instant::now() + PRE_HANDSHAKE_DEADLINE;
+                                let mut reader = PreHandshakeDeadlineStream::new(stream, deadline);
+                                let mut writer =
+                                    PreHandshakeDeadlineStream::new(writer, deadline);
+                                let admitted = usagi_daemon::presentation::ipc::handshake_admitted(
+                                    &mut reader,
+                                    &mut writer,
+                                    &server,
+                                );
+                                // Capacity covers the complete hello response, on
+                                // every success/refusal/error path, but never the
+                                // established connection that follows it.
+                                drop(pre_handshake_permit);
+                                let admitted = match admitted {
+                                    Ok(Some(admitted)) => admitted,
+                                    Ok(None) => return,
+                                    Err(error) => {
+                                        let reason = if matches!(
+                                            error.kind(),
+                                            std::io::ErrorKind::TimedOut
+                                                | std::io::ErrorKind::WouldBlock
+                                        ) {
+                                            "deadline exceeded"
+                                        } else {
+                                            "invalid or incomplete hello"
+                                        };
+                                        ErrorLog::record(&format!(
+                                            "daemon pre-handshake connection refused: {reason}"
+                                        ));
+                                        return;
+                                    }
+                                };
+                                // A pre-handshake timeout must not become an idle
+                                // policy for an admitted subscription. Failure to
+                                // remove it fails this socket closed.
+                                if reader.clear_deadlines().is_err()
+                                    || writer.clear_deadlines().is_err()
+                                {
+                                    ErrorLog::record(
+                                        "daemon admitted connection closed: pre-handshake deadline could not be cleared",
+                                    );
+                                    return;
+                                }
+                                let mut reader = reader.into_inner();
+                                let mut writer = writer.into_inner();
                                 let mut owner =
                                     SharedTerminalOwner::with_visibility_and_retention(
                                         SharedAgent(agent_owner),
@@ -2608,10 +2685,10 @@ fn start_ipc_accept_loop(
                                         retention,
                                     );
                                 let mut metrics_observer = None;
-                                let result = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
+                                let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and(
                                     &mut reader,
                                     &mut writer,
-                                    &server,
+                                    admitted,
                                     connection_fence.as_ref(),
                                     &mut owner,
                                     &mut |request_id, body, hello, connection, _client| match body
@@ -2651,6 +2728,16 @@ fn start_ipc_accept_loop(
                     Err(_) => std::thread::sleep(ACCEPT_ERROR_BACKOFF),
                 }
                 }
+            }
+            // Active shutdown and rollover collection share the same barrier.
+            // `retire` seals registration, shuts every socket to unblock frame
+            // reads, and joins every worker; a concurrent collection may have
+            // performed it already, in which case this is an idempotent no-op.
+            let report = workers.retire();
+            if !report.is_clean() {
+                ErrorLog::record(&format!(
+                    "daemon shutdown retired with client worker failures: {report:?}"
+                ));
             }
             listener
         })
@@ -6199,17 +6286,106 @@ impl usagi_daemon::presentation::ipc::ConnectionFence for GenerationFence {
     }
 }
 
+/// A Unix stream armed against one fixed handshake completion instant.
+///
+/// Every individual `read` and `write` re-arms the OS timeout with only the
+/// remaining budget. Partial prefix/body progress therefore cannot extend the
+/// deadline, while the kernel still performs the blocking wait efficiently.
+struct PreHandshakeDeadlineStream {
+    stream: std::os::unix::net::UnixStream,
+    deadline: Instant,
+}
+
+impl PreHandshakeDeadlineStream {
+    fn new(stream: std::os::unix::net::UnixStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "daemon pre-handshake deadline exceeded",
+                )
+            })
+    }
+
+    fn clear_deadlines(&self) -> std::io::Result<()> {
+        self.stream.set_read_timeout(None)?;
+        self.stream.set_write_timeout(None)
+    }
+
+    fn into_inner(self) -> std::os::unix::net::UnixStream {
+        self.stream
+    }
+
+    fn deadline_error(error: std::io::Error) -> std::io::Error {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "daemon pre-handshake deadline exceeded",
+            )
+        } else {
+            error
+        }
+    }
+}
+
+impl Read for PreHandshakeDeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(bytes).map_err(Self::deadline_error)
+    }
+}
+
+impl Write for PreHandshakeDeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(bytes).map_err(Self::deadline_error)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.flush().map_err(Self::deadline_error)
+    }
+}
+
 /// The accepted stream half that can unblock a worker parked in a frame read.
 ///
 /// A retained worker is joined at collection ([`ClientWorkers::retire`]), and a
 /// thread blocked in `read` on a live socket would never return to be joined —
 /// so what is retained alongside it is a duplicate descriptor that
 /// `shutdown(2)` can close from the outside.
-struct AcceptedStream(std::os::unix::net::UnixStream);
+#[derive(Clone)]
+struct AcceptedStream(Arc<std::os::unix::net::UnixStream>);
+
+impl AcceptedStream {
+    fn new(stream: std::os::unix::net::UnixStream) -> Self {
+        Self(Arc::new(stream))
+    }
+}
 
 impl ConnectionShutdown for AcceptedStream {
     fn shutdown(&self) -> std::io::Result<()> {
         self.0.shutdown(std::net::Shutdown::Both)
+    }
+}
+
+/// Close the accepted socket when its worker returns, independently of when
+/// the retained join handle is next reaped.
+struct ShutdownAcceptedStreamOnDrop(Option<AcceptedStream>);
+
+impl Drop for ShutdownAcceptedStreamOnDrop {
+    fn drop(&mut self) {
+        if let Some(stream) = &self.0 {
+            let _ = stream.shutdown();
+        }
     }
 }
 
@@ -12958,15 +13134,26 @@ mod tests {
         );
         assert_eq!(workers.outstanding(), 0);
 
-        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        // The production-owned admission counter and worker set are injected
+        // independently. Holding the permit inside the worker makes the two
+        // observable lifetimes match the accept-loop contract without asking
+        // the OS for a process-wide thread census.
+        let pre_handshake = PreHandshakeAdmission::new(1);
+        let permit = pre_handshake
+            .try_admit()
+            .expect("the incomplete handshake reserves the only permit");
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
         let parked = std::thread::spawn(move || {
+            let _permit = permit;
             // Parked exactly as a client worker is: blocked reading a frame that
             // never arrives.
             let mut byte = [0_u8; 1];
             let _ = std::io::Read::read(&mut { &server }, &mut byte);
         });
-        let unblock = client.try_clone().map(AcceptedStream);
+        let unblock = client.try_clone().map(AcceptedStream::new);
         retain_client_worker(&workers, unblock, parked);
+        assert_eq!(pre_handshake.in_flight(), 1);
+        assert!(pre_handshake.try_admit().is_none());
         assert_eq!(workers.outstanding(), 1);
 
         // Retirement shuts the retained half down, which is what lets the join
@@ -12974,5 +13161,13 @@ mod tests {
         let report = workers.retire();
         assert_eq!(report.joined, 1);
         assert!(report.is_clean(), "{report:?}");
+        assert_eq!(pre_handshake.in_flight(), 0);
+        assert_eq!(workers.outstanding(), 0);
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            client.read(&mut byte).unwrap(),
+            0,
+            "retirement closes the socket"
+        );
     }
 }

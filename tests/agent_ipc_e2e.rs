@@ -8,7 +8,9 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{LazyLock, Mutex};
@@ -138,6 +140,27 @@ impl Drop for Daemon {
     }
 }
 
+impl Daemon {
+    fn terminate_and_wait(&mut self, timeout: Duration) -> bool {
+        // SAFETY: this fixture owns the exact child represented by `Child` and
+        // sends the daemon's documented graceful shutdown signal to that pid.
+        assert_eq!(
+            unsafe { libc::kill(self.child.id().cast_signed(), libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.child.try_wait().is_ok_and(|status| status.is_some()) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::yield_now();
+        }
+    }
+}
+
 fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
@@ -211,6 +234,41 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
             "daemon did not publish its socket"
         );
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn raw_connection(data_dir: &Path) -> UnixStream {
+    connect_current(data_dir).expect("published daemon socket accepts a raw peer")
+}
+
+fn connection_closed(stream: &mut UnixStream) -> bool {
+    stream.set_nonblocking(true).unwrap();
+    let mut byte = [0_u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+fn observe_until(timeout: Duration, mut observation: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if observation() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::yield_now();
     }
 }
 
@@ -453,6 +511,125 @@ fn safe_readiness_error(error: ClientError) {
             "leaked {private}: {error:?}"
         );
     }
+}
+
+#[test]
+fn root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let mut daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+
+    // A complete real hello proves publication before the raw peers race the
+    // accept loop. Dropping it also gives the next accept a worker to reap, so
+    // historical connections cannot be mistaken for the attack population.
+    drop(client(&data_dir));
+    let limit = usagi_daemon::usecase::authority::pre_handshake::PRE_HANDSHAKE_CONNECTION_LIMIT;
+    let mut stalled = Vec::with_capacity(limit);
+    for index in 0..limit {
+        let mut stream = raw_connection(&data_dir);
+        match index {
+            // No prefix, a partial prefix, and a declared body that never
+            // completes all consume the same absolute pre-handshake budget.
+            1 => stream.write_all(&[0, 0]).unwrap(),
+            2 => {
+                stream.write_all(&16_u32.to_be_bytes()).unwrap();
+                stream.write_all(b"{").unwrap();
+            }
+            _ => {}
+        }
+        stalled.push(stream);
+    }
+
+    // Observe cap exhaustion from the socket itself. A refused peer is closed
+    // before any worker is spawned and receives no incompatible bootstrap frame.
+    let mut over_cap = raw_connection(&data_dir);
+    assert!(
+        observe_until(Duration::from_secs(1), || connection_closed(&mut over_cap)),
+        "the connection above the pre-handshake cap was not refused promptly"
+    );
+    // A well-formed client arriving while the cap is occupied is failed closed
+    // promptly rather than parked behind the incomplete peers. It may win a
+    // slot if a deadline expires concurrently; either outcome is bounded.
+    let start = Instant::now();
+    let during_stream = raw_connection(&data_dir);
+    during_stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    during_stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let during = IpcClient::connect(
+        during_stream,
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        daemon_fixture::client_workspace(&data_dir),
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "a normal client was parked behind incomplete handshakes"
+    );
+    drop(during);
+
+    // All three incomplete-frame forms, and every other stalled peer, are
+    // closed by the one completion deadline. This observation loop is the test
+    // clock; no fixed sleep is treated as evidence of cleanup.
+    assert!(
+        observe_until(Duration::from_secs(5), || stalled
+            .iter_mut()
+            .all(connection_closed)),
+        "pre-handshake sockets survived their completion deadline"
+    );
+
+    // Capacity released by those deadlines is immediately fair to a real
+    // protocol client, whose successful hello also checks generation,
+    // workspace, capability, and credential behavior remained intact.
+    let fair_start = Instant::now();
+    drop(client(&data_dir));
+    assert!(
+        fair_start.elapsed() < Duration::from_secs(5),
+        "a normal client did not recover after pre-handshake capacity returned"
+    );
+
+    // Fill the product-owned permit set again. Observing the next socket's EOF
+    // proves the accept loop reached capacity without relying on an OS-wide
+    // process/thread census. Every admitted socket is also registered in the
+    // product-owned ClientWorkers barrier; its injected outstanding contract is
+    // covered in the runtime unit test alongside the permit counter.
+    let mut shutdown_peers = Vec::with_capacity(limit);
+    for _ in 0..limit {
+        let mut stream = raw_connection(&data_dir);
+        stream.write_all(&[0]).unwrap();
+        shutdown_peers.push(stream);
+    }
+    let mut shutdown_over_cap = raw_connection(&data_dir);
+    assert!(
+        observe_until(Duration::from_secs(1), || {
+            connection_closed(&mut shutdown_over_cap)
+        }),
+        "shutdown fixture never observed a saturated pre-handshake permit set"
+    );
+
+    // SIGTERM must unblock and join the admitted workers. Process exit is the
+    // composition-root join barrier; EOF on every peer proves their sockets
+    // were closed rather than abandoned with the child.
+    assert!(
+        daemon.terminate_and_wait(Duration::from_secs(5)),
+        "daemon shutdown did not unblock and join the waiting handshake worker"
+    );
+    assert!(
+        observe_until(Duration::from_secs(1), || shutdown_peers
+            .iter_mut()
+            .all(connection_closed)),
+        "shutdown left an admitted socket open"
+    );
 }
 
 #[test]
