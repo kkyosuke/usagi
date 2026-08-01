@@ -1,13 +1,13 @@
 ---
 number: 613
 title: fix(tui): continuation 未観測の live Agent close を durable dismissal にする
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, tui, agent, lifecycle, correctness]
 dependson: []
 related: [506, 599, 600]
 created_at: 2026-07-31T06:00:00+00:00
-updated_at: 2026-08-01T00:23:55.588752+00:00
+updated_at: 2026-08-01T01:21:46.596919+00:00
 ---
 
 ## Finding（P2 TUI）
