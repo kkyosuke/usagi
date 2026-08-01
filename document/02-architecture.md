@@ -12,6 +12,7 @@ v2 の実装は **Cargo workspace 上の 4 クレート＋合成ルート（ル�
 - [ディレクトリ構成](#ディレクトリ構成)
 - [各クレートの責務](#各クレートの責務)
 - [Markdown 永続化の commit contract](#markdown-永続化の-commit-contract)
+- [Git subprocess の環境 confine](#git-subprocess-の環境-confine)
 - [依存ルール](#依存ルール)
 - [クリーンアーキテクチャとの対応](#クリーンアーキテクチャとの対応)
 - [単一バイナリと合成ルート](#単一バイナリと合成ルート)
@@ -273,8 +274,7 @@ issue number の採番 authority も本節を正本とする。Git repository �
 ```
 
 raw cwd が repository 内の深い path でも、最寄り ancestor の `.git` まで遡って worktree boundary を決める。
-authority は v1 と同じく、`GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_OBJECT_DIRECTORY` /
-`GIT_COMMON_DIR` / `GIT_PREFIX` / `GIT_NAMESPACE` を除去した
+authority は v1 と同じく、[Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
 `git -C <worktree-root> rev-parse --path-format=absolute --git-common-dir` の成功結果だけを canonical existing
 directory として採用する。valid separate-git-dir / submodule で `commondir` が無い場合は Git が返す git dir
 自体を使う。empty / non-repository `.git`、stale / dangling gitfile・`commondir`、non-UTF-8 / empty output、
@@ -420,6 +420,33 @@ snapshot を使う。snapshot 前には同じ lock のまま scheduled derived r
 全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
 error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
 決める。番号指定 delete は repair 手段に使わない。
+
+## Git subprocess の環境 confine
+
+`git` binary を起動する経路は本節を正本とする。実装は `usagi-core` の
+`infrastructure::git::environment` に 1 か所だけ置き、subprocess を持つ面（daemon の
+session worktree adapter、issue number authority の repository resolver）は
+`confined_git_command(repo)` だけで command を組み立てる。
+
+`-C <repo>` は scope の宣言にならない。Git は repository・index・object database・config を
+`GIT_*` 環境変数から先に解決するため、継承した `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` /
+`GIT_OBJECT_DIRECTORY` / `GIT_COMMON_DIR` や `GIT_CONFIG_COUNT` 経由の config injection は、
+`-C` で指した repository を別 repository へ差し替える。daemon は起動元の環境をそのまま長期間
+保持するので、confine は invocation ごとに行う。
+
+| 扱い | 対象 | 理由 |
+|---|---|---|
+| 除去（既定） | `GIT_` 接頭辞の全変数 | repository / index / object database / hooks / config / 実行する program の解決先を選ぶ名前空間である。deny-by-default なので Git が新しい変数を増やしても既定で閉じる |
+| 継承 | `GIT_SSH` / `GIT_SSH_COMMAND` / `GIT_SSH_VARIANT` | remote への到達手段だけを選び、local repository を差し替えられない。private repository の clone が必要とする |
+| 明示注入 | `LC_ALL=C` | 呼び出し側が Git の stderr で分岐する（`worktree remove` の "is not a working tree" は失敗でなく no-op）ため、message の locale を固定する |
+| 明示注入 | `GIT_TERMINAL_PROMPT=0` | daemon は credential prompt に答える terminal を持たない。prompt で session 操作を hang させず失敗させる。設定済みの credential helper は従来どおり動く |
+
+`GIT_` 接頭辞の外は触らない。`PATH` / `HOME` / `XDG_CONFIG_HOME` は継承したままなので、利用者自身の
+git 設定は従来どおり効く。この confine が閉じるのは invocation ごとの override であり、daemon 自身の
+設定 discovery ではない。
+
+session の Git effect（create、mirror した tree の nested worktree、remove）は全て daemon の
+`GitRunner` 実装 1 か所を通るため、confine もそこで 1 回だけ適用する。
 
 ## 依存ルール
 

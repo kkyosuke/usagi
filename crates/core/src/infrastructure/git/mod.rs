@@ -7,15 +7,22 @@
 //! take a `&dyn GitRunner` and stay pure and unit-testable, while the composition
 //! root binds the real `git`-spawning implementation (mirroring the daemon's
 //! `RecordFile` / `LivenessProbe` seams).
+//!
+//! Whoever spawns the binary builds the command through
+//! [`confined_git_command`], which scopes the subprocess to a single repository:
+//! the path alone does not, because git prefers the repository, index, object
+//! database and configuration named by its environment ([`environment`]).
 
 pub mod clone;
 pub mod diff;
+pub mod environment;
 pub mod repo;
 pub mod runner;
 pub mod worktree;
 
 pub use clone::clone;
 pub use diff::{DiffStatus, diff_status};
+pub use environment::confined_git_command;
 pub use runner::{GitOutput, GitRunner};
 pub use worktree::{WorktreeInfo, add_worktree, list_worktrees, remove_worktree};
 
