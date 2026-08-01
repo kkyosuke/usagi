@@ -195,6 +195,15 @@ pub struct SetupPlan {
 pub struct DeletePlan {
     pub targets: Vec<String>,
     pub force: bool,
+    /// Whether the session's branch is deleted along with its worktree.
+    ///
+    /// A removal the user asked for keeps the branch: it holds the work. Only the
+    /// compensation of a create that never produced any work undoes the branch
+    /// too, so a retry under the same session name is not blocked by it. Absent
+    /// in records written before this field existed, which is exactly the
+    /// branch-preserving behaviour those removals had.
+    #[serde(default)]
+    pub delete_branch: bool,
 }
 /// A safe failure classification, not raw worker output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -876,6 +885,7 @@ mod tests {
                 delete_plan: DeletePlan {
                     targets: vec!["x".into()],
                     force: false,
+                    delete_branch: false,
                 },
             },
             now(),
@@ -1095,7 +1105,8 @@ mod tests {
                     operation: op(),
                     delete_plan: DeletePlan {
                         targets: vec![],
-                        force: false
+                        force: false,
+                        delete_branch: false
                     }
                 },
                 now()
@@ -1110,7 +1121,8 @@ mod tests {
                     operation: op(),
                     delete_plan: DeletePlan {
                         targets: vec![],
-                        force: false
+                        force: false,
+                        delete_branch: false
                     }
                 },
                 now()
@@ -1187,6 +1199,7 @@ mod tests {
                 delete_plan: DeletePlan {
                     targets: vec![],
                     force: true,
+                    delete_branch: false,
                 },
             },
             now(),
@@ -1263,6 +1276,7 @@ mod tests {
                 delete_plan: DeletePlan {
                     targets: vec!["legacy".into()],
                     force: false,
+                    delete_branch: false,
                 },
             },
             now(),

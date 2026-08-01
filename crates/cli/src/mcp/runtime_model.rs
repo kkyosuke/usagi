@@ -47,14 +47,32 @@ impl RuntimeModelSnapshot {
         })
     }
 
-    /// Build the `agent` schema for `session_dispatch`.
+    /// Build the `agent` schema for `session_dispatch`, which may target an
+    /// Agent that already belongs to the named session.
     #[must_use]
     pub fn agent_schema(&self) -> Value {
         let mut branches = vec![json!({
             "type":"object", "properties":{"id":{"type":"string"}},
             "required":["id"], "additionalProperties":false
         })];
-        branches.extend(self.runtimes.iter().map(|entry| {
+        branches.extend(self.new_agent_branches());
+        json!({"oneOf": branches})
+    }
+
+    /// Build the `agent` schema for `session_delegate_brief`, which creates the
+    /// session it dispatches into.
+    ///
+    /// The `id` branch is deliberately absent: no existing Agent can belong to a
+    /// session this request has not created yet, so advertising it would only
+    /// invite a request the daemon must reject — and reject *after* the worktree
+    /// exists. The selector is new-agent only on both surfaces.
+    #[must_use]
+    pub fn new_agent_schema(&self) -> Value {
+        json!({"oneOf": self.new_agent_branches().collect::<Vec<_>>()})
+    }
+
+    fn new_agent_branches(&self) -> impl Iterator<Item = Value> + '_ {
+        self.runtimes.iter().map(|entry| {
             json!({
                 "type":"object",
                 "properties": {
@@ -63,8 +81,7 @@ impl RuntimeModelSnapshot {
                 },
                 "required":["runtime", "model"], "additionalProperties":false
             })
-        }));
-        json!({"oneOf": branches})
+        })
     }
 
     /// Validate the new-agent selector carried by MCP arguments.
@@ -105,6 +122,25 @@ impl RuntimeModelSnapshot {
             .filter(|entry| entry.models.iter().any(|allowed| allowed == model))
             .map(|_| ())
             .ok_or_else(|| "runtime/model is not allowed by this MCP server snapshot".into())
+    }
+
+    /// Validate the selector carried by a tool that creates the session it
+    /// dispatches into.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe validation message when the selector names an existing
+    /// Agent, or is not an allowed runtime/model pair.
+    pub fn validate_new_agent(&self, agent: &Value) -> Result<(), String> {
+        if agent
+            .as_object()
+            .is_some_and(|object| object.contains_key("id"))
+        {
+            return Err(
+                "agent.id cannot be delegated to: the session does not exist yet, so supply runtime and model".into(),
+            );
+        }
+        self.validate_agent(agent)
     }
 
     /// Validate and normalize deprecated `agent_cli` on legacy session tools.
@@ -334,6 +370,62 @@ mod tests {
         ] {
             assert!(snapshot.validate_agent(&agent).is_err());
         }
+    }
+
+    /// A delegation creates the session it dispatches into, so no existing Agent
+    /// can belong to it. The selector it publishes therefore has no `id` branch,
+    /// and one supplied anyway is refused before anything is created (#611).
+    #[test]
+    fn the_delegation_selector_publishes_and_accepts_only_new_agents() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+            &FakeLocator(&["claude"]),
+        );
+
+        let branches = snapshot.new_agent_schema()["oneOf"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0]["properties"]["runtime"]["const"], "claude");
+        assert!(branches.iter().all(|branch| {
+            branch["properties"]
+                .as_object()
+                .is_some_and(|properties| !properties.contains_key("id"))
+        }));
+        // `session_dispatch` keeps the existing-agent branch it can honour.
+        assert_eq!(
+            snapshot.agent_schema()["oneOf"][0]["required"],
+            json!(["id"])
+        );
+
+        snapshot
+            .validate_new_agent(&json!({"runtime":"claude","model":"sonnet"}))
+            .unwrap();
+        assert_eq!(
+            snapshot.validate_new_agent(&json!({"id":"existing"})),
+            Err(
+                "agent.id cannot be delegated to: the session does not exist yet, so supply runtime and model"
+                    .to_owned()
+            )
+        );
+        // The refusal names `id` even when it is mixed with a valid pair, and the
+        // ordinary allowlist checks still apply to everything else.
+        assert!(
+            snapshot
+                .validate_new_agent(&json!({"id":"a","runtime":"claude","model":"sonnet"}))
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .validate_new_agent(&json!({"runtime":"claude","model":"opus"}))
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .validate_new_agent(&json!("not-an-object"))
+                .is_err()
+        );
     }
 
     #[test]

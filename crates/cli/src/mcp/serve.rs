@@ -352,8 +352,8 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot, availability: ToolAvailabi
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
             let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
-            if matches!(tool.name(), "session_dispatch" | "session_delegate_brief") {
-                schema["properties"]["agent"] = snapshot.agent_schema();
+            if let Some(agent) = agent_selector_schema(snapshot, tool.name()) {
+                schema["properties"]["agent"] = agent;
             }
             if matches!(tool.name(), "session_create" | "session_delegate_issue") {
                 schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
@@ -404,10 +404,10 @@ fn tools_call(
         );
     };
     let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-    if matches!(name, "session_dispatch" | "session_delegate_brief") {
-        schema["properties"]["agent"] = snapshot.agent_schema();
+    if let Some(agent_schema) = agent_selector_schema(snapshot, name) {
+        schema["properties"]["agent"] = agent_schema;
         if let Some(agent) = arguments.get("agent")
-            && let Err(message) = snapshot.validate_agent(agent)
+            && let Err(message) = validate_agent_selector(snapshot, name, agent)
         {
             return protocol::error(id, error_code::INVALID_PARAMS, &message);
         }
@@ -473,25 +473,14 @@ fn execute_tool(
         }
         ToolRoute::Session(action) => {
             let operation_id = usagi_core::domain::id::OperationId::new().as_str();
-            match client.request(DaemonRequest::Session {
-                action,
-                operation_id,
-                payload: arguments,
-            }) {
-                Ok(DaemonReply::Accepted {
+            session_tool_response(
+                id,
+                client.request(DaemonRequest::Session {
+                    action,
                     operation_id,
-                    revision,
-                    ..
-                }) => protocol::success(
-                    id,
-                    json!({"content":[{"type":"text","text":format!("accepted operation {operation_id} (revision {revision})")}]}),
-                ),
-                Ok(DaemonReply::Ok(value)) => protocol::success(
-                    id,
-                    json!({"content":[{"type":"text","text":value.to_string()}]}),
-                ),
-                Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
-            }
+                    payload: arguments,
+                }),
+            )
         }
         ToolRoute::Dispatch(action) => {
             let operation_id = usagi_core::domain::id::OperationId::new().as_str();
@@ -534,11 +523,80 @@ fn execute_tool(
     }
 }
 
+/// The live `agent` selector schema this tool advertises, if it takes one.
+///
+/// `session_dispatch` targets an existing session, so it may name an Agent that
+/// already belongs to it. `session_delegate_brief` creates the session it
+/// dispatches into, so it advertises only the new-agent branches: an `agent.id`
+/// there can never pass the daemon's ownership check, and rejecting it at the
+/// schema keeps the composite operation from ever starting.
+fn agent_selector_schema(snapshot: &RuntimeModelSnapshot, tool: &str) -> Option<Value> {
+    match tool {
+        "session_dispatch" => Some(snapshot.agent_schema()),
+        "session_delegate_brief" => Some(snapshot.new_agent_schema()),
+        _ => None,
+    }
+}
+
+fn validate_agent_selector(
+    snapshot: &RuntimeModelSnapshot,
+    tool: &str,
+    agent: &Value,
+) -> Result<(), String> {
+    if tool == "session_delegate_brief" {
+        return snapshot.validate_new_agent(agent);
+    }
+    snapshot.validate_agent(agent)
+}
+
 fn exact_workspace_id(arguments: &Value) -> Option<usagi_core::domain::id::WorkspaceId> {
     arguments
         .get("workspace_id")
         .and_then(Value::as_str)
         .and_then(|value| usagi_core::domain::id::WorkspaceId::parse(value).ok())
+}
+
+/// Renders one session-tool reply: an acceptance, a body, or an error that keeps
+/// the daemon's machine-readable detail.
+fn session_tool_response(id: Value, reply: Result<DaemonReply, ClientError>) -> Value {
+    match reply {
+        Ok(DaemonReply::Accepted {
+            operation_id,
+            revision,
+            ..
+        }) => protocol::success(
+            id,
+            json!({"content":[{"type":"text","text":format!("accepted operation {operation_id} (revision {revision})")}]}),
+        ),
+        Ok(DaemonReply::Ok(value)) => protocol::success(
+            id,
+            json!({"content":[{"type":"text","text":value.to_string()}]}),
+        ),
+        Err(error) => protocol::error_with_data(
+            id,
+            error_code::INTERNAL_ERROR,
+            &error.to_string(),
+            daemon_error_data(&error),
+        ),
+    }
+}
+
+/// The daemon's machine-readable error detail, plus the side effect it reports,
+/// as JSON-RPC `error.data`.
+///
+/// A message alone cannot tell a caller what to do next when a composite
+/// operation failed part-way. `session_delegate_brief` is the case that needs it:
+/// whether the session it created was rolled back decides whether the caller
+/// retries or reconciles.
+fn daemon_error_data(error: &ClientError) -> Option<Value> {
+    let ClientError::Protocol(error) = error else {
+        return None;
+    };
+    let details = error.details.clone()?;
+    Some(json!({
+        "side_effect": error.side_effect,
+        "details": details,
+    }))
 }
 
 fn daemon_body_response(id: Value, reply: Result<DaemonReply, ClientError>) -> Value {
@@ -608,9 +666,9 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState, handle_line,
-        handle_line_with_client, serve, serve_with_client, serve_with_client_and_features,
-        serve_with_client_and_snapshot,
+        SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState, agent_selector_schema,
+        daemon_error_data, handle_line, handle_line_with_client, serve, serve_with_client,
+        serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -700,8 +758,8 @@ mod tests {
             .find(|descriptor| descriptor.name() == name)
             .unwrap();
         let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-        if matches!(name, "session_dispatch" | "session_delegate_brief") {
-            schema["properties"]["agent"] = snapshot.agent_schema();
+        if let Some(agent) = agent_selector_schema(snapshot, name) {
+            schema["properties"]["agent"] = agent;
         }
         value(&schema)
     }
@@ -1190,7 +1248,13 @@ mod tests {
             "session_delegate_issue",
             "session_delegate_brief",
         ] {
-            let snapshot = RuntimeModelSnapshot::default();
+            // `session_delegate_brief` advertises only runtime/model selectors,
+            // so its arguments are satisfiable only against a snapshot that has
+            // at least one available runtime.
+            let snapshot = RuntimeModelSnapshot::capture(
+                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+                &FakeLocator(&["claude"]),
+            );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
@@ -1206,7 +1270,7 @@ mod tests {
                 &mut out,
                 "9.9.9",
                 &mut client,
-                &RuntimeModelSnapshot::default(),
+                &snapshot,
             )
             .unwrap();
             assert_eq!(client.requests.len(), 1, "{name}");
@@ -1224,6 +1288,10 @@ mod tests {
             r#"{"brief":"triage"}"#,
             r#"{"brief":"triage","agent":{"id":"a","runtime":"claude","model":"sonnet"}}"#,
             r#"{"brief":"triage","agent":{"runtime":"claude"}}"#,
+            // A lone existing-agent selector is refused too: the session this
+            // call creates cannot already own an Agent, so admitting it would
+            // build a worktree only to reject it afterwards (#611).
+            r#"{"brief":"triage","agent":{"id":"existing"}}"#,
         ] {
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"session_delegate_brief","arguments":{arguments}}}}}"#
@@ -1429,6 +1497,119 @@ mod tests {
         serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
             .unwrap();
         assert!(String::from_utf8(out).unwrap().contains("not allowed"));
+    }
+
+    /// A composite operation that failed part-way must reach the caller with the
+    /// state it needs to act on, not just a sentence (#611).
+    #[test]
+    fn a_partial_daemon_failure_reaches_the_caller_as_error_data() {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, SideEffect};
+
+        let mut protocol =
+            ProtocolError::new(ErrorCode::OwnershipUnknown, "could not be completed");
+        protocol.side_effect = SideEffect::PartialOrUnknown;
+        protocol.details = Some(serde_json::json!({"reconcile":"retained"}));
+        let data = daemon_error_data(&ClientError::Protocol(protocol.clone())).unwrap();
+        assert_eq!(data["side_effect"], "partial_or_unknown");
+        assert_eq!(data["details"]["reconcile"], "retained");
+
+        // The rendered session-tool response carries it as JSON-RPC `error.data`.
+        let rendered = session_tool_response(
+            serde_json::json!(1),
+            Err(ClientError::Protocol(protocol.clone())),
+        );
+        assert_eq!(
+            rendered["error"]["code"],
+            crate::mcp::protocol::error_code::INTERNAL_ERROR
+        );
+        assert_eq!(
+            rendered["error"]["data"]["details"]["reconcile"],
+            "retained"
+        );
+
+        // An error the daemon did not annotate carries no data, and a transport
+        // failure has nothing to reconcile at all.
+        protocol.details = None;
+        assert!(daemon_error_data(&ClientError::Protocol(protocol)).is_none());
+        assert!(daemon_error_data(&ClientError::Unavailable("down".into())).is_none());
+        assert!(
+            session_tool_response(
+                serde_json::json!(1),
+                Err(ClientError::Unavailable("down".into()))
+            )["error"]
+                .get("data")
+                .is_none()
+        );
+    }
+
+    /// The two success shapes a session tool answers with: an acceptance line for
+    /// a durably admitted operation, and the body for a completed one.
+    #[test]
+    fn session_tool_responses_render_acceptance_and_body() {
+        let accepted = session_tool_response(
+            serde_json::json!(1),
+            Ok(DaemonReply::Accepted {
+                operation_id: "op".into(),
+                revision: 4,
+                body: serde_json::json!({}),
+            }),
+        );
+        assert_eq!(
+            accepted["result"]["content"][0]["text"],
+            "accepted operation op (revision 4)"
+        );
+
+        let body = session_tool_response(
+            serde_json::json!(1),
+            Ok(DaemonReply::Ok(serde_json::json!({"name":"one"}))),
+        );
+        assert_eq!(body["result"]["content"][0]["text"], r#"{"name":"one"}"#);
+    }
+
+    /// The two dispatching tools do not share one `agent` schema: only
+    /// `session_dispatch` can honour an existing Agent (#611).
+    #[test]
+    fn tools_list_publishes_an_existing_agent_branch_only_where_it_can_be_honoured() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+            &FakeLocator(&["claude"]),
+        );
+        let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+        let mut out = Vec::new();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        let tools = last_response(&out)["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let branches = |name: &str| {
+            tools.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"]["properties"]
+                    ["agent"]["oneOf"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+        };
+
+        let dispatch = branches("session_dispatch");
+        assert_eq!(dispatch.len(), 2);
+        assert_eq!(dispatch[0]["required"], serde_json::json!(["id"]));
+
+        let delegate = branches("session_delegate_brief");
+        assert_eq!(delegate.len(), 1);
+        assert_eq!(
+            delegate[0]["required"],
+            serde_json::json!(["runtime", "model"])
+        );
+
+        // A tool that takes no agent selector is left untouched.
+        assert!(
+            agent_selector_schema(&snapshot, "session_create").is_none(),
+            "only the dispatching tools carry an agent selector"
+        );
     }
 
     #[test]

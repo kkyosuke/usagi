@@ -18,7 +18,7 @@ use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState, validate_session_name,
 };
-use usagi_core::infrastructure::git::{GitRunner, list_worktrees};
+use usagi_core::infrastructure::git::{GitRunner, delete_branch, list_worktrees};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
@@ -56,8 +56,114 @@ pub enum SessionRuntimeError {
     AgentFailure { code: ErrorCode, message: String },
     Delivery(String),
     AmbiguousIssue(AmbiguousIssueNumber),
+    Delegation(DelegationFailure),
     Rejected,
     Storage,
+}
+
+/// The safe, structured outcome of a delegation whose dispatch did not succeed.
+///
+/// A delegation creates a session and then dispatches into it, so its failure is
+/// never just a message: the caller has to know whether the session it asked for
+/// exists, which run identity to reconcile it against, and whether the daemon
+/// already rolled it back. A bare error would leave the caller unable to tell a
+/// clean rejection from a worker that may be running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationFailure {
+    pub code: ErrorCode,
+    pub message: String,
+    pub session_id: SessionId,
+    pub run_operation_id: String,
+    pub reconcile: DelegationReconcile,
+}
+
+/// What the daemon did with the session a failed delegation had already created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationReconcile {
+    /// The dispatch definitively did not start, and the session is rolled back
+    /// by a durable teardown the daemon resumes across a restart.
+    Compensated,
+    /// The rollback could not be recorded, so the session is still present and
+    /// has to be removed explicitly.
+    CompensationFailed,
+    /// The spawn outcome is unknown. The session is deliberately kept: tearing
+    /// it down could delete the worktree of a worker that is in fact running.
+    Retained,
+}
+
+impl DelegationReconcile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compensated => "compensated",
+            Self::CompensationFailed => "compensation_failed",
+            Self::Retained => "retained",
+        }
+    }
+
+    /// Whether the delegation left durable state the caller still owns.
+    #[must_use]
+    pub const fn left_side_effect(self) -> bool {
+        !matches!(self, Self::Compensated)
+    }
+}
+
+impl DelegationFailure {
+    /// The safe machine-readable identity a caller needs to reconcile this
+    /// delegation. It carries identities and states only, never worker output.
+    #[must_use]
+    pub fn details(&self) -> Value {
+        json!({
+            "session_id": self.session_id,
+            "run_operation_id": self.run_operation_id,
+            "reconcile": self.reconcile.as_str(),
+        })
+    }
+}
+
+/// Why a session is being created, which is what the durable create journal
+/// records.
+///
+/// A delegated create is one step of a composite operation whose dispatch may
+/// still be missing, so a restart has to be able to tell it from a plain
+/// `session_create` that is complete on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateOrigin {
+    /// `session_create`: the create is the whole operation.
+    Direct,
+    /// `session_delegate_brief`: the create is a step whose dispatch follows.
+    Delegated,
+}
+
+impl CreateOrigin {
+    const fn semantic_action(self) -> SessionAction {
+        match self {
+            Self::Direct => SessionAction::Create,
+            Self::Delegated => SessionAction::DelegateBrief,
+        }
+    }
+}
+
+/// Why a session is being removed, which decides how much of its create is
+/// undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveKind {
+    /// `session_remove`: the worktree goes and the branch stays, because the
+    /// branch holds the session's work.
+    Requested,
+    /// The compensation of a delegated create whose dispatch never started. It
+    /// undoes the create completely, branch included: nothing was ever committed
+    /// on that branch, and leaving it would make a retry under the same session
+    /// name fail with a branch conflict.
+    Compensating,
+}
+
+/// A completed delegated create whose session is still available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedCreate {
+    pub session_id: SessionId,
+    pub name: String,
+    pub operation_id: OperationId,
 }
 
 impl SessionRuntimeError {
@@ -89,6 +195,7 @@ impl SessionRuntimeError {
             | Self::AgentFailure { message, .. }
             | Self::Delivery(message) => message.clone(),
             Self::AmbiguousIssue(error) => error.to_string(),
+            Self::Delegation(failure) => failure.message.clone(),
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
             Self::Rejected => {
@@ -209,10 +316,40 @@ pub fn perform_create(
     operation_id: &str,
     payload: &Value,
 ) -> Result<SessionReply, SessionRuntimeError> {
+    perform_create_from(runtime, git, CreateOrigin::Direct, operation_id, payload)
+}
+
+/// Creates a session as one step of a composite operation, recording the
+/// delegated origin in the durable create journal.
+///
+/// The origin is what makes the composite operation recoverable: a daemon that
+/// died between this create and its dispatch leaves a session no caller owns,
+/// and only a journal that says "this create was delegated" lets the next start
+/// tell it from a plain `session_create`.
+///
+/// # Errors
+///
+/// Returns a typed safe error when the request cannot be admitted or completed.
+pub fn perform_delegated_create(
+    runtime: &Mutex<SessionRuntime>,
+    git: &dyn GitRunner,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
+    perform_create_from(runtime, git, CreateOrigin::Delegated, operation_id, payload)
+}
+
+fn perform_create_from(
+    runtime: &Mutex<SessionRuntime>,
+    git: &dyn GitRunner,
+    origin: CreateOrigin,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
     let step = runtime
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?
-        .begin_create(operation_id, payload)?;
+        .begin_create(origin, operation_id, payload)?;
     match step {
         SessionCreateStep::Done(reply) => Ok(reply),
         SessionCreateStep::Pending(in_flight) => {
@@ -243,10 +380,52 @@ pub fn perform_remove(
     operation_id: &str,
     payload: &Value,
 ) -> Result<SessionReply, SessionRuntimeError> {
+    perform_remove_as(
+        runtime,
+        teardown,
+        RemoveKind::Requested,
+        operation_id,
+        payload,
+    )
+}
+
+/// Undoes a delegated create completely: the worktree and the branch it made.
+///
+/// The removal is forced and deletes the branch, which a requested removal never
+/// does. That is safe only because it is reached exclusively for a session whose
+/// dispatch definitively never started, so nothing on the branch is anybody's
+/// work. Undoing the branch too is what lets the caller retry the same session
+/// name instead of hitting a branch conflict.
+///
+/// # Errors
+///
+/// Returns a typed safe error when the compensation cannot be admitted.
+pub fn perform_compensating_remove(
+    runtime: &Mutex<SessionRuntime>,
+    teardown: &TeardownSignal,
+    operation_id: &str,
+    name: &str,
+) -> Result<SessionReply, SessionRuntimeError> {
+    perform_remove_as(
+        runtime,
+        teardown,
+        RemoveKind::Compensating,
+        operation_id,
+        &json!({"name": name}),
+    )
+}
+
+fn perform_remove_as(
+    runtime: &Mutex<SessionRuntime>,
+    teardown: &TeardownSignal,
+    kind: RemoveKind,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
     let step = runtime
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?
-        .begin_remove(operation_id, payload)?;
+        .begin_remove(kind, operation_id, payload)?;
     match step {
         SessionRemoveStep::Settled(reply) => Ok(reply),
         SessionRemoveStep::Accepted { reply, .. } => {
@@ -325,7 +504,18 @@ impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, 
         validate_teardown_target(&self.io, teardown)?;
         self.io
             .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if !teardown.delete_branch {
+            return Ok(());
+        }
+        // Only after the worktree is gone: git refuses to delete a branch that a
+        // worktree still has checked out.
+        delete_branch(
+            &self.git,
+            &teardown.repository_root,
+            &session_branch(&teardown.name),
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -701,7 +891,7 @@ impl SessionRuntime {
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
-        match self.begin_create(operation_id, payload)? {
+        match self.begin_create(CreateOrigin::Direct, operation_id, payload)? {
             SessionCreateStep::Done(reply) => Ok(reply),
             SessionCreateStep::Pending(in_flight) => {
                 let result = Self::execute_create(self.git.as_ref(), &in_flight);
@@ -716,6 +906,7 @@ impl SessionRuntime {
     /// (see [`perform_create`]).
     fn begin_create(
         &mut self,
+        origin: CreateOrigin,
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionCreateStep, SessionRuntimeError> {
@@ -758,7 +949,7 @@ impl SessionRuntime {
                 .resolve(requested_role.as_ref(), RoleScope::Session)
                 .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
         };
-        let semantic_key = create_semantic_key(&name, role_id.as_ref());
+        let semantic_key = create_semantic_key(origin, &name, role_id.as_ref());
         if let Some(existing) = before
             .operations
             .iter()
@@ -820,7 +1011,7 @@ impl SessionRuntime {
         Ok(SessionCreateStep::Pending(SessionCreateInFlight {
             operation_id,
             fence,
-            branch: format!("usagi/{name}"),
+            branch: session_branch(&name),
             name,
             workspace_root: self.repo_root.clone(),
             destination: path,
@@ -913,7 +1104,7 @@ impl SessionRuntime {
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
-        match self.begin_remove(operation_id, payload)? {
+        match self.begin_remove(RemoveKind::Requested, operation_id, payload)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
                 let outcome = self
@@ -930,11 +1121,15 @@ impl SessionRuntime {
     /// effect, so the caller can answer as soon as it returns.
     fn begin_remove(
         &mut self,
+        kind: RemoveKind,
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionRemoveStep, SessionRuntimeError> {
         let name = session_name(payload)?;
-        let force = force(payload)?;
+        // A compensation is not a client request: it forces the removal and
+        // deletes the branch, and neither is negotiable through a payload.
+        let compensating = kind == RemoveKind::Compensating;
+        let force = compensating || force(payload)?;
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
@@ -981,6 +1176,7 @@ impl SessionRuntime {
                     delete_plan: DeletePlan {
                         targets: vec![name.clone()],
                         force,
+                        delete_branch: compensating,
                     },
                 },
                 Utc::now(),
@@ -1004,8 +1200,61 @@ impl SessionRuntime {
                 session_root: self.session_root(&name),
                 name,
                 force,
+                delete_branch: compensating,
             },
         })
+    }
+
+    /// Every available session whose current incarnation came from a delegated
+    /// create.
+    ///
+    /// This is the recovery half of the delegation saga. The dispatch that such
+    /// a create exists for lives in the dispatch store, so this side only
+    /// reports the identities; the composition root asks the dispatch ledger
+    /// whether each one's run ever became durable and compensates the ones with
+    /// nothing behind them. A successful delegation stays in this list — its run
+    /// is what makes it not an orphan, not its absence here.
+    ///
+    /// A completed create releases the session's operation identity (the record
+    /// no longer has an operation in flight), so the link back to the journal is
+    /// the session name. Only the *last* operation journaled for that name counts:
+    /// a name that was delegated, compensated, and then created plainly belongs
+    /// to the plain create, and reading the stale delegated entry would have this
+    /// roll back a session the user asked for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable lifecycle state cannot be read.
+    pub fn delegated_sessions(&self) -> Result<Vec<DelegatedCreate>, SessionRuntimeError> {
+        let state = self.state()?;
+        Ok(state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .filter_map(|session| {
+                let delegated = semantic_key(SessionAction::DelegateBrief, &session.name);
+                let owning = [
+                    delegated.clone(),
+                    semantic_key(SessionAction::Create, &session.name),
+                    semantic_key(SessionAction::Remove, &session.name),
+                ];
+                let operation = state.operations.iter().rev().find(|operation| {
+                    owning
+                        .iter()
+                        .any(|key| names_session_operation(&operation.semantic_key, key))
+                })?;
+                (names_session_operation(&operation.semantic_key, &delegated)
+                    && operation.status == OperationStatus::Succeeded)
+                    .then(|| DelegatedCreate {
+                        session_id: session.session_id,
+                        name: session.name.clone(),
+                        operation_id: operation.operation_id,
+                    })
+            })
+            .collect())
     }
 
     /// Every unfinished teardown, derived from durable state: a `Deleting`
@@ -1038,6 +1287,7 @@ impl SessionRuntime {
                     session_root: self.session_root(&session.name),
                     name: session.name.clone(),
                     force: plan.force,
+                    delete_branch: plan.delete_branch,
                 })
             })
             .collect())
@@ -1339,7 +1589,7 @@ fn validated_legacy_sessions_without_v2(
     let mut records = Vec::with_capacity(legacy.sessions.len());
     for record in legacy.sessions {
         let expected = expected_parent.join(&record.name);
-        let expected_branch = format!("usagi/{}", record.name);
+        let expected_branch = session_branch(&record.name);
         if !valid_legacy_name(&record.name)
             || !names.insert(record.name.clone())
             || !io.is_linked_worktree(&expected)
@@ -1477,15 +1727,43 @@ fn journal(
     }
 }
 
+/// The branch one session's worktree is checked out on. It is derived from the
+/// name in exactly one place so create, legacy adoption, and the compensating
+/// branch deletion can never disagree about which branch belongs to a session.
+fn session_branch(name: &str) -> String {
+    format!("usagi/{name}")
+}
+
 fn semantic_key(action: SessionAction, name: &str) -> String {
     format!("{action:?}:{name}").to_ascii_lowercase()
 }
 
-fn create_semantic_key(name: &str, role_id: Option<&RoleId>) -> String {
+/// The journaled identity of one create: its origin, the session name, and the
+/// role it was admitted for.
+///
+/// The origin is part of the key because a delegated create is one step of a
+/// composite operation whose dispatch may still be missing, and the recovery pass
+/// has to tell it from a plain `session_create` that is complete on its own.
+/// A direct create without a role keeps the `create:<name>` form earlier daemons
+/// wrote, so existing journals replay unchanged.
+fn create_semantic_key(origin: CreateOrigin, name: &str, role_id: Option<&RoleId>) -> String {
+    let action = semantic_key(origin.semantic_action(), name);
     role_id.map_or_else(
-        || format!("create:{name}"),
-        |role_id| format!("create:{name}:{}", role_id.as_str()),
+        || action.clone(),
+        |role_id| format!("{action}:{}", role_id.as_str()),
     )
+}
+
+/// Whether one journaled semantic key names this action and session.
+///
+/// A create key optionally carries the role it was admitted for, so the action
+/// and name are a prefix rather than the whole key. Session names cannot contain
+/// `:`, which is what makes the separator unambiguous.
+fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
+    semantic_key == action_and_name
+        || semantic_key
+            .strip_prefix(action_and_name)
+            .is_some_and(|role| role.starts_with(':'))
 }
 
 fn projected_snapshot(
@@ -1880,6 +2158,7 @@ mod tests {
             session_container: PathBuf::from("/repo/.usagi/sessions"),
             session_root: PathBuf::from("/repo/.usagi/sessions/one"),
             force: false,
+            delete_branch: false,
         }
     }
 
@@ -3252,6 +3531,7 @@ instructions = "direct"
         missing_operation.delete_plan = Some(DeletePlan {
             targets: vec!["missing-operation".into()],
             force: false,
+            delete_branch: false,
         });
         missing_operation.operation_id = None;
 
@@ -3331,6 +3611,217 @@ instructions = "direct"
             "the session lock must be released while `git worktree add` runs"
         );
         assert_eq!(reply.body["sessions"][0]["name"], "one");
+    }
+
+    /// A delegated create journals its origin, which is the only durable trace
+    /// that a session belongs to a composite operation whose dispatch may never
+    /// have happened. A plain `session_create` is complete on its own and is never
+    /// a recovery candidate — with or without a role (#611).
+    #[test]
+    fn only_delegated_creates_are_reported_for_recovery() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[roles.coder]
+summary = "Implement"
+scopes = ["session"]
+instructions = "code"
+"#,
+        )
+        .unwrap();
+        let runtime = Arc::new(Mutex::new(rt));
+        let delegate = |operation: &str, payload| {
+            perform_delegated_create(&runtime, &FakeGit::ok(), operation, &payload).unwrap();
+        };
+        let create = |payload| {
+            perform_create(&runtime, &FakeGit::ok(), &operation(), &payload).unwrap();
+        };
+
+        let delegated = operation();
+        delegate(&delegated, json!({"name":"triage"}));
+        create(json!({"name":"plain"}));
+        // A role-bearing create journals its role in the same key, so the recovery
+        // pass must recognise the action and name as a prefix rather than by
+        // whole-key equality — in both directions.
+        let with_role = operation();
+        delegate(&with_role, json!({"name":"triage-coder", "role":"coder"}));
+        create(json!({"name":"plain-coder", "role":"coder"}));
+
+        let candidates = runtime.lock().unwrap().delegated_sessions().unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["triage", "triage-coder"]
+        );
+        assert_eq!(candidates[0].operation_id.to_string(), delegated);
+        assert_eq!(candidates[1].operation_id.to_string(), with_role);
+
+        // A retry under the same operation replays the create instead of making a
+        // second session.
+        delegate(&delegated, json!({"name":"triage"}));
+        assert_eq!(
+            runtime.lock().unwrap().snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    /// A session the journal does not explain is not a delegation.
+    ///
+    /// Legacy adoption produces exactly that: an available session with no create
+    /// operation at all. Recovery must leave it alone rather than read the absence
+    /// of a journal entry as "nothing dispatched" and roll it back (#611).
+    #[test]
+    fn a_session_without_an_owning_operation_is_not_a_delegation_candidate() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let mut state = rt.state().unwrap();
+        let revision = state.state_revision;
+        state.state_revision += 1;
+        state.sessions.push(ManagedSession::adopt_available(
+            "adopted".into(),
+            Utc::now(),
+        ));
+        rt.store.replace_if_revision(revision, &state).unwrap();
+
+        assert_eq!(
+            rt.state().unwrap().sessions[0].lifecycle,
+            SessionLifecycle::Available
+        );
+        assert!(rt.delegated_sessions().unwrap().is_empty());
+    }
+
+    /// Compensating a delegated create undoes the branch too, so the same session
+    /// name can be delegated again (#611).
+    #[test]
+    fn compensating_a_delegated_create_undoes_the_branch_and_frees_the_name() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_delegated_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"triage"}),
+        )
+        .unwrap();
+
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("triage");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        let signal = TeardownSignal::new();
+        perform_compensating_remove(&runtime, &signal, &operation(), "triage").unwrap();
+
+        // The durable plan says: force, and take the branch with it.
+        let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].force);
+        assert!(pending[0].delete_branch);
+
+        let git = RecordingGit::new();
+        let calls = Arc::clone(&git.calls);
+        let reports = drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(git, SystemSessionWorktreeIo),
+            &|| false,
+        );
+        assert_eq!(reports[0].effect_error, None);
+        assert!(!session_root.exists());
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.last().unwrap().1,
+            vec!["branch", "-D", "--", "usagi/triage"]
+        );
+        // The branch is deleted from the repository root, never from the tree that
+        // was just removed.
+        assert_eq!(calls.last().unwrap().0, tmp.path());
+        // The compensated session is gone, so it is no longer a recovery candidate.
+        let candidates = || runtime.lock().unwrap().delegated_sessions().unwrap().len();
+        assert_eq!(candidates(), 0);
+
+        // The name is free again, and a plain create that reuses it belongs to the
+        // user: the stale delegated journal entry must not make it a candidate.
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"triage"}),
+        )
+        .unwrap();
+        assert_eq!(candidates(), 0);
+    }
+
+    /// A removal the user asked for keeps the branch: it holds the work.
+    #[test]
+    fn a_requested_removal_leaves_the_session_branch_alone() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        let signal = TeardownSignal::new();
+        perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+        assert!(!runtime.lock().unwrap().pending_teardowns().unwrap()[0].delete_branch);
+
+        let git = RecordingGit::new();
+        let calls = Arc::clone(&git.calls);
+        drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(git, SystemSessionWorktreeIo),
+            &|| false,
+        );
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, args)| args[0] != "branch")
+        );
+    }
+
+    /// The branch deletion is part of the compensation, so its failure is a
+    /// teardown failure: the record stays diagnosable rather than being reported
+    /// as a clean rollback.
+    #[test]
+    fn a_failed_branch_deletion_fails_the_compensating_teardown() {
+        /// Succeeds at removing the worktree and refuses to delete the branch.
+        struct BranchLockedGit;
+        impl GitRunner for BranchLockedGit {
+            fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+                Ok(GitOutput {
+                    success: args[0] != "branch",
+                    stdout: String::new(),
+                    stderr: "error: cannot delete branch 'usagi/one' used by worktree".into(),
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        let data_home = tmp.path().join("daemon");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let error = WorktreeTeardown::new(BranchLockedGit, SystemSessionWorktreeIo)
+            .tear_down(&PendingTeardown {
+                delete_branch: true,
+                repository_root: tmp.path().to_path_buf(),
+                data_home,
+                session_container: tmp.path().join(STATE_DIR).join(SESSIONS_DIR),
+                session_root,
+                ..confined_teardown()
+            })
+            .unwrap_err();
+        assert!(error.contains("git branch delete failed"), "{error}");
     }
 
     #[test]
@@ -3618,6 +4109,7 @@ instructions = "direct"
             session_container: container.clone(),
             session_root: container.join("one"),
             force: true,
+            delete_branch: false,
         };
 
         let result = WorktreeTeardown::new(
@@ -3956,6 +4448,18 @@ instructions = "direct"
                 SessionRuntimeError::Storage,
                 "daemon could not persist session lifecycle state",
             ),
+            // A delegation failure reports the dispatch refusal it wraps; the
+            // reconcile state travels in `details`, not in the message.
+            (
+                SessionRuntimeError::Delegation(DelegationFailure {
+                    code: ErrorCode::Unavailable,
+                    message: "dispatch runtime executable is unavailable".into(),
+                    session_id: SessionId::new(),
+                    run_operation_id: OperationId::new().to_string(),
+                    reconcile: DelegationReconcile::Compensated,
+                }),
+                "dispatch runtime executable is unavailable",
+            ),
         ];
         for (error, expected) in messages {
             assert_eq!(error.safe_message(), expected);
@@ -3980,6 +4484,7 @@ instructions = "direct"
                     session_container: PathBuf::from("/repo/.usagi/sessions"),
                     session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                     force: false,
+                    delete_branch: false,
                 }
             ),
             Err("injected remove failure".into())
@@ -4035,7 +4540,11 @@ instructions = "direct"
             .unwrap();
 
         let _ = runtime
-            .begin_create(&operation(), &json!({"name":"unfinished"}))
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"unfinished"}),
+            )
             .unwrap();
         let current = runtime.state().unwrap();
         let journal = current.operations.last().unwrap();
@@ -4294,6 +4803,7 @@ instructions = "direct"
             session_container: tmp.path().join(STATE_DIR).join(SESSIONS_DIR),
             session_root: tmp.path().join("missing"),
             force: false,
+            delete_branch: false,
         };
         assert_eq!(
             SharedSessionTeardown::new(shared).finish(&pending, Ok(())),

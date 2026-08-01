@@ -1,13 +1,13 @@
 ---
 number: 611
 title: fix(mcp): session_delegate_brief の session 作成と dispatch を失敗時 atomic にする
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, mcp, daemon, session, agent, correctness, lifecycle]
 dependson: []
 related: [502, 546, 547]
-created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+created_at: 2026-07-31T06:00:00+00:00
+updated_at: 2026-07-31T23:44:45.167393+00:00
 ---
 
 ## Finding（P1 partial side effect）

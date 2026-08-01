@@ -287,6 +287,172 @@ printf '%s\n%s\n%s\n' \
     });
 }
 
+/// `session_delegate_brief` is one operation: either the session exists with an
+/// admitted run, or nothing exists.
+///
+/// Both halves of that are exercised here by moving the workspace root's
+/// runtime/model allowlist out from under the MCP server's captured snapshot. A
+/// model the root no longer allows is refused **before** the worktree exists; a
+/// model the root allows but the committed configuration does not can only be
+/// refused **after** it, so that create is rolled back — no session row, no
+/// worktree, no branch, no queued launch — and the name is free again (#611).
+#[test]
+fn production_delegate_brief_refuses_before_creating_or_rolls_the_session_back() {
+    let mut mcp = McpHarness::start();
+    let caller_credential = mcp.launch_caller();
+    let lifecycle_path = mcp.data_dir().join("daemon/sessions.json");
+
+    // The MCP snapshot still advertises `fixture-codex`, but the workspace root
+    // no longer allows it. The daemon decides that without any side effect.
+    mcp.restart_with_credential(&caller_credential);
+    fs::write(
+        mcp.workspace().join(".usagi/config.toml"),
+        "[agents.codex]\nmodels = [\"another-model\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n",
+    )
+    .unwrap();
+    let preflight = mcp.tool(
+        "session_delegate_brief",
+        &json!({
+            "name":"preflight-target",
+            "brief":"must never reach a worktree",
+            "agent":{"runtime":"codex","model":"fixture-codex"}
+        }),
+    );
+    assert_eq!(preflight["error"]["code"], -32603);
+    assert!(
+        !mcp.workspace()
+            .join(".usagi/sessions/preflight-target")
+            .exists()
+    );
+    // Nothing was journaled either: this refusal is not a rollback, the create
+    // never ran.
+    assert!(
+        !fs::read_to_string(&lifecycle_path)
+            .unwrap()
+            .contains("preflight-target")
+    );
+    assert!(!branches(mcp.workspace()).contains(&"usagi/preflight-target".to_owned()));
+
+    // The workspace root now allows a model the committed configuration does
+    // not, so the preflight admits what the created session then refuses.
+    fs::write(
+        mcp.workspace().join(".usagi/config.toml"),
+        "[agents.codex]\nmodels = [\"fixture-codex\", \"uncommitted-model\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n",
+    )
+    .unwrap();
+    mcp.restart_with_credential(&caller_credential);
+
+    let refused = mcp.tool(
+        "session_delegate_brief",
+        &json!({
+            "name":"rollback-target",
+            "brief":"must not leave a worktree behind",
+            "agent":{"runtime":"codex","model":"uncommitted-model"}
+        }),
+    );
+    assert_eq!(refused["error"]["code"], -32603);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not allowed"),
+        "{refused}"
+    );
+    // The caller is told what happened to the session it asked for, not just
+    // that the dispatch failed: this one was rolled back, so nothing is left to
+    // reconcile and the identities name what was undone.
+    let data = &refused["error"]["data"];
+    assert_eq!(data["side_effect"], "none", "{refused}");
+    assert_eq!(data["details"]["reconcile"], "compensated");
+    assert!(data["details"]["session_id"].is_string());
+    assert!(data["details"]["run_operation_id"].is_string());
+
+    // The rollback is durable, not immediate: the daemon's teardown worker owns
+    // the worktree effect, exactly as it does for `session_remove`.
+    let session_root = mcp.workspace().join(".usagi/sessions/rollback-target");
+    wait_until(|| {
+        !session_root.exists()
+            && !tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|session| session["name"] == "rollback-target")
+    });
+    // The branch the create made is gone too, which is what leaves the name
+    // usable; a leftover `usagi/rollback-target` would fail every retry.
+    assert!(!branches(mcp.workspace()).contains(&"usagi/rollback-target".to_owned()));
+    // No launch was queued for the session that never existed.
+    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
+    assert!(!dispatch.contains("must not leave a worktree behind"));
+
+    // The same name delegates cleanly afterwards.
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+sleep 30
+"#,
+    );
+    let accepted = mcp.tool(
+        "session_delegate_brief",
+        &json!({
+            "name":"rollback-target",
+            "brief":"retry under the freed name",
+            "agent":{"runtime":"codex","model":"fixture-codex"}
+        }),
+    );
+    let delegated = tool_text(&accepted);
+    assert_eq!(delegated["name"], "rollback-target");
+    assert!(delegated["run_id"].is_string());
+    assert!(session_root.join(".git").exists());
+}
+
+/// The shipping tool contract does not advertise an existing-agent selector for a
+/// tool that creates the session it dispatches into (#611).
+#[test]
+fn production_delegate_brief_publishes_and_accepts_only_a_new_agent_selector() {
+    let mut mcp = McpHarness::start();
+    let tools = mcp.tools();
+    let branches = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()["inputSchema"]["properties"]["agent"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(
+        branches("session_delegate_brief")
+            .iter()
+            .all(|branch| branch["required"] == json!(["runtime", "model"]))
+    );
+    assert_eq!(branches("session_dispatch")[0]["required"], json!(["id"]));
+
+    let refused = mcp.tool(
+        "session_delegate_brief",
+        &json!({"brief":"triage","name":"id-selector","agent":{"id":"00000000-0000-4000-8000-000000000000"}}),
+    );
+    assert_eq!(refused["error"]["code"], -32602);
+    assert!(!mcp.workspace().join(".usagi/sessions/id-selector").exists());
+}
+
+/// The local branches of one repository, without `refs/heads/`.
+fn branches(repo: &std::path::Path) -> Vec<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["branch", "--format=%(refname:short)"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
 #[test]
 fn production_delegate_brief_rejects_an_unknown_caller_without_creating_a_session() {
     let mut mcp = McpHarness::start();

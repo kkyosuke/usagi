@@ -1028,6 +1028,58 @@ impl AgentRuntime {
         }
     }
 
+    /// Refuses, without any side effect, every new-agent dispatch this daemon
+    /// can already prove it will not admit.
+    ///
+    /// `session_delegate_brief` has to build a worktree before it can dispatch
+    /// into it, so each refusal [`Self::dispatch`] raises afterwards would leave
+    /// an orphan session behind. This runs the same decisions first, reading
+    /// only: the operation identity, the prompt, the workspace runtime/model
+    /// allowlist, the runtime executable, and whether this operation already
+    /// owns a durable admission. [`Self::dispatch`] stays the authority and
+    /// repeats them against the created session's own scope.
+    ///
+    /// An operation this daemon has already answered is deliberately admitted:
+    /// its create replays from the lifecycle journal and its dispatch replays
+    /// from the recorded outcome, so a retry creates nothing twice and must not
+    /// be turned into a refusal here.
+    pub fn preflight_dispatch(
+        &self,
+        operation_id: &str,
+        prompt: &str,
+        runtime: &AgentProfileId,
+        model: &ModelSelector,
+        workspace_root: &std::path::Path,
+    ) -> Result<(), ProtocolError> {
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        if prompt.is_empty() {
+            return Err(dispatch_empty_prompt());
+        }
+        if self.operations.contains_key(operation_id) {
+            return Ok(());
+        }
+        if !WorkspaceAgentConfig::read(workspace_root).allows(runtime.as_str(), model.as_str()) {
+            return Err(dispatch_runtime_model_not_allowed());
+        }
+        if !self.locator.is_available(runtime.as_str()) {
+            return Err(dispatch_runtime_unavailable());
+        }
+        if self
+            .dispatch
+            .admission(operation)
+            .map_err(map_dispatch_storage_error)?
+            .is_some()
+            || self
+                .dispatch
+                .run(operation)
+                .map_err(map_dispatch_storage_error)?
+                .is_some()
+        {
+            return Err(dispatch_admission_incomplete());
+        }
+        Ok(())
+    }
+
     /// Launches a dispatch-selected worker through the same fenced Agent
     /// runtime used by ordinary Agent launch, then records its durable run and
     /// caller binding.  The caller is captured now and never accepted from a
@@ -1039,17 +1091,9 @@ impl AgentRuntime {
         session: SessionId,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let operation = OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "dispatch operation id must be canonical",
-            )
-        })?;
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         if intent.prompt.is_empty() {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "dispatch prompt must not be empty",
-            ));
+            return Err(dispatch_empty_prompt());
         }
         let worker = match &intent.agent {
             DispatchAgentIntent::Existing { agent_id } => self
@@ -1098,16 +1142,10 @@ impl AgentRuntime {
                     .working_directory,
             );
             if !config.allows(worker.runtime.as_str(), worker.model.as_str()) {
-                return Err(ProtocolError::new(
-                    ErrorCode::InvalidArgument,
-                    "dispatch runtime/model is not allowed by the current workspace configuration",
-                ));
+                return Err(dispatch_runtime_model_not_allowed());
             }
             if !self.locator.is_available(worker.runtime.as_str()) {
-                return Err(ProtocolError::new(
-                    ErrorCode::Unavailable,
-                    "dispatch runtime executable is unavailable",
-                ));
+                return Err(dispatch_runtime_unavailable());
             }
         }
         let outcome = self.admit_dispatch(
@@ -1146,10 +1184,7 @@ impl AgentRuntime {
             .map_err(map_dispatch_storage_error)?
         {
             return Err(if existing.semantic_key == semantic_key {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "agent admission is incomplete and cannot be spawned again",
-                )
+                dispatch_admission_incomplete()
             } else {
                 ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
@@ -2430,6 +2465,45 @@ fn map_dispatch_storage_error(_: anyhow::Error) -> ProtocolError {
 
 fn dispatch_agent_not_found() -> ProtocolError {
     ProtocolError::new(ErrorCode::InvalidArgument, "dispatch agent was not found")
+}
+
+// The refusals a dispatch preflight and the dispatch itself must word
+// identically: a caller that saw one before its session existed and the other
+// after must not be told two different things about the same decision.
+
+fn dispatch_operation_id() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::InvalidArgument,
+        "dispatch operation id must be canonical",
+    )
+}
+
+fn dispatch_empty_prompt() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::InvalidArgument,
+        "dispatch prompt must not be empty",
+    )
+}
+
+fn dispatch_runtime_model_not_allowed() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::InvalidArgument,
+        "dispatch runtime/model is not allowed by the current workspace configuration",
+    )
+}
+
+fn dispatch_runtime_unavailable() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::Unavailable,
+        "dispatch runtime executable is unavailable",
+    )
+}
+
+fn dispatch_admission_incomplete() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::OwnershipUnknown,
+        "agent admission is incomplete and cannot be spawned again",
+    )
 }
 
 fn unknown_caller_provenance() -> ProtocolError {
@@ -5471,6 +5545,98 @@ mod tests {
             .unwrap_err();
         assert_eq!(rejected.code, ErrorCode::InvalidArgument);
         assert_eq!(runtime.coordinator.occupied_slots(), 1);
+    }
+
+    /// A delegation has to build a worktree before it can dispatch into it, so
+    /// every refusal that needs no side effect belongs before the create. The
+    /// preflight raises the same refusals `dispatch` does, without touching the
+    /// dispatch store or the coordinator (#611).
+    #[test]
+    fn the_dispatch_preflight_refuses_before_anything_is_created() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("claude");
+        std::fs::write(&executable, "fixture").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let scope = configured_scope(workspace.path());
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let claude = AgentProfileId::new("claude").unwrap();
+        let allowed = ModelSelector::new("test").unwrap();
+        let operation = OperationId::new().to_string();
+        let preflight = |runtime: &AgentRuntime, operation: &str, prompt: &str, model: &str| {
+            runtime.preflight_dispatch(
+                operation,
+                prompt,
+                &claude,
+                &ModelSelector::new(model).unwrap(),
+                workspace.path(),
+            )
+        };
+
+        preflight(&runtime, &operation, "finish", "test").unwrap();
+        assert_eq!(
+            preflight(&runtime, "not-canonical", "finish", "test")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            preflight(&runtime, &operation, "", "test")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        // An unknown model is refused with the same message `dispatch` uses.
+        let rejected = preflight(&runtime, &operation, "finish", "other").unwrap_err();
+        assert_eq!(rejected.code, ErrorCode::InvalidArgument);
+        assert!(rejected.message.contains("not allowed"));
+        // Nothing above reserved anything: no agent, no run, no occupied slot.
+        assert!(runtime.dispatch_store().agents().unwrap().is_empty());
+        assert!(runtime.dispatch_store().runs().unwrap().is_empty());
+        assert_eq!(runtime.coordinator.occupied_slots(), 0);
+
+        std::fs::remove_file(&executable).unwrap();
+        assert_eq!(
+            preflight(&runtime, &operation, "finish", "test")
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        std::fs::write(&executable, "fixture").unwrap();
+
+        // An operation that already owns a durable admission must not create a
+        // second session for it: the spawn's outcome is not this daemon's to
+        // decide again.
+        let session = SessionId::new();
+        let admitted = OperationId::new();
+        runtime
+            .dispatch(
+                &admitted.to_string(),
+                &DispatchIntent {
+                    workspace: WorkspaceId::new(),
+                    session_name: "worker".into(),
+                    caller: CallerRef {
+                        session_id: Some(SessionId::new()),
+                        agent_id: usagi_core::domain::id::AgentId::new(),
+                    },
+                    agent: DispatchAgentIntent::New {
+                        runtime: claude.clone(),
+                        model: allowed.clone(),
+                    },
+                    prompt: "finish".into(),
+                },
+                session,
+                &FakeScope(Ok(scope)),
+            )
+            .unwrap();
+        // This daemon already answered that operation, so a retry replays through
+        // `dispatch` and the preflight deliberately admits it.
+        preflight(&runtime, &admitted.to_string(), "finish", "test").unwrap();
+        // A restart loses the in-memory outcome, and only the durable run is
+        // left: that is the reservation the preflight must refuse to redo.
+        runtime.operations.clear();
+        let incomplete = preflight(&runtime, &admitted.to_string(), "finish", "test").unwrap_err();
+        assert_eq!(incomplete.code, ErrorCode::OwnershipUnknown);
+        assert!(incomplete.message.contains("cannot be spawned again"));
     }
 
     #[test]
