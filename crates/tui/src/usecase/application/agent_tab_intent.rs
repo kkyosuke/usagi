@@ -47,6 +47,17 @@ pub struct AgentTabIntent {
     /// Authoritative user close intent. It is union-preserved across stale
     /// writers until the user explicitly reopens the lineage.
     pub dismissed: BTreeSet<AgentContinuationRef>,
+    /// Deferred close intent for the exact live terminals whose lineage was not
+    /// observed yet when the user closed them. Each fence is promoted into
+    /// [`Self::dismissed`] — and dropped from here — by the first observation
+    /// that binds it to a continuation, so a close is durable even before the
+    /// daemon has reported the conversation.
+    ///
+    /// The field is additive within [`AGENT_TAB_INTENT_SCHEMA`]: an older build
+    /// reading this state simply forgets the deferred fences instead of having
+    /// its whole file quarantined as a future schema.
+    #[serde(default)]
+    pub dismissed_terminals: BTreeSet<TerminalRef>,
 }
 
 impl AgentTabIntent {
@@ -60,6 +71,7 @@ impl AgentTabIntent {
             revision: 0,
             targets: Vec::new(),
             dismissed: BTreeSet::new(),
+            dismissed_terminals: BTreeSet::new(),
         }
     }
 
@@ -118,6 +130,15 @@ impl AgentTabIntent {
             .all(|continuation| continuations.contains(continuation))
         {
             return Err(IntentValidationError::InvalidDismissal);
+        }
+        // A deferred fence has no lineage yet, so it is only checked for scope.
+        // The set itself keeps it unique.
+        if self
+            .dismissed_terminals
+            .iter()
+            .any(|terminal| terminal.workspace_id != expected_workspace)
+        {
+            return Err(IntentValidationError::ScopeMismatch);
         }
         Ok(())
     }
@@ -178,6 +199,22 @@ impl AgentTabIntent {
                 selected,
             } => {
                 let _ = self.apply(AgentTabIntentMutation::Dismiss { continuation });
+                let _ = self.apply(AgentTabIntentMutation::Select {
+                    session_id,
+                    continuation: selected,
+                });
+                None
+            }
+            AgentTabIntentMutation::DismissTerminal { terminal } => {
+                self.dismiss_terminal(&terminal);
+                None
+            }
+            AgentTabIntentMutation::DismissTerminalAndSelect {
+                terminal,
+                session_id,
+                selected,
+            } => {
+                let _ = self.apply(AgentTabIntentMutation::DismissTerminal { terminal });
                 let _ = self.apply(AgentTabIntentMutation::Select {
                     session_id,
                     continuation: selected,
@@ -290,6 +327,70 @@ impl AgentTabIntent {
         target.tabs.extend(old);
     }
 
+    /// The lineage a saved slot has already bound to this exact terminal.
+    fn continuation_of(&self, terminal: &TerminalRef) -> Option<AgentContinuationRef> {
+        self.targets
+            .iter()
+            .flat_map(|target| &target.tabs)
+            .find(|slot| slot.terminal.fences(terminal))
+            .map(|slot| slot.continuation)
+    }
+
+    /// Whether this exact terminal is already closed, either through a deferred
+    /// fence or through the lineage a saved slot binds to it.
+    #[must_use]
+    pub fn dismisses_terminal(&self, terminal: &TerminalRef) -> bool {
+        self.dismissed_terminals.contains(terminal)
+            || self
+                .continuation_of(terminal)
+                .is_some_and(|continuation| self.dismissed.contains(&continuation))
+    }
+
+    /// Close one live tab whose lineage the display intent may not know yet.
+    ///
+    /// A slot that already binds the exact terminal makes the close a normal
+    /// lineage dismissal; otherwise the exact fence is kept until an observation
+    /// can promote it.
+    fn dismiss_terminal(&mut self, terminal: &TerminalRef) {
+        if let Some(continuation) = self.continuation_of(terminal) {
+            self.dismissed.insert(continuation);
+            self.repair_selections();
+            return;
+        }
+        self.dismissed_terminals.insert(terminal.clone());
+    }
+
+    /// Bind every deferred fence the observation now proves to its lineage, so
+    /// the close survives as a continuation that later reconciles, reopen lists,
+    /// and replacement runtimes all reason about.
+    ///
+    /// A fence the observation does not mention is kept: inventory absence is
+    /// never a retention signal.
+    fn promote_deferred_dismissals(
+        &mut self,
+        live: &BTreeMap<AgentContinuationRef, Vec<TerminalRef>>,
+    ) {
+        let promoted = self
+            .dismissed_terminals
+            .iter()
+            .filter_map(|fence| {
+                live.iter()
+                    .find(|(_, candidates)| {
+                        candidates.iter().any(|candidate| candidate.fences(fence))
+                    })
+                    .map(|(continuation, _)| (fence.clone(), *continuation))
+            })
+            .collect::<Vec<_>>();
+        if promoted.is_empty() {
+            return;
+        }
+        for (fence, continuation) in promoted {
+            self.dismissed_terminals.remove(&fence);
+            self.dismissed.insert(continuation);
+        }
+        self.repair_selections();
+    }
+
     fn repair_selections(&mut self) {
         for target in &mut self.targets {
             // `None` is a durable statement that a generic (or empty) tab was
@@ -310,6 +411,25 @@ impl AgentTabIntent {
         self.reconcile_with_policy(terminals, agents, allowed_sessions, true)
     }
 
+    /// Drop the scopes the successfully refreshed managed-session set proves
+    /// gone. A vanished target leaves with only the dismissals its own slots
+    /// owned and the deferred fences of its own terminals, so validation cannot
+    /// observe orphan keys and unrelated targets keep their close intent.
+    fn retain_allowed_scopes(&mut self, allowed_sessions: &BTreeSet<SessionId>) {
+        let removed = self
+            .targets
+            .iter()
+            .filter(|target| !target_allowed(target.session_id, allowed_sessions))
+            .flat_map(|target| target.tabs.iter().map(|slot| slot.continuation))
+            .collect::<BTreeSet<_>>();
+        self.targets
+            .retain(|target| target_allowed(target.session_id, allowed_sessions));
+        self.dismissed
+            .retain(|continuation| !removed.contains(continuation));
+        self.dismissed_terminals
+            .retain(|terminal| target_allowed(terminal.session_id, allowed_sessions));
+    }
+
     fn reconcile_with_policy(
         &mut self,
         terminals: &[TerminalInventoryEntry],
@@ -322,21 +442,7 @@ impl AgentTabIntent {
         }
 
         let live = inventory_set(self.workspace_id, terminals, agents, allowed_sessions);
-
-        // The successfully refreshed managed-session set is authoritative for
-        // scope existence. Remove a vanished target and only dismissals owned by
-        // its slots in one mutation, so validation cannot observe orphan keys
-        // and unrelated targets keep their close intent.
-        let removed = self
-            .targets
-            .iter()
-            .filter(|target| !target_allowed(target.session_id, allowed_sessions))
-            .flat_map(|target| target.tabs.iter().map(|slot| slot.continuation))
-            .collect::<BTreeSet<_>>();
-        self.targets
-            .retain(|target| target_allowed(target.session_id, allowed_sessions));
-        self.dismissed
-            .retain(|continuation| !removed.contains(continuation));
+        self.retain_allowed_scopes(allowed_sessions);
         let mut claimed = BTreeSet::new();
         for target in &mut self.targets {
             target.tabs.retain_mut(|slot| {
@@ -402,6 +508,9 @@ impl AgentTabIntent {
                     terminal,
                 });
         }
+        // Discovery has run, so every live lineage owns a slot and a promoted
+        // dismissal cannot leave `dismissed` pointing at an unknown key.
+        self.promote_deferred_dismissals(&live);
 
         let mut projection = AgentTabProjection::default();
         for target in &mut self.targets {
@@ -562,6 +671,16 @@ pub enum AgentTabIntentMutation {
     /// reducer. `selected=None` means a generic or empty tab owns foreground.
     DismissAndSelect {
         continuation: AgentContinuationRef,
+        session_id: Option<SessionId>,
+        selected: Option<AgentContinuationRef>,
+    },
+    /// Hide one exact live terminal whose lineage has not been observed yet.
+    /// The next observation that binds it promotes the close to its lineage.
+    DismissTerminal { terminal: TerminalRef },
+    /// Atomically hide one not-yet-observed live terminal and persist the
+    /// successor chosen by the pane reducer.
+    DismissTerminalAndSelect {
+        terminal: TerminalRef,
         session_id: Option<SessionId>,
         selected: Option<AgentContinuationRef>,
     },
@@ -804,6 +923,214 @@ mod tests {
             AgentTabIntent::safe_label(closed)
         );
         assert_eq!(AgentTabIntent::safe_label_or_fallback(None), "Agent");
+    }
+
+    #[test]
+    fn a_close_before_observation_is_promoted_to_its_lineage_and_never_reappears() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let closed = AgentContinuationRef::new();
+        let surviving = AgentContinuationRef::new();
+        let closed_terminal = terminal(workspace, Some(session), worktree);
+        let surviving_terminal = terminal(workspace, Some(session), worktree);
+        // Nothing is saved yet: both live Agents are only identified by their
+        // terminal fence, so the close cannot name a lineage.
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.apply(AgentTabIntentMutation::DismissTerminalAndSelect {
+            terminal: closed_terminal.clone(),
+            session_id: Some(session),
+            selected: None,
+        });
+        assert!(intent.dismissed_terminals.contains(&closed_terminal));
+        assert!(intent.dismissed.is_empty());
+        assert_eq!(intent.validate(workspace), Ok(()));
+
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                runtime(closed, &closed_terminal, AgentRuntimeInventoryState::Live),
+                runtime(
+                    surviving,
+                    &surviving_terminal,
+                    AgentRuntimeInventoryState::Live,
+                ),
+            ],
+            resumable: Vec::new(),
+        };
+        let terminals = vec![
+            live_entry(closed_terminal.clone()),
+            live_entry(surviving_terminal),
+        ];
+        let allowed = BTreeSet::from([session]);
+        let projection = intent.reconcile(&terminals, &inventory, &allowed);
+
+        assert_eq!(projection.targets.len(), 1);
+        assert_eq!(
+            projection.targets[0]
+                .tabs
+                .iter()
+                .map(|slot| slot.continuation)
+                .collect::<Vec<_>>(),
+            [surviving]
+        );
+        // The successor had no observed lineage either, so the durable
+        // selection stays `None` rather than manufacturing an Agent selection.
+        assert_eq!(projection.targets[0].selected, None);
+        assert_eq!(intent.dismissed, BTreeSet::from([closed]));
+        assert!(intent.dismissed_terminals.is_empty());
+        assert_eq!(intent.validate(workspace), Ok(()));
+
+        // A reconnect replay and a replacement incarnation of the promoted
+        // lineage stay closed; only an explicit reopen brings it back.
+        let mut replacement = closed_terminal;
+        replacement.terminal_id = TerminalId::new();
+        let replaced = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![runtime(
+                closed,
+                &replacement,
+                AgentRuntimeInventoryState::Live,
+            )],
+            resumable: Vec::new(),
+        };
+        assert!(
+            intent
+                .reconcile(&[live_entry(replacement.clone())], &replaced, &allowed)
+                .targets
+                .is_empty()
+        );
+        intent.apply(AgentTabIntentMutation::Reopen {
+            continuation: closed,
+        });
+        assert_eq!(
+            intent
+                .projected(&[live_entry(replacement)], &replaced, &allowed)
+                .targets[0]
+                .tabs
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_deferred_fence_hides_only_its_own_terminal_and_survives_absence() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let other = AgentContinuationRef::new();
+        let closed_terminal = terminal(workspace, Some(session), worktree);
+        let other_terminal = terminal(workspace, Some(session), worktree);
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.apply(AgentTabIntentMutation::DismissTerminal {
+            terminal: closed_terminal.clone(),
+        });
+
+        // The closed terminal is missing from this observation, so nothing binds
+        // it. Absence is not a promotion, a GC, nor a reason to hide another
+        // live incarnation.
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![runtime(
+                other,
+                &other_terminal,
+                AgentRuntimeInventoryState::Live,
+            )],
+            resumable: Vec::new(),
+        };
+        let projection = intent.reconcile(
+            &[live_entry(other_terminal)],
+            &inventory,
+            &BTreeSet::from([session]),
+        );
+
+        assert_eq!(projection.targets[0].tabs.len(), 1);
+        assert_eq!(projection.targets[0].tabs[0].continuation, other);
+        assert_eq!(
+            intent.dismissed_terminals,
+            BTreeSet::from([closed_terminal])
+        );
+        assert!(intent.dismissed.is_empty());
+        assert_eq!(intent.validate(workspace), Ok(()));
+    }
+
+    #[test]
+    fn a_known_terminal_closes_its_lineage_and_a_removed_session_drops_its_fence() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let continuation = AgentContinuationRef::new();
+        let saved = terminal(workspace, Some(session), worktree);
+        let root_fence = terminal(workspace, None, WorktreeId::new());
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.upsert(Some(session), continuation, saved.clone(), true);
+        assert!(!intent.dismisses_terminal(&saved));
+
+        // The latest state already binds this exact terminal (a stale writer's
+        // deferred close merging after a fresh observation), so the close lands
+        // directly on the lineage.
+        intent.apply(AgentTabIntentMutation::DismissTerminal {
+            terminal: saved.clone(),
+        });
+        assert_eq!(intent.dismissed, BTreeSet::from([continuation]));
+        assert!(intent.dismissed_terminals.is_empty());
+        assert_eq!(intent.targets[0].selected, None);
+        assert!(intent.dismisses_terminal(&saved));
+
+        // A fence whose session is authoritatively gone leaves with its slots;
+        // a root fence is unaffected.
+        let session_fence = terminal(workspace, Some(session), worktree);
+        intent.dismissed_terminals.insert(session_fence.clone());
+        intent.dismissed_terminals.insert(root_fence.clone());
+        let absent = AgentInventory {
+            workspace_id: workspace,
+            runtimes: Vec::new(),
+            resumable: Vec::new(),
+        };
+        intent.reconcile(&[], &absent, &BTreeSet::new());
+        assert_eq!(intent.dismissed_terminals, BTreeSet::from([root_fence]));
+        assert!(!intent.dismisses_terminal(&session_fence));
+        assert_eq!(intent.validate(workspace), Ok(()));
+
+        let mut foreign = AgentTabIntent::empty(workspace);
+        foreign
+            .dismissed_terminals
+            .insert(terminal(WorkspaceId::new(), None, WorktreeId::new()));
+        assert_eq!(
+            foreign.validate(workspace),
+            Err(IntentValidationError::ScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn a_stale_projection_hides_a_deferred_close_without_discovering_it() {
+        let workspace = WorkspaceId::new();
+        let worktree = WorktreeId::new();
+        let continuation = AgentContinuationRef::new();
+        let saved = terminal(workspace, None, worktree);
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.upsert(None, continuation, saved.clone(), true);
+        // A concurrent writer bound this lineage after the deferred close was
+        // recorded, so the saved state carries both keys at once.
+        intent.dismissed_terminals.insert(saved.clone());
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![runtime(
+                continuation,
+                &saved,
+                AgentRuntimeInventoryState::Live,
+            )],
+            resumable: Vec::new(),
+        };
+
+        let before = intent.clone();
+        assert!(
+            intent
+                .projected_exact(&[live_entry(saved)], &inventory, &BTreeSet::new())
+                .targets
+                .is_empty()
+        );
+        assert_eq!(intent, before);
     }
 
     #[test]

@@ -842,7 +842,10 @@ pending tab を安全な feedback に置き換える。`←` / `→`（または
 選択 tab を前後へ並べ替え、`Ctrl-O x` / `Ctrl-O Ctrl-X` は選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
 terminal を停止しない。live Agent tab の close は subscription を detach して conversation lineage の dismissal を
-永続化し、同じ lineage の replacement / interrupted record を `reopen` の明示操作まで隠す。`reopen` picker は
+永続化し、同じ lineage の replacement / interrupted record を `reopen` の明示操作まで隠す。continuation がまだ
+観測されておらず terminal fence だけで投影されている live Agent の close は、その exact `TerminalRef` を
+[deferred dismissal](#deferred-dismissal未観測-lineage-の-close) として永続化する。generic Terminal tab の close は
+conversation の dismissal ではないため、lineage も fence も記録しない。`reopen` picker は
 `AgentContinuationRef` から作る safe label だけを表示し、選択 lineage の dismissal だけを解除する。reopen 自体は
 Agent launch、provider resume、runtime kill を行わない。pending tab の close は daemon へ未送信の client-owned launch
 だけを取り消し、送信済み operation を推測して再送・cancel しない。
@@ -1209,7 +1212,8 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 
 - **two-source reconciliation**: daemon の unified terminal / Agent inventory が liveness・PTY ownership の正本、
   `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択・
-  conversation lineage dismissal の正本である。local state は workspace identity、完全な last-known `TerminalRef`、
+  conversation lineage dismissal と[未観測 lineage の deferred dismissal](#deferred-dismissal未観測-lineage-の-close)の
+  正本である。local state は workspace identity、完全な last-known `TerminalRef`、
   provider-neutral な `AgentContinuationRef` だけを持ち、provider ID、argv、environment、transcript、terminal output を
   保存しない。generic Terminal tab は従来どおり inventory だけから復元する。
 - **タイミング**: 初回 frame を paint した後、UI event loop と別の daemon connection で
@@ -1262,8 +1266,32 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 | exact-equal terminal row の重複 | `TerminalRef` / kind / live がすべて同じ | normalize して 1 row にする |
 | conflicting terminal row / duplicate live continuation / Agent↔terminal 非全単射 | 同じ fenced ref の kind / live が競合する、または live Agent 対応が一意でない | observation 全体を拒否して retry する |
 | daemon 不通 / partial / cross-RPC 不整合 inventory | coherent な全量 observation ではない | 全 pane restore を適用せず retry し、intent / dismissal を GC せず local PTY も作らない |
+| deferred dismissal の fence が live Agent と一致する | exact `TerminalRef` が observation の live lineage に対応した | fence を lineage dismissal へ昇格し、tab を出さない（[deferred dismissal](#deferred-dismissal未観測-lineage-の-close)） |
 | corrupt schema | current schema として読めない | private peer へ quarantine し、空 intent から安全に再構築する |
 | future schema | current build より新しい | 元 bytes を保持して read-only にし、restore / mutation を適用せず typed notice を表示する |
+
+### deferred dismissal（未観測 lineage の close）
+
+live Agent conversation は continuation が未観測でも terminal fence だけで投影される
+（[指示モード](#指示モードdirector-mode)）。この tab を閉じたとき dismissal key が無いことを理由に永続化を
+省くと、runtime だけが閉じて次の observation が同じ conversation を再投影する。そのため `AgentTabIntent` は
+lineage dismissal に加えて、**exact `TerminalRef` の deferred dismissal** を持つ。本節がその契約の正本である。
+
+| 局面 | 動作 |
+|---|---|
+| close 時に lineage が既知 | 従来どおり continuation の dismissal を commit する |
+| close 時に lineage が未知 | exact `TerminalRef` を deferred dismissal として commit する。可視 UI は他の close と同じ atomic 契約に従い、保存失敗時は tab を閉じず typed safe notice を出す |
+| observation が fence の lineage を証明した | 同じ commit で dismissal を continuation へ昇格し、fence を落とす。以降は lineage dismissal と同一に扱う |
+| observation に fence が現れない | fence を保持する（inventory absence は retention / GC の根拠にしない） |
+| session が authoritative に消えた | その session scope の fence を slots / dismissal と同じ commit で除去する |
+| 別 exact `TerminalRef` の live Agent | 昇格前の fence は他の incarnation を抑止しない |
+
+- 昇格前の fence は lineage を持たないため `reopen` picker に出さない。昇格後は他の dismissal と同じ safe label で
+  reopen できる。
+- CAS 競合時、deferred close は monotonic な delta として merge し、stale な後継 selection は捨てて最新 writer の
+  selection を残す。同じ terminal の再 close も revision を進め、その revision を読んだ stale Reopen を fence する。
+- deferred dismissal は現行 schema への追加 field であり、schema は上げない。旧 build はこの field を無視して
+  従来どおり読めるため、state 全体が future schema として read-only 化されることはない。
 
 ## resume data compatibility
 

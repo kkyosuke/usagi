@@ -4105,6 +4105,15 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
     }
 }
 
+/// The durable key a closed Agent tab is dismissed by. A tab whose lineage the
+/// display intent already knows closes by continuation; one that is only
+/// identified by its live terminal closes by that exact fence until an
+/// observation binds its lineage.
+enum AgentDismissalKey {
+    Continuation(AgentContinuationRef),
+    Terminal(TerminalRef),
+}
+
 /// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work
 /// the runtime reports: detach a live subscription, or drop a still-pending
 /// launch (both its queued work and its completion routing) so it cannot spawn a
@@ -4118,27 +4127,47 @@ fn close_focused_terminal_pane(
     // tab already carries its own lineage, so both close through the same
     // continuation-scoped dismissal (#506) and neither deletes a provider
     // conversation or a daemon runtime.
+    //
+    // A live Agent whose continuation is not observed yet (#599 projects it from
+    // the terminal fence alone) is closed by that exact fence instead. Skipping
+    // the mutation would close only the runtime tab and let the next inventory
+    // replay project the same conversation again (#613).
     let dismissed = runtime
         .focused_interrupted()
-        .map(|interrupted| interrupted.continuation)
+        .map(|interrupted| AgentDismissalKey::Continuation(interrupted.continuation))
         .or_else(|| {
-            runtime
-                .focused_terminal()
-                .as_ref()
-                .and_then(|terminal| ui.agent_continuation_for(terminal))
+            runtime.focused_agent_terminal().map(|terminal| {
+                ui.agent_continuation_for(&terminal).map_or(
+                    AgentDismissalKey::Terminal(terminal),
+                    AgentDismissalKey::Continuation,
+                )
+            })
         });
-    if let Some(continuation) = dismissed {
+    if let Some(key) = dismissed {
         let selected = runtime.selection_after_close().flatten();
         let selected = match selected.as_ref() {
             Some(TabSelection::Live(terminal)) => ui.agent_continuation_for(terminal),
             Some(TabSelection::Interrupted(continuation)) => Some(*continuation),
             Some(TabSelection::Pending(_) | TabSelection::Ready(_)) | None => None,
         };
-        if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::DismissAndSelect {
-            continuation,
-            session_id: runtime.panes().active().and_then(Target::session_id),
-            selected,
-        }) {
+        let session_id = runtime.panes().active().and_then(Target::session_id);
+        let mutation = match key {
+            AgentDismissalKey::Continuation(continuation) => {
+                AgentTabIntentMutation::DismissAndSelect {
+                    continuation,
+                    session_id,
+                    selected,
+                }
+            }
+            AgentDismissalKey::Terminal(terminal) => {
+                AgentTabIntentMutation::DismissTerminalAndSelect {
+                    terminal,
+                    session_id,
+                    selected,
+                }
+            }
+        };
+        if let Err(error) = ui.mutate_agent_intent(mutation) {
             surface_agent_tab_intent_error(runtime, error);
             return;
         }
@@ -12721,6 +12750,10 @@ mod tests {
                             .any(|slot| slot.continuation == *continuation)
                     })
                 }
+                AgentTabIntentMutation::DismissTerminal { terminal }
+                | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
+                    state.dismisses_terminal(terminal)
+                }
                 _ => false,
             };
             let mut mutation_applied = true;
@@ -12758,6 +12791,10 @@ mod tests {
                     AgentTabIntentMutation::DismissAndSelect { continuation, .. }
                     | AgentTabIntentMutation::Dismiss { continuation } => {
                         state.apply(AgentTabIntentMutation::Dismiss { continuation })
+                    }
+                    AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. }
+                    | AgentTabIntentMutation::DismissTerminal { terminal } => {
+                        state.apply(AgentTabIntentMutation::DismissTerminal { terminal })
                     }
                     AgentTabIntentMutation::Select {
                         session_id,
@@ -12859,6 +12896,35 @@ mod tests {
         assert!(reopen.intent.dismissed.contains(&continuation));
         assert_eq!(reopen.intent.revision, 3);
         assert_eq!(shared.lock().unwrap().revision, 3);
+
+        // A deferred close merges the same way: the exact fence is recorded
+        // under the conflict and a repeat still advances the revision.
+        let unobserved = scoped_terminal_ref(workspace, None);
+        let deferred = port
+            .mutate(
+                workspace,
+                1,
+                AgentTabIntentMutation::DismissTerminalAndSelect {
+                    terminal: unobserved.clone(),
+                    session_id: None,
+                    selected: Some(continuation),
+                },
+            )
+            .unwrap();
+        assert!(deferred.cas_conflict);
+        assert!(deferred.intent.dismissed_terminals.contains(&unobserved));
+        assert_eq!(deferred.intent.revision, 4);
+        let repeated = port
+            .mutate(
+                workspace,
+                deferred.intent.revision,
+                AgentTabIntentMutation::DismissTerminal {
+                    terminal: unobserved,
+                },
+            )
+            .unwrap();
+        assert!(!repeated.cas_conflict);
+        assert_eq!(repeated.intent.revision, 5);
     }
 
     #[test]
@@ -15211,10 +15277,214 @@ mod tests {
             &mut std::collections::HashMap::new(),
         );
 
-        assert_eq!(runtime.focused_terminal(), Some(generic));
-        let durable = durable.lock().unwrap();
-        assert!(durable.dismissed.contains(&closed));
-        assert_eq!(durable.targets[0].selected, None);
+        assert_eq!(runtime.focused_terminal(), Some(generic.clone()));
+        {
+            let state = durable.lock().unwrap();
+            assert!(state.dismissed.contains(&closed));
+            assert_eq!(state.targets[0].selected, None);
+        }
+
+        // Closing the generic successor is not a conversation dismissal, so it
+        // records neither a lineage nor a deferred terminal fence.
+        let before = durable.lock().unwrap().clone();
+        super::close_focused_terminal_pane(
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+        assert!(!runtime.active_pane().tabs().iter().any(|tab| matches!(
+            tab,
+            PaneTab::Live(LivePane { terminal, .. }) if terminal.fences(&generic)
+        )));
+        assert_eq!(*durable.lock().unwrap(), before);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One fixture closes, replays, reconnects, and reopens.
+    fn closing_an_unobserved_live_agent_survives_inventory_replay_and_reconnect() {
+        let workspace = WorkspaceId::new();
+        let closed = AgentContinuationRef::new();
+        let surviving = AgentContinuationRef::new();
+        let closed_terminal = scoped_terminal_ref(workspace, None);
+        let surviving_terminal = scoped_terminal_ref(workspace, None);
+        // Nothing is saved yet, so both root conversations are projected from
+        // their terminal fence alone (#599) and neither has a continuation.
+        let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::new(),
+                Box::new(MemoryIntentPort {
+                    state: Arc::clone(&durable),
+                    mutations: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        // The root target owns the Agent drawer, so it is the active pane only
+        // while the drawer is open.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![super::PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![
+                    LivePane {
+                        terminal: closed_terminal.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: surviving_terminal.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(closed_terminal.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+        assert_eq!(ui.agent_continuation_for(&closed_terminal), None);
+
+        super::close_focused_terminal_pane(
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+
+        assert_eq!(runtime.focused_terminal(), Some(surviving_terminal.clone()));
+        {
+            let state = durable.lock().unwrap();
+            assert!(state.dismissed_terminals.contains(&closed_terminal));
+            assert!(state.dismissed.is_empty());
+        }
+
+        let live_agents = |terminals: &[(TerminalRef, AgentContinuationRef)]| {
+            (
+                terminals
+                    .iter()
+                    .map(|(terminal, _)| TerminalInventoryEntry {
+                        terminal: terminal.clone(),
+                        kind: TerminalKind::Agent,
+                        live: true,
+                    })
+                    .collect::<Vec<_>>(),
+                AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: terminals
+                        .iter()
+                        .map(|(terminal, continuation)| AgentRuntimeInventoryItem {
+                            runtime: AgentRuntimeRef::new(
+                                AgentRuntimeId::new(),
+                                terminal.clone(),
+                                None,
+                            )
+                            .unwrap(),
+                            continuation: *continuation,
+                            state: AgentRuntimeInventoryState::Live,
+                            resumed_from: None,
+                        })
+                        .collect(),
+                    resumable: Vec::new(),
+                },
+            )
+        };
+        let replay =
+            |ui: &mut WorkspaceUi,
+             runtime: &mut WorkspaceRuntime,
+             inventory: (Vec<TerminalInventoryEntry>, AgentInventory)| {
+                let fence = runtime.restore_fence();
+                let applied = super::apply_restore_completion(
+                    super::RestoreCompletion {
+                        port: Box::new(UnavailableAgentCommandPort),
+                        dispatched_interaction: fence.0,
+                        dispatched_registry_revision: fence.1,
+                        dispatched_allowed_sessions: BTreeSet::new(),
+                        terminals: Ok(inventory.0),
+                        agents: Ok(inventory.1),
+                        observation_coherent: true,
+                    },
+                    ui,
+                    runtime,
+                    workspace,
+                    &BTreeSet::new(),
+                );
+                assert_eq!(applied.outcome, super::RestoreJobOutcome::Applied);
+                runtime
+                    .active_pane()
+                    .tabs()
+                    .iter()
+                    .filter_map(|tab| match tab {
+                        PaneTab::Live(pane) => Some(pane.terminal.clone()),
+                        PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+        // The observation that finally binds the closed terminal to its lineage
+        // promotes the fence instead of projecting the conversation again.
+        let observation = live_agents(&[
+            (closed_terminal.clone(), closed),
+            (surviving_terminal.clone(), surviving),
+        ]);
+        assert_eq!(
+            replay(&mut ui, &mut runtime, observation.clone()),
+            vec![surviving_terminal.clone()]
+        );
+        {
+            let state = durable.lock().unwrap();
+            assert_eq!(state.dismissed, BTreeSet::from([closed]));
+            assert!(state.dismissed_terminals.is_empty());
+            assert_eq!(state.validate(workspace), Ok(()));
+        }
+
+        // A reconnect replay of the same inventory, and a replacement
+        // incarnation of the closed lineage, both stay closed.
+        assert_eq!(
+            replay(&mut ui, &mut runtime, observation),
+            vec![surviving_terminal.clone()]
+        );
+        let replacement = TerminalRef {
+            terminal_id: TerminalId::new(),
+            ..closed_terminal
+        };
+        assert_eq!(
+            replay(
+                &mut ui,
+                &mut runtime,
+                live_agents(&[
+                    (replacement.clone(), closed),
+                    (surviving_terminal.clone(), surviving),
+                ]),
+            ),
+            vec![surviving_terminal.clone()]
+        );
+
+        // Only an explicit reopen brings the conversation back.
+        assert_eq!(
+            ui.agent_reopen_choices()
+                .into_iter()
+                .map(|choice| (choice.label, choice.continuation))
+                .collect::<Vec<_>>(),
+            [(AgentTabIntent::safe_label(closed), closed)]
+        );
+        ui.mutate_agent_intent(AgentTabIntentMutation::Reopen {
+            continuation: closed,
+        })
+        .unwrap();
+        let reopened = replay(
+            &mut ui,
+            &mut runtime,
+            live_agents(&[
+                (replacement.clone(), closed),
+                (surviving_terminal.clone(), surviving),
+            ]),
+        );
+        assert_eq!(reopened.len(), 2);
+        assert!(reopened.contains(&replacement));
+        assert!(reopened.contains(&surviving_terminal));
     }
 
     #[test]
