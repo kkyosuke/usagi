@@ -1,13 +1,13 @@
 ---
 number: 605
 title: fix(daemon): worktree Git command から inherited repository 環境を除去する
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, git, security, correctness]
 dependson: []
 related: [470, 543, 584]
-created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+created_at: 2026-07-31T06:00:00+00:00
+updated_at: 2026-08-01T00:03:37.285599+00:00
 ---
 
 ## Finding（P1 security/correctness）
