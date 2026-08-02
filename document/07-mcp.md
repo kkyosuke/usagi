@@ -139,7 +139,7 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、次回 Agent launch 用の durable queue または live Agent PTY へ配送する |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
-| `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する |
+| `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の完了メッセージを workspace root coordinator へ `auto` 配送する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
@@ -180,11 +180,43 @@ session 作成系は optional role selector を受け取る。`session_create` /
 保存済み assignment を検証し、instruction 本文は MCP wire に載せない。catalog・default・conflict の正本は
 [10. session role](10-session-roles.md) を参照する。
 
-`session_delegate_brief` も同じ credential/provenance と worker selector を使う。`agent` は既存 worker の
-`id`、または allowlist にある `runtime` と `model` の組のいずれか一方だけであり、混在・部分指定は受理しない。
+`session_delegate_brief` も同じ credential/provenance を使うが、`agent` selector は **新規 worker 専用**である。
+この tool は dispatch 先の session を自分で作るため、作成前の session に既存 Agent が所属することはなく、既存
+worker の `id` branch は schema に現れず daemon も受理しない。`agent` は allowlist にある `runtime` と `model` の
+組だけであり、部分指定・混在は受理しない。`session_dispatch` は既存 session を対象とするため `id` branch を持つ。
+
 runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` を扱う。
 workspace の `.usagi/config.toml` に対応する model allowlist があり、profile の実行コマンドが PATH 上にある runtime
 だけが MCP schema に現れる。`sakana-ai` の実行コマンドは `codex-fugu` である。
+
+### delegation の atomicity
+
+`session_delegate_brief` は session 作成と dispatch の 2 つの effect を持つ composite operation だが、成功応答は
+その両方が成立したときだけ返る。副作用の無い判定（selector、caller、workspace root の runtime/model allowlist、
+runtime 実行ファイル、その operation が既に持つ admission）はすべて worktree 作成の**前**に行う。
+
+作成後に dispatch が失敗した場合の扱いは、spawn の結果が確定しているかで分かれる。
+
+| dispatch の失敗 | daemon の扱い | error の `side_effect` / `details.reconcile` |
+|---|---|---|
+| 確定した拒否（allowlist、capacity、spawn 失敗など） | 作成した session を durable teardown で巻き戻す（worktree と branch を削除） | `none` / `compensated` |
+| 巻き戻し自体を記録できなかった | session はそのまま残る | `partial_or_unknown` / `compensation_failed` |
+| spawn の結果が不明（store / journal / reconcile 要求） | session を**残す**。worktree で worker が動いている可能性があるため撤去しない | `partial_or_unknown` / `retained` |
+
+error の `details` には `session_id` と `run_operation_id` も入る。agent はこれを使って
+`session_list` / `agent_list` で実際の状態を確認する。
+
+巻き戻しは `session_remove` と同じ durable teardown なので、daemon が途中で停止しても次回起動時に再開される
+（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）。`session_remove` と異なり branch も
+削除する。delegation は commit を持たない session を作るだけなので branch に成果は無く、branch を残すと同名 session の
+再委譲が branch 衝突で失敗するためである。
+
+作成と dispatch の間で daemon が停止した場合は、次回起動が connection を受け付ける前に巻き戻す。delegated create は
+durable journal にその由来が記録されており、dispatch store にその operation の run も admission も無い session だけが
+対象となる（run があればその operation の結末は dispatch 側が所有する）。
+
+同じ operation id での retry は二重作成しない。create は lifecycle journal から、dispatch は記録済みの結末から
+replay される。
 
 `supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
 `idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な

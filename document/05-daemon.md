@@ -679,6 +679,13 @@ daemon 起動時には未完了の create / initialize / delete journal を reco
 physical effect の完了を証明できないため再実行せず safe failure にして明示 recovery を待つ。中断された **delete は
 resume する**（[session teardown worker](#session-teardown-worker)）。
 
+完了した create のうち、journal が **delegated** と記録しているものは追加で reconcile する。`session_delegate_brief` は
+worktree を作ってから dispatch するため、その間に daemon が停止すると caller の無い `available` session が残る。起動は
+connection 受け付け前に、dispatch store にその operation の run も admission も**無い** delegated session だけを
+compensating teardown で巻き戻す。run があれば結末は dispatch 側が所有するため触らない。判定は session 名について
+journal 上**最後**の operation を見るため、巻き戻し後に同名で作り直した session を誤って対象にしない。契約の正本は
+[7. MCP の delegation の atomicity](07-mcp.md#delegation-の-atomicity) である。
+
 interrupted reconciliation は session を `failed`、対応 operation を terminal `failed` に同じ durable state で記録する。元の `OperationId` の再送は保存済み safe failure を返し、effect を再試行しない。operator が filesystem / Git の状態を確認・修復した後は、明示 recovery または新しい `OperationId` による許可された lifecycle 操作を使う。
 
 旧 reducer が書いた `session.lifecycle = failed` と `operation.status = succeeded` の矛盾した snapshot は daemon open 時に保守的に補正する。failure stage、session name、operation の canonical semantic key が一致する operation だけを `failed` に戻して関連付け、成功 outcome や success hook は生成しない。この移行は effect の再実行可能性を推測しないため、自動 retry は行わず明示 recovery を待つ。
@@ -742,6 +749,11 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため、失敗 record を remove すれば同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
+| branch | `session_remove` は branch `usagi/<name>` を残す（成果を保持するため）。branch も削除するのは `DeletePlan.delete_branch` を持つ compensating teardown だけで、worktree 撤去の**後**に実行する（checkout 中の branch は削除できない） |
+
+compensating teardown は、`session_delegate_brief` が作成したが dispatch に至らなかった session を巻き戻すために
+daemon 自身が admit する removal である。client が要求できる removal ではなく、force と branch 削除は payload で
+選べない。契約の正本は [7. MCP の delegation の atomicity](07-mcp.md#delegation-の-atomicity) である。
 
 client 側の表示は既存の投影で足りる。受理直後から `deleting` 行が見え、完了で消える。TUI は `deleting` 行を
 削除中の行として描画し、`SessionLifecycle::capabilities` により attach も再 remove もできない。MCP の
