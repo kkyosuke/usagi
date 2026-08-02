@@ -4605,12 +4605,9 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
         );
     }
     if let Some(editor) = &material.role_editor {
-        return scratchpad_modal::render_roles_over(
-            material.height,
-            material.width,
-            &frame,
-            editor,
-        );
+        let height = material.height;
+        let width = material.width;
+        return scratchpad_modal::render_roles_over(height, width, &frame, editor);
     }
     frame
 }
@@ -5417,31 +5414,30 @@ fn drive_workspace_controller(
 }
 
 fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> SessionRoleCatalog {
-    let Some(data_home) = data_home else {
-        return SessionRoleCatalog::default();
-    };
-    let Ok(catalog) =
-        usagi_core::infrastructure::role_catalog::load_effective(data_home, workspace_root)
-    else {
-        return SessionRoleCatalog::default();
-    };
-    let roles = catalog
-        .roles
-        .into_iter()
-        .filter(|(_, definition)| {
-            definition
-                .scopes
-                .contains(&usagi_core::domain::role::RoleScope::Session)
+    data_home
+        .and_then(|data_home| {
+            usagi_core::infrastructure::role_catalog::load_effective(data_home, workspace_root).ok()
         })
-        .map(|(id, definition)| RoleChoice {
-            id,
-            summary: definition.summary,
+        .map(|catalog| {
+            let roles = catalog
+                .roles
+                .into_iter()
+                .filter(|(_, definition)| {
+                    definition
+                        .scopes
+                        .contains(&usagi_core::domain::role::RoleScope::Session)
+                })
+                .map(|(id, definition)| RoleChoice {
+                    id,
+                    summary: definition.summary,
+                })
+                .collect();
+            SessionRoleCatalog {
+                roles,
+                default: catalog.defaults.session,
+            }
         })
-        .collect();
-    SessionRoleCatalog {
-        roles,
-        default: catalog.defaults.session,
-    }
+        .unwrap_or_default()
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
