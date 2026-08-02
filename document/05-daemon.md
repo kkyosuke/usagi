@@ -1008,8 +1008,12 @@ IPC、TUI、log に保存・公開しない。
 
 新規 worker の runtime/model は MCP schema snapshot を信頼せず、spawn の直前に resolved managed-session worktree の current `.usagi/config.toml` allowlist と current executable locator で再検証する。allowlist 外・不完全な runtime/model は safe `invalid_argument`、CLI 不在は safe `unavailable` となり、reservation や spawn を行わない。既存 `agent.id` はこの再選択を通らず、保存済み agent の session ownership と lifecycle scope をそのまま用いる。allowlist、executable、または MCP wire / durable registry に path、argv、environment、credential、raw CLI output、provider model list は保存しない。
 
-root の provisioner は Codex を既定 profile とし、`codex login status` または `claude auth status` を spawn
-前に実行する。probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
+root の provisioner は Codex を既定 profile とし、launch する executable 自身の status command を spawn 前に
+実行する。どの product にどの status command を対応させるかは、profile・executable と同じ
+[agent CLI の closed vocabulary](03-tui.md#settings-scope-と-workspace-entry)（core domain settings）が持つ単一の決定関数が答える。
+Codex 互換の `sakana-ai` は launch する `codex-fugu` の `login status` で判定され、Codex は `codex login status`、
+Claude は `claude auth status` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
+probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
 

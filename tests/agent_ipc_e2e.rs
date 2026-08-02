@@ -103,13 +103,23 @@ fn fixture_repo() -> tempfile::TempDir {
 }
 
 fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
+    write_codex_cli(bin, "codex", count, ready_status);
+}
+
+/// Install a fixture Codex-grammar CLI under `program`.
+///
+/// `sakana-ai` launches the Codex-compatible `codex-fugu`, so the two profiles
+/// differ only in the executable name and are exercised with the same script:
+/// the same `login status` readiness contract, the same session capture, and the
+/// same one-line conversation.
+fn write_codex_cli(bin: &Path, program: &str, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
     let script = format!(
         "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{}\" codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         env!("CARGO_BIN_EXE_usagi"),
         count.display(),
     );
-    let path = bin.join("codex");
+    let path = bin.join(program);
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -505,7 +515,14 @@ fn safe_readiness_error(error: ClientError) {
     };
     assert_eq!(error.code, ErrorCode::Unavailable);
     assert!(error.message.contains("install it and sign in"));
-    for private in ["PATH", "codex login status", "credential", "token", "argv"] {
+    for private in [
+        "PATH",
+        "codex login status",
+        "codex-fugu login status",
+        "credential",
+        "token",
+        "argv",
+    ] {
         assert!(
             !error.message.contains(private),
             "leaked {private}: {error:?}"
@@ -755,6 +772,100 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         safe_readiness_error(client.request(request()).unwrap_err());
         assert!(!count.exists(), "readiness failure must not spawn the PTY");
     }
+}
+
+/// #609 product E2E: the `sakana-ai` profile launches the Codex-compatible
+/// `codex-fugu`, so its admission has to follow *that* executable's status
+/// probe.
+///
+/// The root used to accept only `codex` / `claude` as readiness products, which
+/// made an installed and authenticated `codex-fugu` permanently unavailable —
+/// the profile the picker offers could never be launched. This drives the
+/// shipping binary over the real socket for all three states: not installed and
+/// installed-but-unauthenticated must refuse safely without spawning a PTY, and
+/// an authenticated fixture must reach a live conversation.
+#[test]
+fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for ready_status in [None, Some(1)] {
+        let repo = fixture_repo();
+        let home = short_dir("usagi-");
+        let bin = home.path().join("bin");
+        let count = home.path().join("spawn-count");
+        fs::create_dir(&bin).unwrap();
+        // Codex stays installed and authenticated throughout, so a refusal can
+        // only come from `codex-fugu`'s own probe rather than a shared one.
+        write_codex(&bin, &count, 0);
+        if let Some(status) = ready_status {
+            write_codex_cli(&bin, "codex-fugu", &count, status);
+        }
+        let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+        let mut client = client(&channel_data_dir(home.path()));
+        let (workspace, session, _) = available_scope(&mut client);
+        let operation = OperationId::new().to_string();
+        let request = || DaemonRequest::Agent {
+            operation_id: operation.clone(),
+            intent: launch_intent(workspace, session, Some("sakana-ai")),
+        };
+        safe_readiness_error(client.request(request()).unwrap_err());
+        safe_readiness_error(client.request(request()).unwrap_err());
+        assert!(!count.exists(), "readiness failure must not spawn the PTY");
+    }
+
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    write_codex_cli(&bin, "codex-fugu", &count, 0);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let mut client = client(&channel_data_dir(home.path()));
+    let (workspace, session, _) = available_scope(&mut client);
+
+    let (operation, terminal) = launch(&mut client, workspace, session, Some("sakana-ai"));
+    let subscription = attach(&mut client, &terminal);
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq: 0,
+                input_operation: None,
+                bytes: b"go\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    wait_for_agent_completion(
+        &mut client,
+        &operation,
+        workspace,
+        session,
+        Some("sakana-ai"),
+    );
+    let snapshot = client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Resync,
+            payload: serde_json::to_value(TerminalRequest::Resync {
+                terminal: terminal.clone(),
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    let DaemonReply::Ok(snapshot) = snapshot else {
+        unreachable!()
+    };
+    assert_eq!(snapshot["exited"], 0);
+    let rows = restored_screen(&snapshot);
+    assert!(screen_contains(&rows, "ready"), "{rows:?}");
+    assert!(screen_contains(&rows, "input:go"), "{rows:?}");
+    assert_eq!(
+        fs::read_to_string(&count).unwrap().lines().count(),
+        1,
+        "the authenticated fixture spawns exactly one `codex-fugu` child"
+    );
 }
 
 /// An agent phase report is routed to the Agent owner over the real socket, and
