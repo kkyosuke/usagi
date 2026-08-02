@@ -18,7 +18,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::memory::{Memory, MemorySummary};
-use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore, MutationOutcome};
+use crate::infrastructure::markdown_store::{
+    MarkdownEntry, MarkdownSource, MarkdownStore, MutationOutcome,
+};
 use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
@@ -80,12 +82,17 @@ impl MarkdownEntry for MemoryEntry {
             .map(ToOwned::to_owned)
     }
 
-    fn summary(entry: &Memory) -> MemorySummary {
-        entry.summary()
+    fn summary(entry: &Memory, file: &str) -> MemorySummary {
+        entry.summary(file)
     }
 
-    fn sort_entries(entries: &mut Vec<Memory>) {
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
+    fn sort_sources(sources: &mut [MarkdownSource<Memory>]) {
+        sources.sort_by(|left, right| {
+            left.entry
+                .name
+                .cmp(&right.entry.name)
+                .then_with(|| left.file.cmp(&right.file))
+        });
     }
 
     fn index_parts(index: IndexFile) -> (Option<u32>, Option<String>, Vec<MemorySummary>) {
@@ -164,8 +171,10 @@ impl MemoryStore {
 
     /// Like [`scan`](Self::scan), but logs unreadable/unparseable memory files and
     /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
-    pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
-        self.inner.scan_lenient()
+    /// Each memory is paired with the exact file it was read from so callers
+    /// building their own summaries name a source that exists.
+    pub(crate) fn scan_sources_lenient(&self) -> Result<Vec<MarkdownSource<Memory>>> {
+        self.inner.scan_sources_lenient()
     }
 
     /// Read a single memory by name, or `None` if it does not exist.
@@ -334,6 +343,50 @@ mod tests {
             .unwrap()
             .set_modified(t)
             .unwrap();
+    }
+
+    /// Two sources declaring the same name are ordered by their file name, so a
+    /// duplicate lists deterministically instead of in directory order.
+    #[test]
+    fn sources_sharing_a_name_are_ordered_by_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        for file in ["second.md", "first.md"] {
+            fs::write(store.dir().join(file), memory("dup", "Dup").to_markdown()).unwrap();
+        }
+
+        let files: Vec<String> = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.file)
+            .collect();
+
+        assert_eq!(files, ["first.md", "second.md"]);
+    }
+
+    /// A memory file whose name disagrees with its `name` field is still
+    /// reported by the file it lives in, through both the cached-index and the
+    /// rebuild path — the same invariant the issue store holds.
+    #[test]
+    fn summaries_report_a_memory_file_that_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.dir().join("authored-by-hand.md"),
+            memory("declared-name", "Declared").to_markdown(),
+        )
+        .unwrap();
+
+        assert!(!store.index_path().exists());
+        let rebuilt = store.summaries().unwrap();
+        assert_eq!(rebuilt[0].name, "declared-name");
+        assert_eq!(rebuilt[0].file, "authored-by-hand.md");
+        assert!(store.dir().join(&rebuilt[0].file).is_file());
+
+        assert_eq!(store.summaries().unwrap(), rebuilt);
     }
 
     #[test]

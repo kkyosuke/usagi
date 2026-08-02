@@ -94,9 +94,11 @@ fn file_name_zero_pads_the_number() {
 }
 
 #[test]
-fn summary_mirrors_the_issue_without_body() {
+fn summary_reports_the_source_file_and_mirrors_the_issue_without_body() {
     let issue = sample();
-    let summary = issue.summary();
+    // A source whose name does not match the title: the summary reports the
+    // file it was read from, not the canonical write target.
+    let summary = issue.summary("007-renamed-since-the-last-write.md");
     assert_eq!(summary.number, 7);
     assert_eq!(summary.title, "Add doctor command");
     assert_eq!(summary.status, IssueStatus::InProgress);
@@ -106,7 +108,8 @@ fn summary_mirrors_the_issue_without_body() {
     assert_eq!(summary.related, vec![3]);
     assert_eq!(summary.parent, Some(4));
     assert_eq!(summary.milestone, Some("v1".to_string()));
-    assert_eq!(summary.file, "007-add-doctor-command.md");
+    assert_eq!(issue.file_name(), "007-add-doctor-command.md");
+    assert_eq!(summary.file, "007-renamed-since-the-last-write.md");
 }
 
 #[test]
@@ -317,7 +320,7 @@ fn parse_rejects_missing_required_fields() {
 
 #[test]
 fn summary_serializes_to_json() {
-    let summary = sample().summary();
+    let summary = sample().summary("007-add-doctor-command.md");
     let json = serde_json::to_string(&summary).unwrap();
     assert!(json.contains("\"status\":\"in-progress\""));
     let back: IssueSummary = serde_json::from_str(&json).unwrap();

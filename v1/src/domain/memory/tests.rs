@@ -60,15 +60,17 @@ fn slugify_falls_back_when_empty() {
 }
 
 #[test]
-fn file_name_and_summary_derive_from_fields() {
+fn file_name_is_canonical_and_summary_reports_the_source_file() {
     let m = sample();
     assert_eq!(m.file_name(), "user-prefers-tabs.md");
-    let s = m.summary();
+    // A source whose name does not match the memory name: the summary reports
+    // the file it was read from, not the canonical write target.
+    let s = m.summary("renamed-since-the-last-write.md");
     assert_eq!(s.name, "user-prefers-tabs");
     assert_eq!(s.title, "ユーザーはタブを好む");
     assert_eq!(s.kind, MemoryType::User);
     assert_eq!(s.related, vec!["editor-config".to_string()]);
-    assert_eq!(s.file, "user-prefers-tabs.md");
+    assert_eq!(s.file, "renamed-since-the-last-write.md");
 }
 
 #[test]

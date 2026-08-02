@@ -68,7 +68,9 @@ pub struct MemorySummary {
     pub kind: MemoryType,
     #[serde(default)]
     pub related: Vec<String>,
-    /// File name (relative to the memory directory) backing this memory.
+    /// Name of the source file (relative to the memory directory) this memory
+    /// was read from. Always an existing file, which is not necessarily the
+    /// canonical [`Memory::file_name`] the next write will target.
     pub file: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -101,15 +103,19 @@ impl Memory {
         format!("{}.md", self.name)
     }
 
-    /// Build the metadata summary for this memory.
+    /// Build the metadata summary for this memory, reported as living in `file`.
+    ///
+    /// `file` is the name of the source that supplied this memory, which the
+    /// caller knows and the entity does not. Taking it as an argument keeps a
+    /// summary from ever naming a file that does not exist.
     #[must_use]
-    pub fn summary(&self) -> MemorySummary {
+    pub fn summary(&self, file: &str) -> MemorySummary {
         MemorySummary {
             name: self.name.clone(),
             title: self.title.clone(),
             kind: self.kind,
             related: self.related.clone(),
-            file: self.file_name(),
+            file: file.to_owned(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

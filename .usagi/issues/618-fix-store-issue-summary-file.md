@@ -1,13 +1,13 @@
 ---
 number: 618
 title: fix(store): issue summary の file を実ファイル名で報告する
-status: todo
+status: done
 priority: medium
 labels: [store, issue, persistence, v1, v2, correctness]
 dependson: []
 related: [617, 117, 113]
 created_at: 2026-07-31T23:45:08.418037+00:00
-updated_at: 2026-07-31T23:45:08.418037+00:00
+updated_at: 2026-08-01T01:33:05.968582+00:00
 ---
 
 ## Finding（correctness / SSoT）

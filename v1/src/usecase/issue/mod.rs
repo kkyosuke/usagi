@@ -322,13 +322,13 @@ pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec
     }
     // Tolerant scan: one unparseable file is skipped (and logged) rather than
     // failing the whole query, matching how `list` reads through the index.
-    let issues = IssueStore::new(repo_root).scan_lenient()?;
-    let done = done_numbers(issues.iter().map(|i| (i.number, i.status)));
+    let sources = IssueStore::new(repo_root).scan_sources_lenient()?;
+    let done = done_numbers(sources.iter().map(|s| (s.entry.number, s.entry.status)));
     let needle = search::fold_query(query);
-    let matched: Vec<IssueSummary> = issues
+    let matched: Vec<IssueSummary> = sources
         .into_iter()
-        .filter(|i| search::matches_folded(&needle, &[&i.title, &i.body]))
-        .map(|i| i.summary())
+        .filter(|s| search::matches_folded(&needle, &[&s.entry.title, &s.entry.body]))
+        .map(|s| s.entry.summary(&s.file))
         .collect();
     Ok(annotate(matched, &done)
         .into_iter()
@@ -386,10 +386,16 @@ pub fn delete(repo_root: &Path, number: u32) -> Result<bool> {
 }
 
 /// Annotate an in-memory set of issues with dependency readiness, without
-/// touching disk. Used by callers (e.g. the TUI) that already hold the issues.
+/// touching disk. Used by callers (e.g. the TUI) that already hold the issues
+/// and never surface `summary.file`. With no source paths at hand this reports
+/// each issue's canonical [`Issue::file_name`]; callers that need a path that
+/// exists read through [`IssueStore`], which reports the file it actually read.
 pub fn annotate_all(issues: &[Issue]) -> Vec<ListedIssue> {
     let done = done_numbers(issues.iter().map(|i| (i.number, i.status)));
-    annotate(issues.iter().map(Issue::summary).collect(), &done)
+    annotate(
+        issues.iter().map(|i| i.summary(&i.file_name())).collect(),
+        &done,
+    )
 }
 
 /// Collect the set of issue numbers whose status is `done`.

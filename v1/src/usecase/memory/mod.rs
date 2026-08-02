@@ -126,12 +126,14 @@ pub fn search(repo_root: &Path, query: &str, filter: &MemoryFilter) -> Result<Ve
     }
     // Tolerant scan: one unparseable file is skipped (and logged) rather than
     // failing the whole query, matching how `list` reads through the index.
-    let memories = MemoryStore::new(repo_root).scan_lenient()?;
+    let sources = MemoryStore::new(repo_root).scan_sources_lenient()?;
     let needle = search::fold_query(query);
-    let mut summaries: Vec<MemorySummary> = memories
+    let mut summaries: Vec<MemorySummary> = sources
         .into_iter()
-        .filter(|m| search::matches_folded(&needle, &[&m.name, &m.title, &m.body]))
-        .map(|m| m.summary())
+        .filter(|s| {
+            search::matches_folded(&needle, &[&s.entry.name, &s.entry.title, &s.entry.body])
+        })
+        .map(|s| s.entry.summary(&s.file))
         .filter(|s| filter.matches(s))
         .collect();
     sort_newest_first(&mut summaries);

@@ -228,6 +228,14 @@ fast path は全 source byte を各 1 回読む一方、frontmatter の parse �
 利用しない。source mutation 後は一部 summary の patch ではなく全 source を走査して fingerprint と summary
 を再生成し、外部編集された sibling の stale summary に新しい fingerprint を付けない。
 
+summary が報告する `file` は、その entry を実際に読み取った source file の名前である。entry の field から
+導出する canonical 名（issue は `NNN-<slug>.md`、memory は `<name>.md`）は次の write 先を決める write
+target であって、読み手への報告名ではない。store を経由せず Markdown を直接置いた source、および title
+変更後まだ書き戻していない source では両者がずれるため、報告名を実 file に固定し、読み手が存在しない path を
+掴まないようにする。`index.json` の `file` も同じ実 file 名を保持し、rename は `source_fingerprint` の
+入力に含まれるので cache は自動で rebuild される。canonical 化自体は維持し、次の write が entry を canonical
+名へ書き直して同 identity の stale sibling を削除する。
+
 mutation は store lock 下で次の順序に分ける。
 
 ```text

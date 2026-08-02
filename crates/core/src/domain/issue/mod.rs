@@ -95,7 +95,9 @@ pub struct IssueSummary {
     pub parent: Option<u32>,
     #[serde(default)]
     pub milestone: Option<String>,
-    /// File name (relative to the issues directory) backing this issue.
+    /// Name of the source file (relative to the issues directory) this issue
+    /// was read from. Always an existing file, which is not necessarily the
+    /// canonical [`Issue::file_name`] the next write will target.
     pub file: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -115,15 +117,25 @@ impl Issue {
         crate::domain::frontmatter::slugify(&self.title, "issue")
     }
 
-    /// The file name backing this issue, e.g. `001-add-doctor.md`.
+    /// The canonical file name for this issue, e.g. `001-add-doctor.md`.
+    ///
+    /// This is the *write target*: where the store puts the issue on its next
+    /// write. It is not necessarily the file the issue was read from, because a
+    /// source can be authored outside the store or have had its title changed
+    /// since the last write. Readers must report the file they actually read
+    /// (see [`Issue::summary`]).
     #[must_use]
     pub fn file_name(&self) -> String {
         format!("{:03}-{}.md", self.number, self.slug())
     }
 
-    /// Build the metadata summary for this issue.
+    /// Build the metadata summary for this issue, reported as living in `file`.
+    ///
+    /// `file` is the name of the source that supplied this issue, which the
+    /// caller knows and the entity does not. Taking it as an argument keeps a
+    /// summary from ever naming a file that does not exist.
     #[must_use]
-    pub fn summary(&self) -> IssueSummary {
+    pub fn summary(&self, file: &str) -> IssueSummary {
         IssueSummary {
             number: self.number,
             title: self.title.clone(),
@@ -134,7 +146,7 @@ impl Issue {
             related: self.related.clone(),
             parent: self.parent,
             milestone: self.milestone.clone(),
-            file: self.file_name(),
+            file: file.to_owned(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

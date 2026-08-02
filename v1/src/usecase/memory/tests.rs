@@ -77,6 +77,23 @@ fn list_filters_by_type_and_orders_newest_first() {
     assert!(projects.iter().all(|s| s.kind == MemoryType::Project));
 }
 
+/// `search` builds its own summaries from a lenient scan, so it must name the
+/// file on disk just like the indexed listing does.
+#[test]
+fn search_reports_the_file_on_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    save_one(repo, "deploy", "Deploy steps", MemoryType::Project);
+    let dir = repo.join(".usagi/memory");
+    std::fs::rename(dir.join("deploy.md"), dir.join("renamed-by-hand.md")).unwrap();
+
+    let found = search(repo, "deploy", &MemoryFilter::default()).unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].file, "renamed-by-hand.md");
+    assert!(dir.join(&found[0].file).is_file());
+}
+
 #[test]
 fn search_matches_name_title_and_body_then_filters() {
     let tmp = tempfile::tempdir().unwrap();
