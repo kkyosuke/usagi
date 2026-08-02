@@ -4663,7 +4663,7 @@ fn drain_controller_host_actions(
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
                     ui,
-                    SessionCommand::CreateWithRole {
+                    SessionCommand::Create {
                         name: name.clone(),
                         role_id,
                     },
@@ -6360,7 +6360,7 @@ mod tests {
     };
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry, NewRequest, Overlay,
-        PendingToken, SessionCreateIntent, TabDirection, Target,
+        PendingToken, RoleEditorScope, SessionCreateIntent, TabDirection, Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -8586,19 +8586,17 @@ mod tests {
             command: SessionCommand,
         ) -> Result<SessionCommandResult, String> {
             let sessions = match &command {
-                SessionCommand::Create { name } | SessionCommand::CreateWithRole { name, .. } => {
-                    Some(vec![SessionRecord {
-                        name: name.clone(),
-                        display_name: None,
-                        origin: SessionOrigin::Human,
-                        started_from: None,
-                        root: workspace.path.join(".usagi/sessions").join(name),
-                        created_at: now(),
-                        last_active: None,
-                        notes: Scratchpad::default(),
-                        prs: Vec::new(),
-                    }])
-                }
+                SessionCommand::Create { name, .. } => Some(vec![SessionRecord {
+                    name: name.clone(),
+                    display_name: None,
+                    origin: SessionOrigin::Human,
+                    started_from: None,
+                    root: workspace.path.join(".usagi/sessions").join(name),
+                    created_at: now(),
+                    last_active: None,
+                    notes: Scratchpad::default(),
+                    prs: Vec::new(),
+                }]),
                 SessionCommand::Remove { .. } => Some(Vec::new()),
                 _ => None,
             };
@@ -8730,6 +8728,18 @@ mod tests {
         );
         assert!(overview.join("\n").contains("Overview"));
 
+        let _ = palette.apply_event(AppEvent::Key(AppKey::SubmitOverview(
+            "roles workspace".to_owned(),
+        )));
+        let _ = palette.apply_event(AppEvent::Backend(BackendEvent::RolesLoaded {
+            scope: RoleEditorScope::Workspace,
+            source: "version = 1\n".to_owned(),
+        }));
+        let roles = render_controller_frame(
+            20, 80, &palette, "atlas", root, sessions, None, &git, None, None,
+        );
+        assert!(roles.join("\n").contains("workspace roles.toml"));
+
         // Create-failure dialog: a failed create OperationResult opens it, and
         // this path composites the safe message over Home.
         let mut failing = WorkspaceRuntime::new(workspace, Vec::new());
@@ -8752,6 +8762,32 @@ mod tests {
             render_controller_frame(20, 80, &failing, "atlas", root, &[], None, &git, None, None);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
+    }
+
+    #[test]
+    fn unavailable_backend_reports_role_editor_errors_for_load_and_save() {
+        use crate::usecase::application::daemon_backend::TargetStorePort as _;
+
+        let mut port = UnavailableBackendPort;
+        let (load, load_events) = Completions::channel();
+        port.load_roles(RoleEditorScope::Workspace, load);
+        assert!(matches!(
+            load_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Workspace,
+                ..
+            })
+        ));
+
+        let (save, save_events) = Completions::channel();
+        port.save_roles(RoleEditorScope::Global, "version = 1\n".to_owned(), save);
+        assert!(matches!(
+            save_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Global,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -10035,9 +10071,7 @@ mod tests {
                 _: Option<&SessionRecord>,
                 command: SessionCommand,
             ) -> Result<SessionCommandResult, String> {
-                let (SessionCommand::Create { name } | SessionCommand::CreateWithRole { name, .. }) =
-                    command
-                else {
+                let SessionCommand::Create { name, .. } = command else {
                     return Err("unexpected session command".to_owned());
                 };
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -10360,7 +10394,7 @@ mod tests {
                 let _ = self.release.lock().unwrap().recv();
             }
             let session_ids = match command {
-                SessionCommand::Create { .. } | SessionCommand::CreateWithRole { .. } => {
+                SessionCommand::Create { .. } => {
                     vec![self.existing, self.created]
                 }
                 SessionCommand::Remove { .. } => Vec::new(),

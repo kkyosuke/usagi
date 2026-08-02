@@ -617,6 +617,8 @@ mod tests {
         saved_notes: Vec<(Target, Scratchpad)>,
         loaded_env: Vec<EnvScope>,
         saved_env: Vec<(EnvScope, Vec<EnvironmentEntry>)>,
+        loaded_roles: Vec<RoleEditorScope>,
+        saved_roles: Vec<(RoleEditorScope, String)>,
     }
 
     impl TargetStorePort for FakeStore {
@@ -666,6 +668,25 @@ mod tests {
                 error: SafeError {
                     message: SafeMessage::new("permission denied"),
                     error_id: "env-save".to_owned(),
+                },
+            }));
+        }
+
+        fn load_roles(&mut self, scope: RoleEditorScope, completions: Completions) {
+            self.loaded_roles.push(scope);
+            completions.emit(AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope,
+                source: "version = 1\n".to_owned(),
+            }));
+        }
+
+        fn save_roles(&mut self, scope: RoleEditorScope, source: String, completions: Completions) {
+            self.saved_roles.push((scope, source));
+            completions.emit(AppEvent::Backend(BackendEvent::RolesError {
+                scope,
+                error: SafeError {
+                    message: SafeMessage::new("invalid catalog"),
+                    error_id: "roles-save".to_owned(),
                 },
             }));
         }
@@ -901,6 +922,28 @@ mod tests {
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::EnvironmentError { scope: failed, .. })]
                 if *failed == EnvScope::Global
+        ));
+    }
+
+    #[test]
+    fn load_and_save_roles_reflux_backend_events() {
+        let mut backend = backend();
+        backend.dispatch(Effect::LoadRoles {
+            scope: RoleEditorScope::Workspace,
+        });
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::RolesLoaded { scope, source })]
+                if *scope == RoleEditorScope::Workspace && source == "version = 1\n"
+        ));
+        backend.dispatch(Effect::SaveRoles {
+            scope: RoleEditorScope::Global,
+            source: "version = 1\n".to_owned(),
+        });
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::RolesError { scope, .. })]
+                if *scope == RoleEditorScope::Global
         ));
     }
 

@@ -2904,10 +2904,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         command: SessionCommand,
     ) -> Result<SessionCommandResult, String> {
         let (action, payload) = match command {
-            SessionCommand::Create { name } => {
-                (SessionAction::Create, serde_json::json!({"name": name}))
-            }
-            SessionCommand::CreateWithRole { name, role_id } => (
+            SessionCommand::Create { name, role_id } => (
                 SessionAction::Create,
                 serde_json::json!({"name": name, "role": role_id}),
             ),
@@ -3983,11 +3980,11 @@ mod tests {
         DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort, FsWorkspaceLoader, Geometry,
         LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
         PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
-        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
-        agent_inventory_request, agent_launch_request, classify_terminal_input,
-        correlate_agent_launch, created_session_hook, daemon_error_reason, decision_cadence,
-        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
+        TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
+        TerminalSubscription, agent_inventory_request, agent_launch_request,
+        classify_terminal_input, correlate_agent_launch, created_session_hook, daemon_error_reason,
+        decision_cadence, decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, probe_path,
@@ -6242,6 +6239,31 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_snapshot_projects_safe_role_metadata_by_session_id() {
+        let mut managed =
+            ManagedSession::new_creating("fresh".into(), OperationId::new(), Utc::now());
+        managed.lifecycle = SessionLifecycle::Available;
+        managed.role_id = Some(usagi_core::domain::role::RoleId::new("coder").unwrap());
+        let session_id = managed.session_id;
+        let mut managed_value = serde_json::to_value(managed).unwrap();
+        managed_value
+            .as_object_mut()
+            .unwrap()
+            .insert("role_summary".to_owned(), json!("Writes code"));
+        let parsed = lifecycle_snapshot(&json!({
+            "revision": 1,
+            "workspace_id": WorkspaceId::new(),
+            "root_worktree_id": usagi_core::domain::id::WorktreeId::new(),
+            "sessions": [managed_value]
+        }))
+        .unwrap();
+
+        let role = &parsed.session_roles[&session_id];
+        assert_eq!(role.role_id.as_ref().unwrap().as_str(), "coder");
+        assert_eq!(role.role_summary.as_deref(), Some("Writes code"));
+    }
+
+    #[test]
     fn build_identity_errors_keep_the_old_daemon_in_the_tui_message() {
         use usagi_core::usecase::client::ClientError;
 
@@ -6835,17 +6857,73 @@ mod tests {
         BackendTargetStorePort::save_roles(
             &mut store,
             RoleEditorScope::Workspace,
-            "# exact\nversion = 1\n".into(),
+            "# exact\nversion = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n".into(),
             completions,
         );
         assert!(matches!(
             receiver.recv().unwrap(),
             AppEvent::Backend(BackendEvent::RolesLoaded { source, .. }) if source.starts_with("# exact")
         ));
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::SessionRoleCatalog(SessionRoleCatalog {
+                roles,
+                default: Some(default),
+            })) if roles.len() == 1 && default.as_str() == "coder"
+        ));
         assert_eq!(
             std::fs::read_to_string(workspace.path().join(".usagi/roles.toml")).unwrap(),
-            "# exact\nversion = 1\n"
+            "# exact\nversion = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n"
         );
+
+        let (load, loaded) = Completions::channel();
+        BackendTargetStorePort::load_roles(&mut store, RoleEditorScope::Workspace, load);
+        assert!(matches!(
+            loaded.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesLoaded { scope: RoleEditorScope::Workspace, source })
+                if source.starts_with("# exact")
+        ));
+
+        let (global, global_events) = Completions::channel();
+        BackendTargetStorePort::save_roles(
+            &mut store,
+            RoleEditorScope::Global,
+            "version = 1\n".into(),
+            global,
+        );
+        assert!(matches!(
+            global_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Global,
+                ..
+            })
+        ));
+
+        std::fs::write(workspace.path().join(".usagi/roles.toml"), "version = 99\n").unwrap();
+        let (bad_load, bad_load_events) = Completions::channel();
+        BackendTargetStorePort::load_roles(&mut store, RoleEditorScope::Workspace, bad_load);
+        assert!(matches!(
+            bad_load_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Workspace,
+                ..
+            })
+        ));
+
+        let (bad_save, bad_save_events) = Completions::channel();
+        BackendTargetStorePort::save_roles(
+            &mut store,
+            RoleEditorScope::Global,
+            "version = 99\n".into(),
+            bad_save,
+        );
+        assert!(matches!(
+            bad_save_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Global,
+                ..
+            })
+        ));
     }
 
     #[test]

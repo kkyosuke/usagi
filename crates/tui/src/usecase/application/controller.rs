@@ -3938,19 +3938,7 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
         }
     };
     match command {
-        overview::SessionCommand::Create { name } => {
-            state.overlay = None;
-            request_create_session(
-                state,
-                SessionCreateIntent {
-                    name,
-                    profile: None,
-                    model: None,
-                    role_id: None,
-                },
-            )
-        }
-        overview::SessionCommand::CreateWithRole { name, role_id } => {
+        overview::SessionCommand::Create { name, role_id } => {
             state.overlay = None;
             request_create_session(
                 state,
@@ -4675,7 +4663,9 @@ mod tests {
                 default: Some(coder),
             })),
         );
+        assert_eq!(state.role_catalog().roles.len(), 2);
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        assert_eq!(state.create_session_form().unwrap().roles().len(), 2);
         assert_eq!(
             state
                 .create_session_form()
@@ -4687,6 +4677,8 @@ mod tests {
             "coder"
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         for character in "feature".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
@@ -4696,6 +4688,10 @@ mod tests {
             if intent.role_id.as_ref() == Some(&reviewer)
                 && intent.profile.is_none() && intent.model.is_none())
         );
+
+        let mut empty = CreateSessionForm::new(Vec::new());
+        empty.move_role(true);
+        assert!(empty.selected_role().is_none());
     }
 
     #[test]
@@ -4857,6 +4853,10 @@ mod tests {
                 KeyEventKind::Press,
             ))
         };
+        assert_eq!(
+            classify_management_input(ctrl_a(KeyCode::Char('s'))),
+            Some(AppKey::SaveRoles)
+        );
         assert_eq!(
             classify_management_input(ctrl_a(KeyCode::Char('\u{1}'))),
             Some(AppKey::CtrlA)
@@ -7409,6 +7409,8 @@ mod tests {
                 source: "version = 1\n# preserved".into(),
             }),
         );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         let saves = update(&mut state, AppEvent::Key(AppKey::SaveRoles));
         assert!(
@@ -7442,6 +7444,43 @@ mod tests {
             vec![Effect::LoadRoles {
                 scope: RoleEditorScope::Global
             }]
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Global,
+                source: "version = 1\n".into(),
+            }),
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::ToggleRoleScope)),
+            vec![Effect::LoadRoles {
+                scope: RoleEditorScope::Workspace
+            }]
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+
+        state.overlay = Some(Overlay::Roles);
+        state.role_editor = None;
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        state.overlay = Some(Overlay::Overview);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("roles invalid".into()))
+            )
+            .is_empty()
+        );
+        assert!(
+            state
+                .notice()
+                .unwrap()
+                .message
+                .as_str()
+                .contains("roles takes")
         );
     }
 

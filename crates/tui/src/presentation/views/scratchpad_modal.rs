@@ -567,6 +567,8 @@ mod tests {
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("roles global".into())),
         );
+        let loading = render_roles_over(24, 80, &base(), state.role_editor().unwrap()).join("\n");
+        assert!(loading.contains("loading"));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::RolesLoaded {
@@ -575,6 +577,8 @@ mod tests {
             }),
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::SaveRoles));
+        let saving = render_roles_over(24, 80, &base(), state.role_editor().unwrap()).join("\n");
+        assert!(saving.contains("Saving"));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::RolesError {
@@ -590,5 +594,9 @@ mod tests {
         assert!(text.contains("# comment"));
         assert!(text.contains("invalid default role"));
         assert!(frame.iter().all(|line| display_width(line) == 80));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        let workspace = render_roles_over(24, 80, &base(), state.role_editor().unwrap()).join("\n");
+        assert!(workspace.contains("workspace roles.toml"));
     }
 }

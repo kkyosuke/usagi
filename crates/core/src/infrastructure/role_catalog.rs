@@ -393,6 +393,77 @@ mod tests {
     }
 
     #[test]
+    fn source_editor_reports_missing_large_and_io_boundaries() {
+        let root = tempdir().unwrap();
+        let missing = root.path().join("missing/roles.toml");
+        assert_eq!(read_source(&missing).unwrap(), "version = 1\n");
+
+        let large = root.path().join("large.toml");
+        let file = fs::File::create(&large).unwrap();
+        file.set_len(MAX_CATALOG_BYTES + 1).unwrap();
+        assert!(matches!(
+            read_source(&large),
+            Err(RoleCatalogError::TooLarge(_))
+        ));
+        assert!(matches!(
+            write_source(
+                &large,
+                &"x".repeat(usize::try_from(MAX_CATALOG_BYTES).unwrap() + 1),
+            ),
+            Err(RoleCatalogError::TooLarge(_))
+        ));
+
+        let directory = root.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        assert!(matches!(
+            read_source(&directory),
+            Err(RoleCatalogError::Io { .. })
+        ));
+
+        let blocked_parent = root.path().join("blocked");
+        fs::write(&blocked_parent, "file").unwrap();
+        assert!(matches!(
+            write_source(&blocked_parent.join("roles.toml"), "version = 1\n"),
+            Err(RoleCatalogError::Io { .. })
+        ));
+
+        let directory_target = root.path().join("target");
+        fs::create_dir(&directory_target).unwrap();
+        assert!(matches!(
+            write_source(&directory_target, "version = 1\n"),
+            Err(RoleCatalogError::Io { .. })
+        ));
+
+        assert!(matches!(
+            write_source(Path::new(""), "version = 1\n"),
+            Err(RoleCatalogError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn global_editor_validates_with_workspace_overrides_and_preserves_them() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        write(
+            &workspace.join(".usagi/roles.toml"),
+            "version = 1\n[defaults]\nroot = \"lead\"\n[roles.lead]\nsummary = \"Lead\"\nscopes = [\"root\"]\ninstructions = \"lead\"\n[roles.review]\nsummary = \"Review\"\nscopes = [\"session\"]\ninstructions = \"review\"\n",
+        );
+        write_layer_source(
+            &home,
+            &workspace,
+            CatalogLayer::Global,
+            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n",
+        )
+        .unwrap();
+
+        let catalog = load_effective(&home, &workspace).unwrap();
+        assert_eq!(catalog.defaults.root.unwrap().as_str(), "lead");
+        assert_eq!(catalog.defaults.session.unwrap().as_str(), "coder");
+        assert!(catalog.roles.contains_key(&RoleId::new("review").unwrap()));
+    }
+
+    #[test]
     fn missing_files_preserve_legacy_mode() {
         let root = tempdir().unwrap();
         let catalog =

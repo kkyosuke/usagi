@@ -50,9 +50,6 @@ pub enum Command {
 pub enum SessionCommand {
     Create {
         name: String,
-    },
-    CreateWithRole {
-        name: String,
         role_id: Option<usagi_core::domain::role::RoleId>,
     },
     List,
@@ -217,6 +214,7 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
     match verb {
         "create" if !rest.is_empty() => Ok(SessionCommand::Create {
             name: rest.to_owned(),
+            role_id: None,
         }),
         "list" if rest.is_empty() => Ok(SessionCommand::List),
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
@@ -452,7 +450,8 @@ mod tests {
         assert_eq!(
             parse_session("create feature-x"),
             Ok(SessionCommand::Create {
-                name: "feature-x".into()
+                name: "feature-x".into(),
+                role_id: None,
             })
         );
         assert_eq!(parse_session("list"), Ok(SessionCommand::List));
@@ -558,6 +557,13 @@ mod tests {
 
     #[test]
     fn dispatches_through_the_handler_interface() {
+        assert_eq!(
+            dispatch("roles global").unwrap(),
+            CommandResult::NotImplemented {
+                command: "roles",
+                arguments: "global".to_owned(),
+            }
+        );
         assert_eq!(
             dispatch("session list").unwrap(),
             CommandResult::NotImplemented {

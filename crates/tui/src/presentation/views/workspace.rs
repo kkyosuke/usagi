@@ -1924,8 +1924,9 @@ mod tests {
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, Route, SafeError,
-        SafeMessage, Selection, SessionRoleProjection, Target, TargetPhase, update,
+        AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, RoleChoice, Route, SafeError,
+        SafeMessage, Selection, SessionRoleCatalog, SessionRoleProjection, Target, TargetPhase,
+        update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -2501,6 +2502,31 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(strip(&lines[0]).contains("+ new: feature-x"));
         assert_eq!(display_width(&lines[0]), 30);
+    }
+
+    #[test]
+    fn create_session_projection_renders_the_default_role_picker_line() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionRoleCatalog(SessionRoleCatalog {
+                roles: vec![RoleChoice {
+                    id: RoleId::new("coder").unwrap(),
+                    summary: "Code".to_owned(),
+                }],
+                default: Some(RoleId::new("coder").unwrap()),
+            })),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        let frame = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(frame.contains("role: coder"));
+        assert!(frame.contains("↑/↓"));
     }
 
     #[test]
