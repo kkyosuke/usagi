@@ -5137,30 +5137,13 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
-    if let Ok(data_home) = usagi_core::infrastructure::paths::data_dir()
-        && let Ok(catalog) =
-            usagi_core::infrastructure::role_catalog::load_effective(&data_home, &root_cwd)
-    {
-        let roles = catalog
-            .roles
-            .into_iter()
-            .filter(|(_, definition)| {
-                definition
-                    .scopes
-                    .contains(&usagi_core::domain::role::RoleScope::Session)
-            })
-            .map(|(id, definition)| RoleChoice {
-                id,
-                summary: definition.summary,
-            })
-            .collect();
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
-            SessionRoleCatalog {
-                roles,
-                default: catalog.defaults.session,
-            },
-        )));
-    }
+    let role_catalog = usagi_core::infrastructure::paths::data_dir().map_or_else(
+        |_| SessionRoleCatalog::default(),
+        |data_home| session_role_catalog(&data_home, &root_cwd),
+    );
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
+        role_catalog,
+    )));
     runtime.set_agent_models(agent_models.available, agent_models.default);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
@@ -5432,6 +5415,31 @@ fn drive_workspace_controller(
                 BackendFlow::Leave => return Ok(WorkspaceStep::Back),
             }
         }
+    }
+}
+
+fn session_role_catalog(data_home: &Path, workspace_root: &Path) -> SessionRoleCatalog {
+    let Ok(catalog) =
+        usagi_core::infrastructure::role_catalog::load_effective(data_home, workspace_root)
+    else {
+        return SessionRoleCatalog::default();
+    };
+    let roles = catalog
+        .roles
+        .into_iter()
+        .filter(|(_, definition)| {
+            definition
+                .scopes
+                .contains(&usagi_core::domain::role::RoleScope::Session)
+        })
+        .map(|(id, definition)| RoleChoice {
+            id,
+            summary: definition.summary,
+        })
+        .collect();
+    SessionRoleCatalog {
+        roles,
+        default: catalog.defaults.session,
     }
 }
 
@@ -6360,7 +6368,8 @@ mod tests {
     };
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry, NewRequest, Overlay,
-        PendingToken, RoleEditorScope, SessionCreateIntent, TabDirection, Target,
+        PendingToken, RoleEditorScope, SessionCreateIntent, SessionRoleCatalog, TabDirection,
+        Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -8788,6 +8797,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn session_role_catalog_filters_scope_and_falls_back_on_invalid_source() {
+        let root = tempdir().unwrap();
+        let data_home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&data_home).unwrap();
+        std::fs::write(
+            data_home.join("roles.toml"),
+            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n[roles.director]\nsummary = \"Direct\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n",
+        )
+        .unwrap();
+
+        let catalog = super::session_role_catalog(&data_home, &workspace);
+        assert_eq!(catalog.default.unwrap().as_str(), "coder");
+        assert_eq!(catalog.roles.len(), 1);
+        assert_eq!(catalog.roles[0].id.as_str(), "coder");
+
+        std::fs::write(data_home.join("roles.toml"), "version = 99\n").unwrap();
+        assert_eq!(
+            super::session_role_catalog(&data_home, &workspace),
+            SessionRoleCatalog::default()
+        );
     }
 
     #[test]

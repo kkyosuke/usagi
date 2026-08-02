@@ -464,6 +464,21 @@ mod tests {
     }
 
     #[test]
+    fn global_editor_accepts_a_missing_workspace_layer() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        let source = "version = 1\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n";
+
+        write_layer_source(&home, &workspace, CatalogLayer::Global, source).unwrap();
+
+        assert_eq!(
+            read_layer_source(&home, &workspace, CatalogLayer::Global).unwrap(),
+            source
+        );
+    }
+
+    #[test]
     fn missing_files_preserve_legacy_mode() {
         let root = tempdir().unwrap();
         let catalog =
