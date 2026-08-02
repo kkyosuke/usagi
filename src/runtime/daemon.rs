@@ -12120,25 +12120,26 @@ instructions = "{instructions}"
                 .unwrap()
                 .insert(pid, (start_identity.to_owned(), process_group));
         }
+
+        /// One lookup behind both reads, so a pid is either a whole process or
+        /// no process at all — the platform never half-answers here.
+        fn answer(&self, pid: u32) -> std::io::Result<(String, u32)> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
     }
 
     impl ChildProcessProbe for ScriptedProbe {
         fn start_identity(&self, pid: u32) -> std::io::Result<String> {
-            self.0
-                .lock()
-                .unwrap()
-                .get(&pid)
-                .map(|(start_identity, _)| start_identity.clone())
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            self.answer(pid).map(|(start_identity, _)| start_identity)
         }
 
         fn process_group(&self, pid: u32) -> std::io::Result<u32> {
-            self.0
-                .lock()
-                .unwrap()
-                .get(&pid)
-                .map(|(_, process_group)| *process_group)
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            self.answer(pid).map(|(_, process_group)| process_group)
         }
     }
 
