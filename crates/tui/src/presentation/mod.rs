@@ -9964,6 +9964,7 @@ mod tests {
                     session_roles: None,
                     revision: Some(3),
                 }),
+                Err("later daemon failure".to_owned()),
             ]))),
         };
 
@@ -9979,6 +9980,11 @@ mod tests {
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
         assert_eq!(ui.workspace.session_ids(), &[session]);
         assert_eq!(ui.last_session_revision, 9);
+
+        // A lane error without a parked reducer completion is intentionally
+        // consumed without synthesizing an event.
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
@@ -14672,6 +14678,11 @@ mod tests {
                 live: true,
             },
             TerminalInventoryEntry {
+                terminal: session_generic.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+            TerminalInventoryEntry {
                 terminal: stale_generic,
                 kind: TerminalKind::Terminal,
                 live: true,
@@ -14729,6 +14740,14 @@ mod tests {
                 .panes
                 .iter()
                 .any(|pane| pane.terminal.fences(&session_generic_second))
+        );
+        assert_eq!(
+            managed
+                .panes
+                .iter()
+                .filter(|pane| pane.terminal.fences(&session_generic))
+                .count(),
+            1
         );
     }
 
@@ -14966,6 +14985,22 @@ mod tests {
                 Box::new(UnavailableAgentCommandPort),
             );
         let geometry = terminal_geometry(20, 80);
+
+        // Embedders can lose their stream port before teardown. Closing the
+        // retained coordinator still removes and retains it without a detach.
+        let without_agent = scoped_terminal_ref(workspace, Some(session));
+        let mut embedded = WorkspaceUi::new(
+            WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]),
+            Box::new(UnavailableSessionCommandPort),
+        );
+        embedded.terminals.push(
+            crate::usecase::application::terminal_session::TerminalSession::new(
+                without_agent.clone(),
+                geometry,
+            ),
+        );
+        embedded.close_terminal(&without_agent);
+        assert_eq!(embedded.detached_terminals.len(), 1);
 
         for terminal in &terminals {
             ui.start_terminal_session(terminal.clone(), geometry);
