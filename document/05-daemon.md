@@ -1626,6 +1626,13 @@ wall clock・PID 由来の値は identity にしない。観測結果は `exact`
 どちらも signal 先にはしない。`unknown` は何も証明しないため fail closed である。verifiable でない identity では
 `running` record を作れない。
 
+観測した proof は spawn した process のメモリに置き、**child の exit を durable に commit した時点で解放する**。
+解放は exact identity 単位で行い、記録時の `(pid, process-start token, process group)` が今も一致する entry
+だけを削除する。PID だけで削除すると、OS がその番号を渡した次の child の proof を消して live な resource を
+`identity_unknown` に落とすためである。解放は proof を持つ token の drop で起きるので、commit 済みの exit だけ
+でなく、platform が読めなかった wait、受け手のいなくなった observation も同じ経路で解放する。短命 child を
+繰り返しても、この registry は baseline に戻る。
+
 ### standby hydrate と activation
 
 standby readiness が hydrate するのは single-writer lifecycle store（`sessions.json`）だけである。読むのは 1 回で、
