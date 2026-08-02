@@ -1,13 +1,13 @@
 ---
 number: 607
 title: fix(daemon): exited child の SpawnedChildren identity を exact release する
-status: todo
+status: done
 priority: low
 labels: [review, v2, daemon, process, resource, lifecycle]
 dependson: []
 related: [473, 518, 550]
-created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+created_at: 2026-07-31T06:00:00+00:00
+updated_at: 2026-08-02T14:14:46.375406+00:00
 ---
 
 ## Finding（P3 leak）

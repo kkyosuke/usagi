@@ -940,9 +940,11 @@ server lifetime 中は変わらないため、設定、PATH、CLI install/uninst
 
 既存の `session_create` と `session_delegate_issue` は移行期間の `agent_cli` alias を受ける。parser は
 これを `runtime` に正規化するが、`runtime` または `agent.id` と混在した alias は migration error として
-拒否する。`session_delegate_brief` は `session_dispatch` と同じ必須 `agent` selector を使い、
-`agent.id` と `runtime`/`model` の混在を拒否する。認証済み caller の provenance を dispatch binding に
-保存し、隔離 worktree 内の worker を直ちに起動する。
+拒否する。`session_delegate_brief` は dispatch 先の session を自ら作るため、`agent` selector は
+`runtime`/`model` の新規 worker 専用であり、`agent.id` branch を schema に載せず daemon も受理しない。
+認証済み caller の provenance を dispatch binding に保存し、隔離 worktree 内の worker を直ちに起動する。
+作成と dispatch は失敗時に巻き戻る 1 つの operation として扱う（正本は
+[7. MCP の delegation の atomicity](07-mcp.md#delegation-の-atomicity)）。
 
 既存の `session_delegate_brief`、`session_delegate_issue`、`issue_to_prompt`、`session_prompt`、
 `session_complete` は引き続き利用できる。

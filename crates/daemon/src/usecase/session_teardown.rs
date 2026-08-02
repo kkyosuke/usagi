@@ -37,6 +37,10 @@ pub struct PendingTeardown {
     pub session_container: PathBuf,
     pub session_root: PathBuf,
     pub force: bool,
+    /// Whether the session branch is deleted after the worktree, taken from the
+    /// durable delete plan so a resumed teardown undoes exactly as much as the
+    /// admission promised.
+    pub delete_branch: bool,
 }
 
 /// The durable side of a teardown: which teardowns are unfinished, and how one
@@ -170,6 +174,7 @@ mod tests {
             session_container: PathBuf::from("/repo/.usagi/sessions"),
             session_root: PathBuf::from("/repo/.usagi/sessions").join(name),
             force: false,
+            delete_branch: false,
         }
     }
 

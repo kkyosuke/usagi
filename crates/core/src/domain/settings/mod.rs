@@ -86,13 +86,42 @@ pub enum ModalSelectionMode {
     Action,
 }
 
+/// The public, non-secret status invocation that decides whether an agent CLI is
+/// ready to launch.
+///
+/// It travels with the rest of the agent CLI vocabulary
+/// ([`DefaultModel::readiness_command`]) so a provider cannot be added to the
+/// picker without also declaring how a launcher proves that CLI is usable. The
+/// arguments are literal, product-documented status subcommands: they carry no
+/// credential, configuration path, or user input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentReadinessCommand {
+    program: &'static str,
+    arguments: &'static [&'static str],
+}
+
+impl AgentReadinessCommand {
+    /// The executable to run, identical to [`DefaultModel::command`].
+    #[must_use]
+    pub const fn program(self) -> &'static str {
+        self.program
+    }
+
+    /// The status subcommand arguments passed to [`program`](Self::program).
+    #[must_use]
+    pub const fn arguments(self) -> &'static [&'static str] {
+        self.arguments
+    }
+}
+
 /// The cloud model provider used when a new Agent pane has no explicit profile.
 ///
 /// This is also the closed vocabulary a user selects from with the Closeup
 /// `agent -m <model>` command, so [`selector`](Self::selector),
-/// [`profile_id`](Self::profile_id), and [`command`](Self::command) are the
-/// single source of truth for the typed token, the daemon profile it launches,
-/// and the executable whose presence makes it usable.
+/// [`profile_id`](Self::profile_id), [`command`](Self::command), and
+/// [`readiness_command`](Self::readiness_command) are the single source of truth
+/// for the typed token, the daemon profile it launches, the executable whose
+/// presence makes it usable, and the status probe that proves it usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultModel {
@@ -143,6 +172,37 @@ impl DefaultModel {
             Self::OpenAi => "codex",
             Self::SakanaAi => "sakana.ai",
         }
+    }
+
+    /// The non-secret status probe a launcher runs before spawning this
+    /// provider's CLI.
+    ///
+    /// Codex and the Codex-compatible `codex-fugu` share the same CLI grammar,
+    /// so both prove readiness with `login status`; Claude uses `auth status`.
+    /// The probe deliberately reuses [`command`](Self::command) rather than
+    /// naming an executable again, so a renamed executable cannot leave the
+    /// probe pointing at the old one.
+    #[must_use]
+    pub const fn readiness_command(self) -> AgentReadinessCommand {
+        AgentReadinessCommand {
+            program: self.command(),
+            arguments: match self {
+                Self::Claude => &["auth", "status"],
+                Self::OpenAi | Self::SakanaAi => &["login", "status"],
+            },
+        }
+    }
+
+    /// The single decision a launcher makes about readiness: resolve a product
+    /// token to the status probe that proves that CLI usable, or refuse.
+    ///
+    /// The token is resolved with [`from_selector`](Self::from_selector), so an
+    /// executable (`codex-fugu`), a profile ID (`sakana-ai`), and a selector
+    /// (`sakana.ai`) all reach the same probe. An unknown token yields `None`,
+    /// which keeps a launcher fail-closed on a product it does not model.
+    #[must_use]
+    pub fn readiness_command_for(token: &str) -> Option<AgentReadinessCommand> {
+        Self::from_selector(token).map(Self::readiness_command)
     }
 
     /// Resolve a user-typed token to its provider, accepting the

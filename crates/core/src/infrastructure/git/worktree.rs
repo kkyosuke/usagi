@@ -83,6 +83,25 @@ pub fn remove_worktree(
     bail!("git worktree remove failed: {}", output.stderr.trim());
 }
 
+/// Delete the local branch `branch`, discarding unmerged commits.
+///
+/// A branch git does not know is already in the desired end state — a create
+/// whose worktree add failed before branching, or a repeated deletion — so it is
+/// treated as a no-op. This exists for the branch half of undoing a create; it
+/// is never how a session the user worked in is removed.
+///
+/// # Errors
+///
+/// Returns an error when the `git` process cannot be spawned, or `git branch -D`
+/// fails for any reason other than the branch not existing.
+pub fn delete_branch(runner: &dyn GitRunner, repo: &Path, branch: &str) -> Result<()> {
+    let output = runner.run(repo, &["branch", "-D", "--", branch])?;
+    if output.success || output.stderr.contains("not found") {
+        return Ok(());
+    }
+    bail!("git branch delete failed: {}", output.stderr.trim());
+}
+
 /// List the repository's worktrees.
 ///
 /// # Errors
@@ -136,7 +155,7 @@ fn parse_porcelain(text: &str) -> Vec<WorktreeInfo> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorktreeInfo, add_worktree, list_worktrees, remove_worktree};
+    use super::{WorktreeInfo, add_worktree, delete_branch, list_worktrees, remove_worktree};
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
     use std::path::{Path, PathBuf};
 
@@ -213,6 +232,28 @@ mod tests {
             .to_string();
         assert!(err.contains("git worktree remove failed"));
         assert!(err.contains("modified or untracked"));
+    }
+
+    #[test]
+    fn delete_branch_forces_the_deletion_and_swallows_an_unknown_branch() {
+        let git = FakeGit::new(vec![ok("Deleted branch usagi/x")]);
+        delete_branch(&git, Path::new("/repo"), "usagi/x").unwrap();
+        assert_eq!(git.calls.borrow()[0], vec!["branch", "-D", "--", "usagi/x"]);
+
+        let missing = FakeGit::new(vec![fail("error: branch 'usagi/x' not found.")]);
+        delete_branch(&missing, Path::new("/repo"), "usagi/x").unwrap();
+    }
+
+    #[test]
+    fn delete_branch_surfaces_other_failures() {
+        let git = FakeGit::new(vec![fail(
+            "error: cannot delete branch 'usagi/x' used by worktree",
+        )]);
+        let err = delete_branch(&git, Path::new("/repo"), "usagi/x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("git branch delete failed"));
+        assert!(err.contains("used by worktree"));
     }
 
     #[test]

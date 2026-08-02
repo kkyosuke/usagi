@@ -23,6 +23,7 @@ use usagi_core::domain::agent::prompt::session_system_prompt_with_role;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
     ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
@@ -126,8 +127,8 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
 use usagi_daemon::usecase::session_runtime::{
-    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, WorktreeTeardown, perform_create,
-    perform_remove,
+    SessionRuntime, SessionRuntimeError, SharedSessionTeardown, WorktreeTeardown,
+    perform_compensating_remove, perform_create, perform_delegated_create, perform_remove,
 };
 use usagi_daemon::usecase::session_teardown::{
     TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
@@ -230,24 +231,84 @@ impl SpawnedChildren {
     ///
     /// A platform that cannot answer yields the explicitly unverifiable token
     /// instead of a fabricated one, so the record stays visible and fails closed.
-    fn observe(&self, probe: &dyn ChildProcessProbe, pid: u32, fallback: &str) -> ProcessIdentity {
+    ///
+    /// The recorded proof is handed back as a [`ChildRelease`], because a map
+    /// that is only ever inserted into is a leak: a daemon that runs thousands of
+    /// short-lived children would keep a growing table of dead pids, and the
+    /// kernel reuses those numbers. The caller holds the token for exactly as
+    /// long as the child may still have to be proven — until its exit is
+    /// committed — and the proof is gone the moment the token is dropped.
+    fn observe(
+        self: &Arc<Self>,
+        probe: &dyn ChildProcessProbe,
+        pid: u32,
+        fallback: &str,
+    ) -> (ProcessIdentity, Option<ChildRelease>) {
         let Ok(identity) = record_child(probe, pid) else {
-            return ProcessIdentity {
-                pid,
-                start_identity: fallback.to_owned(),
-                process_group: pid,
-            };
+            return (
+                ProcessIdentity {
+                    pid,
+                    start_identity: fallback.to_owned(),
+                    process_group: pid,
+                },
+                None,
+            );
         };
         let recorded = identity.to_process_identity();
+        let mut release = None;
         if let Ok(mut observed) = self.0.lock() {
-            observed.insert(pid, identity);
+            observed.insert(pid, identity.clone());
+            release = Some(ChildRelease {
+                children: Arc::clone(self),
+                identity,
+            });
         }
-        recorded.unwrap_or_else(|_| ProcessIdentity {
+        let recorded = recorded.unwrap_or_else(|_| ProcessIdentity {
             pid,
             start_identity: fallback.to_owned(),
             process_group: pid,
-        })
+        });
+        (recorded, release)
     }
+
+    /// Release exactly the observation that was recorded, never a namesake.
+    ///
+    /// The kernel may hand the pid to a new process as soon as the old one is
+    /// reaped, so removing by pid alone would delete the successor's proof and
+    /// leave a live child unprovable. Only an entry that still answers with the
+    /// recorded start identity and process group is removed; anything else
+    /// already belongs to somebody else's child.
+    fn release(&self, identity: &ChildIdentity) {
+        if let Ok(mut observed) = self.0.lock()
+            && observed.get(&identity.pid).is_some_and(|recorded| {
+                is_same_child(recorded, &identity.start_identity, identity.process_group)
+            })
+        {
+            observed.remove(&identity.pid);
+        }
+    }
+}
+
+/// The exact release token for one observed child.
+///
+/// It releases on drop so that every way a child's life can end — a committed
+/// exit, a wait the platform could not read, an observation nobody is left to
+/// receive — frees the proof without having to remember to.
+struct ChildRelease {
+    children: Arc<SpawnedChildren>,
+    identity: ChildIdentity,
+}
+
+impl Drop for ChildRelease {
+    fn drop(&mut self) {
+        self.children.release(&self.identity);
+    }
+}
+
+/// Whether a recorded observation still describes the same process. A pid alone
+/// never answers that question, because the kernel reuses it.
+fn is_same_child(recorded: &ChildIdentity, start_identity: &str, process_group: u32) -> bool {
+    recorded.start_identity == start_identity && recorded.process_group == process_group
 }
 
 /// The store-side view of [`SpawnedChildren`]: it can only ask, never record.
@@ -261,8 +322,7 @@ impl IdentityAuthority for ObservedChildren {
             .ok()?
             .get(&process.pid)
             .filter(|identity| {
-                identity.start_identity == process.start_identity
-                    && identity.process_group == process.process_group
+                is_same_child(identity, &process.start_identity, process.process_group)
             })
             .cloned()
     }
@@ -834,13 +894,14 @@ trait AgentReadinessProbe: Send + Sync {
 struct SystemAgentReadiness;
 impl AgentReadinessProbe for SystemAgentReadiness {
     fn ready(&self, product: &str) -> Result<(), ()> {
-        let (command, args) = match product {
-            "codex" => ("codex", ["login", "status"]),
-            "claude" => ("claude", ["auth", "status"]),
-            _ => return Err(()),
-        };
-        Command::new(command)
-            .args(args)
+        // Which products exist, and which status command proves each one usable,
+        // is the shared agent CLI vocabulary owned by core domain settings. This
+        // root only runs the resolved probe, so the Codex-compatible
+        // `codex-fugu` behind the `sakana-ai` profile is recognised without a
+        // second table here (#609). An unmodelled product still fails closed.
+        let probe = DefaultModel::readiness_command_for(product).ok_or(())?;
+        Command::new(probe.program())
+            .args(probe.arguments())
             .status()
             .ok()
             .filter(std::process::ExitStatus::success)
@@ -1080,7 +1141,10 @@ impl AgentTerminalActor for SharedAgent {
 
 enum AgentPtyObservation {
     Output(TerminalRef, Vec<u8>),
-    Exited(TerminalRef, i32),
+    /// The child is gone. Its identity proof rides along so that the durable
+    /// exit is still committed by a process that can prove the child was its
+    /// own, and the proof is released the instant that commit is behind us.
+    Exited(TerminalRef, i32, Option<ChildRelease>),
 }
 
 const PTY_OBSERVATION_QUEUE_ITEMS: usize = 64;
@@ -1193,6 +1257,13 @@ impl PtySpawner for AgentPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        // The identity is observed before the watcher owns it, so the token this
+        // thread carries is the very one the exit observation hands back. Every
+        // way out of the thread — a drained reader, an unreadable wait, a
+        // receiver that hung up — drops it, so no dead pid keeps its proof.
+        let (identity, release) =
+            self.children
+                .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty");
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
@@ -1210,12 +1281,14 @@ impl PtySpawner for AgentPty {
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
             {
-                let _ = observations.send(AgentPtyObservation::Exited(output_terminal, status));
+                let _ = observations.send(AgentPtyObservation::Exited(
+                    output_terminal,
+                    status,
+                    release,
+                ));
             }
         });
-        Ok(self
-            .children
-            .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty"))
+        Ok(identity)
     }
 
     fn terminate_reap(&mut self, terminal: &TerminalRef) -> Result<(), TerminateReapError> {
@@ -1309,7 +1382,13 @@ impl PtyWriter for AgentPty {
 
 enum PtyObservation {
     Output(usagi_core::domain::id::TerminalRef, Vec<u8>),
-    Exited(usagi_core::domain::id::TerminalRef, i32),
+    /// Carries the child's identity proof for the same reason the Agent
+    /// observation does: the commit needs it, and nothing after the commit does.
+    Exited(
+        usagi_core::domain::id::TerminalRef,
+        i32,
+        Option<ChildRelease>,
+    ),
 }
 
 struct DaemonPty {
@@ -1371,6 +1450,11 @@ impl GenericPtySpawner for DaemonPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        // As in the Agent spawner: the watcher thread owns the release token, so
+        // the proof lives exactly as long as this child does.
+        let (identity, release) = self
+            .children
+            .observe(&UnixChildProbe, pid, "daemon-owned-pty");
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
@@ -1388,12 +1472,11 @@ impl GenericPtySpawner for DaemonPty {
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
             {
-                let _ = output_sender.send(PtyObservation::Exited(output_terminal, status));
+                let _ =
+                    output_sender.send(PtyObservation::Exited(output_terminal, status, release));
             }
         });
-        Ok(self
-            .children
-            .observe(&UnixChildProbe, pid, "daemon-owned-pty"))
+        Ok(identity)
     }
 }
 
@@ -1791,6 +1874,18 @@ fn spawn_ipc_server(
     start_decision_maintenance(Arc::clone(&decisions), Arc::clone(&shutdown))?;
     start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
     let teardown = start_session_teardown_worker(Arc::clone(&runtime), Arc::clone(&shutdown))?;
+    // Before any client can observe them: roll back the sessions a delegation
+    // created and then died before dispatching into.
+    let compensated = reconcile_orphan_delegations(
+        &runtime,
+        &DispatchStore::new(data_dir.join("daemon")),
+        &teardown,
+    );
+    if compensated != 0 {
+        ErrorLog::record(&format!(
+            "daemon startup compensated {compensated} delegated session(s) whose dispatch never started"
+        ));
+    }
     start_retention_gc_worker(
         Arc::clone(&terminal),
         Arc::clone(&agent),
@@ -2346,7 +2441,7 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: usagi_core::domain::settings::DefaultModel::OpenAi.command(),
+            program: DefaultModel::OpenAi.command(),
             environment: Some(Arc::clone(&environment)),
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
@@ -2354,7 +2449,7 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: usagi_core::domain::settings::DefaultModel::SakanaAi.command(),
+            program: DefaultModel::SakanaAi.command(),
             environment: Some(Arc::clone(&environment)),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
@@ -2424,13 +2519,18 @@ fn start_agent_observer(
                             );
                         }
                     }
-                    AgentPtyObservation::Exited(reference, status) => {
+                    AgentPtyObservation::Exited(reference, status, release) => {
                         {
                             let Ok(mut agent) = agent.lock() else {
                                 break;
                             };
                             let _ = agent.exit(&reference, status);
                         }
+                        // The commit above is the last reader of this child's
+                        // identity, so the proof is released here rather than
+                        // where the exit was seen: a record still projecting as
+                        // `Running` must not lose its authority mid-commit.
+                        drop(release);
                         // A candidate the output never terminated is only
                         // creditable once nothing more can arrive for it.
                         projection.submit_closed(reference.terminal_id, reference.session_id);
@@ -2576,13 +2676,16 @@ where
                             );
                         }
                     }
-                    PtyObservation::Exited(reference, status) => {
+                    PtyObservation::Exited(reference, status, release) => {
                         {
                             let Ok(mut terminal) = terminal.lock() else {
                                 break;
                             };
                             let _ = terminal.exit(&reference, status);
                         }
+                        // Released after the commit, exactly as the Agent
+                        // observer does.
+                        drop(release);
                         projection.submit_closed(reference.terminal_id, reference.session_id);
                     }
                 }
@@ -4288,6 +4391,26 @@ fn session_response_envelope(
             }
             envelope(hello, request_id, outcome, body)
         }
+        // A delegation answers with its own structured outcome: the caller has to
+        // be able to tell a clean rejection from a session that is still there
+        // because its worker's fate is unknown, and a code and a sentence cannot
+        // carry that.
+        Err(SessionRuntimeError::Delegation(failure)) => {
+            let mut error =
+                usagi_core::infrastructure::ipc::ProtocolError::new(failure.code, &failure.message);
+            error.side_effect = if failure.reconcile.left_side_effect() {
+                usagi_core::infrastructure::ipc::SideEffect::PartialOrUnknown
+            } else {
+                usagi_core::infrastructure::ipc::SideEffect::None
+            };
+            error.details = Some(failure.details());
+            envelope(
+                hello,
+                request_id,
+                ResponseOutcome::Error(error),
+                serde_json::json!(null),
+            )
+        }
         Err(error) => {
             let code = match &error {
                 SessionRuntimeError::IdempotencyConflict => {
@@ -4595,8 +4718,15 @@ fn dispatch_session_action(
             };
             reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
         }
-        SessionAction::DelegateIssue | SessionAction::DelegateBrief => {
-            let (name, prompt) = if action == SessionAction::DelegateIssue {
+        SessionAction::DelegateBrief => reply(delegate_brief(
+            sessions,
+            teardown,
+            agent,
+            operation_id,
+            payload,
+        )?),
+        SessionAction::DelegateIssue => {
+            let (name, prompt) = {
                 let number = payload
                     .get("number")
                     .and_then(serde_json::Value::as_u64)
@@ -4626,115 +4756,8 @@ fn dispatch_session_action(
                         .map_or_else(|| format!("issue-{number}"), str::to_owned),
                     issue::to_prompt(&issue),
                 )
-            } else {
-                let brief = string("brief")?;
-                let suffix = operation_id
-                    .chars()
-                    .filter(char::is_ascii_alphanumeric)
-                    .take(8)
-                    .collect::<String>();
-                let name = payload
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .map_or_else(|| format!("triage-{suffix}"), str::to_owned);
-                (
-                    name,
-                    format!(
-                        "このセッションの worktree 内で次の依頼をトリアージし、必要なら issue 化して実装へつなげてください。リポジトリの規約に従ってください。\n\n{brief}"
-                    ),
-                )
             };
             let requested_role = payload.get("role").cloned();
-            if action == SessionAction::DelegateBrief {
-                use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
-                use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
-
-                let selector = payload
-                    .get("agent")
-                    .and_then(serde_json::Value::as_object)
-                    .ok_or(SessionRuntimeError::InvalidRequest)?;
-                let selected = if let Some(id) = selector.get("id") {
-                    if selector.len() != 1 {
-                        return Err(SessionRuntimeError::InvalidRequest);
-                    }
-                    DispatchAgentIntent::Existing {
-                        agent_id: serde_json::from_value(id.clone())
-                            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
-                    }
-                } else {
-                    if selector.len() != 2 {
-                        return Err(SessionRuntimeError::InvalidRequest);
-                    }
-                    let runtime = selector
-                        .get("runtime")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value::<AgentProfileId>(value).ok())
-                        .ok_or(SessionRuntimeError::InvalidRequest)?;
-                    let model = selector
-                        .get("model")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value::<ModelSelector>(value).ok())
-                        .ok_or(SessionRuntimeError::InvalidRequest)?;
-                    DispatchAgentIntent::New { runtime, model }
-                };
-                let credential = string("_caller_credential")?;
-                let (workspace, caller) = {
-                    let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-                    let caller = runtime
-                        .mcp_dispatch_caller(credential)
-                        .ok_or(SessionRuntimeError::ScopeUnavailable)?;
-                    let workspace = sessions
-                        .lock()
-                        .map_err(|_| SessionRuntimeError::Storage)?
-                        .snapshot()
-                        .map_err(|_| SessionRuntimeError::Storage)?
-                        .get("workspace_id")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .ok_or(SessionRuntimeError::Storage)?;
-                    (workspace, caller)
-                };
-                // Reject an invalid selector or an unauthenticated caller
-                // before creating the isolated worktree. This composite
-                // operation must not leave an orphan session on rejection.
-                let created = sessions
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .handle(
-                        SessionAction::Create,
-                        operation_id,
-                        &serde_json::json!({"name": name, "role": requested_role}),
-                    )?;
-                let id = sessions
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .session_id(&name)?;
-                let scope = SharedScopeResolver(Arc::clone(sessions));
-                let admission = agent
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .dispatch(
-                        operation_id,
-                        &DispatchIntent {
-                            workspace,
-                            session_name: name.clone(),
-                            caller,
-                            agent: selected,
-                            prompt: prompt.clone(),
-                        },
-                        id,
-                        &scope,
-                    )
-                    .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
-                return reply(serde_json::json!({
-                    "name": name,
-                    "session_id": id,
-                    "created": created.body,
-                    "run_id": admission.operation_id,
-                    "terminal": admission.terminal,
-                    "completed": admission.completed,
-                }));
-            }
             let created = sessions
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
@@ -4772,6 +4795,248 @@ fn dispatch_session_action(
             .map_err(|_| SessionRuntimeError::Storage)?
             .handle(action, operation_id, payload),
     }
+}
+
+/// Reads a delegation's `agent` selector, which names a runtime and model and
+/// nothing else.
+///
+/// An `agent.id` is refused rather than resolved. No existing Agent can belong to
+/// a session the same request is about to create, so the dispatch ownership check
+/// would reject every such selector — after the worktree already existed. The
+/// tool schema no longer advertises that branch and this is the daemon-side half
+/// of the same rule.
+fn new_agent_selector(
+    selector: Option<&serde_json::Value>,
+) -> Result<
+    (
+        usagi_core::domain::agent::AgentProfileId,
+        usagi_core::domain::agent::ModelSelector,
+    ),
+    SessionRuntimeError,
+> {
+    use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
+
+    let selector = selector
+        .and_then(serde_json::Value::as_object)
+        .filter(|selector| selector.len() == 2 && !selector.contains_key("id"))
+        .ok_or(SessionRuntimeError::InvalidRequest)?;
+    let field = |key: &str| {
+        selector
+            .get(key)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    Ok((
+        serde_json::from_value::<AgentProfileId>(field("runtime"))
+            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+        serde_json::from_value::<ModelSelector>(field("model"))
+            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+    ))
+}
+
+/// Creates a triage session for a brief and dispatches a fresh worker into it,
+/// as one operation that either takes effect completely or leaves nothing.
+///
+/// The order is what makes that true. Every rejection the daemon can decide
+/// without a side effect — the selector, the caller, the runtime/model
+/// allowlist, the runtime executable, an operation that already owns an
+/// admission — is decided before the worktree exists. Only after that does the
+/// create run, and a dispatch that then fails definitively is rolled back by the
+/// same durable teardown `session_remove` uses, which the daemon resumes across
+/// a restart. A dispatch whose spawn outcome is *unknown* is deliberately not
+/// rolled back: the worktree may already hold a running worker, so the caller
+/// gets the session and run identity to reconcile instead.
+fn delegate_brief(
+    sessions: &SharedSessionRuntime,
+    teardown: &TeardownSignal,
+    agent: &SharedAgentRuntime,
+    operation_id: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, SessionRuntimeError> {
+    use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
+
+    let string = |key: &str| {
+        payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(SessionRuntimeError::InvalidRequest)
+    };
+    let brief = string("brief")?;
+    let suffix = operation_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect::<String>();
+    let name = payload
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| format!("triage-{suffix}"), str::to_owned);
+    let prompt = format!(
+        "このセッションの worktree 内で次の依頼をトリアージし、必要なら issue 化して実装へつなげてください。リポジトリの規約に従ってください。\n\n{brief}"
+    );
+    let (runtime, model) = new_agent_selector(payload.get("agent"))?;
+
+    let credential = string("_caller_credential")?;
+    let (workspace, caller, repository_root) = {
+        let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let caller = runtime
+            .mcp_dispatch_caller(credential)
+            .ok_or(SessionRuntimeError::ScopeUnavailable)?;
+        let sessions = sessions.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let workspace = sessions
+            .snapshot()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .get("workspace_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or(SessionRuntimeError::Storage)?;
+        (workspace, caller, sessions.repository_root().to_path_buf())
+    };
+    // The workspace root's configuration is the one the new session inherits, so
+    // an unknown runtime/model or a missing executable is decided here rather
+    // than after the worktree build. `dispatch` still re-reads the created
+    // session's own configuration and stays the authority.
+    agent
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .preflight_dispatch(operation_id, &prompt, &runtime, &model, &repository_root)
+        .map_err(|error| SessionRuntimeError::AgentFailure {
+            code: error.code,
+            message: error.message,
+        })?;
+
+    let created = perform_delegated_create(
+        sessions,
+        &SystemGit,
+        operation_id,
+        &serde_json::json!({"name": name, "role": payload.get("role").cloned()}),
+    )?;
+    let id = sessions
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .session_id(&name)?;
+    let scope = SharedScopeResolver(Arc::clone(sessions));
+    let admission = agent
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .dispatch(
+            operation_id,
+            &DispatchIntent {
+                workspace,
+                session_name: name.clone(),
+                caller,
+                agent: DispatchAgentIntent::New { runtime, model },
+                prompt,
+            },
+            id,
+            &scope,
+        );
+    let admission = match admission {
+        Ok(admission) => admission,
+        Err(error) => {
+            return Err(compensate_delegation(
+                sessions,
+                teardown,
+                id,
+                &name,
+                operation_id,
+                error,
+            ));
+        }
+    };
+    Ok(serde_json::json!({
+        "name": name,
+        "session_id": id,
+        "created": created.body,
+        "run_id": admission.operation_id,
+        "terminal": admission.terminal,
+        "completed": admission.completed,
+    }))
+}
+
+/// Rolls a delegated create back, or reports why it must not be rolled back.
+///
+/// The teardown is admitted under a fresh operation identity because the
+/// delegation's own identity already names the create it is compensating. Once
+/// admitted it is durable: the daemon's teardown worker finishes it, and a
+/// daemon that dies first resumes it from the `Deleting` record on the next
+/// start.
+fn compensate_delegation(
+    sessions: &SharedSessionRuntime,
+    teardown: &TeardownSignal,
+    session_id: usagi_core::domain::id::SessionId,
+    name: &str,
+    run_operation_id: &str,
+    error: usagi_core::infrastructure::ipc::ProtocolError,
+) -> SessionRuntimeError {
+    use usagi_daemon::usecase::session_runtime::{DelegationFailure, DelegationReconcile};
+
+    let reconcile = if error.code == usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown {
+        DelegationReconcile::Retained
+    } else {
+        match perform_compensating_remove(
+            sessions,
+            teardown,
+            &usagi_core::domain::id::OperationId::new().to_string(),
+            name,
+        ) {
+            // A session that is already gone needs no compensation: an earlier
+            // attempt's teardown removed it, so nothing was left behind either
+            // way.
+            Ok(_) | Err(SessionRuntimeError::UnknownSession) => DelegationReconcile::Compensated,
+            Err(_) => DelegationReconcile::CompensationFailed,
+        }
+    };
+    SessionRuntimeError::Delegation(DelegationFailure {
+        code: error.code,
+        message: error.message,
+        session_id,
+        run_operation_id: run_operation_id.to_owned(),
+        reconcile,
+    })
+}
+
+/// Compensates delegated creates whose dispatch never became durable.
+///
+/// A delegation builds its worktree before it can dispatch into it, so a daemon
+/// that died inside that window left an available session no caller owns and no
+/// run points at. This runs before the daemon accepts connections, so no client
+/// ever observes such a session, and it uses the same durable teardown a live
+/// compensation does.
+///
+/// A reservation in the dispatch store — even one a restart already failed — is
+/// not an orphan: that operation reached the dispatch side, which owns its
+/// outcome. Only a create with nothing at all behind it is rolled back.
+fn reconcile_orphan_delegations(
+    sessions: &SharedSessionRuntime,
+    dispatch: &DispatchStore,
+    teardown: &TeardownSignal,
+) -> usize {
+    let Ok(candidates) = sessions
+        .lock()
+        .map_err(|_| ())
+        .and_then(|sessions| sessions.delegated_sessions().map_err(|_| ()))
+    else {
+        return 0;
+    };
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            matches!(dispatch.run(candidate.operation_id), Ok(None))
+                && matches!(dispatch.admission(candidate.operation_id), Ok(None))
+        })
+        .filter(|candidate| {
+            perform_compensating_remove(
+                sessions,
+                teardown,
+                &usagi_core::domain::id::OperationId::new().to_string(),
+                &candidate.name,
+            )
+            .is_ok()
+        })
+        .count()
 }
 
 fn dispatch_agent(
@@ -10794,6 +11059,7 @@ mod tests {
                 session_container: PathBuf::from("/repo/.usagi/sessions"),
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
+                delete_branch: false,
             });
         signal.notify();
         handle.join().unwrap();
@@ -10870,6 +11136,7 @@ mod tests {
                 session_container: PathBuf::from("/repo/.usagi/sessions"),
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
+                delete_branch: false,
             },
         ]));
         let pending_calls = Arc::new(AtomicUsize::new(0));
@@ -11955,7 +12222,7 @@ instructions = "{instructions}"
             let remaining = deadline.saturating_duration_since(Instant::now());
             match observations.recv_timeout(remaining).unwrap() {
                 PtyObservation::Output(_, _) => {}
-                PtyObservation::Exited(exited, status) => {
+                PtyObservation::Exited(exited, status, _) => {
                     assert_eq!(exited, terminal);
                     assert_eq!(status, 0);
                     break;
@@ -11990,7 +12257,7 @@ instructions = "{instructions}"
             )
             .unwrap();
             blocked_sender
-                .send(PtyObservation::Exited(blocked_terminal, 0))
+                .send(PtyObservation::Exited(blocked_terminal, 0, None))
                 .unwrap();
         });
 
@@ -12010,9 +12277,124 @@ instructions = "{instructions}"
         ));
         assert!(matches!(
             receiver.recv().unwrap(),
-            PtyObservation::Exited(actual, 0) if actual == terminal
+            PtyObservation::Exited(actual, 0, None) if actual == terminal
         ));
         producer.join().unwrap();
+    }
+
+    /// A [`ChildProcessProbe`] the test writes the OS's answers into.
+    ///
+    /// Pid reuse is the case this fix turns on, and it cannot be raced for
+    /// against a real kernel: here the test simply says that the same number now
+    /// answers as a different process. A pid with no answer is a process the
+    /// platform cannot see.
+    #[derive(Default)]
+    struct ScriptedProbe(Mutex<BTreeMap<u32, (String, u32)>>);
+
+    impl ScriptedProbe {
+        fn answers(&self, pid: u32, start_identity: &str, process_group: u32) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(pid, (start_identity.to_owned(), process_group));
+        }
+
+        /// One lookup behind both reads, so a pid is either a whole process or
+        /// no process at all — the platform never half-answers here.
+        fn answer(&self, pid: u32) -> std::io::Result<(String, u32)> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .cloned()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+    }
+
+    impl ChildProcessProbe for ScriptedProbe {
+        fn start_identity(&self, pid: u32) -> std::io::Result<String> {
+            self.answer(pid).map(|(start_identity, _)| start_identity)
+        }
+
+        fn process_group(&self, pid: u32) -> std::io::Result<u32> {
+            self.answer(pid).map(|(_, process_group)| process_group)
+        }
+    }
+
+    #[test]
+    fn an_observed_child_stays_provable_until_its_release_is_dropped() {
+        let children = Arc::new(SpawnedChildren::default());
+        let probe = ScriptedProbe::default();
+        probe.answers(4242, "start-a", 4242);
+
+        let (identity, release) = children.observe(&probe, 4242, "daemon-owned-pty");
+        assert_eq!(identity.start_identity, "start-a");
+        let authority = ObservedChildren(Arc::clone(&children));
+        // The durable store may only call a record `Running` while the child is
+        // provable, so the proof has to outlive everything up to the exit commit.
+        assert!(authority.verified(&identity).is_some());
+        assert_eq!(children.0.lock().unwrap().len(), 1);
+
+        drop(release);
+        assert!(authority.verified(&identity).is_none());
+        assert!(children.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn releasing_an_exited_child_leaves_the_pid_its_successor_took() {
+        const REUSED: u32 = 4243;
+        let children = Arc::new(SpawnedChildren::default());
+        let probe = ScriptedProbe::default();
+        probe.answers(REUSED, "first-start", REUSED);
+        let (first, first_release) = children.observe(&probe, REUSED, "daemon-owned-pty");
+
+        // The kernel reaped the first child and handed the number to the next one.
+        probe.answers(REUSED, "second-start", REUSED);
+        let (second, second_release) = children.observe(&probe, REUSED, "daemon-owned-pty");
+
+        let authority = ObservedChildren(Arc::clone(&children));
+        drop(first_release);
+        assert!(authority.verified(&first).is_none());
+        assert!(
+            authority.verified(&second).is_some(),
+            "the live child lost the proof its namesake released"
+        );
+        assert_eq!(children.0.lock().unwrap().len(), 1);
+
+        drop(second_release);
+        assert!(authority.verified(&second).is_none());
+        assert!(children.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_long_run_of_short_lived_children_returns_the_registry_to_its_baseline() {
+        const CHILDREN: u32 = 1024;
+        let children = Arc::new(SpawnedChildren::default());
+        let probe = ScriptedProbe::default();
+
+        for pid in 1..=CHILDREN {
+            probe.answers(pid, &format!("start-{pid}"), pid);
+            let (_, release) = children.observe(&probe, pid, "daemon-owned-pty");
+            assert!(release.is_some());
+            drop(release);
+            let observed = children.0.lock().unwrap().len();
+            assert_eq!(observed, 0, "child {pid} left {observed} proof(s) behind");
+        }
+    }
+
+    #[test]
+    fn a_child_the_platform_cannot_read_records_no_proof_and_needs_no_release() {
+        let children = Arc::new(SpawnedChildren::default());
+
+        let (identity, release) =
+            children.observe(&ScriptedProbe::default(), 7, "daemon-owned-pty");
+
+        // The unverifiable token stays visible so the record fails closed, but
+        // nothing was recorded, so there is nothing to release either.
+        assert_eq!(identity.start_identity, "daemon-owned-pty");
+        assert_eq!(identity.process_group, 7);
+        assert!(release.is_none());
+        assert!(children.0.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -12040,7 +12422,8 @@ instructions = "{instructions}"
         let children = Arc::new(SpawnedChildren::default());
         let (mut generic, generic_observations) =
             DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children));
-        let (mut agent, agent_observations) = AgentPty::new(BTreeMap::new(), metrics, children);
+        let (mut agent, agent_observations) =
+            AgentPty::new(BTreeMap::new(), metrics, Arc::clone(&children));
         let generation = DaemonGeneration::new();
 
         let generic_scope = TerminalLaunchScope {
@@ -12131,6 +12514,10 @@ instructions = "{instructions}"
         }
         reclaim_agent_observations(&mut agent, &agent_observations, TERMINALS_PER_OWNER);
         assert!(agent.terminals.is_empty());
+        // Both owners spawned real children through the real probe, so the
+        // identity registry proves the leak is closed end to end and not only in
+        // the unit tests' fake: every observation released exactly its own entry.
+        assert!(children.0.lock().unwrap().is_empty());
 
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -12159,13 +12546,18 @@ instructions = "{instructions}"
                     assert!(!bytes.is_empty());
                     output.insert(terminal.terminal_id.as_str().clone());
                 }
-                PtyObservation::Exited(terminal, 0) => {
+                PtyObservation::Exited(terminal, 0, release) => {
                     assert!(output.contains(&terminal.terminal_id.as_str()));
                     assert!(pty.release(&terminal));
                     assert!(!pty.release(&terminal));
+                    // The observer's contract: the identity proof dies with the
+                    // observation that reported the exit.
+                    drop(release);
                     exits += 1;
                 }
-                PtyObservation::Exited(_, status) => panic!("unexpected exit status {status}"),
+                PtyObservation::Exited(_, status, _) => {
+                    panic!("unexpected exit status {status}")
+                }
             }
         }
     }
@@ -12183,13 +12575,14 @@ instructions = "{instructions}"
                     assert!(!bytes.is_empty());
                     output.insert(terminal.terminal_id.as_str().clone());
                 }
-                AgentPtyObservation::Exited(terminal, 0) => {
+                AgentPtyObservation::Exited(terminal, 0, release) => {
                     assert!(output.contains(&terminal.terminal_id.as_str()));
                     assert!(pty.release(&terminal));
                     assert!(!pty.release(&terminal));
+                    drop(release);
                     exits += 1;
                 }
-                AgentPtyObservation::Exited(_, status) => {
+                AgentPtyObservation::Exited(_, status, _) => {
                     panic!("unexpected exit status {status}");
                 }
             }
@@ -12594,6 +12987,322 @@ instructions = "{instructions}"
         let runtime = runtime.lock().unwrap();
         let session_id = runtime.session_id("one").unwrap();
         assert!(runtime.session_scope_by_id(session_id).is_ok());
+    }
+
+    /// A delegation builds its worktree before it can dispatch into it, so a
+    /// daemon that died in that window left a session no caller owns. The next
+    /// start rolls exactly those back — and leaves the ones whose dispatch did
+    /// reach the store, because that operation's outcome is the dispatch side's
+    /// to decide (#611).
+    #[test]
+    fn startup_compensates_only_delegated_creates_with_nothing_dispatched() {
+        let temporary = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                temporary.path().join("repository"),
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                PermissiveSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let dispatch = DispatchStore::new(temporary.path().join("dispatch"));
+        let teardown = TeardownSignal::new();
+        let delegate = |name: &str| {
+            let operation = usagi_core::domain::id::OperationId::new();
+            perform_delegated_create(
+                &sessions,
+                &AlwaysSuccessfulGit,
+                &operation.to_string(),
+                &serde_json::json!({"name": name}),
+            )
+            .unwrap();
+            operation
+        };
+
+        let orphan = delegate("orphan");
+        let dispatched = delegate("dispatched");
+        // A plain `session_create` is complete on its own and is never a
+        // compensation candidate.
+        perform_create(
+            &sessions,
+            &AlwaysSuccessfulGit,
+            &usagi_core::domain::id::OperationId::new().to_string(),
+            &serde_json::json!({"name": "plain"}),
+        )
+        .unwrap();
+        // The dispatched delegation reached the dispatch store, which now owns
+        // that operation's outcome.
+        let agent = usagi_core::domain::agent::Agent {
+            agent_id: usagi_core::domain::id::AgentId::new(),
+            session_id: None,
+            runtime: usagi_core::domain::agent::AgentProfileId::new("claude").unwrap(),
+            model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            status: usagi_core::domain::agent::AgentStatus::Idle,
+            current_run: None,
+        };
+        dispatch
+            .upsert_run(usagi_core::domain::agent::DispatchRun {
+                run_id: dispatched,
+                agent_id: agent.agent_id,
+                prompt: "finish".into(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                status: usagi_core::domain::agent::RunStatus::Running,
+            })
+            .unwrap();
+
+        assert_eq!(
+            reconcile_orphan_delegations(&sessions, &dispatch, &teardown),
+            1
+        );
+
+        let names = |lifecycle: &str| {
+            sessions.lock().unwrap().snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|session| session["lifecycle"] == lifecycle)
+                .map(|session| session["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("deleting"), ["orphan"]);
+        assert_eq!(names("available"), ["dispatched", "plain"]);
+        // The teardown worker was woken for the admitted compensation, and the
+        // durable plan takes the branch with the worktree.
+        assert!(teardown.wait(std::time::Duration::from_millis(1)));
+        let pending = sessions.lock().unwrap().pending_teardowns().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].force && pending[0].delete_branch);
+
+        // A second start finds nothing new: the orphan is already `Deleting`, so
+        // it is the teardown worker's, not another compensation's.
+        assert_eq!(
+            reconcile_orphan_delegations(&sessions, &dispatch, &teardown),
+            0
+        );
+        assert_ne!(orphan, dispatched);
+    }
+
+    /// Whether a failed dispatch rolls its session back is decided by the failure,
+    /// not by the caller: an unknown spawn outcome must keep the worktree, because
+    /// a worker may be running in it (#611).
+    #[test]
+    fn an_unknown_spawn_outcome_keeps_the_delegated_session_and_a_definite_one_rolls_it_back() {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+        use usagi_daemon::usecase::session_runtime::DelegationReconcile;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                temporary.path().join("repository"),
+                &temporary.path().join("daemon"),
+                DaemonGeneration::new(),
+                AlwaysSuccessfulGit,
+                PermissiveSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        let teardown = TeardownSignal::new();
+        let run = usagi_core::domain::id::OperationId::new().to_string();
+        let delegate = |name: &str| {
+            perform_delegated_create(
+                &sessions,
+                &AlwaysSuccessfulGit,
+                &usagi_core::domain::id::OperationId::new().to_string(),
+                &serde_json::json!({"name": name}),
+            )
+            .unwrap();
+            sessions.lock().unwrap().session_id(name).unwrap()
+        };
+        let compensate = |name: &str, id, code| {
+            compensate_delegation(
+                &sessions,
+                &teardown,
+                id,
+                name,
+                &run,
+                ProtocolError::new(code, "refused"),
+            )
+        };
+
+        // Unknown: the session stays available and the caller is told to
+        // reconcile it.
+        let retained_id = delegate("retained");
+        let retained = compensate("retained", retained_id, ErrorCode::OwnershipUnknown);
+        let SessionRuntimeError::Delegation(retained) = retained else {
+            panic!("a failed delegation reports a delegation failure");
+        };
+        assert_eq!(retained.reconcile, DelegationReconcile::Retained);
+        assert_eq!(retained.session_id, retained_id);
+        assert_eq!(retained.run_operation_id, run);
+        assert!(sessions.lock().unwrap().session_id("retained").is_ok());
+
+        // Definite: the session is rolled back by a durable teardown.
+        let rolled_back_id = delegate("rolled-back");
+        let compensated = compensate("rolled-back", rolled_back_id, ErrorCode::Unavailable);
+        let SessionRuntimeError::Delegation(compensated) = compensated else {
+            panic!("a failed delegation reports a delegation failure");
+        };
+        assert_eq!(compensated.reconcile, DelegationReconcile::Compensated);
+        assert_eq!(
+            sessions.lock().unwrap().pending_teardowns().unwrap()[0].name,
+            "rolled-back"
+        );
+        // A session the compensation cannot find is also nothing left behind: an
+        // earlier attempt's teardown already removed it.
+        let already_gone = compensate("never-created", rolled_back_id, ErrorCode::Unavailable);
+        let SessionRuntimeError::Delegation(already_gone) = already_gone else {
+            panic!("a failed delegation reports a delegation failure");
+        };
+        assert_eq!(already_gone.reconcile, DelegationReconcile::Compensated);
+
+        // A rollback that cannot be admitted at all leaves the session present,
+        // and says so rather than claiming a clean rejection.
+        let poisoned = Arc::clone(&sessions);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison the session lock");
+        })
+        .join();
+        let failed = compensate("rolled-back", rolled_back_id, ErrorCode::Unavailable);
+        let SessionRuntimeError::Delegation(failed) = failed else {
+            panic!("a failed delegation reports a delegation failure");
+        };
+        assert_eq!(failed.reconcile, DelegationReconcile::CompensationFailed);
+        // The same poisoned lock makes the startup reconcile report nothing
+        // rather than guessing at an empty candidate set.
+        assert_eq!(
+            reconcile_orphan_delegations(
+                &sessions,
+                &DispatchStore::new(temporary.path().join("dispatch")),
+                &teardown
+            ),
+            0
+        );
+    }
+
+    /// A delegation that fails answers with structured state, not a sentence: the
+    /// caller has to tell a clean rejection from a session that is still there
+    /// because its worker's fate is unknown (#611).
+    #[test]
+    fn a_failed_delegation_reports_its_reconcile_state_on_the_wire() {
+        use usagi_core::infrastructure::ipc::{ErrorCode, SideEffect};
+        use usagi_daemon::usecase::session_runtime::{DelegationFailure, DelegationReconcile};
+
+        let session_id = SessionId::new();
+        let run = usagi_core::domain::id::OperationId::new().to_string();
+        let envelope_for = |reconcile: DelegationReconcile, code: ErrorCode| {
+            session_response_envelope(
+                usagi_core::usecase::client::SessionAction::DelegateBrief,
+                &serde_json::json!({}),
+                Err(SessionRuntimeError::Delegation(DelegationFailure {
+                    code,
+                    message: "dispatch runtime executable is unavailable".into(),
+                    session_id,
+                    run_operation_id: run.clone(),
+                    reconcile,
+                })),
+                usagi_core::infrastructure::ipc::RequestId("delegate".into()),
+                &session_test_hello(),
+            )
+        };
+
+        let compensated =
+            envelope_for(DelegationReconcile::Compensated, ErrorCode::InvalidArgument);
+        let error = response_error(&compensated);
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        // A rolled-back delegation left nothing behind.
+        assert_eq!(error.side_effect, SideEffect::None);
+        let details = error.details.unwrap();
+        assert_eq!(details["reconcile"], "compensated");
+        assert_eq!(details["run_operation_id"], run);
+        assert_eq!(
+            details["session_id"],
+            serde_json::to_value(session_id).unwrap()
+        );
+
+        for (reconcile, token) in [
+            (DelegationReconcile::Retained, "retained"),
+            (
+                DelegationReconcile::CompensationFailed,
+                "compensation_failed",
+            ),
+        ] {
+            let error = response_error(&envelope_for(reconcile, ErrorCode::OwnershipUnknown));
+            assert_eq!(error.code, ErrorCode::OwnershipUnknown);
+            // Something durable is still there, so the caller must reconcile it
+            // rather than assume a clean rejection.
+            assert_eq!(error.side_effect, SideEffect::PartialOrUnknown);
+            assert_eq!(error.details.unwrap()["reconcile"], token);
+        }
+    }
+
+    /// The protocol error one response envelope carries, or a failure naming what
+    /// it carried instead.
+    fn response_error(
+        envelope: &usagi_core::infrastructure::ipc::Envelope,
+    ) -> usagi_core::infrastructure::ipc::ProtocolError {
+        match &envelope.kind {
+            usagi_core::infrastructure::ipc::EnvelopeKind::Response {
+                outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(error),
+                ..
+            } => error.clone(),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    /// A Git runner that reports success for everything, for composition tests
+    /// whose subject is the durable lifecycle rather than Git.
+    struct AlwaysSuccessfulGit;
+    impl usagi_core::infrastructure::git::GitRunner for AlwaysSuccessfulGit {
+        fn run(
+            &self,
+            _: &Path,
+            _: &[&str],
+        ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+            Ok(usagi_core::infrastructure::git::GitOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// Worktree IO that accepts every managed path and performs no effect.
+    struct PermissiveSessionWorktreeIo;
+    impl usagi_daemon::usecase::session_runtime::SessionWorktreeIo for PermissiveSessionWorktreeIo {
+        fn remove_file_best_effort(&self, _: &Path) {}
+        fn path_occupied(&self, _: &Path) -> bool {
+            false
+        }
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            Some(path.to_path_buf())
+        }
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            true
+        }
+        fn build_session_tree(
+            &self,
+            _: &dyn usagi_core::infrastructure::git::GitRunner,
+            _: &Path,
+            _: &Path,
+            _: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn remove_session_tree(
+            &self,
+            _: &dyn usagi_core::infrastructure::git::GitRunner,
+            _: &Path,
+            _: bool,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// One process's durable runtime state over a real data directory.

@@ -35,10 +35,23 @@ pub fn success(id: Value, result: Value) -> Value {
 /// エラー応答（`error`）を組み立てる。`id` は move で消費する。
 #[must_use]
 pub fn error(id: Value, code: i32, message: &str) -> Value {
-    let body = Map::from_iter([
+    error_with_data(id, code, message, None)
+}
+
+/// エラー応答に daemon の machine-readable な `details` を `error.data` として載せる。
+///
+/// message だけでは伝わらない状態を caller に渡すために必要である。たとえば
+/// `session_delegate_brief` の失敗は「作成した session を巻き戻したか」で対応が変わり、
+/// caller はその判定に session と run の identity を要する。
+#[must_use]
+pub fn error_with_data(id: Value, code: i32, message: &str, data: Option<Value>) -> Value {
+    let mut body = Map::from_iter([
         ("code".to_owned(), Value::from(code)),
         ("message".to_owned(), Value::from(message)),
     ]);
+    if let Some(data) = data {
+        body.insert("data".to_owned(), data);
+    }
     Value::Object(Map::from_iter([
         ("jsonrpc".to_owned(), Value::from(VERSION)),
         ("id".to_owned(), id),
@@ -48,7 +61,7 @@ pub fn error(id: Value, code: i32, message: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{error, error_code, success};
+    use super::{error, error_code, error_with_data, success};
     use serde_json::json;
 
     #[test]
@@ -68,5 +81,24 @@ mod tests {
         assert_eq!(v["error"]["code"], error_code::METHOD_NOT_FOUND);
         assert_eq!(v["error"]["message"], "nope");
         assert!(v.get("result").is_none());
+        // `error` carries no `data`; a caller reading it must not see an empty
+        // object it would then try to interpret.
+        assert!(v["error"].get("data").is_none());
+    }
+
+    #[test]
+    fn error_data_is_attached_only_when_the_daemon_supplied_it() {
+        let v = error_with_data(
+            json!(1),
+            error_code::INTERNAL_ERROR,
+            "partial",
+            Some(json!({"reconcile":"retained"})),
+        );
+        assert_eq!(v["error"]["data"]["reconcile"], "retained");
+        assert!(
+            error_with_data(json!(1), error_code::INTERNAL_ERROR, "plain", None)["error"]
+                .get("data")
+                .is_none()
+        );
     }
 }

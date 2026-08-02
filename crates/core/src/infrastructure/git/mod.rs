@@ -24,7 +24,7 @@ pub use clone::clone;
 pub use diff::{DiffStatus, diff_status};
 pub use environment::confined_git_command;
 pub use runner::{GitOutput, GitRunner};
-pub use worktree::{WorktreeInfo, add_worktree, list_worktrees, remove_worktree};
+pub use worktree::{WorktreeInfo, add_worktree, delete_branch, list_worktrees, remove_worktree};
 
 #[cfg(test)]
 pub(crate) mod testkit {

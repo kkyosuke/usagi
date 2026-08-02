@@ -1,13 +1,13 @@
 ---
 number: 592
 title: feat(agent): v2 の Agent 起動へ system prompt 注入を追加する
-status: todo
+status: done
 priority: high
 labels: [agent, daemon, core, epic]
 dependson: []
 related: [139, 142, 254, 530, 531, 537, 32]
 created_at: 2026-07-31T00:11:36.506934+00:00
-updated_at: 2026-07-31T00:11:36.506934+00:00
+updated_at: 2026-08-02T13:53:07.807558+00:00
 ---
 
 ## 目的
@@ -56,6 +56,32 @@ v2 では次を実地に確認した。
 - 3 子 issue が実装しやすい粒度に分割され、依存関係が `dependson` で表現されている。
 - 既存の #139/#142/#254/#530/#531/#537（agent capability 基盤・Claude/Codex builder・phase hook/MCP 配線・guard-workspace・sandbox）との重複がないことが本文に明記されている。
 - v1 の #32（local LLM MCP）との関係が明記されている。
+
+## 重複照合（既存 issue との境界）
+
+`related` に挙げた既存 issue と本 epic の担当範囲は次のとおり重ならない。いずれも本 epic は既存の機構を
+作り直さず、既存 vocabulary・既存経路へ additive に載せるだけである。
+
+| 既存 issue | その issue が確立した範囲 | 本 epic が重複しない理由 |
+|---|---|---|
+| #139 | closed vocabulary としての `AgentCapability` と `LaunchPlan` builder の土台 | 既存 vocabulary に `SystemPrompt` variant を 1 つ追加するだけで、capability 機構・builder 構造は変更しない |
+| #142 | Claude/Codex の launch 生成を共通 `render_plan` builder へ移行 | 共通化された `render_plan` の durable argv には触れず、ephemeral な `SpawnProvision.arguments()` にだけ追加する |
+| #254 | phase hook・MCP injection・resume/reclaim の接続と実運用の `LaunchRequest` 構築箇所 | 同じ構築箇所の `required_capabilities` に 1 要素を足し、local LLM MCP も同じ injection 経路へ server を 1 つ追加するだけで、経路自体は作り直さない |
+| #530 / #537 | guard-workspace フック（論理境界）と OS sandbox（`claude-sandbox` / `--settings`）による境界の**強制** | 本 epic は Agent に境界を**知らせる** instruction を扱う多層防御の別レイヤであり、sandbox launcher prefix と `--settings` JSON には手を入れない |
+| #531 | agent-phase の phase 報告 IPC（起動後の経路） | system prompt は起動時 argv の materialization であり、報告経路と交差しない |
+
+### #32（v1 のローカル LLM MCP）との関係
+
+#32 は v1 で `usagi llm-mcp` と `LOCAL_LLM_PROMPT` を導入した originating issue（v1 で done）である。本 epic の
+local LLM 子 issue は **#32 の v2 移植**であり、v1 実装を置き換えるものではない（v1 は `v1/` に退避済みで更新しない）。
+delegation instruction の文言は #32 が導入した v1 の `LOCAL_LLM_PROMPT` をバイト等価で移植し、operator に見える
+指示文を変えない。
+
+## 分割の確定
+
+上表の子 issue 3 本を `parent: 592` で起票し、依存は `dependson` で core SSoT → adapter 配線 → local LLM MCP 配線の
+直列として表現した（番号は本文に固定せず field で保持する）。v1 の `ROOT_PROMPT` / `SESSION_WORKTREE_PROMPT` /
+`LOCAL_LLM_PROMPT` をバイト等価で移植する方針は、各子 issue 本文に self-contained に明記した。
 
 ## 非目標
 

@@ -679,6 +679,13 @@ daemon 起動時には未完了の create / initialize / delete journal を reco
 physical effect の完了を証明できないため再実行せず safe failure にして明示 recovery を待つ。中断された **delete は
 resume する**（[session teardown worker](#session-teardown-worker)）。
 
+完了した create のうち、journal が **delegated** と記録しているものは追加で reconcile する。`session_delegate_brief` は
+worktree を作ってから dispatch するため、その間に daemon が停止すると caller の無い `available` session が残る。起動は
+connection 受け付け前に、dispatch store にその operation の run も admission も**無い** delegated session だけを
+compensating teardown で巻き戻す。run があれば結末は dispatch 側が所有するため触らない。判定は session 名について
+journal 上**最後**の operation を見るため、巻き戻し後に同名で作り直した session を誤って対象にしない。契約の正本は
+[7. MCP の delegation の atomicity](07-mcp.md#delegation-の-atomicity) である。
+
 interrupted reconciliation は session を `failed`、対応 operation を terminal `failed` に同じ durable state で記録する。元の `OperationId` の再送は保存済み safe failure を返し、effect を再試行しない。operator が filesystem / Git の状態を確認・修復した後は、明示 recovery または新しい `OperationId` による許可された lifecycle 操作を使う。
 
 旧 reducer が書いた `session.lifecycle = failed` と `operation.status = succeeded` の矛盾した snapshot は daemon open 時に保守的に補正する。failure stage、session name、operation の canonical semantic key が一致する operation だけを `failed` に戻して関連付け、成功 outcome や success hook は生成しない。この移行は effect の再実行可能性を推測しないため、自動 retry は行わず明示 recovery を待つ。
@@ -742,6 +749,11 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため、失敗 record を remove すれば同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
+| branch | `session_remove` は branch `usagi/<name>` を残す（成果を保持するため）。branch も削除するのは `DeletePlan.delete_branch` を持つ compensating teardown だけで、worktree 撤去の**後**に実行する（checkout 中の branch は削除できない） |
+
+compensating teardown は、`session_delegate_brief` が作成したが dispatch に至らなかった session を巻き戻すために
+daemon 自身が admit する removal である。client が要求できる removal ではなく、force と branch 削除は payload で
+選べない。契約の正本は [7. MCP の delegation の atomicity](07-mcp.md#delegation-の-atomicity) である。
 
 client 側の表示は既存の投影で足りる。受理直後から `deleting` 行が見え、完了で消える。TUI は `deleting` 行を
 削除中の行として描画し、`SessionLifecycle::capabilities` により attach も再 remove もできない。MCP の
@@ -1008,8 +1020,12 @@ IPC、TUI、log に保存・公開しない。
 
 新規 worker の runtime/model は MCP schema snapshot を信頼せず、spawn の直前に resolved managed-session worktree の current `.usagi/config.toml` allowlist と current executable locator で再検証する。allowlist 外・不完全な runtime/model は safe `invalid_argument`、CLI 不在は safe `unavailable` となり、reservation や spawn を行わない。既存 `agent.id` はこの再選択を通らず、保存済み agent の session ownership と lifecycle scope をそのまま用いる。allowlist、executable、または MCP wire / durable registry に path、argv、environment、credential、raw CLI output、provider model list は保存しない。
 
-root の provisioner は Codex を既定 profile とし、`codex login status` または `claude auth status` を spawn
-前に実行する。probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
+root の provisioner は Codex を既定 profile とし、launch する executable 自身の status command を spawn 前に
+実行する。どの product にどの status command を対応させるかは、profile・executable と同じ
+[agent CLI の closed vocabulary](03-tui.md#settings-scope-と-workspace-entry)（core domain settings）が持つ単一の決定関数が答える。
+Codex 互換の `sakana-ai` は launch する `codex-fugu` の `login status` で判定され、Codex は `codex login status`、
+Claude は `claude auth status` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
+probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
 差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
 
@@ -1609,6 +1625,13 @@ wall clock・PID 由来の値は identity にしない。観測結果は `exact`
 区別する。`gone` と `reused` は「この child はもう走っていない」ことの証明なので final commit に使えるが、
 どちらも signal 先にはしない。`unknown` は何も証明しないため fail closed である。verifiable でない identity では
 `running` record を作れない。
+
+観測した proof は spawn した process のメモリに置き、**child の exit を durable に commit した時点で解放する**。
+解放は exact identity 単位で行い、記録時の `(pid, process-start token, process group)` が今も一致する entry
+だけを削除する。PID だけで削除すると、OS がその番号を渡した次の child の proof を消して live な resource を
+`identity_unknown` に落とすためである。解放は proof を持つ token の drop で起きるので、commit 済みの exit だけ
+でなく、platform が読めなかった wait、受け手のいなくなった observation も同じ経路で解放する。短命 child を
+繰り返しても、この registry は baseline に戻る。
 
 ### standby hydrate と activation
 

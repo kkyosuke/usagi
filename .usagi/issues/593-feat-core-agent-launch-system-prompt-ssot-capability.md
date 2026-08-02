@@ -5,10 +5,10 @@ status: done
 priority: high
 labels: [core, agent, review]
 dependson: []
-related: [139]
+related: [139, 254]
 parent: 592
 created_at: 2026-07-31T00:12:05.285547+00:00
-updated_at: 2026-07-31T00:51:16.362973+00:00
+updated_at: 2026-08-02T13:53:00.364582+00:00
 ---
 
 ## 目的
