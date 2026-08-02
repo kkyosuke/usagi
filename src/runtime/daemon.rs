@@ -23,6 +23,7 @@ use usagi_core::domain::agent::prompt::session_system_prompt_with_role;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
     ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
@@ -834,13 +835,14 @@ trait AgentReadinessProbe: Send + Sync {
 struct SystemAgentReadiness;
 impl AgentReadinessProbe for SystemAgentReadiness {
     fn ready(&self, product: &str) -> Result<(), ()> {
-        let (command, args) = match product {
-            "codex" => ("codex", ["login", "status"]),
-            "claude" => ("claude", ["auth", "status"]),
-            _ => return Err(()),
-        };
-        Command::new(command)
-            .args(args)
+        // Which products exist, and which status command proves each one usable,
+        // is the shared agent CLI vocabulary owned by core domain settings. This
+        // root only runs the resolved probe, so the Codex-compatible
+        // `codex-fugu` behind the `sakana-ai` profile is recognised without a
+        // second table here (#609). An unmodelled product still fails closed.
+        let probe = DefaultModel::readiness_command_for(product).ok_or(())?;
+        Command::new(probe.program())
+            .args(probe.arguments())
             .status()
             .ok()
             .filter(std::process::ExitStatus::success)
@@ -2358,7 +2360,7 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: usagi_core::domain::settings::DefaultModel::OpenAi.command(),
+            program: DefaultModel::OpenAi.command(),
             environment: Some(Arc::clone(&environment)),
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
@@ -2366,7 +2368,7 @@ fn open_agent_runtime(
             readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: usagi_core::domain::settings::DefaultModel::SakanaAi.command(),
+            program: DefaultModel::SakanaAi.command(),
             environment: Some(Arc::clone(&environment)),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {

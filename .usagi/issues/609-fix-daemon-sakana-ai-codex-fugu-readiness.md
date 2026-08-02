@@ -1,13 +1,13 @@
 ---
 number: 609
 title: fix(daemon): sakana-ai の codex-fugu readiness を認識する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, daemon, agent, sakana-ai, correctness]
 dependson: []
 related: [545, 582]
-created_at: 2026-07-31T15:00:00+09:00
-updated_at: 2026-07-31T15:00:00+09:00
+created_at: 2026-07-31T06:00:00+00:00
+updated_at: 2026-08-02T14:11:26.279297+00:00
 ---
 
 ## Finding（P2 correctness）

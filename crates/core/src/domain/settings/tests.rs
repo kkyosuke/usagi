@@ -1,6 +1,6 @@
 use super::{
-    AvailableModels, DEFAULT_LOCAL_LLM_MODEL, DefaultModel, EnvBindings, LOCAL_LLM_MODELS,
-    LocalLlm, LocalSettings, ModalSelectionMode, Settings, Theme,
+    AgentReadinessCommand, AvailableModels, DEFAULT_LOCAL_LLM_MODEL, DefaultModel, EnvBindings,
+    LOCAL_LLM_MODELS, LocalLlm, LocalSettings, ModalSelectionMode, Settings, Theme,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -137,6 +137,56 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
     // through the `sakana-ai` profile.
     assert_eq!(DefaultModel::SakanaAi.command(), "codex-fugu");
     assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
+}
+
+#[test]
+fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
+    // Codex and the Codex-compatible `codex-fugu` share the CLI grammar, so both
+    // prove readiness with `login status`; Claude uses `auth status`. Without
+    // `codex-fugu` here an installed sakana.ai stays permanently unavailable
+    // (#609).
+    for (model, program, arguments) in [
+        (DefaultModel::Claude, "claude", ["auth", "status"]),
+        (DefaultModel::OpenAi, "codex", ["login", "status"]),
+        (DefaultModel::SakanaAi, "codex-fugu", ["login", "status"]),
+    ] {
+        let probe = model.readiness_command();
+        assert_eq!(probe.program(), program, "{model:?}");
+        assert_eq!(probe.arguments(), arguments, "{model:?}");
+        // The probe cannot drift away from the executable a launch spawns.
+        assert_eq!(probe.program(), model.command(), "{model:?}");
+    }
+    // Exercise the derived traits the launcher relies on to copy and log a probe.
+    let probe: AgentReadinessCommand = DefaultModel::SakanaAi.readiness_command();
+    assert_eq!(probe, DefaultModel::SakanaAi.readiness_command());
+    assert_ne!(probe, DefaultModel::OpenAi.readiness_command());
+    assert!(format!("{probe:?}").contains("codex-fugu"));
+}
+
+#[test]
+fn readiness_resolution_accepts_product_tokens_and_otherwise_fails_closed() {
+    // A launcher may hold the executable, the daemon profile ID, or the typed
+    // selector; all three reach the same probe.
+    for token in ["codex-fugu", "sakana-ai", "sakana.ai", "SAKANA_AI"] {
+        assert_eq!(
+            DefaultModel::readiness_command_for(token),
+            Some(DefaultModel::SakanaAi.readiness_command()),
+            "{token}"
+        );
+    }
+    assert_eq!(
+        DefaultModel::readiness_command_for("codex"),
+        Some(DefaultModel::OpenAi.readiness_command())
+    );
+    assert_eq!(
+        DefaultModel::readiness_command_for("claude"),
+        Some(DefaultModel::Claude.readiness_command())
+    );
+    // An unmodelled product yields no probe, so a launcher refuses it rather
+    // than spawning an unknown executable.
+    for token in ["gemini", "agy", "openai", ""] {
+        assert_eq!(DefaultModel::readiness_command_for(token), None, "{token}");
+    }
 }
 
 #[test]
