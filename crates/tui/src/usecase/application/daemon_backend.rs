@@ -27,7 +27,8 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::usecase::env::EnvScope;
 
 use super::controller::{
-    AppEvent, Effect, EnvironmentEntry, PendingToken, SessionCreateIntent, TabDirection, Target,
+    AppEvent, Effect, EnvironmentEntry, PendingToken, RoleEditorScope, SessionCreateIntent,
+    TabDirection, Target,
 };
 use crate::usecase::overview;
 
@@ -182,6 +183,20 @@ pub trait TargetStorePort {
         entries: Vec<EnvironmentEntry>,
         completions: Completions,
     );
+    fn load_roles(&mut self, scope: RoleEditorScope, completions: Completions) {
+        completions.emit(AppEvent::Backend(
+            super::controller::BackendEvent::RolesError {
+                scope,
+                error: super::controller::SafeError {
+                    message: super::controller::SafeMessage::new("role editor is unavailable"),
+                    error_id: "roles-unavailable".to_owned(),
+                },
+            },
+        ));
+    }
+    fn save_roles(&mut self, scope: RoleEditorScope, _source: String, completions: Completions) {
+        self.load_roles(scope, completions);
+    }
 }
 
 /// Workspace-scope command execution (the Overview command surface).
@@ -428,6 +443,10 @@ impl DaemonBackend {
             Effect::SaveEnvironment { scope, entries } => {
                 self.store
                     .save_environment(scope, entries, self.completions());
+            }
+            Effect::LoadRoles { scope } => self.store.load_roles(scope, self.completions()),
+            Effect::SaveRoles { scope, source } => {
+                self.store.save_roles(scope, source, self.completions());
             }
             Effect::WorkspaceCommand { workspace, command } => {
                 self.workspace_commands
@@ -727,6 +746,7 @@ mod tests {
             name: "feature".to_owned(),
             profile: None,
             model: None,
+            role_id: None,
         }
     }
 

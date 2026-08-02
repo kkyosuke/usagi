@@ -39,6 +39,9 @@ use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
 use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotMode};
+use usagi_core::infrastructure::role_catalog::{
+    CatalogLayer, read_layer_source, write_layer_source,
+};
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -71,7 +74,8 @@ use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit,
 };
 use usagi_tui::usecase::application::controller::{
-    BackendEvent, EnvironmentEntry, NewRequest, Notice, SafeError, SafeMessage, Target,
+    AppEvent, BackendEvent, EnvironmentEntry, NewRequest, Notice, RoleChoice, RoleEditorScope,
+    SafeError, SafeMessage, SessionRoleCatalog, SessionRoleProjection, Target,
 };
 use usagi_tui::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DecisionPort as BackendDecisionPort,
@@ -230,6 +234,8 @@ struct RepoEnvironmentStore {
     /// id elsewhere).
     session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
     environment: SettingsEnvironmentStore,
+    role_data_home: PathBuf,
+    role_workspace: PathBuf,
 }
 
 impl RepoEnvironmentStore {
@@ -237,11 +243,14 @@ impl RepoEnvironmentStore {
         workspace_path: &Path,
         session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
         environment: SettingsEnvironmentStore,
+        role_data_home: PathBuf,
     ) -> Self {
         Self {
             store: WorkspaceStateStore::new(workspace_path),
             session_names,
             environment,
+            role_data_home,
+            role_workspace: workspace_path.to_owned(),
         }
     }
 
@@ -393,6 +402,67 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
             },
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+    }
+
+    fn load_roles(&mut self, scope: RoleEditorScope, completions: Completions) {
+        let layer = match scope {
+            RoleEditorScope::Global => CatalogLayer::Global,
+            RoleEditorScope::Workspace => CatalogLayer::Workspace,
+        };
+        let event = match read_layer_source(&self.role_data_home, &self.role_workspace, layer) {
+            Ok(source) => BackendEvent::RolesLoaded { scope, source },
+            Err(error) => BackendEvent::RolesError {
+                scope,
+                error: Self::safe_error(error),
+            },
+        };
+        completions.emit(AppEvent::Backend(event));
+    }
+
+    fn save_roles(&mut self, scope: RoleEditorScope, source: String, completions: Completions) {
+        let layer = match scope {
+            RoleEditorScope::Global => CatalogLayer::Global,
+            RoleEditorScope::Workspace => CatalogLayer::Workspace,
+        };
+        let mut saved = false;
+        let event =
+            match write_layer_source(&self.role_data_home, &self.role_workspace, layer, &source) {
+                Ok(()) => {
+                    saved = true;
+                    BackendEvent::RolesLoaded { scope, source }
+                }
+                Err(error) => BackendEvent::RolesError {
+                    scope,
+                    error: Self::safe_error(error),
+                },
+            };
+        completions.emit(AppEvent::Backend(event));
+        if saved
+            && let Ok(catalog) = usagi_core::infrastructure::role_catalog::load_effective(
+                &self.role_data_home,
+                &self.role_workspace,
+            )
+        {
+            let roles = catalog
+                .roles
+                .into_iter()
+                .filter(|(_, definition)| {
+                    definition
+                        .scopes
+                        .contains(&usagi_core::domain::role::RoleScope::Session)
+                })
+                .map(|(id, definition)| RoleChoice {
+                    id,
+                    summary: definition.summary,
+                })
+                .collect();
+            completions.emit(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
+                SessionRoleCatalog {
+                    roles,
+                    default: catalog.defaults.session,
+                },
+            )));
+        }
     }
 
     fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions) {
@@ -672,7 +742,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         let store = RepoEnvironmentStore::new(
             &snapshot.workspace.path,
             session_names,
-            SettingsEnvironmentStore::new(environment_data_dir, &snapshot.workspace.path),
+            SettingsEnvironmentStore::new(environment_data_dir.clone(), &snapshot.workspace.path),
+            environment_data_dir,
         );
         let backend = DaemonBackend::new(
             Box::new(host.clone()),
@@ -2613,6 +2684,7 @@ struct LifecycleSnapshot {
     revision: u64,
     sessions: Vec<ManagedSession>,
     agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
+    session_roles: BTreeMap<SessionId, SessionRoleProjection>,
 }
 
 impl LifecycleSnapshot {
@@ -2729,6 +2801,35 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
             .into_iter()
             .flatten()
             .collect();
+        let session_roles = session_values
+            .iter()
+            .map(|item| {
+                let session_id = serde_json::from_value(
+                    item.get("session_id")
+                        .cloned()
+                        .ok_or_else(|| "daemon role projection has no session ID".to_owned())?,
+                )
+                .map_err(|_| "daemon role projection has an invalid session ID".to_owned())?;
+                let role_id = item
+                    .get("role_id")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| "daemon role projection has an invalid role ID".to_owned())?
+                    .flatten();
+                let role_summary = item
+                    .get("role_summary")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+                Ok((
+                    session_id,
+                    SessionRoleProjection {
+                        role_id,
+                        role_summary,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
         let sessions = serde_json::from_value(serde_json::Value::Array(session_values.clone()))
             .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
         Ok(LifecycleSnapshot {
@@ -2737,6 +2838,7 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
             revision,
             sessions,
             agent_resumes,
+            session_roles,
         })
     })();
     record_lifecycle_snapshot_error(&result);
@@ -2805,6 +2907,10 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             SessionCommand::Create { name } => {
                 (SessionAction::Create, serde_json::json!({"name": name}))
             }
+            SessionCommand::CreateWithRole { name, role_id } => (
+                SessionAction::Create,
+                serde_json::json!({"name": name, "role": role_id}),
+            ),
             SessionCommand::List => (SessionAction::List, serde_json::json!({})),
             SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
             SessionCommand::Resume { .. } => {
@@ -2903,6 +3009,7 @@ fn session_snapshot_result(
         session_ids: Some(session_ids),
         agent_resumes: Some(snapshot.agent_resumes.clone()),
         session_lifecycles: Some(snapshot.session_lifecycles()),
+        session_roles: Some(snapshot.session_roles.clone()),
         revision: Some(snapshot.revision),
     })
 }
@@ -3871,15 +3978,16 @@ mod tests {
     const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
-        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, DaemonAgentCommandPort,
-        DaemonDecisionCommandPort, DaemonReply, DaemonRequest, DaemonRestoreConnectionPort,
-        EnvScope, EnvironmentStorePort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
-        LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
-        ProductionBackendFactory, RepoEnvironmentStore, SettingsEnvironmentStore, Start,
-        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-        TerminalSnapshotMode, TerminalSubscription, agent_inventory_request, agent_launch_request,
-        classify_terminal_input, correlate_agent_launch, created_session_hook, daemon_error_reason,
-        decision_cadence, decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, BackendTargetStorePort,
+        Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonReply, DaemonRequest,
+        DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort, FsWorkspaceLoader, Geometry,
+        LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
+        PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
+        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
+        agent_inventory_request, agent_launch_request, classify_terminal_input,
+        correlate_agent_launch, created_session_hook, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, probe_path,
@@ -5883,6 +5991,7 @@ mod tests {
             revision: 1,
             sessions: vec![available, failed, deleting, creating],
             agent_resumes: std::collections::BTreeMap::new(),
+            session_roles: std::collections::BTreeMap::new(),
         };
 
         // Available, Failed and Deleting are listed; the Creating row is not.
@@ -6177,6 +6286,7 @@ mod tests {
             revision: 2,
             sessions: vec![available],
             agent_resumes: std::collections::BTreeMap::new(),
+            session_roles: std::collections::BTreeMap::new(),
         };
         let legacy = SessionRecord {
             name: "legacy".into(),
@@ -6685,6 +6795,7 @@ mod tests {
             workspace.path(),
             vec![(alpha, "alpha".to_owned())],
             SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
+            workspace.path().to_path_buf(),
         );
 
         // The root always resolves; a known session resolves to its store name.
@@ -6707,6 +6818,33 @@ mod tests {
                 .message
                 .as_str()
                 .contains("state.json is unreadable")
+        );
+    }
+
+    #[test]
+    fn production_role_store_reads_and_atomically_validates_workspace_catalog() {
+        let workspace = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            Vec::new(),
+            SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
+            data.path().to_path_buf(),
+        );
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::save_roles(
+            &mut store,
+            RoleEditorScope::Workspace,
+            "# exact\nversion = 1\n".into(),
+            completions,
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesLoaded { source, .. }) if source.starts_with("# exact")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(".usagi/roles.toml")).unwrap(),
+            "# exact\nversion = 1\n"
         );
     }
 
@@ -6813,6 +6951,7 @@ mod tests {
             revision: 0,
             sessions: Vec::new(),
             agent_resumes: std::collections::BTreeMap::new(),
+            session_roles: std::collections::BTreeMap::new(),
         };
         let workspace = Workspace::new("broken", workspace.path());
         assert!(session_snapshot_result("refresh", &snapshot, &workspace).is_err());
@@ -7251,6 +7390,7 @@ mod tests {
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
             failure_summary: None,
+            role_id: None,
         };
         let frame = runtime.render(
             24,

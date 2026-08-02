@@ -7,7 +7,7 @@
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::{
-    EnvironmentEditor, EnvironmentEntry, NoteEditor, NoteSection,
+    EnvironmentEditor, EnvironmentEntry, NoteEditor, NoteSection, RoleEditor, RoleEditorScope,
 };
 use usagi_core::usecase::env::EnvScope;
 
@@ -241,13 +241,62 @@ pub fn render_environment_over(
     )
 }
 
+/// Render the lossless TOML role editor. Validation failures remain inline and
+/// leave the complete source available for correction.
+#[must_use]
+pub fn render_roles_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    editor: &RoleEditor,
+) -> Vec<String> {
+    let scope = match editor.scope() {
+        RoleEditorScope::Global => "global",
+        RoleEditorScope::Workspace => "workspace",
+    };
+    let mut lines = vec![modal::caption(&format!(
+        "{scope} roles.toml · versioned TOML"
+    ))];
+    if editor.is_loading() {
+        lines.push(modal::empty_notice("(loading…)"));
+    } else {
+        lines.extend(
+            editor
+                .source()
+                .lines()
+                .rev()
+                .take(14)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|line| modal::content_line(line, INNER_WIDTH)),
+        );
+    }
+    if let Some(line) = error_line(editor.error().map(|error| error.message.as_str())) {
+        lines.push(line);
+    }
+    lines.push(modal::footer(if editor.is_saving() {
+        "Saving…"
+    } else {
+        "Ctrl-S: validate + save   Tab: scope   Esc: close"
+    }));
+    modal::render_over(
+        height,
+        width,
+        base,
+        "Roles",
+        INNER_WIDTH,
+        &modal::fixed_body(lines, 18),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{render_environment_over, render_notes_over};
+    use super::{render_environment_over, render_notes_over, render_roles_over};
     use crate::presentation::widgets::display_width;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, EnvironmentEntry, NoteSection, SafeError,
-        SafeMessage, Target, update,
+        AppEvent, AppKey, AppState, BackendEvent, EnvironmentEntry, NoteSection, RoleEditorScope,
+        SafeError, SafeMessage, Target, update,
     };
     use chrono::{TimeZone, Utc};
     use usagi_core::domain::id::{SessionId, WorkspaceId};
@@ -508,5 +557,38 @@ mod tests {
                 .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
                 .count()
         );
+    }
+
+    #[test]
+    fn role_editor_renders_lossless_source_and_inline_validation_error() {
+        let mut state = AppState::home(WorkspaceId::new(), Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("roles global".into())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Global,
+                source: "# comment\nversion = 1\n".into(),
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::SaveRoles));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Global,
+                error: SafeError {
+                    message: SafeMessage::new("invalid default role"),
+                    error_id: "roles-invalid".into(),
+                },
+            }),
+        );
+        let frame = render_roles_over(24, 80, &base(), state.role_editor().unwrap());
+        let text = frame.join("\n");
+        assert!(text.contains("# comment"));
+        assert!(text.contains("invalid default role"));
+        assert!(frame.iter().all(|line| display_width(line) == 80));
     }
 }

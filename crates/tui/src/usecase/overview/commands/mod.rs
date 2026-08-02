@@ -6,11 +6,13 @@
 mod config;
 mod env;
 mod issue;
+mod roles;
 mod session;
 
 pub(super) use config::Config;
 pub(super) use env::Env;
 pub(super) use issue::Issue;
+pub(super) use roles::Roles;
 pub(super) use session::Session;
 
 #[cfg(test)]

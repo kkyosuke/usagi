@@ -32,7 +32,7 @@ use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, HomeMode, Notice, PrOverlay, PreviewOverlay, Selection,
-    Target, TargetPhase,
+    SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
@@ -101,6 +101,8 @@ pub struct ProjectedSession {
     pub lifecycle: SessionLifecycle,
     /// Safe failure summary shown on a `Failed` row; `None` for other lifecycles.
     pub failure_summary: Option<String>,
+    /// Safe display-only role ID from the daemon projection.
+    pub role_id: Option<String>,
 }
 
 /// Read-only Git facts supplied asynchronously by the composition layer.
@@ -136,6 +138,7 @@ impl ProjectedSession {
             // the only state those legacy paths ever projected.
             lifecycle: SessionLifecycle::Available,
             failure_summary: None,
+            role_id: None,
         }
     }
 }
@@ -209,6 +212,7 @@ pub struct HomeProjection {
     /// owns input. The sidebar row renders it as a name-only caret in place of the
     /// static `+ new session` label; profile/model are never part of this flow.
     create_draft: Option<CreateDraft>,
+    create_role: Option<String>,
     /// Name of a create request the daemon is still fulfilling. Present exactly
     /// while a create worker owns the port; the sidebar draws it as a two-line
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
@@ -274,12 +278,22 @@ impl HomeProjection {
         for id in state.sessions() {
             for session in snapshot_sessions {
                 if session.id == *id {
-                    sessions.push(session.clone());
+                    let mut session = session.clone();
+                    session.role_id = state
+                        .session_roles()
+                        .get(id)
+                        .and_then(|projection| projection.role_id.as_ref())
+                        .map(ToString::to_string);
+                    sessions.push(session);
                     break;
                 }
             }
         }
         let create_draft = state.create_session_form().map(CreateDraft::from);
+        let create_role = state
+            .create_session_form()
+            .and_then(CreateSessionForm::selected_role)
+            .map(|role| role.id.to_string());
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
@@ -321,6 +335,7 @@ impl HomeProjection {
             overview_modal: None,
             closeup_modal: None,
             create_draft,
+            create_role,
             // Seeded by the shell's in-flight create via `with_create_pending`;
             // the reducer never owns the pending name because its snapshot arrives
             // through the daemon transport, not `AppState`.
@@ -581,6 +596,8 @@ pub struct Workspace {
     /// refreshed from each lifecycle snapshot. A session absent here (older
     /// snapshot or a name-only fallback) is treated as `Available`.
     session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
+    /// Non-persistent safe role metadata from the daemon snapshot.
+    session_roles: BTreeMap<SessionId, SessionRoleProjection>,
 }
 
 impl Workspace {
@@ -614,6 +631,7 @@ impl Workspace {
             metrics: None,
             git_diffs: BTreeMap::new(),
             session_lifecycles: BTreeMap::new(),
+            session_roles: BTreeMap::new(),
         }
     }
 
@@ -707,6 +725,15 @@ impl Workspace {
     #[must_use]
     pub fn session_lifecycles(&self) -> &BTreeMap<SessionId, SessionLifecycleProjection> {
         &self.session_lifecycles
+    }
+
+    pub fn set_session_roles(&mut self, roles: BTreeMap<SessionId, SessionRoleProjection>) {
+        self.session_roles = roles;
+    }
+
+    #[must_use]
+    pub fn session_roles(&self) -> &BTreeMap<SessionId, SessionRoleProjection> {
+        &self.session_roles
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -1408,7 +1435,7 @@ fn home_row_height(row: Selection) -> usize {
 /// rendered. Every other row falls back to the static [`home_row_height`].
 fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> usize {
     if let (Selection::NewSession, Some(draft)) = (row, home.create_draft.as_ref()) {
-        return new_session_input_lines(width, draft).len();
+        return create_session_input_lines(width, draft, home.create_role.as_deref()).len();
     }
     home_row_height(row)
 }
@@ -1482,6 +1509,7 @@ fn home_failed_row_lines(
     vec![first, widgets::pad_to_width(&reason, width)]
 }
 
+#[allow(clippy::too_many_lines)] // One total row renderer keeps lifecycle, badge, and viewport height composition aligned.
 fn home_row_lines_at(
     width: usize,
     home: &HomeProjection,
@@ -1495,7 +1523,7 @@ fn home_row_lines_at(
     // the error, which `home_row_height_at` derives from the same builder so the
     // viewport math stays aligned.
     if let (Selection::NewSession, Some(draft)) = (row, home.create_draft.as_ref()) {
-        return new_session_input_lines(width, draft);
+        return create_session_input_lines(width, draft, home.create_role.as_deref());
     }
     let target = match row {
         Selection::Target(target) => Some(target),
@@ -1548,8 +1576,16 @@ fn home_row_lines_at(
     let label = home_row_label(row, &label, selected, current, home.mode);
     let first = if let Some(session) = session {
         let note = if session.has_notes { "✎" } else { "·" };
+        let badge = session
+            .role_id
+            .as_ref()
+            .map(|role| format!(" [{}]", widgets::clip_to_width(role, 12)))
+            .unwrap_or_default();
         widgets::pad_to_width(
-            &format!("{marker} {label}  {}", Style::new().dim().paint(note)),
+            &format!(
+                "{marker} {label}{badge}  {}",
+                Style::new().dim().paint(note)
+            ),
             width,
         )
     } else {
@@ -1657,6 +1693,27 @@ fn new_session_input_lines(width: usize, draft: &CreateDraft) -> Vec<String> {
         for segment in widgets::wrap_to_width(error, width) {
             lines.push(widgets::pad_to_width(&danger.paint(&segment), width));
         }
+    }
+    lines
+}
+
+fn create_session_input_lines(
+    width: usize,
+    draft: &CreateDraft,
+    role: Option<&str>,
+) -> Vec<String> {
+    let mut lines = new_session_input_lines(width, draft);
+    if let Some(role) = role {
+        let role_line = format!("  role: {role}  (↑/↓)");
+        lines.insert(
+            1,
+            widgets::pad_to_width(
+                &Style::new()
+                    .dim()
+                    .paint(&widgets::clip_to_width(&role_line, width)),
+                width,
+            ),
+        );
     }
     lines
 }
@@ -1868,7 +1925,7 @@ mod tests {
     use crate::presentation::widgets::{display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, Route, SafeError,
-        SafeMessage, Selection, Target, TargetPhase, update,
+        SafeMessage, Selection, SessionRoleProjection, Target, TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -1886,6 +1943,8 @@ mod tests {
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
+    use usagi_core::domain::role::RoleId;
+    use usagi_core::domain::session_lifecycle::SessionLifecycle;
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
@@ -1996,6 +2055,7 @@ mod tests {
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
             failure_summary: None,
+            role_id: None,
         }
     }
 
@@ -2441,6 +2501,48 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(strip(&lines[0]).contains("+ new: feature-x"));
         assert_eq!(display_width(&lines[0]), 30);
+    }
+
+    #[test]
+    fn sidebar_role_badge_uses_safe_id_without_replacing_lifecycle_state() {
+        let workspace = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let mut session = projected_session(session_id, "alpha", "/work/alpha");
+        session.role_id = Some("reviewer".to_owned());
+        session.lifecycle = SessionLifecycle::Failed;
+        session.failure_summary = Some("setup failed".to_owned());
+        let state = AppState::home(workspace, vec![session_id]);
+        let frame = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[session],
+        ));
+        assert!(frame.contains("failed"));
+        // Failed rows deliberately keep their lifecycle-specific rendering;
+        // badges never turn them into an attachable ordinary row.
+        assert!(!frame.contains("[reviewer]"));
+
+        let mut available = projected_session(session_id, "alpha", "/work/alpha");
+        available.role_id = Some("reviewer".to_owned());
+        let mut state = AppState::home(workspace, vec![session_id]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
+                session_id,
+                SessionRoleProjection {
+                    role_id: Some(RoleId::new("reviewer").unwrap()),
+                    role_summary: None,
+                },
+            )]))),
+        );
+        let frame = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[available],
+        ));
+        assert!(frame.contains("[reviewer]"));
     }
 
     #[test]

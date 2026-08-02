@@ -49,6 +49,7 @@ use crate::presentation::views::director_drawer::{
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::quit_modal;
+use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
@@ -66,7 +67,8 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, NewRequest, Notice, OperationResult, Overlay, PendingToken, Target,
+    Feedback, NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice,
+    SessionRoleCatalog, SessionRoleProjection, Target,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -1253,6 +1255,8 @@ pub struct SessionCommandResult {
     /// Carries each row's lifecycle (and a `Failed` row's failure summary) so the
     /// sidebar can show state and gate attach/remove by capability.
     pub session_lifecycles: Option<BTreeMap<SessionId, SessionLifecycleProjection>>,
+    /// Safe role projection keyed by stable daemon identity. Never persisted.
+    pub session_roles: Option<BTreeMap<SessionId, SessionRoleProjection>>,
     /// Monotonically increasing daemon lifecycle revision for this snapshot.
     /// The UI uses it to ignore a response that arrives after a newer command.
     pub revision: Option<u64>,
@@ -1267,6 +1271,7 @@ impl SessionCommandResult {
             session_ids: None,
             agent_resumes: None,
             session_lifecycles: None,
+            session_roles: None,
             revision: None,
         }
     }
@@ -2772,6 +2777,7 @@ fn apply_session_projection(
     session_ids: Option<Vec<SessionId>>,
     agent_resumes: Option<BTreeMap<SessionId, ProviderResumeProjection>>,
     session_lifecycles: Option<BTreeMap<SessionId, SessionLifecycleProjection>>,
+    session_roles: Option<BTreeMap<SessionId, SessionRoleProjection>>,
 ) {
     let Some(sessions) = sessions else {
         return;
@@ -2799,6 +2805,8 @@ fn apply_session_projection(
         ui.workspace.replace_sessions(sessions);
     }
     ui.workspace.set_session_lifecycles(lifecycles);
+    ui.workspace
+        .set_session_roles(session_roles.unwrap_or_default());
     if let Some(agent_resumes) = agent_resumes {
         ui.agent_resumes = agent_resumes;
     }
@@ -2856,6 +2864,7 @@ fn adopt_session_snapshot(ui: &mut WorkspaceUi, result: SessionCommandResult) {
             result.session_ids,
             result.agent_resumes,
             result.session_lifecycles,
+            result.session_roles,
         );
     }
 }
@@ -3376,6 +3385,11 @@ fn sync_runtime_sessions(
     if runtime.state().session_lifecycles() != &lifecycles {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
             lifecycles,
+        )));
+    }
+    if runtime.state().session_roles() != ui.workspace.session_roles() {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoles(
+            ui.workspace.session_roles().clone(),
         )));
     }
 }
@@ -4511,6 +4525,7 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    role_editor: Option<crate::usecase::application::controller::RoleEditor>,
     /// Whole-second wall clock behind the sidebar's relative session times.
     ///
     /// Truncating to the second is what makes time material without making
@@ -4562,6 +4577,7 @@ fn home_frame_material(
             .state()
             .create_session_error()
             .map(|error| error.message.clone()),
+        role_editor: runtime.state().role_editor().cloned(),
         now: now.with_nanosecond(0).unwrap_or(now),
     }
 }
@@ -4586,6 +4602,14 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
             material.width,
             &frame,
             message,
+        );
+    }
+    if let Some(editor) = &material.role_editor {
+        return scratchpad_modal::render_roles_over(
+            material.height,
+            material.width,
+            &frame,
+            editor,
         );
     }
     frame
@@ -4635,10 +4659,14 @@ fn drain_controller_host_actions(
         match action {
             ControllerHostAction::Create(request, completions) => {
                 let name = request.intent.name;
+                let role_id = request.intent.role_id;
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
                     ui,
-                    SessionCommand::Create { name: name.clone() },
+                    SessionCommand::CreateWithRole {
+                        name: name.clone(),
+                        role_id,
+                    },
                     SessionBackendCompletion::Create {
                         token: request.token,
                         before,
@@ -5109,6 +5137,30 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    if let Ok(data_home) = usagi_core::infrastructure::paths::data_dir()
+        && let Ok(catalog) =
+            usagi_core::infrastructure::role_catalog::load_effective(&data_home, &root_cwd)
+    {
+        let roles = catalog
+            .roles
+            .into_iter()
+            .filter(|(_, definition)| {
+                definition
+                    .scopes
+                    .contains(&usagi_core::domain::role::RoleScope::Session)
+            })
+            .map(|(id, definition)| RoleChoice {
+                id,
+                summary: definition.summary,
+            })
+            .collect();
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
+            SessionRoleCatalog {
+                roles,
+                default: catalog.defaults.session,
+            },
+        )));
+    }
     runtime.set_agent_models(agent_models.available, agent_models.default);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
@@ -6637,6 +6689,7 @@ mod tests {
                     name: "feature".to_owned(),
                     profile: None,
                     model: None,
+                    role_id: None,
                 },
             },
             Effect::RefreshSessions { workspace },
@@ -6772,6 +6825,7 @@ mod tests {
                     name: "feature".into(),
                     profile: None,
                     model: None,
+                    role_id: None,
                 },
             },
             Effect::RefreshSessions { workspace },
@@ -6967,9 +7021,16 @@ mod tests {
         assert_eq!(super::session_name_for(&ui, SessionId::new()), None);
 
         let records = ui.workspace.sessions().to_vec();
-        super::apply_session_projection(&mut ui, None, None, None, None);
-        super::apply_session_projection(&mut ui, Some(records.clone()), None, None, None);
-        super::apply_session_projection(&mut ui, Some(records), Some(vec![session]), None, None);
+        super::apply_session_projection(&mut ui, None, None, None, None, None);
+        super::apply_session_projection(&mut ui, Some(records.clone()), None, None, None, None);
+        super::apply_session_projection(
+            &mut ui,
+            Some(records),
+            Some(vec![session]),
+            None,
+            None,
+            None,
+        );
         let records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(
             &mut ui,
@@ -6977,6 +7038,7 @@ mod tests {
             Some(vec![session]),
             Some(std::collections::BTreeMap::new()),
             Some(std::collections::BTreeMap::new()),
+            None,
         );
         let mut mismatched_runtime = WorkspaceRuntime::new(workspace, Vec::new());
         ui.pane_completion_sender
@@ -7066,6 +7128,7 @@ mod tests {
                     failure_summary: None,
                 },
             )])),
+            None,
         );
 
         let operation = OperationId::new();
@@ -8523,17 +8586,19 @@ mod tests {
             command: SessionCommand,
         ) -> Result<SessionCommandResult, String> {
             let sessions = match &command {
-                SessionCommand::Create { name } => Some(vec![SessionRecord {
-                    name: name.clone(),
-                    display_name: None,
-                    origin: SessionOrigin::Human,
-                    started_from: None,
-                    root: workspace.path.join(".usagi/sessions").join(name),
-                    created_at: now(),
-                    last_active: None,
-                    notes: Scratchpad::default(),
-                    prs: Vec::new(),
-                }]),
+                SessionCommand::Create { name } | SessionCommand::CreateWithRole { name, .. } => {
+                    Some(vec![SessionRecord {
+                        name: name.clone(),
+                        display_name: None,
+                        origin: SessionOrigin::Human,
+                        started_from: None,
+                        root: workspace.path.join(".usagi/sessions").join(name),
+                        created_at: now(),
+                        last_active: None,
+                        notes: Scratchpad::default(),
+                        prs: Vec::new(),
+                    }])
+                }
                 SessionCommand::Remove { .. } => Some(Vec::new()),
                 _ => None,
             };
@@ -8548,6 +8613,7 @@ mod tests {
                 session_ids: None,
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: None,
             })
         }
@@ -8604,6 +8670,7 @@ mod tests {
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
             failure_summary: None,
+            role_id: None,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
@@ -9741,6 +9808,7 @@ mod tests {
                 session_ids: Some(vec![published]),
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: Some(7),
             })]))),
         };
@@ -9789,6 +9857,7 @@ mod tests {
                 session_ids: None,
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: Some(8),
             }));
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
@@ -9822,6 +9891,7 @@ mod tests {
                     session_ids: Some(vec![stale]),
                     agent_resumes: None,
                     session_lifecycles: None,
+                    session_roles: None,
                     revision: Some(3),
                 }),
             ]))),
@@ -9965,7 +10035,9 @@ mod tests {
                 _: Option<&SessionRecord>,
                 command: SessionCommand,
             ) -> Result<SessionCommandResult, String> {
-                let SessionCommand::Create { name } = command else {
+                let (SessionCommand::Create { name } | SessionCommand::CreateWithRole { name, .. }) =
+                    command
+                else {
                     return Err("unexpected session command".to_owned());
                 };
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -10136,6 +10208,7 @@ mod tests {
                     session_ids: Some(vec![newer]),
                     agent_resumes: None,
                     session_lifecycles: None,
+                    session_roles: None,
                     revision: Some(2),
                 }),
                 completion: super::SessionBackendCompletion::Remove {
@@ -10157,6 +10230,7 @@ mod tests {
                     session_ids: Some(vec![original]),
                     agent_resumes: None,
                     session_lifecycles: None,
+                    session_roles: None,
                     revision: Some(1),
                 }),
                 completion: super::SessionBackendCompletion::Remove {
@@ -10196,6 +10270,7 @@ mod tests {
             session_ids: Some(vec![existing, created]),
             agent_resumes: None,
             session_lifecycles: None,
+            session_roles: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Create {
@@ -10285,7 +10360,9 @@ mod tests {
                 let _ = self.release.lock().unwrap().recv();
             }
             let session_ids = match command {
-                SessionCommand::Create { .. } => vec![self.existing, self.created],
+                SessionCommand::Create { .. } | SessionCommand::CreateWithRole { .. } => {
+                    vec![self.existing, self.created]
+                }
                 SessionCommand::Remove { .. } => Vec::new(),
                 _ => vec![self.existing],
             };
@@ -10295,6 +10372,7 @@ mod tests {
                 session_ids: Some(session_ids),
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: None,
             })
         }
@@ -10320,6 +10398,7 @@ mod tests {
                         name: format!("session-{token}"),
                         profile: None,
                         model: None,
+                        role_id: None,
                     },
                 },
                 completions,
@@ -10460,6 +10539,7 @@ mod tests {
                 session_ids: Some(vec![self.existing, self.created]),
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: None,
             })
         }
@@ -10700,6 +10780,7 @@ mod tests {
             session_ids: Some(vec![session]),
             agent_resumes: None,
             session_lifecycles: None,
+            session_roles: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Remove {

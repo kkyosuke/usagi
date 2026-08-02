@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::persistence::json_file::write_text_atomic;
+
 use crate::domain::role::{
     EffectiveRoleCatalog, MAX_ROLE_INSTRUCTIONS_BYTES, RoleDefaults, RoleDefinition, RoleId,
     RoleScope,
@@ -15,7 +17,7 @@ use crate::domain::role::{
 const CATALOG_VERSION: u16 = 1;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoleCatalogFile {
     version: u16,
@@ -151,8 +153,12 @@ fn read_optional(path: &Path) -> Result<Option<RoleCatalogFile>, RoleCatalogErro
         path: path.to_owned(),
         source,
     })?;
+    parse_source(path, &source).map(Some)
+}
+
+fn parse_source(path: &Path, source: &str) -> Result<RoleCatalogFile, RoleCatalogError> {
     let catalog: RoleCatalogFile =
-        toml::from_str(&source).map_err(|source| RoleCatalogError::Malformed {
+        toml::from_str(source).map_err(|source| RoleCatalogError::Malformed {
             path: path.to_owned(),
             source,
         })?;
@@ -178,7 +184,131 @@ fn read_optional(path: &Path) -> Result<Option<RoleCatalogFile>, RoleCatalogErro
             });
         }
     }
-    Ok(Some(catalog))
+    Ok(catalog)
+}
+
+/// Read one catalog layer as exact editable TOML. A missing file starts with a
+/// valid versioned document; existing comments, ordering, and whitespace are
+/// returned unchanged.
+///
+/// # Errors
+///
+/// Returns a catalog IO, size, schema, or semantic validation error.
+pub fn read_source(path: &Path) -> Result<String, RoleCatalogError> {
+    match fs::read_to_string(path) {
+        Ok(source) => {
+            if source.len() as u64 > MAX_CATALOG_BYTES {
+                return Err(RoleCatalogError::TooLarge(path.to_owned()));
+            }
+            parse_source(path, &source)?;
+            Ok(source)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok("version = 1\n".to_owned())
+        }
+        Err(source) => Err(RoleCatalogError::Io {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+/// Validate and atomically replace one catalog layer without reserializing it.
+/// This preserves every comment and formatting choice in the supplied document.
+///
+/// # Errors
+///
+/// Returns a validation or atomic persistence error without replacing the target.
+pub fn write_source(path: &Path, source: &str) -> Result<(), RoleCatalogError> {
+    if source.len() as u64 > MAX_CATALOG_BYTES {
+        return Err(RoleCatalogError::TooLarge(path.to_owned()));
+    }
+    parse_source(path, source)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|source| RoleCatalogError::Io {
+        path: parent.to_owned(),
+        source,
+    })?;
+    write_text_atomic(path, source).map_err(|error| RoleCatalogError::Io {
+        path: path.to_owned(),
+        source: std::io::Error::other(error.to_string()),
+    })
+}
+
+/// Which versioned catalog layer the editor owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogLayer {
+    Global,
+    Workspace,
+}
+
+fn layer_path(data_home: &Path, workspace_root: &Path, layer: CatalogLayer) -> PathBuf {
+    match layer {
+        CatalogLayer::Global => data_home.join("roles.toml"),
+        CatalogLayer::Workspace => workspace_root.join(".usagi").join("roles.toml"),
+    }
+}
+
+/// Read one editable layer verbatim.
+///
+/// # Errors
+///
+/// Returns an IO or catalog validation error for the selected layer.
+pub fn read_layer_source(
+    data_home: &Path,
+    workspace_root: &Path,
+    layer: CatalogLayer,
+) -> Result<String, RoleCatalogError> {
+    read_source(&layer_path(data_home, workspace_root, layer))
+}
+
+/// Validate the replacement in the effective two-layer context, then atomically
+/// write only the selected layer. No serialization occurs, so unrelated TOML is
+/// lossless.
+///
+/// # Errors
+///
+/// Returns an effective-catalog validation or atomic persistence error.
+pub fn write_layer_source(
+    data_home: &Path,
+    workspace_root: &Path,
+    layer: CatalogLayer,
+    source: &str,
+) -> Result<(), RoleCatalogError> {
+    let target = layer_path(data_home, workspace_root, layer);
+    let replacement = parse_source(&target, source)?;
+    let global_path = layer_path(data_home, workspace_root, CatalogLayer::Global);
+    let workspace_path = layer_path(data_home, workspace_root, CatalogLayer::Workspace);
+    let global = if layer == CatalogLayer::Global {
+        Some(replacement.clone())
+    } else {
+        read_optional(&global_path)?
+    };
+    let workspace = if layer == CatalogLayer::Workspace {
+        Some(replacement)
+    } else {
+        read_optional(&workspace_path)?
+    };
+    let mut effective = EffectiveRoleCatalog {
+        configured: true,
+        ..EffectiveRoleCatalog::default()
+    };
+    if let Some(global) = global {
+        effective.defaults = global.defaults;
+        effective.roles = global.roles;
+    }
+    if let Some(workspace) = workspace {
+        if workspace.defaults.root.is_some() {
+            effective.defaults.root = workspace.defaults.root;
+        }
+        if workspace.defaults.session.is_some() {
+            effective.defaults.session = workspace.defaults.session;
+        }
+        effective.roles.extend(workspace.roles);
+    }
+    validate_default(&effective, RoleScope::Root)?;
+    validate_default(&effective, RoleScope::Session)?;
+    write_source(&target, source)
 }
 
 fn validate_default(
@@ -211,6 +341,55 @@ mod tests {
     fn write(path: &Path, body: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn layer_editor_preserves_source_and_rejects_invalid_replacements_atomically() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        let source = "# keep me\nversion = 1\n\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"ship\"\n";
+        write_layer_source(&home, &workspace, CatalogLayer::Workspace, source).unwrap();
+        assert_eq!(
+            read_layer_source(&home, &workspace, CatalogLayer::Workspace).unwrap(),
+            source
+        );
+
+        let error =
+            write_layer_source(&home, &workspace, CatalogLayer::Workspace, "version = 99\n")
+                .unwrap_err();
+        assert!(matches!(error, RoleCatalogError::UnsupportedVersion { .. }));
+        assert_eq!(
+            fs::read_to_string(workspace.join(".usagi/roles.toml")).unwrap(),
+            source
+        );
+    }
+
+    #[test]
+    fn workspace_editor_validates_defaults_against_the_effective_global_layer() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        write(
+            &home.join("roles.toml"),
+            "version = 1\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"ship\"\n",
+        );
+        write_layer_source(
+            &home,
+            &workspace,
+            CatalogLayer::Workspace,
+            "version = 1\n[defaults]\nsession = \"coder\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_effective(&home, &workspace)
+                .unwrap()
+                .defaults
+                .session
+                .unwrap()
+                .as_str(),
+            "coder"
+        );
     }
 
     #[test]
