@@ -4,6 +4,8 @@
 //! adapters. It deliberately does not own adapter CLI syntax or launch-scope
 //! resolution.
 
+use crate::domain::role::RoleId;
+
 const ROOT_PROMPT: &str = "<context>\nあなたは usagi が管理するワークスペースの root ディレクトリ（統括環境）で起動されています。\n</context>\n<instructions>\n受け取った指示や issue をもとに、どのようなタスクを各セッションに実行させるべきかを判別してください。\n</instructions>";
 
 const SESSION_WORKTREE_PROMPT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
@@ -34,16 +36,35 @@ pub const fn local_llm_delegation_prompt() -> &'static str {
 /// Callers derive `is_root` from `LaunchRequest.scope.session_id.is_none()`.
 #[must_use]
 pub fn session_system_prompt(is_root: bool, local_llm_delegation: bool) -> String {
+    session_system_prompt_with_role(is_root, None, local_llm_delegation)
+}
+
+/// Composes the immutable scope boundary, one optional effective role policy,
+/// and the trusted local-LLM suffix exactly once and in that order.
+#[must_use]
+pub fn session_system_prompt_with_role(
+    is_root: bool,
+    role: Option<(&RoleId, &str)>,
+    local_llm_delegation: bool,
+) -> String {
     let base = if is_root {
         root_prompt()
     } else {
         session_worktree_prompt()
     };
-    if local_llm_delegation {
-        format!("{base}\n{}", local_llm_delegation_prompt())
-    } else {
-        base.to_owned()
+    let mut prompt = base.to_owned();
+    if let Some((id, instructions)) = role {
+        prompt.push_str("\n<role id=\"");
+        prompt.push_str(id.as_str());
+        prompt.push_str("\">\n");
+        prompt.push_str(instructions);
+        prompt.push_str("\n</role>");
     }
+    if local_llm_delegation {
+        prompt.push('\n');
+        prompt.push_str(local_llm_delegation_prompt());
+    }
+    prompt
 }
 
 #[cfg(test)]
@@ -82,5 +103,17 @@ mod tests {
             session_system_prompt(false, true),
             format!("{V1_SESSION_WORKTREE_PROMPT}\n{V1_LOCAL_LLM_PROMPT}")
         );
+    }
+
+    #[test]
+    fn effective_role_is_bounded_between_scope_and_optional_suffix_once() {
+        let id = RoleId::new("reviewer").unwrap();
+        let prompt =
+            session_system_prompt_with_role(false, Some((&id, "Review correctness.")), true);
+        assert!(prompt.starts_with(V1_SESSION_WORKTREE_PROMPT));
+        assert!(prompt.contains("<role id=\"reviewer\">\nReview correctness.\n</role>"));
+        assert!(prompt.ends_with(V1_LOCAL_LLM_PROMPT));
+        assert_eq!(prompt.matches("<role id=").count(), 1);
+        assert_eq!(prompt.matches("<delegation_instructions>").count(), 1);
     }
 }

@@ -175,6 +175,11 @@ dispatch 系は credential から caller と current run を復元する。`sess
 `agent_complete` / `agent_fail` は保存済み binding の caller inbox だけへ配送され、`agent_inbox` は
 認証済み caller 自身の inbox だけを返す。payload の caller 名や cwd から identity を補完しない。
 
+session 作成系は optional role selector を受け取る。`session_create` / `session_delegate_issue` /
+`session_delegate_brief` は top-level `role`、`session_dispatch` は `session.role` を使う。daemon が current catalog と
+保存済み assignment を検証し、instruction 本文は MCP wire に載せない。catalog・default・conflict の正本は
+[10. session role](10-session-roles.md) を参照する。
+
 `session_delegate_brief` も同じ credential/provenance と worker selector を使う。`agent` は既存 worker の
 `id`、または allowlist にある `runtime` と `model` の組のいずれか一方だけであり、混在・部分指定は受理しない。
 runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` を扱う。

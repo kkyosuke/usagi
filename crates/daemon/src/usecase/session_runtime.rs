@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use usagi_core::domain::id::{
     CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
 };
+use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState, validate_session_name,
@@ -44,6 +45,8 @@ pub enum SessionRuntimeError {
     InvalidOperation,
     DuplicateOperation,
     IdempotencyConflict,
+    RoleConflict(Option<RoleId>, Option<RoleId>),
+    InvalidRole(String),
     SessionBranchExists(String),
     SessionWorkspaceExists(String),
     SessionWorkspaceCreationFailed { name: String, detail: String },
@@ -67,6 +70,11 @@ impl SessionRuntimeError {
                 "operation identity conflicts with an existing request".into()
             }
             Self::IdempotencyConflict => "operation id was reused with a different request".into(),
+            Self::RoleConflict(existing, requested) => format!(
+                "session role conflict: existing={}, requested={}",
+                existing.as_ref().map_or("<legacy>", RoleId::as_str),
+                requested.as_ref().map_or("<legacy>", RoleId::as_str)
+            ),
             Self::SessionBranchExists(name) => format!(
                 "cannot create session \"{name}\": branch usagi/{name} already exists; choose a different name or remove the stale branch"
             ),
@@ -76,7 +84,8 @@ impl SessionRuntimeError {
             Self::SessionWorkspaceCreationFailed { name, detail } => {
                 format!("cannot create session \"{name}\": {detail}")
             }
-            Self::DurableFailure(message)
+            Self::InvalidRole(message)
+            | Self::DurableFailure(message)
             | Self::AgentFailure { message, .. }
             | Self::Delivery(message) => message.clone(),
             Self::AmbiguousIssue(error) => error.to_string(),
@@ -467,7 +476,12 @@ impl SessionRuntime {
                 Ok(SessionReply {
                     operation_id: operation_id.to_owned(),
                     revision: state.state_revision,
-                    body: snapshot(&state, self.root_worktree_id),
+                    body: projected_snapshot(
+                        &state,
+                        self.root_worktree_id,
+                        &self.data_home,
+                        &self.repo_root,
+                    ),
                 })
             }
             SessionAction::Status => self.status(operation_id),
@@ -491,6 +505,11 @@ impl SessionRuntime {
 
     fn status(&self, operation_id: &str) -> Result<SessionReply, SessionRuntimeError> {
         let state = self.state()?;
+        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
+            &self.data_home,
+            &self.repo_root,
+        )
+        .ok();
         let base = self
             .git
             .run(&self.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
@@ -539,6 +558,8 @@ impl SessionRuntime {
                 Ok(json!({
                     "name": session.name,
                     "session_id": session.session_id,
+                    "role_id": session.role_id,
+                    "role_summary": session.role_id.as_ref().and_then(|id| catalog.as_ref()?.roles.get(id).map(|role| role.summary.clone())),
                     "lifecycle": session.lifecycle,
                     "agent_phase": "none",
                     "worktrees": [{
@@ -573,6 +594,24 @@ impl SessionRuntime {
             }
         }
         Err(SessionRuntimeError::UnknownSession)
+    }
+
+    /// Stable role assignment for a managed session incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when lifecycle state cannot be loaded, or
+    /// [`SessionRuntimeError::UnknownSession`] when the incarnation is absent.
+    pub fn session_role(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<RoleId>, SessionRuntimeError> {
+        self.state()?
+            .sessions
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .map(|session| session.role_id)
+            .ok_or(SessionRuntimeError::UnknownSession)
     }
 
     /// Resolves an available stable session identity to its trusted worktree.
@@ -610,7 +649,12 @@ impl SessionRuntime {
     /// Returns an error when the durable lifecycle state cannot be read.
     pub fn snapshot(&self) -> Result<Value, SessionRuntimeError> {
         let state = self.state()?;
-        Ok(snapshot(&state, self.root_worktree_id))
+        Ok(projected_snapshot(
+            &state,
+            self.root_worktree_id,
+            &self.data_home,
+            &self.repo_root,
+        ))
     }
 
     /// Resolves only an available, fully fenced managed session to a path.
@@ -676,10 +720,45 @@ impl SessionRuntime {
         payload: &Value,
     ) -> Result<SessionCreateStep, SessionRuntimeError> {
         let name = session_name(payload)?;
+        let requested_role = payload
+            .get("role")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<RoleId>)
+            .transpose()
+            .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+        // Re-read both catalog layers at the daemon admission boundary. The
+        // registered repository root, never the target session worktree, is
+        // authoritative for workspace policy.
+        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
+            &self.data_home,
+            &self.repo_root,
+        )
+        .map_err(|_| {
+            SessionRuntimeError::InvalidRole("effective role catalog is invalid".into())
+        })?;
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
-        let semantic_key = semantic_key(SessionAction::Create, &name);
+        let existing_session = before.sessions.iter().find(|session| session.name == name);
+        let role_id = if let Some(existing) = existing_session {
+            if let Some(requested) = requested_role.as_ref() {
+                catalog
+                    .resolve(Some(requested), RoleScope::Session)
+                    .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
+            } else if let Some(assigned) = existing.role_id.as_ref() {
+                catalog
+                    .resolve(Some(assigned), RoleScope::Session)
+                    .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
+            } else {
+                None
+            }
+        } else {
+            catalog
+                .resolve(requested_role.as_ref(), RoleScope::Session)
+                .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
+        };
+        let semantic_key = create_semantic_key(&name, role_id.as_ref());
         if let Some(existing) = before
             .operations
             .iter()
@@ -694,8 +773,18 @@ impl SessionRuntime {
         // session name. Report that concrete conflict before asking the
         // reducer to reserve it, rather than collapsing the reducer's
         // `DuplicateSessionName` into a generic rejection.
-        if before.sessions.iter().any(|session| session.name == name) {
-            return Err(SessionRuntimeError::SessionWorkspaceExists(name));
+        if let Some(existing) = existing_session {
+            if existing.role_id != role_id {
+                return Err(SessionRuntimeError::RoleConflict(
+                    existing.role_id.clone(),
+                    role_id,
+                ));
+            }
+            return Ok(SessionCreateStep::Done(SessionReply {
+                operation_id: operation_id.to_string(),
+                revision: before.state_revision,
+                body: snapshot(&before, self.root_worktree_id),
+            }));
         }
         let path = self
             .repo_root
@@ -717,6 +806,7 @@ impl SessionRuntime {
                 self.generation,
                 LifecycleEvent::ReserveCreate {
                     name: name.clone(),
+                    role_id,
                     operation,
                 },
                 Utc::now(),
@@ -1389,6 +1479,43 @@ fn journal(
 
 fn semantic_key(action: SessionAction, name: &str) -> String {
     format!("{action:?}:{name}").to_ascii_lowercase()
+}
+
+fn create_semantic_key(name: &str, role_id: Option<&RoleId>) -> String {
+    role_id.map_or_else(
+        || format!("create:{name}"),
+        |role_id| format!("create:{name}:{}", role_id.as_str()),
+    )
+}
+
+fn projected_snapshot(
+    state: &WorkspaceLifecycleState,
+    root_worktree_id: WorktreeId,
+    data_home: &Path,
+    repo_root: &Path,
+) -> Value {
+    let mut value = snapshot(state, root_worktree_id);
+    let catalog =
+        usagi_core::infrastructure::role_catalog::load_effective(data_home, repo_root).ok();
+    project_role_summaries(&mut value, catalog.as_ref());
+    value
+}
+
+/// Applies current catalog display metadata without changing lifecycle truth.
+fn project_role_summaries(value: &mut Value, catalog: Option<&EffectiveRoleCatalog>) {
+    let items = value["sessions"]
+        .as_array_mut()
+        .expect("lifecycle snapshot always contains a sessions array");
+    for item in items {
+        let role_id = item
+            .get("role_id")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<RoleId>(value).ok());
+        let summary = role_id
+            .as_ref()
+            .and_then(|id| catalog?.roles.get(id).map(|role| role.summary.clone()));
+        item["role_summary"] = json!(summary);
+    }
 }
 
 /// The completion fence for one session operation, taken from the journal entry
@@ -2124,6 +2251,24 @@ mod tests {
     }
 
     #[test]
+    fn role_errors_preserve_their_derived_value_contract() {
+        let errors = [
+            SessionRuntimeError::RoleConflict(
+                Some(RoleId::new("coder").unwrap()),
+                Some(RoleId::new("reviewer").unwrap()),
+            ),
+            SessionRuntimeError::InvalidRole("invalid role".into()),
+        ];
+
+        for error in errors {
+            let cloned = error.clone();
+            assert_eq!(cloned, error);
+            assert_eq!(format!("{cloned:?}"), format!("{error:?}"));
+            assert!(!error.safe_message().is_empty());
+        }
+    }
+
+    #[test]
     fn reports_a_reusable_session_name_when_its_branch_already_exists() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
@@ -2345,20 +2490,181 @@ mod tests {
     }
 
     #[test]
-    fn reports_an_existing_lifecycle_session_before_reserving_another_create() {
-        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    fn existing_session_create_is_idempotent_for_the_same_legacy_role() {
+        let (tmp, mut runtime) = runtime(FakeGit::ok());
         runtime
             .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
             .unwrap();
 
-        let error = runtime
+        let reply = runtime
             .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
-            .unwrap_err();
+            .unwrap();
+
+        assert_eq!(reply.body["sessions"].as_array().unwrap().len(), 1);
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[roles.coder]
+summary = "Implement"
+scopes = ["session"]
+instructions = "code"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "role":"coder"}),
+            ),
+            Err(SessionRuntimeError::RoleConflict(None, Some(_)))
+        ));
+        assert!(matches!(
+            runtime.session_role(SessionId::new()),
+            Err(SessionRuntimeError::UnknownSession)
+        ));
+    }
+
+    #[test]
+    fn catalog_default_assignment_is_stable_and_conflicting_role_is_rejected() {
+        let (tmp, mut runtime) = runtime(FakeGit::ok());
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[defaults]
+session = "coder"
+[roles.coder]
+summary = "Implement"
+scopes = ["session"]
+instructions = "code"
+[roles.reviewer]
+summary = "Review"
+scopes = ["session"]
+instructions = "review"
+"#,
+        )
+        .unwrap();
+
+        let created = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert_eq!(created.body["sessions"][0]["role_id"], "coder");
+        let replay = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert_eq!(replay.body["sessions"].as_array().unwrap().len(), 1);
+        assert!(matches!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "role":"reviewer"}),
+            ),
+            Err(SessionRuntimeError::RoleConflict(..))
+        ));
+        assert!(matches!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "role":"missing"}),
+            ),
+            Err(SessionRuntimeError::InvalidRole(_))
+        ));
+        let id = runtime.session_id("one").unwrap();
+        assert_eq!(runtime.session_role(id).unwrap().unwrap().as_str(), "coder");
+
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[defaults]
+session = "coder"
+[roles.coder]
+summary = "Changed summary"
+scopes = ["session"]
+instructions = "changed"
+"#,
+        )
+        .unwrap();
+        let snapshot = runtime.snapshot().unwrap();
+        assert_eq!(snapshot["sessions"][0]["role_id"], "coder");
+        assert_eq!(snapshot["sessions"][0]["role_summary"], "Changed summary");
+        let status = runtime
+            .handle(SessionAction::Status, &operation(), &json!({}))
+            .unwrap();
+        assert_eq!(status.body["sessions"][0]["role_id"], "coder");
+        assert_eq!(
+            status.body["sessions"][0]["role_summary"],
+            "Changed summary"
+        );
 
         assert_eq!(
-            error,
-            SessionRuntimeError::SessionWorkspaceExists("one".into())
+            runtime
+                .handle(
+                    SessionAction::Create,
+                    &operation(),
+                    &json!({"name":"invalid", "role":"Bad"}),
+                )
+                .unwrap_err(),
+            SessionRuntimeError::InvalidRequest
         );
+
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[roles.reviewer]
+summary = "Review"
+scopes = ["session"]
+instructions = "review"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.handle(SessionAction::Create, &operation(), &json!({"name":"one"})),
+            Err(SessionRuntimeError::InvalidRole(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_catalog_fails_create_before_git_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
+        std::fs::write(tmp.path().join(".usagi/roles.toml"), "version = 99\n").unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            FakeSessionWorktreeIo {
+                occupied: false,
+                build_calls: Arc::clone(&calls),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.handle(SessionAction::Create, &operation(), &json!({"name":"one"})),
+            Err(SessionRuntimeError::InvalidRole(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        std::fs::write(
+            tmp.path().join(".usagi/roles.toml"),
+            r#"version = 1
+[roles.director]
+summary = "Direct"
+scopes = ["root"]
+instructions = "direct"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime.handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "role":"director"}),
+            ),
+            Err(SessionRuntimeError::InvalidRole(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2602,6 +2908,7 @@ mod tests {
                 runtime.generation,
                 LifecycleEvent::ReserveCreate {
                     name: "interrupted".into(),
+                    role_id: None,
                     operation: journal(
                         operation,
                         runtime.generation,

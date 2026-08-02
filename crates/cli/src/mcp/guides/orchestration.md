@@ -69,7 +69,7 @@ dispatch/agent tool は daemon が Agent 起動時に注入した private caller
 無ければ作成する。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
 
 ```json
-{"name":"session_dispatch","arguments":{"session":{"name":"issue-123"},
+{"name":"session_dispatch","arguments":{"session":{"name":"issue-123","role":"coder"},
  "agent":{"runtime":"codex","model":"gpt-5"},"prompt":"issue #123 を実装する"}}
 ```
 
@@ -104,6 +104,8 @@ caller は `agent_inbox {"unread_only":true}` で自分宛ての報告を読む�
 ## session を作成する
 
 `session_create` は session 名を受け取り、daemon が lifecycle operation として処理する。
+optional `role` は effective role catalog の ID である。省略時の default 解決と scope 検証は daemon が行い、
+既存 session では保存済み role と同一なら冪等、不一致なら conflict になる。role instruction 本文は wire に載らない。
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call",

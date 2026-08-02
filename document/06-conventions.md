@@ -48,7 +48,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
 | `uuid` | v2 resource incarnation の typed ID（UUIDv4）と durable operation ID（UUIDv7） | 本依存 |
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
-| `toml` | `usagi-core` の infrastructure（`runtime_model`）による `.usagi/config.toml` の agent runtime / model allowlist 解析 | 本依存 |
+| `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist と global/workspace `roles.toml` の解析 | 本依存 |
 | `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当） | 本依存 |
@@ -67,8 +67,8 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
-JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`toml` は
-`usagi-core` の infrastructure、`shell-words` は同クレートの usecase が使い、いずれも domain には持ち込まない。
+JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`toml` は `usagi-core` の infrastructure
+（runtime/model と role catalog reader）、`shell-words` は同クレートの usecase が使い、いずれも domain には持ち込まない。
 `unicode-width` は
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
