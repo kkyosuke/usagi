@@ -338,10 +338,15 @@ pub fn dim_ansi(text: &str) -> String {
     output
 }
 
+/// フォールバックの行数。controller の launch gate も同じ行数で正規化する。
+const FALLBACK_ROWS: usize = 24;
+const _: () =
+    assert!(FALLBACK_ROWS == crate::usecase::application::controller::NORMALIZED_TERMINAL_ROWS);
+
 /// 生の端末サイズを正規化する。非対話環境が報告する 0 を 80x24 のフォールバックに置き換える。
 #[must_use]
 pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
-    let height = if height == 0 { 24 } else { height };
+    let height = if height == 0 { FALLBACK_ROWS } else { height };
     let width = if width == 0 { 80 } else { width };
     (height, width)
 }

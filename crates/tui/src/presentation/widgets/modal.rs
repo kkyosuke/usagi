@@ -231,6 +231,43 @@ pub fn prompt_line(value: &str, cursor: usize, selection: Option<(usize, usize)>
     format!("{prompt} {body}")
 }
 
+/// Emit at most `capacity` rows of a selection list, keeping row `selected`
+/// visible and spending whatever rows are left over on the `↑ N more` /
+/// `↓ N more` indicators.
+///
+/// [`list_window`] pairs with [`scroll_window`] only when the caller can afford
+/// the indicator rows on top of its window. A viewport that is itself the
+/// budget — a drawer or pane whose content rows are all the space there is —
+/// must fit window *and* indicators inside `capacity`, so this helper shrinks
+/// the window until the whole emission fits. Candidate rows outrank indicators:
+/// when even a one-row window plus its indicators would overflow, the entire
+/// capacity goes to list rows and no indicator is drawn, because a viewport
+/// that hides the cursor is worse than one that hides the row count.
+///
+/// A zero capacity draws nothing at all; the caller owns whatever it says in
+/// place of the list.
+#[must_use]
+pub fn bounded_list_rows(rows: &[String], selected: usize, capacity: usize) -> Vec<String> {
+    if capacity == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+    let len = rows.len();
+    let mut window = capacity;
+    loop {
+        let (start, end) = list_window(len, selected, window);
+        let indicators = usize::from(start > 0) + usize::from(end < len);
+        if end - start + indicators <= capacity {
+            return scroll_window(rows, start, end);
+        }
+        if window == 1 {
+            break;
+        }
+        window -= 1;
+    }
+    let (start, end) = list_window(len, selected, capacity);
+    rows[start..end].to_vec()
+}
+
 /// A dim inline subcommand row under a palette action: a plain `›` / space
 /// marker indented under its parent command. Folds the picker row the overview
 /// and closeup palettes both drew; its quiet marker stays distinct from the
@@ -715,14 +752,14 @@ pub fn render_over(
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        ConfirmationModal, ConfirmationView, boxed, caption, columns, confirmation_buttons,
-        content_line, empty_notice, fixed_body, footer, heading, list_window, modal_inner_width,
-        prompt_line, render_body, render_body_over, render_confirmation_over, render_modal,
-        render_over, scroll_above, scroll_below, scroll_window, selection_marker, subcommand_row,
-        viewport_window,
+        ConfirmationModal, ConfirmationView, bounded_list_rows, boxed, caption, columns,
+        confirmation_buttons, content_line, empty_notice, fixed_body, footer, heading, list_window,
+        modal_inner_width, prompt_line, render_body, render_body_over, render_confirmation_over,
+        render_modal, render_over, scroll_above, scroll_below, scroll_window, selection_marker,
+        subcommand_row, viewport_window,
     };
     use crate::presentation::theme::{Role, Style};
-    use crate::presentation::widgets::clip_to_width;
+    use crate::presentation::widgets::{clip_to_width, strip_ansi};
 
     #[test]
     fn confirmation_buttons_mark_the_selected_choice() {
@@ -887,6 +924,42 @@ mod tests {
         assert_eq!(list_window(10, 9, 6), (4, 10));
         // An empty list yields an empty window rather than panicking.
         assert_eq!(list_window(0, 0, 6), (0, 0));
+    }
+
+    #[test]
+    fn bounded_list_rows_keeps_the_selection_on_screen_within_the_capacity() {
+        let rows: Vec<String> = (0..5).map(|n| format!("row {n}")).collect();
+        let plain = |capacity, selected| {
+            bounded_list_rows(&rows, selected, capacity)
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+        };
+
+        // A capacity that fits the list draws it whole, with no indicators.
+        assert_eq!(plain(5, 4), ["row 0", "row 1", "row 2", "row 3", "row 4"]);
+        // Otherwise indicators are paid for out of the same capacity.
+        assert_eq!(plain(4, 0), ["row 0", "row 1", "row 2", "  ↓ 2 more"]);
+        assert_eq!(plain(4, 4), ["  ↑ 2 more", "row 2", "row 3", "row 4"]);
+        assert_eq!(plain(3, 2), ["  ↑ 2 more", "row 2", "  ↓ 2 more"]);
+        assert_eq!(plain(2, 0), ["row 0", "  ↓ 4 more"]);
+        // When both indicators would leave no candidate row, the rows win.
+        assert_eq!(plain(2, 2), ["row 1", "row 2"]);
+        assert_eq!(plain(1, 2), ["row 2"]);
+        // Every selection stays on screen at every capacity.
+        for capacity in 1..=6 {
+            for selected in 0..rows.len() {
+                let drawn = plain(capacity, selected);
+                assert!(drawn.len() <= capacity, "{capacity}/{selected}");
+                assert!(
+                    drawn.iter().any(|row| row == &format!("row {selected}")),
+                    "{capacity}/{selected}"
+                );
+            }
+        }
+        // A zero capacity and an empty list both draw nothing.
+        assert!(bounded_list_rows(&rows, 3, 0).is_empty());
+        assert!(bounded_list_rows(&[], 0, 4).is_empty());
     }
 
     #[test]
