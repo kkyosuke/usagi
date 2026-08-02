@@ -5137,10 +5137,8 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
-    let role_catalog = usagi_core::infrastructure::paths::data_dir().map_or_else(
-        |_| SessionRoleCatalog::default(),
-        |data_home| session_role_catalog(&data_home, &root_cwd),
-    );
+    let data_home = usagi_core::infrastructure::paths::data_dir().ok();
+    let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
         role_catalog,
     )));
@@ -5418,7 +5416,10 @@ fn drive_workspace_controller(
     }
 }
 
-fn session_role_catalog(data_home: &Path, workspace_root: &Path) -> SessionRoleCatalog {
+fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> SessionRoleCatalog {
+    let Some(data_home) = data_home else {
+        return SessionRoleCatalog::default();
+    };
     let Ok(catalog) =
         usagi_core::infrastructure::role_catalog::load_effective(data_home, workspace_root)
     else {
@@ -8811,14 +8812,18 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = super::session_role_catalog(&data_home, &workspace);
+        let catalog = super::session_role_catalog(Some(&data_home), &workspace);
         assert_eq!(catalog.default.unwrap().as_str(), "coder");
         assert_eq!(catalog.roles.len(), 1);
         assert_eq!(catalog.roles[0].id.as_str(), "coder");
 
         std::fs::write(data_home.join("roles.toml"), "version = 99\n").unwrap();
         assert_eq!(
-            super::session_role_catalog(&data_home, &workspace),
+            super::session_role_catalog(Some(&data_home), &workspace),
+            SessionRoleCatalog::default()
+        );
+        assert_eq!(
+            super::session_role_catalog(None, &workspace),
             SessionRoleCatalog::default()
         );
     }
