@@ -35,11 +35,15 @@ pub struct McpServer {
 /// An issue rendered as a ready-to-run agent prompt (see
 /// [`McpServer::render_prompt`]): the issue's number and title plus the prompt
 /// text fed to a session's agent.
+///
+/// Deliberately carries no file name: [`crate::domain::issue::Issue::file_name`]
+/// derives one from the current title, which need not be the name the issue is
+/// actually stored (or committed) under, so callers that want the issue's file
+/// must resolve it by number instead of rebuilding a path from here.
 pub(crate) struct RenderedPrompt {
     pub number: u32,
     pub title: String,
     pub prompt: String,
-    pub file_name: String,
 }
 
 impl McpServer {
@@ -92,7 +96,6 @@ impl McpServer {
                 number: issue.number,
                 title: issue.title.clone(),
                 prompt: issue::to_prompt(&issue),
-                file_name: issue.file_name(),
             }),
             None => Err(format!("no issue #{number}")),
         }

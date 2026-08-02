@@ -307,6 +307,21 @@ fn is_issue_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
 }
 
+/// The issue number `path` claims, or `None` when `path` does not name an issue
+/// file (`NNN-<slug>.md`).
+///
+/// This is the same number-prefix rule the store resolves reads by, exposed for
+/// callers that hold candidate paths this store never opened — notably the
+/// `session_delegate_issue` precheck, which lists `.usagi/issues/` at the base
+/// commit and must match an issue by number rather than by the name derived from
+/// its current title (a committed issue may carry any name).
+pub fn issue_number_at_path(path: &Path) -> Option<u32> {
+    if !is_issue_file(path) {
+        return None;
+    }
+    number_from_filename(path)
+}
+
 /// The issue number encoded in an issue file's name (`NNN-slug.md`), or `None`
 /// when the name has no numeric prefix.
 fn number_from_filename(path: &Path) -> Option<u32> {
@@ -691,6 +706,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(store.max_number().unwrap(), 2);
+    }
+
+    #[test]
+    fn issue_number_at_path_reads_the_prefix_of_markdown_names_only() {
+        // The number prefix is what identifies an issue, whatever slug follows it
+        // — a hand-written name resolves exactly like a store-canonical one.
+        assert_eq!(
+            issue_number_at_path(Path::new(".usagi/issues/605-hand-written.md")),
+            Some(605)
+        );
+        assert_eq!(issue_number_at_path(Path::new("001-a.md")), Some(1));
+
+        // Non-markdown siblings never claim a number, even with a numeric prefix,
+        // so an attachment committed beside an issue cannot shadow it.
+        assert_eq!(issue_number_at_path(Path::new("605-diagram.png")), None);
+        assert_eq!(issue_number_at_path(Path::new("index.json")), None);
+        // Markdown without a numeric prefix is not an issue file either.
+        assert_eq!(issue_number_at_path(Path::new("README.md")), None);
+        assert_eq!(issue_number_at_path(Path::new("x-1.md")), None);
     }
 
     #[test]

@@ -40,6 +40,12 @@ const DELEGATE_BRIEF_TOOL: &str = "session_delegate_brief";
 /// sub-server).
 const COMPOSITE_TOOLS: [&str; 2] = [DELEGATE_ISSUE_TOOL, DELEGATE_BRIEF_TOOL];
 
+/// The tracked issue directory, relative to the workspace root and spelled as a
+/// git pathspec (mirroring the layout
+/// [`crate::infrastructure::issue_store::IssueStore`] writes). The base-commit
+/// precheck lists it at the base ref to resolve an issue by number.
+const ISSUES_DIR: &str = ".usagi/issues";
+
 /// Tools that mutate either git-tracked store. Both `.usagi/issues/` and
 /// `.usagi/memory/` (Markdown files plus `MEMORY.md`) ride the current branch;
 /// only their derived indexes and lock files are ignored. Consequently these
@@ -260,21 +266,7 @@ impl UsagiMcpServer {
             local_settings.default_branch(),
         );
         let base_ref = base.unwrap_or_else(|| "HEAD".to_string());
-        let relative_issue_path = format!(".usagi/issues/{}", rendered.file_name);
-
-        if !crate::infrastructure::git::file_exists_at_rev(
-            &self.workspace_root,
-            &base_ref,
-            &relative_issue_path,
-        ) {
-            return Err(format!(
-                "issue #{} is not committed to the base branch ({}) yet: \
-                 uncommitted issues will not be present in the new session's worktree. \
-                 Please commit and merge this issue using a triage session first, \
-                 or create a new triage session manually with session_create + session_prompt.",
-                args.number, base_ref
-            ));
-        }
+        Self::verify_issue_is_committed(&self.workspace_root, &base_ref, args.number)?;
 
         // 3. Create a fresh session for the issue (default name: issue-<number>),
         //    pinning the optional per-session agent CLI / model so the delegated
@@ -298,6 +290,56 @@ impl UsagiMcpServer {
             "worktrees": created.worktrees,
             "delivered_to": channel.as_str(),
         })))
+    }
+
+    /// Fail unless exactly one committed file under [`ISSUES_DIR`] at `base_ref`
+    /// carries issue `number`.
+    ///
+    /// The new session's worktree is cut from `base_ref`, so an issue that is not
+    /// committed there would be missing from the very worktree that is supposed
+    /// to work on it. The check resolves the issue **by its number prefix**, the
+    /// same way the store resolves reads: an issue's committed file name is not
+    /// derivable from its title — markdown authored by hand keeps whatever name
+    /// it was added under, and a retitled issue keeps its old name until the next
+    /// store write renames it — so probing the title-derived
+    /// `NNN-<slug-of-title>.md` reports committed issues as missing.
+    ///
+    /// Two committed files for one number is refused rather than guessed at, for
+    /// the same reason [`crate::infrastructure::issue_store::AmbiguousIssueNumber`]
+    /// refuses it: either sibling could be the real issue, and delegating the
+    /// wrong one silently sends the session after the wrong work.
+    fn verify_issue_is_committed(
+        workspace_root: &Path,
+        base_ref: &str,
+        number: u32,
+    ) -> Result<(), String> {
+        let committed: Vec<String> =
+            crate::infrastructure::git::files_at_rev(workspace_root, base_ref, ISSUES_DIR)
+                .into_iter()
+                .filter(|path| {
+                    crate::infrastructure::issue_store::issue_number_at_path(Path::new(path))
+                        == Some(number)
+                })
+                .collect();
+
+        match committed.as_slice() {
+            [] => Err(format!(
+                "issue #{number} is not committed to the base branch ({base_ref}) yet: \
+                 no file under {ISSUES_DIR}/ at that revision carries issue number {number}, \
+                 and uncommitted issues will not be present in the new session's worktree. \
+                 Please commit and merge this issue using a triage session first, \
+                 or create a new triage session manually with session_create + session_prompt."
+            )),
+            [_only] => Ok(()),
+            ambiguous => Err(format!(
+                "issue #{number} is ambiguous at the base branch ({base_ref}): {} files carry \
+                 that issue number ({}). Refusing to delegate, because the session would be \
+                 pointed at a guess. Remove the stale file(s) in a triage session first so the \
+                 number resolves to one file.",
+                ambiguous.len(),
+                ambiguous.join(", ")
+            )),
+        }
     }
 }
 
@@ -1405,6 +1447,87 @@ mod tests {
             "{err_text}"
         );
         // No session was created.
+        let listed = call(&server, "session_list", json!({}));
+        assert_eq!(listed["content"][0]["text"], "[]");
+    }
+
+    /// The path of the single issue markdown currently in `root`'s store.
+    fn only_issue_file(root: &Path) -> PathBuf {
+        let mut files: Vec<PathBuf> = fs::read_dir(root.join(".usagi").join("issues"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+            .collect();
+        assert_eq!(files.len(), 1, "expected exactly one issue file: {files:?}");
+        files.pop().unwrap()
+    }
+
+    #[test]
+    fn delegate_issue_resolves_the_committed_file_by_number_not_by_the_title_slug() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"Add doctor"}))
+            .unwrap();
+
+        // Commit the issue under a name that does *not* match the one derived from
+        // its title. That is the state of every issue whose markdown was authored
+        // by hand (a bulk backlog PR) and of every issue retitled after being
+        // committed, since only the next store write renames the file. Probing the
+        // derived `001-add-doctor.md` would report this committed issue as missing.
+        let issues = root.path().join(".usagi").join("issues");
+        let derived = only_issue_file(root.path());
+        let committed_as = issues.join("001-hand-written-name.md");
+        assert_ne!(derived, committed_as);
+        fs::rename(&derived, &committed_as).unwrap();
+        commit_issues(root.path());
+
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], false, "{result}");
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["issue"], 1);
+        assert_eq!(body["session"], "issue-1");
+        assert_eq!(body["delivered_to"], "queue");
+
+        // The session really exists, so the delegation went all the way through.
+        let listed = call(&server, "session_list", json!({}));
+        assert!(listed["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("issue-1"));
+    }
+
+    #[test]
+    fn delegate_issue_refuses_a_number_carried_by_two_committed_files() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"twinned"}))
+            .unwrap();
+        let issues = root.path().join(".usagi").join("issues");
+        let canonical = only_issue_file(root.path());
+        let stale = issues.join("001-stale-twin.md");
+        fs::copy(&canonical, &stale).unwrap();
+        commit_issues(root.path());
+        // A triage session has since deleted the stale sibling in this working
+        // tree, so #1 renders fine here while the base commit still carries both
+        // files — and the delegated worktree would be cut from that base.
+        fs::remove_file(&stale).unwrap();
+
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], true);
+        let err_text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            err_text.contains("issue #1 is ambiguous at the base branch"),
+            "{err_text}"
+        );
+        assert!(err_text.contains("001-stale-twin.md"), "{err_text}");
+        // No session was created from the ambiguous base.
         let listed = call(&server, "session_list", json!({}));
         assert_eq!(listed["content"][0]["text"], "[]");
     }

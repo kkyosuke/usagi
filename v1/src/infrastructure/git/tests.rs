@@ -1009,6 +1009,67 @@ fn resolve_base_ref_is_none_without_the_default_branch() {
 }
 
 #[test]
+fn files_at_rev_lists_the_committed_entries_under_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let issues = dir.path().join(".usagi").join("issues");
+    std::fs::create_dir_all(&issues).unwrap();
+    // Recursive listing, so a nested entry appears too; the paths come back
+    // relative to the repository root regardless of depth.
+    std::fs::write(issues.join("001-a.md"), "a").unwrap();
+    std::fs::write(issues.join("002-b.md"), "b").unwrap();
+    std::fs::create_dir_all(issues.join("nested")).unwrap();
+    std::fs::write(issues.join("nested").join("003-c.md"), "c").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "issues"]);
+    // An uncommitted sibling is invisible: the listing is of the tree at `rev`.
+    std::fs::write(issues.join("004-uncommitted.md"), "d").unwrap();
+
+    let mut listed = files_at_rev(dir.path(), "main", ".usagi/issues");
+    listed.sort();
+    assert_eq!(
+        listed,
+        vec![
+            ".usagi/issues/001-a.md".to_string(),
+            ".usagi/issues/002-b.md".to_string(),
+            ".usagi/issues/nested/003-c.md".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn files_at_rev_is_empty_for_an_absent_directory_or_an_unknown_rev() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // The revision resolves but holds nothing under the directory.
+    assert!(files_at_rev(dir.path(), "main", ".usagi/issues").is_empty());
+    // The revision does not resolve at all (git exits non-zero).
+    assert!(files_at_rev(dir.path(), "no-such-rev", ".usagi/issues").is_empty());
+    // Not a repository at all.
+    let plain = tempfile::tempdir().unwrap();
+    assert!(files_at_rev(plain.path(), "main", ".usagi/issues").is_empty());
+}
+
+#[test]
+fn files_at_rev_keeps_a_path_git_would_otherwise_quote() {
+    // Default `core.quotePath` escapes non-ASCII bytes in `ls-tree` output; the
+    // NUL-separated form must return the name verbatim so callers can match on it.
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let issues = dir.path().join(".usagi").join("issues");
+    std::fs::create_dir_all(&issues).unwrap();
+    std::fs::write(issues.join("001-日本語.md"), "a").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "issues"]);
+
+    assert_eq!(
+        files_at_rev(dir.path(), "main", ".usagi/issues"),
+        vec![".usagi/issues/001-日本語.md".to_string()]
+    );
+}
+
+#[test]
 fn list_branches_returns_local_and_remote_names_deduped() {
     // A repo with a remote: local `main` plus a local `develop`, and the
     // remote-tracking `origin/main`. The duplicate `main` collapses and the

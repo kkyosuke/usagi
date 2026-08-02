@@ -1,13 +1,13 @@
 ---
 number: 617
 title: fix(mcp): session_delegate_issue の commit 済み判定を issue 番号で解決する
-status: todo
+status: done
 priority: high
 labels: [orchestration, mcp, v1, fix, correctness]
 dependson: []
 related: [104, 110, 618]
 created_at: 2026-07-31T23:44:38.548451+00:00
-updated_at: 2026-07-31T23:45:12.997984+00:00
+updated_at: 2026-08-01T00:53:50.485665+00:00
 ---
 
 ## 症状（P1 運用ブロック）
