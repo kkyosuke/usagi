@@ -230,24 +230,84 @@ impl SpawnedChildren {
     ///
     /// A platform that cannot answer yields the explicitly unverifiable token
     /// instead of a fabricated one, so the record stays visible and fails closed.
-    fn observe(&self, probe: &dyn ChildProcessProbe, pid: u32, fallback: &str) -> ProcessIdentity {
+    ///
+    /// The recorded proof is handed back as a [`ChildRelease`], because a map
+    /// that is only ever inserted into is a leak: a daemon that runs thousands of
+    /// short-lived children would keep a growing table of dead pids, and the
+    /// kernel reuses those numbers. The caller holds the token for exactly as
+    /// long as the child may still have to be proven — until its exit is
+    /// committed — and the proof is gone the moment the token is dropped.
+    fn observe(
+        self: &Arc<Self>,
+        probe: &dyn ChildProcessProbe,
+        pid: u32,
+        fallback: &str,
+    ) -> (ProcessIdentity, Option<ChildRelease>) {
         let Ok(identity) = record_child(probe, pid) else {
-            return ProcessIdentity {
-                pid,
-                start_identity: fallback.to_owned(),
-                process_group: pid,
-            };
+            return (
+                ProcessIdentity {
+                    pid,
+                    start_identity: fallback.to_owned(),
+                    process_group: pid,
+                },
+                None,
+            );
         };
         let recorded = identity.to_process_identity();
+        let mut release = None;
         if let Ok(mut observed) = self.0.lock() {
-            observed.insert(pid, identity);
+            observed.insert(pid, identity.clone());
+            release = Some(ChildRelease {
+                children: Arc::clone(self),
+                identity,
+            });
         }
-        recorded.unwrap_or_else(|_| ProcessIdentity {
+        let recorded = recorded.unwrap_or_else(|_| ProcessIdentity {
             pid,
             start_identity: fallback.to_owned(),
             process_group: pid,
-        })
+        });
+        (recorded, release)
     }
+
+    /// Release exactly the observation that was recorded, never a namesake.
+    ///
+    /// The kernel may hand the pid to a new process as soon as the old one is
+    /// reaped, so removing by pid alone would delete the successor's proof and
+    /// leave a live child unprovable. Only an entry that still answers with the
+    /// recorded start identity and process group is removed; anything else
+    /// already belongs to somebody else's child.
+    fn release(&self, identity: &ChildIdentity) {
+        if let Ok(mut observed) = self.0.lock()
+            && observed.get(&identity.pid).is_some_and(|recorded| {
+                is_same_child(recorded, &identity.start_identity, identity.process_group)
+            })
+        {
+            observed.remove(&identity.pid);
+        }
+    }
+}
+
+/// The exact release token for one observed child.
+///
+/// It releases on drop so that every way a child's life can end — a committed
+/// exit, a wait the platform could not read, an observation nobody is left to
+/// receive — frees the proof without having to remember to.
+struct ChildRelease {
+    children: Arc<SpawnedChildren>,
+    identity: ChildIdentity,
+}
+
+impl Drop for ChildRelease {
+    fn drop(&mut self) {
+        self.children.release(&self.identity);
+    }
+}
+
+/// Whether a recorded observation still describes the same process. A pid alone
+/// never answers that question, because the kernel reuses it.
+fn is_same_child(recorded: &ChildIdentity, start_identity: &str, process_group: u32) -> bool {
+    recorded.start_identity == start_identity && recorded.process_group == process_group
 }
 
 /// The store-side view of [`SpawnedChildren`]: it can only ask, never record.
@@ -261,8 +321,7 @@ impl IdentityAuthority for ObservedChildren {
             .ok()?
             .get(&process.pid)
             .filter(|identity| {
-                identity.start_identity == process.start_identity
-                    && identity.process_group == process.process_group
+                is_same_child(identity, &process.start_identity, process.process_group)
             })
             .cloned()
     }
@@ -1080,7 +1139,10 @@ impl AgentTerminalActor for SharedAgent {
 
 enum AgentPtyObservation {
     Output(TerminalRef, Vec<u8>),
-    Exited(TerminalRef, i32),
+    /// The child is gone. Its identity proof rides along so that the durable
+    /// exit is still committed by a process that can prove the child was its
+    /// own, and the proof is released the instant that commit is behind us.
+    Exited(TerminalRef, i32, Option<ChildRelease>),
 }
 
 const PTY_OBSERVATION_QUEUE_ITEMS: usize = 64;
@@ -1193,6 +1255,13 @@ impl PtySpawner for AgentPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        // The identity is observed before the watcher owns it, so the token this
+        // thread carries is the very one the exit observation hands back. Every
+        // way out of the thread — a drained reader, an unreadable wait, a
+        // receiver that hung up — drops it, so no dead pid keeps its proof.
+        let (identity, release) =
+            self.children
+                .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty");
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
@@ -1210,12 +1279,14 @@ impl PtySpawner for AgentPty {
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
             {
-                let _ = observations.send(AgentPtyObservation::Exited(output_terminal, status));
+                let _ = observations.send(AgentPtyObservation::Exited(
+                    output_terminal,
+                    status,
+                    release,
+                ));
             }
         });
-        Ok(self
-            .children
-            .observe(&UnixChildProbe, pid, "daemon-owned-agent-pty"))
+        Ok(identity)
     }
 
     fn terminate_reap(&mut self, terminal: &TerminalRef) -> Result<(), TerminateReapError> {
@@ -1309,7 +1380,13 @@ impl PtyWriter for AgentPty {
 
 enum PtyObservation {
     Output(usagi_core::domain::id::TerminalRef, Vec<u8>),
-    Exited(usagi_core::domain::id::TerminalRef, i32),
+    /// Carries the child's identity proof for the same reason the Agent
+    /// observation does: the commit needs it, and nothing after the commit does.
+    Exited(
+        usagi_core::domain::id::TerminalRef,
+        i32,
+        Option<ChildRelease>,
+    ),
 }
 
 struct DaemonPty {
@@ -1371,6 +1448,11 @@ impl GenericPtySpawner for DaemonPty {
         let metrics = Arc::clone(&self.metrics);
         let output_terminal = terminal.clone();
         let exit_pty = Arc::clone(&pty);
+        // As in the Agent spawner: the watcher thread owns the release token, so
+        // the proof lives exactly as long as this child does.
+        let (identity, release) = self
+            .children
+            .observe(&UnixChildProbe, pid, "daemon-owned-pty");
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
@@ -1388,12 +1470,11 @@ impl GenericPtySpawner for DaemonPty {
                 .lock()
                 .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
             {
-                let _ = output_sender.send(PtyObservation::Exited(output_terminal, status));
+                let _ =
+                    output_sender.send(PtyObservation::Exited(output_terminal, status, release));
             }
         });
-        Ok(self
-            .children
-            .observe(&UnixChildProbe, pid, "daemon-owned-pty"))
+        Ok(identity)
     }
 }
 
@@ -2424,13 +2505,18 @@ fn start_agent_observer(
                             );
                         }
                     }
-                    AgentPtyObservation::Exited(reference, status) => {
+                    AgentPtyObservation::Exited(reference, status, release) => {
                         {
                             let Ok(mut agent) = agent.lock() else {
                                 break;
                             };
                             let _ = agent.exit(&reference, status);
                         }
+                        // The commit above is the last reader of this child's
+                        // identity, so the proof is released here rather than
+                        // where the exit was seen: a record still projecting as
+                        // `Running` must not lose its authority mid-commit.
+                        drop(release);
                         // A candidate the output never terminated is only
                         // creditable once nothing more can arrive for it.
                         projection.submit_closed(reference.terminal_id, reference.session_id);
@@ -2576,13 +2662,16 @@ where
                             );
                         }
                     }
-                    PtyObservation::Exited(reference, status) => {
+                    PtyObservation::Exited(reference, status, release) => {
                         {
                             let Ok(mut terminal) = terminal.lock() else {
                                 break;
                             };
                             let _ = terminal.exit(&reference, status);
                         }
+                        // Released after the commit, exactly as the Agent
+                        // observer does.
+                        drop(release);
                         projection.submit_closed(reference.terminal_id, reference.session_id);
                     }
                 }
@@ -11955,7 +12044,7 @@ instructions = "{instructions}"
             let remaining = deadline.saturating_duration_since(Instant::now());
             match observations.recv_timeout(remaining).unwrap() {
                 PtyObservation::Output(_, _) => {}
-                PtyObservation::Exited(exited, status) => {
+                PtyObservation::Exited(exited, status, _) => {
                     assert_eq!(exited, terminal);
                     assert_eq!(status, 0);
                     break;
@@ -11990,7 +12079,7 @@ instructions = "{instructions}"
             )
             .unwrap();
             blocked_sender
-                .send(PtyObservation::Exited(blocked_terminal, 0))
+                .send(PtyObservation::Exited(blocked_terminal, 0, None))
                 .unwrap();
         });
 
@@ -12010,9 +12099,123 @@ instructions = "{instructions}"
         ));
         assert!(matches!(
             receiver.recv().unwrap(),
-            PtyObservation::Exited(actual, 0) if actual == terminal
+            PtyObservation::Exited(actual, 0, None) if actual == terminal
         ));
         producer.join().unwrap();
+    }
+
+    /// A [`ChildProcessProbe`] the test writes the OS's answers into.
+    ///
+    /// Pid reuse is the case this fix turns on, and it cannot be raced for
+    /// against a real kernel: here the test simply says that the same number now
+    /// answers as a different process. A pid with no answer is a process the
+    /// platform cannot see.
+    #[derive(Default)]
+    struct ScriptedProbe(Mutex<BTreeMap<u32, (String, u32)>>);
+
+    impl ScriptedProbe {
+        fn answers(&self, pid: u32, start_identity: &str, process_group: u32) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(pid, (start_identity.to_owned(), process_group));
+        }
+    }
+
+    impl ChildProcessProbe for ScriptedProbe {
+        fn start_identity(&self, pid: u32) -> std::io::Result<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .map(|(start_identity, _)| start_identity.clone())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+
+        fn process_group(&self, pid: u32) -> std::io::Result<u32> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&pid)
+                .map(|(_, process_group)| *process_group)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+    }
+
+    #[test]
+    fn an_observed_child_stays_provable_until_its_release_is_dropped() {
+        let children = Arc::new(SpawnedChildren::default());
+        let probe = ScriptedProbe::default();
+        probe.answers(4242, "start-a", 4242);
+
+        let (identity, release) = children.observe(&probe, 4242, "daemon-owned-pty");
+        assert_eq!(identity.start_identity, "start-a");
+        let authority = ObservedChildren(Arc::clone(&children));
+        // The durable store may only call a record `Running` while the child is
+        // provable, so the proof has to outlive everything up to the exit commit.
+        assert!(authority.verified(&identity).is_some());
+        assert_eq!(children.0.lock().unwrap().len(), 1);
+
+        drop(release);
+        assert!(authority.verified(&identity).is_none());
+        assert!(children.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn releasing_an_exited_child_leaves_the_pid_its_successor_took() {
+        const REUSED: u32 = 4243;
+        let children = Arc::new(SpawnedChildren::default());
+        let probe = ScriptedProbe::default();
+        probe.answers(REUSED, "first-start", REUSED);
+        let (first, first_release) = children.observe(&probe, REUSED, "daemon-owned-pty");
+
+        // The kernel reaped the first child and handed the number to the next one.
+        probe.answers(REUSED, "second-start", REUSED);
+        let (second, second_release) = children.observe(&probe, REUSED, "daemon-owned-pty");
+
+        let authority = ObservedChildren(Arc::clone(&children));
+        drop(first_release);
+        assert!(authority.verified(&first).is_none());
+        assert!(
+            authority.verified(&second).is_some(),
+            "the live child lost the proof its namesake released"
+        );
+        assert_eq!(children.0.lock().unwrap().len(), 1);
+
+        drop(second_release);
+        assert!(authority.verified(&second).is_none());
+        assert!(children.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_long_run_of_short_lived_children_returns_the_registry_to_its_baseline() {
+        const CHILDREN: u32 = 1024;
+        let children = Arc::new(SpawnedChildren::default());
+        let probe = ScriptedProbe::default();
+
+        for pid in 1..=CHILDREN {
+            probe.answers(pid, &format!("start-{pid}"), pid);
+            let (_, release) = children.observe(&probe, pid, "daemon-owned-pty");
+            assert!(release.is_some());
+            drop(release);
+            let observed = children.0.lock().unwrap().len();
+            assert_eq!(observed, 0, "child {pid} left {observed} proof(s) behind");
+        }
+    }
+
+    #[test]
+    fn a_child_the_platform_cannot_read_records_no_proof_and_needs_no_release() {
+        let children = Arc::new(SpawnedChildren::default());
+
+        let (identity, release) =
+            children.observe(&ScriptedProbe::default(), 7, "daemon-owned-pty");
+
+        // The unverifiable token stays visible so the record fails closed, but
+        // nothing was recorded, so there is nothing to release either.
+        assert_eq!(identity.start_identity, "daemon-owned-pty");
+        assert_eq!(identity.process_group, 7);
+        assert!(release.is_none());
+        assert!(children.0.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -12040,7 +12243,8 @@ instructions = "{instructions}"
         let children = Arc::new(SpawnedChildren::default());
         let (mut generic, generic_observations) =
             DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children));
-        let (mut agent, agent_observations) = AgentPty::new(BTreeMap::new(), metrics, children);
+        let (mut agent, agent_observations) =
+            AgentPty::new(BTreeMap::new(), metrics, Arc::clone(&children));
         let generation = DaemonGeneration::new();
 
         let generic_scope = TerminalLaunchScope {
@@ -12131,6 +12335,10 @@ instructions = "{instructions}"
         }
         reclaim_agent_observations(&mut agent, &agent_observations, TERMINALS_PER_OWNER);
         assert!(agent.terminals.is_empty());
+        // Both owners spawned real children through the real probe, so the
+        // identity registry proves the leak is closed end to end and not only in
+        // the unit tests' fake: every observation released exactly its own entry.
+        assert!(children.0.lock().unwrap().is_empty());
 
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -12159,13 +12367,18 @@ instructions = "{instructions}"
                     assert!(!bytes.is_empty());
                     output.insert(terminal.terminal_id.as_str().clone());
                 }
-                PtyObservation::Exited(terminal, 0) => {
+                PtyObservation::Exited(terminal, 0, release) => {
                     assert!(output.contains(&terminal.terminal_id.as_str()));
                     assert!(pty.release(&terminal));
                     assert!(!pty.release(&terminal));
+                    // The observer's contract: the identity proof dies with the
+                    // observation that reported the exit.
+                    drop(release);
                     exits += 1;
                 }
-                PtyObservation::Exited(_, status) => panic!("unexpected exit status {status}"),
+                PtyObservation::Exited(_, status, _) => {
+                    panic!("unexpected exit status {status}")
+                }
             }
         }
     }
@@ -12183,13 +12396,14 @@ instructions = "{instructions}"
                     assert!(!bytes.is_empty());
                     output.insert(terminal.terminal_id.as_str().clone());
                 }
-                AgentPtyObservation::Exited(terminal, 0) => {
+                AgentPtyObservation::Exited(terminal, 0, release) => {
                     assert!(output.contains(&terminal.terminal_id.as_str()));
                     assert!(pty.release(&terminal));
                     assert!(!pty.release(&terminal));
+                    drop(release);
                     exits += 1;
                 }
-                AgentPtyObservation::Exited(_, status) => {
+                AgentPtyObservation::Exited(_, status, _) => {
                     panic!("unexpected exit status {status}");
                 }
             }
