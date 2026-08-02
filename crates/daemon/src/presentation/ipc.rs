@@ -530,20 +530,9 @@ pub fn server_protocol(
             // negotiates a lower revision keeps the legacy raw tail.
             max_revision: usagi_core::infrastructure::ipc::TERMINAL_CHECKPOINT_REVISION,
         }],
-        capabilities: vec![
-            "request.correlation.v1".into(),
-            "pr.snapshot.v1".into(),
-            "pr.subscription.v1".into(),
-            "build.artifact.v1".into(),
-            "daemon.owner-identity.v1".into(),
-            usagi_core::infrastructure::ipc::TERMINAL_SCREEN_CHECKPOINT_CAPABILITY.into(),
-            usagi_core::infrastructure::ipc::TERMINAL_INPUT_OPERATION_CAPABILITY.into(),
-            usagi_core::infrastructure::ipc::WORKSPACE_FENCE_CAPABILITY.into(),
-            // A client that addresses terminals by their owner generation must
-            // see that this daemon serves them that way; the rollover gate reads
-            // the same advertisement from a successor's hello (#508).
-            usagi_core::infrastructure::ipc::OWNER_GENERATION_ROUTING_CAPABILITY.into(),
-        ],
+        capabilities: usagi_core::infrastructure::ipc::server_advertised_capabilities(
+            usagi_core::infrastructure::ipc::GenerationRole::Active,
+        ),
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
         daemon_process: Some(daemon_process),
@@ -561,7 +550,7 @@ pub fn server_protocol(
 ///   this private endpoint cannot bind it as the data directory's owner (owner
 ///   binding requires `active`);
 /// * it advertises
-///   [`GENERATION_HANDOFF_CAPABILITY`](crate::usecase::authority::standby::GENERATION_HANDOFF_CAPABILITY),
+///   [`Capability::GenerationHandoff`](usagi_core::infrastructure::ipc::Capability::GenerationHandoff),
 ///   which is the peer's claim that it participates in the durable registry and
 ///   re-decides authority per request. A standby that could not honour role
 ///   admission must not be namable as a successor, and
@@ -589,9 +578,9 @@ pub fn standby_server_protocol(
         workspace_root,
     );
     protocol.generation_role = usagi_core::infrastructure::ipc::GenerationRole::Standby;
-    protocol
-        .capabilities
-        .push(crate::usecase::authority::standby::GENERATION_HANDOFF_CAPABILITY.to_owned());
+    protocol.capabilities = usagi_core::infrastructure::ipc::server_advertised_capabilities(
+        usagi_core::infrastructure::ipc::GenerationRole::Standby,
+    );
     protocol
 }
 
@@ -694,7 +683,7 @@ mod tests {
             active.generation_role,
             usagi_core::infrastructure::ipc::GenerationRole::Active
         );
-        let required = crate::usecase::authority::standby::GENERATION_HANDOFF_CAPABILITY;
+        let required = usagi_core::infrastructure::ipc::Capability::GenerationHandoff.wire_name();
         assert!(standby.capabilities.iter().any(|it| it == required));
         assert!(!active.capabilities.iter().any(|it| it == required));
         // Readiness compares the artifact byte for byte, so the standby must
@@ -717,7 +706,11 @@ mod tests {
                 max_revision: 1,
             }],
             capabilities: vec![],
-            required_capabilities: vec!["request.correlation.v1".into()],
+            required_capabilities: vec![
+                usagi_core::infrastructure::ipc::Capability::RequestCorrelation
+                    .wire_name()
+                    .into(),
+            ],
             build: BuildIdentity {
                 version: "other".into(),
                 commit: "y".into(),

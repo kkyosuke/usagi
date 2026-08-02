@@ -39,11 +39,11 @@ fn readiness_admits_only_the_exact_admitted_artifact_from_the_registered_peer() 
         Err(ReadinessRefusal::IdentityUnknown)
     );
 
-    for missing in [BUILD_ARTIFACT_CAPABILITY, GENERATION_HANDOFF_CAPABILITY] {
+    for missing in standby_readiness_required_capabilities() {
         let mut older = hello(generation, &expected);
         older
             .capabilities
-            .retain(|advertised| advertised != missing);
+            .retain(|advertised| advertised != missing.wire_name());
         assert_eq!(
             verify_readiness(generation, &expected, &older),
             Err(ReadinessRefusal::UnsupportedCapability)

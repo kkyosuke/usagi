@@ -10,15 +10,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::ipc::{
-    BuildIdentity, ConnectionId, DaemonGeneration as WireGeneration, GenerationRole as WireRole,
-    OWNER_GENERATION_ROUTING_CAPABILITY, OperationId, ProtocolLimits, ProtocolVersion, ServerHello,
+    BuildIdentity, Capability, ConnectionId, DaemonGeneration as WireGeneration,
+    GenerationRole as WireRole, OperationId, ProtocolLimits, ProtocolVersion, ServerHello,
     build_identity,
 };
 
 use super::handoff::{LocatorObservation, PublishedLocator};
 use super::registry::{GenerationRegistry, RegistryFile};
 use super::rollover::CurrentLocator;
-use super::standby::{BUILD_ARTIFACT_CAPABILITY, GENERATION_HANDOFF_CAPABILITY, StandbyProbe};
+use super::standby::StandbyProbe;
 use crate::usecase::generation::ProcessIdentity;
 
 /// A canonical artifact identity that differs per `tag`, so "same version,
@@ -64,9 +64,9 @@ pub fn hello(generation: DaemonGeneration, artifact: &BuildIdentity) -> ServerHe
             revision: 2,
         },
         capabilities: vec![
-            BUILD_ARTIFACT_CAPABILITY.to_owned(),
-            GENERATION_HANDOFF_CAPABILITY.to_owned(),
-            OWNER_GENERATION_ROUTING_CAPABILITY.to_owned(),
+            Capability::BuildArtifact.wire_name().to_owned(),
+            Capability::GenerationHandoff.wire_name().to_owned(),
+            Capability::OwnerGenerationRouting.wire_name().to_owned(),
         ],
         build: artifact.clone(),
         limits: ProtocolLimits::default(),

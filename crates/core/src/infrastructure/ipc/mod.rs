@@ -27,10 +27,123 @@ pub const TERMINAL_WIRE_GENERATION: u16 = 1;
 /// A peer that negotiates a lower revision keeps the legacy `replay` tail, so
 /// the daemon serves both during the migration window.
 pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
+
+/// Closed vocabulary for capabilities exchanged during IPC negotiation.
+///
+/// A capability's external spelling lives only in [`Self::wire_name`]. The
+/// policy functions below derive every production client requirement, client
+/// advertisement, server advertisement, and readiness requirement from these
+/// descriptors so the same protocol contract cannot drift between layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Capability {
+    RequestCorrelation,
+    PrSnapshot,
+    PrSubscription,
+    BuildArtifact,
+    DaemonOwnerIdentity,
+    TerminalScreenCheckpoint,
+    TerminalInputOperation,
+    WorkspaceFence,
+    OwnerGenerationRouting,
+    GenerationHandoff,
+}
+
+/// Stable metadata for one member of the capability vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityDescriptor {
+    pub wire_name: &'static str,
+    pub purpose: &'static str,
+}
+
+impl Capability {
+    /// Every capability understood by this build.
+    pub const ALL: [Self; 10] = [
+        Self::RequestCorrelation,
+        Self::PrSnapshot,
+        Self::PrSubscription,
+        Self::BuildArtifact,
+        Self::DaemonOwnerIdentity,
+        Self::TerminalScreenCheckpoint,
+        Self::TerminalInputOperation,
+        Self::WorkspaceFence,
+        Self::OwnerGenerationRouting,
+        Self::GenerationHandoff,
+    ];
+
+    /// Stable wire spelling and protocol purpose.
+    #[must_use]
+    pub const fn descriptor(self) -> CapabilityDescriptor {
+        match self {
+            Self::RequestCorrelation => CapabilityDescriptor {
+                wire_name: "request.correlation.v1",
+                purpose: "correlate every request with its response",
+            },
+            Self::PrSnapshot => CapabilityDescriptor {
+                wire_name: "pr.snapshot.v1",
+                purpose: "read the daemon-owned pull-request snapshot",
+            },
+            Self::PrSubscription => CapabilityDescriptor {
+                wire_name: "pr.subscription.v1",
+                purpose: "subscribe to pull-request inventory changes",
+            },
+            Self::BuildArtifact => CapabilityDescriptor {
+                wire_name: "build.artifact.v1",
+                purpose: "compare canonical build artifact identities",
+            },
+            Self::DaemonOwnerIdentity => CapabilityDescriptor {
+                wire_name: "daemon.owner-identity.v1",
+                purpose: "bind a daemon hello to its process owner",
+            },
+            Self::TerminalScreenCheckpoint => CapabilityDescriptor {
+                wire_name: "terminal.screen-checkpoint.v1",
+                purpose: "restore terminal state from a semantic checkpoint",
+            },
+            Self::TerminalInputOperation => CapabilityDescriptor {
+                wire_name: "terminal.input-operation.v1",
+                purpose: "resolve durable terminal input operations",
+            },
+            Self::WorkspaceFence => CapabilityDescriptor {
+                wire_name: "workspace.fence.v1",
+                purpose: "admit only clients naming the served workspace",
+            },
+            Self::OwnerGenerationRouting => CapabilityDescriptor {
+                wire_name: "owner-generation-routing.v1",
+                purpose: "route terminal work to its owner generation",
+            },
+            Self::GenerationHandoff => CapabilityDescriptor {
+                wire_name: "daemon.generation-handoff.v1",
+                purpose: "re-decide authority during generation handoff",
+            },
+        }
+    }
+
+    /// Stable spelling carried on the wire.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        self.descriptor().wire_name
+    }
+
+    /// Whether a peer's wire advertisement contains this descriptor.
+    #[must_use]
+    pub fn is_advertised_by(self, capabilities: &[String]) -> bool {
+        capabilities
+            .iter()
+            .any(|advertised| advertised == self.wire_name())
+    }
+}
+
+fn capability_names(capabilities: &[Capability]) -> Vec<String> {
+    capabilities
+        .iter()
+        .map(|capability| capability.wire_name().to_owned())
+        .collect()
+}
+
 /// The capability a daemon advertises when its snapshots can carry a semantic
 /// screen checkpoint. It is the truth source for the checkpoint path: a client
 /// requires this capability even when the negotiated revision would allow it.
-pub const TERMINAL_SCREEN_CHECKPOINT_CAPABILITY: &str = "terminal.screen-checkpoint.v1";
+pub const TERMINAL_SCREEN_CHECKPOINT_CAPABILITY: &str =
+    Capability::TerminalScreenCheckpoint.wire_name();
 /// The capability a daemon advertises when a terminal input carries a durable,
 /// producer-issued operation identity whose final outcome it can answer on a
 /// *different* connection than the one that wrote it.
@@ -39,12 +152,13 @@ pub const TERMINAL_SCREEN_CHECKPOINT_CAPABILITY: &str = "terminal.screen-checkpo
 /// [`TERMINAL_SCREEN_CHECKPOINT_CAPABILITY`] is for checkpoints: a client that
 /// cannot see it must keep its lost acknowledgement latched as an unknown effect
 /// instead of resending the bytes.
-pub const TERMINAL_INPUT_OPERATION_CAPABILITY: &str = "terminal.input-operation.v1";
+pub const TERMINAL_INPUT_OPERATION_CAPABILITY: &str =
+    Capability::TerminalInputOperation.wire_name();
 /// The capability a daemon advertises when it admits a hello only after matching
 /// the client's declared workspace against its own trusted workspace root. A
 /// workspace-bound client requires it, so a daemon that would admit any
 /// workspace cannot silently serve one workspace's sessions to another.
-pub const WORKSPACE_FENCE_CAPABILITY: &str = "workspace.fence.v1";
+pub const WORKSPACE_FENCE_CAPABILITY: &str = Capability::WorkspaceFence.wire_name();
 /// The capability a **client** advertises when it addresses every terminal
 /// request by the owner generation of its complete `TerminalRef` instead of by
 /// whichever endpoint is currently active.
@@ -55,7 +169,8 @@ pub const WORKSPACE_FENCE_CAPABILITY: &str = "workspace.fence.v1";
 /// different terminal. The routing contract itself is
 /// [`crate::usecase::owner_routing`], and the handoff admission that requires it
 /// of every participant is the daemon's rollover gate (#508).
-pub const OWNER_GENERATION_ROUTING_CAPABILITY: &str = "owner-generation-routing.v1";
+pub const OWNER_GENERATION_ROUTING_CAPABILITY: &str =
+    Capability::OwnerGenerationRouting.wire_name();
 /// The [`ProtocolError::error_id`] carried by every workspace-fence refusal.
 /// Clients match on it to present "this is not this workspace's daemon" instead
 /// of an unavailable endpoint, and to keep the refusal out of cold start,
@@ -394,6 +509,73 @@ pub enum GenerationRole {
     Active,
     Draining,
     Standby,
+}
+
+const BASE_CLIENT_REQUIRED_CAPABILITIES: [Capability; 3] = [
+    Capability::RequestCorrelation,
+    Capability::PrSnapshot,
+    Capability::BuildArtifact,
+];
+
+const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 9] = [
+    Capability::RequestCorrelation,
+    Capability::PrSnapshot,
+    Capability::PrSubscription,
+    Capability::BuildArtifact,
+    Capability::DaemonOwnerIdentity,
+    Capability::TerminalScreenCheckpoint,
+    Capability::TerminalInputOperation,
+    Capability::WorkspaceFence,
+    Capability::OwnerGenerationRouting,
+];
+
+const STANDBY_READINESS_REQUIRED_CAPABILITIES: [Capability; 2] =
+    [Capability::BuildArtifact, Capability::GenerationHandoff];
+
+/// Production capabilities required by a client in this connection context.
+///
+/// Owner identity is required only when an OS/durable owner is being bound.
+/// Workspace fencing is required only when the client names a workspace.
+#[must_use]
+pub fn client_required_capabilities(
+    expects_owner: bool,
+    workspace: &ClientWorkspace,
+) -> Vec<String> {
+    let mut capabilities = capability_names(&BASE_CLIENT_REQUIRED_CAPABILITIES);
+    if expects_owner {
+        capabilities.push(Capability::DaemonOwnerIdentity.wire_name().to_owned());
+    }
+    if matches!(
+        workspace,
+        ClientWorkspace::Bound { .. } | ClientWorkspace::Selected { .. }
+    ) {
+        capabilities.push(Capability::WorkspaceFence.wire_name().to_owned());
+    }
+    capabilities
+}
+
+/// Production capabilities advertised by every client.
+#[must_use]
+pub fn client_advertised_capabilities() -> Vec<String> {
+    capability_names(&[Capability::OwnerGenerationRouting])
+}
+
+/// Production capabilities advertised by a daemon generation in `role`.
+/// Generation handoff is a standby-only claim because only that serving path
+/// re-decides authority for every request.
+#[must_use]
+pub fn server_advertised_capabilities(role: GenerationRole) -> Vec<String> {
+    let mut capabilities = capability_names(&BASE_SERVER_ADVERTISED_CAPABILITIES);
+    if role == GenerationRole::Standby {
+        capabilities.push(Capability::GenerationHandoff.wire_name().to_owned());
+    }
+    capabilities
+}
+
+/// Descriptors a standby hello must advertise before it can receive authority.
+#[must_use]
+pub const fn standby_readiness_required_capabilities() -> &'static [Capability] {
+    &STANDBY_READINESS_REQUIRED_CAPABILITIES
 }
 
 /// Bootstrap messages are deliberately separate from post-handshake envelopes.
