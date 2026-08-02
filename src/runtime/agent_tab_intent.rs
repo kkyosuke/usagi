@@ -206,6 +206,12 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                             .any(|slot| slot.continuation == *continuation)
                     })
                 }
+                // A repeated close of the same exact terminal is causal for the
+                // same reason: it must fence a Reopen that read this revision.
+                AgentTabIntentMutation::DismissTerminal { terminal }
+                | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
+                    current.dismisses_terminal(terminal)
+                }
                 _ => false,
             };
             let mut mutation_applied = true;
@@ -292,6 +298,13 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                     }
                     AgentTabIntentMutation::Dismiss { continuation } => {
                         current.apply(AgentTabIntentMutation::Dismiss { continuation })
+                    }
+                    // A deferred close carries the exact terminal the user saw,
+                    // so it merges monotonically for the same reason. Only the
+                    // stale successor preview is dropped.
+                    AgentTabIntentMutation::DismissTerminal { terminal }
+                    | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
+                        current.apply(AgentTabIntentMutation::DismissTerminal { terminal })
                     }
                 }
             } else {
@@ -1493,6 +1506,111 @@ mod tests {
                 .contains(&observed.continuation)
         );
         assert_eq!(fs::read(path).unwrap(), bytes_after_close);
+    }
+
+    #[test]
+    fn a_deferred_terminal_close_persists_merges_and_advances_its_fence() {
+        let (_root, mut store, workspace) = fixture();
+        let visible = observation(workspace);
+        let unobserved = observation(workspace);
+        let opened = store
+            .mutate(
+                workspace,
+                0,
+                AgentTabIntentMutation::Upsert {
+                    session_id: None,
+                    continuation: visible.continuation,
+                    terminal: visible.terminal,
+                    select: true,
+                },
+            )
+            .unwrap();
+
+        // The user closes a live conversation whose lineage the daemon has not
+        // reported yet, so only its exact terminal identifies the close.
+        let deferred = store
+            .mutate(
+                workspace,
+                opened.intent.revision,
+                AgentTabIntentMutation::DismissTerminalAndSelect {
+                    terminal: unobserved.terminal.clone(),
+                    session_id: None,
+                    selected: Some(visible.continuation),
+                },
+            )
+            .unwrap();
+        assert!(!deferred.cas_conflict);
+        assert!(
+            deferred
+                .intent
+                .dismissed_terminals
+                .contains(&unobserved.terminal)
+        );
+        assert!(deferred.intent.dismissed.is_empty());
+        assert_eq!(
+            AgentTabIntentPort::load(&mut store, workspace).unwrap(),
+            deferred.intent
+        );
+
+        // A newer writer moves the selection off every Agent. The stale close of
+        // the same terminal merges monotonically, keeps that newer selection,
+        // and still advances the revision so an older Reopen cannot win.
+        let newer_selection = store
+            .mutate(
+                workspace,
+                deferred.intent.revision,
+                AgentTabIntentMutation::Select {
+                    session_id: None,
+                    continuation: None,
+                },
+            )
+            .unwrap();
+        let stale_close = store
+            .mutate(
+                workspace,
+                deferred.intent.revision,
+                AgentTabIntentMutation::DismissTerminalAndSelect {
+                    terminal: unobserved.terminal.clone(),
+                    session_id: None,
+                    selected: Some(visible.continuation),
+                },
+            )
+            .unwrap();
+        assert!(stale_close.cas_conflict);
+        assert!(stale_close.mutation_applied);
+        assert_eq!(
+            stale_close.intent.revision,
+            newer_selection.intent.revision + 1
+        );
+        assert_eq!(stale_close.intent.targets[0].selected, None);
+        assert!(
+            stale_close
+                .intent
+                .dismissed_terminals
+                .contains(&unobserved.terminal)
+        );
+
+        // The same close without a successor preview (the merged form a stale
+        // writer replays) is inert on the state and still fenced.
+        let bytes_before = fs::read(store.state_path(workspace)).unwrap();
+        let merged = store
+            .mutate(
+                workspace,
+                newer_selection.intent.revision,
+                AgentTabIntentMutation::DismissTerminal {
+                    terminal: unobserved.terminal.clone(),
+                },
+            )
+            .unwrap();
+        assert!(merged.cas_conflict);
+        assert_eq!(merged.intent.revision, stale_close.intent.revision + 1);
+        assert!(
+            merged
+                .intent
+                .dismissed_terminals
+                .contains(&unobserved.terminal)
+        );
+        assert_ne!(fs::read(store.state_path(workspace)).unwrap(), bytes_before);
     }
 
     #[test]

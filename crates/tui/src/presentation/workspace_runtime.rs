@@ -636,6 +636,31 @@ impl WorkspaceRuntime {
         }
     }
 
+    /// The focused live terminal when its tab hosts an Agent conversation.
+    ///
+    /// Closing an Agent tab is a durable conversation dismissal while closing a
+    /// generic terminal tab is not, so the shell must tell them apart even
+    /// before any continuation has been observed for the tab (#613).
+    #[must_use]
+    pub fn focused_agent_terminal(&self) -> Option<TerminalRef> {
+        let terminal = self.focused_terminal()?;
+        self.panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .find_map(|tab| match tab {
+                PaneTab::Live(live)
+                    if live.kind == PaneKind::Agent && live.terminal.fences(&terminal) =>
+                {
+                    Some(terminal.clone())
+                }
+                PaneTab::Live(_)
+                | PaneTab::Interrupted(_)
+                | PaneTab::Pending(_)
+                | PaneTab::Ready(_) => None,
+            })
+    }
+
     /// The live tabs of every target that are **not** the attached foreground
     /// selection. They own no subscription, so their process exiting can only be
     /// observed through the daemon's per-scope terminal inventory.
