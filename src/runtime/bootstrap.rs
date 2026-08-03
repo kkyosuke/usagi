@@ -29,6 +29,19 @@ const READINESS_ATTEMPTS: u32 = 40;
 pub(crate) const READINESS_CEILING: Duration = READINESS_DELAY.saturating_mul(READINESS_ATTEMPTS);
 const READINESS_DELAY: Duration = Duration::from_millis(50);
 
+// Keep endpoint ownership in the generic composition function while the
+// retry/error decision below has one type-erased, coverage-visible instance.
+macro_rules! wait_for_stream {
+    ($connect:expr) => {{
+        let mut ready = None;
+        wait_for_ready(&mut || {
+            ready = Some($connect()?);
+            Ok(())
+        })?;
+        ready.expect("a successful readiness probe stores its endpoint")
+    }};
+}
+
 // The unit suite exercises every action, readiness, recovery, and build-fence
 // transition. LLVM nevertheless counts the separately generated production
 // `IpcClient` instantiation as uncovered for branches exercised by the fake
@@ -78,21 +91,21 @@ where
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             start().map_err(BootstrapError::Start)?;
-            let stream = wait_for_ready(&mut connect)?;
-            require_expected_build(&stream, expected_build, &build_of)?;
+            let stream = wait_for_stream!(connect);
+            require_expected_build(build_of(&stream), expected_build)?;
             Ok(stream)
         }
         Err(error) if can_attempt_stale_recovery(error.kind()) => {
             match recover_stale().map_err(BootstrapError::Recovery)? {
                 StaleRecovery::Recovered => {
                     start().map_err(BootstrapError::Start)?;
-                    let stream = wait_for_ready(&mut connect)?;
-                    require_expected_build(&stream, expected_build, &build_of)?;
+                    let stream = wait_for_stream!(connect);
+                    require_expected_build(build_of(&stream), expected_build)?;
                     Ok(stream)
                 }
                 StaleRecovery::OwnerActive => {
-                    let stream = wait_for_ready(&mut connect)?;
-                    require_expected_build(&stream, expected_build, &build_of)?;
+                    let stream = wait_for_stream!(connect);
+                    require_expected_build(build_of(&stream), expected_build)?;
                     Ok(stream)
                 }
                 StaleRecovery::NotProven => Err(BootstrapError::Connect(error)),
@@ -120,8 +133,8 @@ where
     B: Fn(&S) -> &BuildIdentity,
 {
     restart().map_err(BootstrapError::Restart)?;
-    let stream = wait_for_ready(&mut connect)?;
-    require_expected_build(&stream, expected_build, &build_of)?;
+    let stream = wait_for_stream!(connect);
+    require_expected_build(build_of(&stream), expected_build)?;
     Ok(stream)
 }
 
@@ -209,15 +222,11 @@ impl fmt::Display for BootstrapError {
 
 impl std::error::Error for BootstrapError {}
 
-fn require_expected_build<S, B>(
-    stream: &S,
+fn require_expected_build(
+    actual_build: &BuildIdentity,
     expected_build: &BuildIdentity,
-    build_of: &B,
-) -> Result<(), BootstrapError>
-where
-    B: Fn(&S) -> &BuildIdentity,
-{
-    match build_artifact_decision(build_of(stream), expected_build, false) {
+) -> Result<(), BootstrapError> {
+    match build_artifact_decision(actual_build, expected_build, false) {
         BuildArtifactDecision::Reuse => Ok(()),
         BuildArtifactDecision::RolloverTrigger | BuildArtifactDecision::ForceReplace => {
             Err(BootstrapError::ReplacementBuildMismatch)
@@ -226,14 +235,11 @@ where
     }
 }
 
-fn wait_for_ready<S, C>(connect: &mut C) -> Result<S, BootstrapError>
-where
-    C: FnMut() -> io::Result<S>,
-{
+fn wait_for_ready(connect: &mut dyn FnMut() -> io::Result<()>) -> Result<(), BootstrapError> {
     let mut last_error = io::Error::other("daemon did not publish an endpoint");
     for _ in 0..READINESS_ATTEMPTS {
         match connect() {
-            Ok(stream) => return Ok(stream),
+            Ok(()) => return Ok(()),
             // A workspace refusal is the endpoint's final answer, not a
             // publication delay: waiting cannot change it, so report it at once
             // instead of spending the readiness budget on it.
