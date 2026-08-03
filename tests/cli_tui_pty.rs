@@ -1410,6 +1410,61 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     reader.join().unwrap();
 }
 
+#[test]
+fn real_pty_closeup_agent_m_codex_launches_codex_in_the_managed_session() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("agent-model-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .output()
+        .expect("workspace registers");
+    assert!(registered.status.success());
+    let _ = create_session(home.path(), "agent-model");
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+    submit_closeup_command(&mut master, &captured, baseline, "agent -m codex");
+    wait_for_screen_since(&captured, baseline, "codex-ready-unique:");
+    assert_spawns_settle(&fixtures.codex_count, 1);
+    assert_eq!(fixtures.claude_spawns(), 0);
+    assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
+
+    stop_daemon(&home);
+    drop(master);
+    drop(slave);
+    reader.join().unwrap();
+}
+
 /// 実 daemon・実 PTY 2 本: detach された background tab の process が exit したとき、
 /// scope inventory lane **だけ**がそれを観測して tab を閉じ、foreground pane は流れ続ける。
 ///

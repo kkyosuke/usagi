@@ -1859,7 +1859,11 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         };
         let reply = client
             .request(agent_launch_request(operation, intent.clone()))
-            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?;
+            // Protocol failures already carry a daemon-authored, safe recovery
+            // reason (for example a missing Codex login). Preserve it so an
+            // explicit `agent -m codex` refusal is not misreported as a broken
+            // daemon connection.
+            .map_err(daemon_error_reason)?;
         correlate_agent_launch(reply, operation, &intent)
     }
 

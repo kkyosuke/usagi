@@ -1152,6 +1152,9 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
 - **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付ける。
   default の CLI が install されていない場合は `the configured agent CLI is not installed` として拒否する。
+- daemon が CLI の未認証・readiness 不成立などで起動を拒否した場合は、daemon が返した安全な復旧理由を error modal に
+  表示する。protocol rejection を接続失敗へ置き換えないため、`agent -m codex` では install・sign-in を確認して再試行
+  すべきことを画面上で判断できる。
 - **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m sak` → `agent -m sakana.ai`、
   `agent --` → `agent --model` のように候補が 1 つなら確定し、**候補が複数のときは Tab を押すたびに巡回する**
   （`agent -m c` → `agent -m claude` → `agent -m codex` → `agent -m claude`）。曖昧さで Tab が無反応になることはない。
