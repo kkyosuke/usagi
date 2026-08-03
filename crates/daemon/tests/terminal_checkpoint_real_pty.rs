@@ -53,7 +53,7 @@ use usagi_core::usecase::vt_screen::{
     ActiveBuffer, Geometry as ScreenGeometry, RowCheckpoint, ScreenCheckpoint, VtScreen,
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
-use usagi_daemon::presentation::ipc::TerminalOwner;
+use usagi_daemon::presentation::ipc::encode_terminal_response;
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
     TerminalOutcome,
@@ -75,6 +75,7 @@ use usagi_daemon::usecase::terminal::{
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
 };
+use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
 
 // ---- the painted screen -----------------------------------------------------
 
@@ -447,7 +448,7 @@ trait DaemonOwner {
         &mut self,
         connection: ConnectionId,
         client: ClientId,
-        action: TerminalAction,
+        _action: TerminalAction,
         request: TerminalRequest,
         wire: SnapshotWire,
     ) -> Value;
@@ -462,17 +463,23 @@ impl DaemonOwner for AgentOwner {
         &mut self,
         connection: ConnectionId,
         client: ClientId,
-        action: TerminalAction,
+        _action: TerminalAction,
         request: TerminalRequest,
         wire: SnapshotWire,
     ) -> Value {
-        let outcome =
-            self.0
-                .handle_terminal(connection, client, RequestId::new(), action, request, wire);
+        let outcome = self.0.handle(
+            TerminalRequestContext {
+                connection,
+                client,
+                request: RequestId::new(),
+            },
+            request,
+        );
         match outcome {
-            TerminalOutcome::Handled(result) => {
-                result.expect("the Agent owner completes its terminal request")
-            }
+            TerminalOutcome::Handled(result) => encode_terminal_response(
+                result.expect("the Agent owner completes its terminal request"),
+                wire,
+            ),
             TerminalOutcome::NotOwned => panic!("the Agent owner owns the terminal it launched"),
         }
     }
@@ -503,16 +510,18 @@ impl DaemonOwner for GenericOwner {
         request: TerminalRequest,
         wire: SnapshotWire,
     ) -> Value {
-        TerminalOwner::request(
+        let _ = action;
+        let response = TerminalOwner::handle(
             self,
-            connection,
-            client,
-            RequestId::new(),
-            action,
-            serde_json::to_value(request).expect("the terminal request vocabulary serializes"),
-            wire,
+            TerminalRequestContext {
+                connection,
+                client,
+                request: RequestId::new(),
+            },
+            request,
         )
-        .expect("the generic owner completes its terminal request")
+        .expect("the generic owner completes its terminal request");
+        encode_terminal_response(response, wire)
     }
     fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) {
         GenericTerminalRuntime::output(self, terminal, bytes)

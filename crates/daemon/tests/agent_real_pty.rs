@@ -32,9 +32,9 @@ use usagi_core::domain::terminal_visibility::{CompletedTerminalEntry, TerminalVi
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::usecase::agent::AgentProfileCatalog;
-use usagi_core::usecase::client::{AgentLaunchIntent, TerminalAction, TerminalRequest};
+use usagi_core::usecase::client::{AgentLaunchIntent, TerminalRequest};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
-use usagi_daemon::presentation::ipc::TerminalOwner;
+use usagi_daemon::presentation::ipc::encode_terminal_response;
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
     SharedTerminalOwner, TerminalOutcome,
@@ -53,6 +53,9 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::terminal::{
     Geometry, Output, PtyWriteError, PtyWriter, SnapshotWire, SpawnFailure,
 };
+use usagi_daemon::usecase::terminal_owner::{
+    TerminalOwner, TerminalRequestContext, TerminalResponse,
+};
 
 // ---- shared fakes -----------------------------------------------------------
 
@@ -60,15 +63,11 @@ use usagi_daemon::usecase::terminal::{
 /// route Agent-only scenarios without a real generic PTY runtime.
 struct EmptyGeneric;
 impl TerminalOwner for EmptyGeneric {
-    fn request(
+    fn handle(
         &mut self,
-        _: ConnectionId,
-        _: ClientId,
-        _: RequestId,
-        _: TerminalAction,
-        _: Value,
-        _: SnapshotWire,
-    ) -> Result<Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        _: TerminalRequestContext,
+        _: TerminalRequest,
+    ) -> Result<TerminalResponse, usagi_core::infrastructure::ipc::ProtocolError> {
         Err(usagi_core::infrastructure::ipc::ProtocolError::new(
             ErrorCode::NotFound,
             "no generic terminal",
@@ -253,11 +252,49 @@ fn intent(profile: Option<&str>) -> AgentLaunchIntent {
     }
 }
 
-fn handled(outcome: TerminalOutcome) -> Value {
+fn handled(outcome: TerminalOutcome<TerminalResponse>) -> Value {
     match outcome {
-        TerminalOutcome::Handled(result) => result.unwrap(),
+        TerminalOutcome::Handled(result) => {
+            encode_terminal_response(result.unwrap(), SnapshotWire::RawTail)
+        }
         TerminalOutcome::NotOwned => panic!("agent owner should own its terminal"),
     }
+}
+
+fn agent_terminal_request(
+    runtime: &mut AgentRuntime,
+    connection: ConnectionId,
+    client: ClientId,
+    request: TerminalRequest,
+) -> TerminalOutcome<TerminalResponse> {
+    AgentTerminalActor::handle(
+        runtime,
+        TerminalRequestContext {
+            connection,
+            client,
+            request: RequestId::new(),
+        },
+        request,
+    )
+}
+
+fn owner_request(
+    owner: &mut impl TerminalOwner,
+    connection: ConnectionId,
+    client: ClientId,
+    request: TerminalRequest,
+) -> Value {
+    let response = TerminalOwner::handle(
+        owner,
+        TerminalRequestContext {
+            connection,
+            client,
+            request: RequestId::new(),
+        },
+        request,
+    )
+    .unwrap();
+    encode_terminal_response(response, SnapshotWire::RawTail)
 }
 
 fn finish_real_pty(
@@ -407,28 +444,24 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
     // Attach while running, then drain the real PTY into the durable journal.
     let connection = ConnectionId::new();
     let client = ClientId::new();
-    handled(runtime.handle_terminal(
+    handled(agent_terminal_request(
+        &mut runtime,
         connection,
         client,
-        RequestId::new(),
-        TerminalAction::Attach,
         TerminalRequest::Attach {
             terminal: terminal.clone(),
         },
-        SnapshotWire::RawTail,
     ));
 
     finish_real_pty(&mut runtime, &observations, &terminal);
 
-    let resync = handled(runtime.handle_terminal(
+    let resync = handled(agent_terminal_request(
+        &mut runtime,
         connection,
         client,
-        RequestId::new(),
-        TerminalAction::Resync,
         TerminalRequest::Resync {
             terminal: terminal.clone(),
         },
-        SnapshotWire::RawTail,
     ));
     assert_eq!(resync["exited"], 0);
     let replay = resync["replay"].as_array().unwrap();
@@ -452,19 +485,14 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
     };
     let mut owner = SharedTerminalOwner::new(runtime, EmptyGeneric);
     let completed_inventory = |owner: &mut SharedTerminalOwner<EmptyGeneric, AgentRuntime>| {
-        let response = owner
-            .request(
-                connection,
-                client,
-                RequestId::new(),
-                TerminalAction::CompletedInventory,
-                serde_json::to_value(TerminalRequest::CompletedInventory {
-                    scope: query_scope.clone(),
-                })
-                .unwrap(),
-                SnapshotWire::RawTail,
-            )
-            .unwrap();
+        let response = owner_request(
+            owner,
+            connection,
+            client,
+            TerminalRequest::CompletedInventory {
+                scope: query_scope.clone(),
+            },
+        );
         serde_json::from_value::<Vec<CompletedTerminalEntry>>(response["entries"].clone()).unwrap()
     };
 
@@ -478,35 +506,25 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
         TerminalVisibilityState::Unobserved
     );
 
-    let observed = owner
-        .request(
-            connection,
-            client,
-            RequestId::new(),
-            TerminalAction::Observe,
-            serde_json::to_value(TerminalRequest::Observe {
-                terminal: terminal.clone(),
-                expected_revision: 0,
-            })
-            .unwrap(),
-            SnapshotWire::RawTail,
-        )
-        .unwrap();
+    let observed = owner_request(
+        &mut owner,
+        connection,
+        client,
+        TerminalRequest::Observe {
+            terminal: terminal.clone(),
+            expected_revision: 0,
+        },
+    );
     assert_eq!(observed["applied"], serde_json::json!(true));
-    let dismissed = owner
-        .request(
-            connection,
-            client,
-            RequestId::new(),
-            TerminalAction::Dismiss,
-            serde_json::to_value(TerminalRequest::Dismiss {
-                terminal: terminal.clone(),
-                expected_revision: 1,
-            })
-            .unwrap(),
-            SnapshotWire::RawTail,
-        )
-        .unwrap();
+    let dismissed = owner_request(
+        &mut owner,
+        connection,
+        client,
+        TerminalRequest::Dismiss {
+            terminal: terminal.clone(),
+            expected_revision: 1,
+        },
+    );
     assert_eq!(dismissed["applied"], serde_json::json!(true));
 
     // A second query still returns the retained tombstone (never resurrected as
@@ -966,13 +984,14 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
         worktree_id: usagi_core::domain::id::WorktreeId::new(),
     };
     assert!(matches!(
-        runtime.handle_terminal(
-            ConnectionId::new(),
-            ClientId::new(),
-            RequestId::new(),
-            TerminalAction::Attach,
+        AgentTerminalActor::handle(
+            &mut runtime,
+            TerminalRequestContext {
+                connection: ConnectionId::new(),
+                client: ClientId::new(),
+                request: RequestId::new(),
+            },
             TerminalRequest::Attach { terminal: foreign },
-            SnapshotWire::RawTail,
         ),
         TerminalOutcome::NotOwned
     ));

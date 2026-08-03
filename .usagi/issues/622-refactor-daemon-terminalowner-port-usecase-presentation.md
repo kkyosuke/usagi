@@ -1,13 +1,13 @@
 ---
 number: 622
 title: refactor(daemon): TerminalOwner port を usecase 境界へ移して presentation 依存逆流を解消する
-status: todo
+status: in-progress
 priority: medium
 labels: [refactor, daemon, ipc, terminal, architecture, clean-architecture, review]
 dependson: []
 related: [621]
 created_at: 2026-08-02T22:56:43.500348+00:00
-updated_at: 2026-08-02T22:56:43.500348+00:00
+updated_at: 2026-08-02T23:58:36.230397+00:00
 ---
 
 ## 問題 / 責務違反

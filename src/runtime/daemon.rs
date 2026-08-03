@@ -139,8 +139,7 @@ use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
 };
 use usagi_daemon::usecase::terminal::{
-    Geometry, Output, PtyWriteError, PtyWriter, SnapshotWire, SpawnFailure,
-    output_pipeline_counters,
+    Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
 };
 use usagi_daemon::usecase::terminal_ipc::{
     GENERIC_TERMINAL_LIMIT, GenericTerminalRuntime, ResolvedTerminalScope,
@@ -1080,25 +1079,13 @@ impl DecisionWaker for DeferredDecisionWaker {
 /// safe unavailable error rather than a client-side fallback.
 struct SharedAgent(SharedAgentRuntime);
 impl AgentTerminalActor for SharedAgent {
-    fn handle_terminal(
+    fn handle(
         &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
+        context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
         request: usagi_core::usecase::client::TerminalRequest,
-        wire: SnapshotWire,
     ) -> TerminalOutcome {
         match self.0.lock() {
-            Ok(mut agent) => AgentTerminalActor::handle_terminal(
-                &mut *agent,
-                connection,
-                client,
-                request_id,
-                action,
-                request,
-                wire,
-            ),
+            Ok(mut agent) => AgentTerminalActor::handle(&mut *agent, context, request),
             Err(_) => {
                 TerminalOutcome::Handled(Err(usagi_core::infrastructure::ipc::ProtocolError::new(
                     usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
@@ -1704,16 +1691,15 @@ fn process_resource_usage() -> Option<(u64, u64)> {
 
 type SharedMetricsBroker = Arc<Mutex<MetricsBroker>>;
 type SharedProcessResourceSampler = Arc<Mutex<ProcessResourceSampler>>;
-impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
-    fn request(
+impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
+    fn handle(
         &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
-        payload: serde_json::Value,
-        wire: SnapshotWire,
-    ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
+        request: usagi_core::usecase::client::TerminalRequest,
+    ) -> Result<
+        usagi_daemon::usecase::terminal_owner::TerminalResponse,
+        usagi_core::infrastructure::ipc::ProtocolError,
+    > {
         self.0
             .lock()
             .map_err(|_| {
@@ -1722,7 +1708,7 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
                     "terminal owner is unavailable",
                 )
             })?
-            .request(connection, client, request_id, action, payload, wire)
+            .handle(context, request)
     }
     fn inventory(
         &self,
@@ -8621,7 +8607,8 @@ mod tests {
     use usagi_core::usecase::client::{
         TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
     };
-    use usagi_daemon::presentation::ipc::TerminalOwner;
+    use usagi_daemon::presentation::ipc::JsonTerminalOwner as TerminalOwner;
+    use usagi_daemon::usecase::terminal::SnapshotWire;
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
@@ -13778,18 +13765,31 @@ instructions = "{instructions}"
         seen: Vec<TerminalAction>,
     }
 
-    impl TerminalOwner for FenceWitness {
-        fn request(
+    impl usagi_daemon::usecase::terminal_owner::TerminalOwner for FenceWitness {
+        fn handle(
             &mut self,
-            _connection: ConnectionId,
-            _client: ClientId,
-            _request_id: RequestId,
-            action: TerminalAction,
-            _payload: serde_json::Value,
-            _wire: usagi_daemon::usecase::terminal::SnapshotWire,
-        ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+            _context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
+            request: TerminalRequest,
+        ) -> Result<
+            usagi_daemon::usecase::terminal_owner::TerminalResponse,
+            usagi_core::infrastructure::ipc::ProtocolError,
+        > {
+            let action = match request {
+                TerminalRequest::Launch { .. } => TerminalAction::Launch,
+                TerminalRequest::Inventory { .. } => TerminalAction::Inventory,
+                TerminalRequest::Attach { .. } => TerminalAction::Attach,
+                TerminalRequest::Resume { .. } => TerminalAction::Resume,
+                TerminalRequest::Resync { .. } => TerminalAction::Resync,
+                TerminalRequest::Input { .. } => TerminalAction::Input,
+                TerminalRequest::InputOutcome { .. } => TerminalAction::InputOutcome,
+                TerminalRequest::Resize { .. } => TerminalAction::Resize,
+                TerminalRequest::Detach { .. } => TerminalAction::Detach,
+                TerminalRequest::CompletedInventory { .. } => TerminalAction::CompletedInventory,
+                TerminalRequest::Observe { .. } => TerminalAction::Observe,
+                TerminalRequest::Dismiss { .. } => TerminalAction::Dismiss,
+            };
             self.seen.push(action);
-            Ok(serde_json::json!({"served": true}))
+            Ok(usagi_daemon::usecase::terminal_owner::TerminalResponse::Detached)
         }
 
         fn disconnect(&mut self, _connection: ConnectionId) {}
@@ -13927,11 +13927,18 @@ instructions = "{instructions}"
     }
 
     fn attach_request() -> serde_json::Value {
-        serde_json::json!({
-            "kind": "terminal",
-            "action": "attach",
-            "payload": {"operation": "attach", "terminal": null},
+        let terminal = usagi_core::domain::id::TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        serde_json::to_value(DaemonRequest::Terminal {
+            action: TerminalAction::Attach,
+            payload: serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
         })
+        .unwrap()
     }
 
     /// The fence changes nothing for the one active generation this build runs:

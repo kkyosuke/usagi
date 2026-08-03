@@ -13,8 +13,7 @@ use serde_json::{Value, json};
 use usagi_core::{
     domain::{
         id::{
-            ClientId, CompletionFence, ConnectionId, DaemonGeneration, OperationId, RequestId,
-            TerminalId, TerminalRef,
+            CompletionFence, ConnectionId, DaemonGeneration, OperationId, TerminalId, TerminalRef,
         },
         terminal_launch::{
             DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchRequest,
@@ -23,19 +22,20 @@ use usagi_core::{
     },
     infrastructure::ipc::{ErrorCode, ProtocolError},
     usecase::{
-        client::{TerminalAction, TerminalGeometry, TerminalRequest},
+        client::{TerminalGeometry, TerminalRequest},
         vt_screen::{COLS_MAX, ROWS_MAX},
     },
 };
-
-use crate::presentation::ipc::TerminalOwner;
 
 use super::{
     generic_terminal::{
         GenericPtySpawner, GenericTerminalCoordinator, GenericTerminalError,
         TerminalProfileResolver, TerminalStore,
     },
-    terminal::{Geometry, InputRequest, PtyWriter, RegistryError, SnapshotWire},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
+    terminal_owner::{
+        TerminalOwner as TerminalOwnerPort, TerminalRequestContext, TerminalResponse,
+    },
     terminal_retention_ipc::SharedTerminalRetention,
 };
 
@@ -225,25 +225,20 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
 }
 
 impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalScopeResolver>
-    TerminalOwner for GenericTerminalRuntime<R, S, P, Q>
+    TerminalOwnerPort for GenericTerminalRuntime<R, S, P, Q>
 {
-    fn request(
+    fn handle(
         &mut self,
-        connection: ConnectionId,
-        client: ClientId,
-        request_id: RequestId,
-        action: TerminalAction,
-        payload: Value,
-        wire: SnapshotWire,
-    ) -> Result<Value, ProtocolError> {
-        let request: TerminalRequest = serde_json::from_value(payload).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "invalid terminal request vocabulary",
-            )
-        })?;
-        match (action, request) {
-            (TerminalAction::Launch, TerminalRequest::Launch { intent }) => {
+        context: TerminalRequestContext,
+        request: TerminalRequest,
+    ) -> Result<TerminalResponse, ProtocolError> {
+        let TerminalRequestContext {
+            connection,
+            client,
+            request: request_id,
+        } = context;
+        match request {
+            TerminalRequest::Launch { intent } => {
                 // The scope's session is optional: `Some` is a managed session
                 // and `None` is the workspace root. Either way the daemon owner
                 // resolves the authoritative checkout path; the client never
@@ -272,11 +267,11 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                             "launch operation id was accepted for a different intent",
                         ));
                     }
-                    return Ok(json!({
-                        "terminal": recorded.terminal,
-                        "launch_operation": producer,
-                        "replayed": true,
-                    }));
+                    return Ok(TerminalResponse::Launch {
+                        terminal: recorded.terminal.clone(),
+                        launch_operation: producer,
+                        replayed: true,
+                    });
                 }
                 let terminal = TerminalRef {
                     daemon_generation: self.generation,
@@ -313,27 +308,24 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     .map_err(map_error)?;
                 // The accepted response echoes the producer's own id, so a client
                 // that lost the first answer can resolve it without guessing.
-                Ok(json!({
-                    "terminal": terminal,
-                    "launch_operation": launch_operation,
-                    "replayed": false,
-                }))
+                Ok(TerminalResponse::Launch {
+                    terminal,
+                    launch_operation,
+                    replayed: false,
+                })
             }
-            (TerminalAction::Inventory, TerminalRequest::Inventory { scope }) => {
-                Ok(json!({"terminals": self.coordinator.inventory(&scope)}))
-            }
-            (TerminalAction::Attach, TerminalRequest::Attach { terminal }) => self
+            TerminalRequest::Inventory { scope } => Ok(TerminalResponse::Inventory(
+                self.coordinator.inventory(&scope),
+            )),
+            TerminalRequest::Attach { terminal } => self
                 .coordinator
                 .attach_for_client(&terminal, connection, client)
-                .map(|attached| json!(attached.into_frame(wire)))
+                .map(TerminalResponse::Attached)
                 .map_err(map_error),
-            (
-                TerminalAction::Resume,
-                TerminalRequest::Resume {
-                    terminal,
-                    after_offset,
-                },
-            ) => {
+            TerminalRequest::Resume {
+                terminal,
+                after_offset,
+            } => {
                 let output = self
                     .coordinator
                     .replay_from(&terminal, after_offset)
@@ -345,48 +337,39 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     .terminal_exit_status(&terminal)
                     .map_err(map_error)?
                     .is_some();
-                Ok(json!({"output": output, "exited": exited}))
+                Ok(TerminalResponse::Resumed { output, exited })
             }
-            (TerminalAction::Resync, TerminalRequest::Resync { terminal }) => self
+            TerminalRequest::Resync { terminal } => self
                 .coordinator
                 .terminal_snapshot(&terminal)
-                .map(|snapshot| json!(snapshot.into_frame(wire)))
+                .map(TerminalResponse::Snapshot)
                 .map_err(map_error),
-            (
-                TerminalAction::Resize,
-                TerminalRequest::Resize {
-                    terminal,
-                    geometry: size,
-                },
-            ) => {
+            TerminalRequest::Resize {
+                terminal,
+                geometry: size,
+            } => {
                 let geometry = geometry(size)?;
                 self.coordinator
                     .resize(&terminal, geometry, &mut self.pty)
-                    .map(|snapshot| json!(snapshot.into_frame(wire)))
+                    .map(TerminalResponse::Snapshot)
                     .map_err(map_error)
             }
-            (
-                TerminalAction::Detach,
-                TerminalRequest::Detach {
-                    terminal,
-                    subscription,
-                },
-            ) => {
+            TerminalRequest::Detach {
+                terminal,
+                subscription,
+            } => {
                 self.coordinator
                     .detach(&terminal, subscription, connection)
                     .map_err(map_error)?;
-                Ok(json!({}))
+                Ok(TerminalResponse::Detached)
             }
-            (
-                TerminalAction::Input,
-                TerminalRequest::Input {
-                    terminal,
-                    subscription,
-                    input_seq,
-                    input_operation,
-                    bytes,
-                },
-            ) => self
+            TerminalRequest::Input {
+                terminal,
+                subscription,
+                input_seq,
+                input_operation,
+                bytes,
+            } => self
                 .input(
                     &terminal,
                     InputRequest {
@@ -399,23 +382,25 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     },
                     &bytes,
                 )
-                .map(|ack| json!({"ack": ack}))
+                .map(TerminalResponse::Input)
                 .map_err(map_error),
-            (
-                TerminalAction::InputOutcome,
-                TerminalRequest::InputOutcome {
-                    terminal,
-                    input_operation,
-                },
-            ) => self
+            TerminalRequest::InputOutcome {
+                terminal,
+                input_operation,
+            } => self
                 .coordinator
                 .input_outcome(&terminal, client, input_operation)
-                .map(input_outcome_body)
+                .map(TerminalResponse::InputOutcome)
                 .map_err(map_error),
-            _ => Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "terminal action does not match its payload",
-            )),
+            TerminalRequest::CompletedInventory { scope } => Ok(
+                TerminalResponse::CompletedInventory(self.coordinator.completed_inventory(&scope)),
+            ),
+            TerminalRequest::Observe { .. } | TerminalRequest::Dismiss { .. } => {
+                Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal visibility request requires the shared owner",
+                ))
+            }
         }
     }
     fn inventory(
@@ -473,18 +458,6 @@ pub(super) fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolErro
             )
         })
 }
-/// Projects a durable input operation lookup onto the wire.
-///
-/// An absent record is `unknown` rather than an error or a fabricated success:
-/// the client keeps its uncertainty latched and must not write the bytes again
-/// (#519).
-pub(super) fn input_outcome_body(ack: Option<super::terminal::InputAck>) -> Value {
-    match ack {
-        Some(ack) => json!({"outcome": "final", "ack": ack}),
-        None => json!({"outcome": "unknown"}),
-    }
-}
-
 fn map_scope_failure(_: TerminalScopeResolveError) -> ProtocolError {
     ProtocolError::new(
         ErrorCode::InvalidArgument,
@@ -537,15 +510,18 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usecase::terminal::SnapshotWire;
+    use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
     use crate::usecase::{
         generation::ProcessIdentity,
         terminal::{PtyWriteError, SpawnFailure, TerminalReconcileState},
     };
     use std::{collections::BTreeMap, path::PathBuf};
     use usagi_core::domain::{
-        id::{SessionId, WorkspaceId, WorktreeId},
+        id::{ClientId, RequestId, SessionId, WorkspaceId, WorktreeId},
         terminal_launch::{DurableTerminalLaunchSnapshot, TerminalLaunchScope, TerminalProfileId},
     };
+    use usagi_core::usecase::client::TerminalAction;
 
     #[derive(Default)]
     struct Store {
@@ -1521,7 +1497,7 @@ mod tests {
     #[test]
     fn malformed_requests_geometry_and_every_error_family_are_typed() {
         let (mut runtime, terminal) = launched_runtime();
-        runtime.disconnect(ConnectionId::new());
+        TerminalOwner::disconnect(&mut runtime, ConnectionId::new());
         let (mut failing_exit, failing_terminal) = launched_runtime();
         failing_exit.store.fail = true;
         assert_eq!(
