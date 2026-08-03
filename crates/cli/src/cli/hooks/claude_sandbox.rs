@@ -3,8 +3,8 @@
 //!
 //! usagi の Claude provisioner が起動 program をこの launcher で包む（`usagi claude-sandbox … --
 //! claude …`）。人手で叩くものではない（`--help` 非表示）。ここは解析済み引数を typed な
-//! [`RunOutcome::ClaudeSandbox`] にまとめるだけの薄いシムで、platform 判定・backend 探索・
-//! `$TMPDIR` / `$HOME` の読み取り・実 exec は合成ルートが束ねる。sandbox 計画の純粋な決定部は
+//! [`RunOutcome::ClaudeSandbox`] にまとめるだけの薄いシムで、daemon bootstrap が確定した backend / policy
+//! path の再検証と実 exec は合成ルートが束ねる。sandbox 計画の純粋な決定部は
 //! [`usagi_core::usecase::claude_sandbox`] にあり、backend 不在・未対応 platform では起動を拒否する
 //! （無保護フォールバックしない）。
 
@@ -20,6 +20,14 @@ use crate::cli::{Run, RunOutcome};
 pub struct ClaudeSandbox {
     /// 起動モード（session / root）。
     pub mode: SandboxMode,
+    /// session workspace の保護対象 root。
+    pub protected_root: Option<PathBuf>,
+    /// daemon bootstrap が確定した backend。launcher 自身は PATH を探索しない。
+    pub backend: Option<PathBuf>,
+    /// daemon bootstrap が確定した temporary directory。
+    pub tmpdir: Option<PathBuf>,
+    /// daemon bootstrap が確定した home directory。
+    pub home: Option<PathBuf>,
     /// sandbox が書き込みを許す起動固有 root。
     pub writable_roots: Vec<PathBuf>,
     /// sandbox の中で exec する program と引数。
@@ -30,6 +38,10 @@ impl Run for ClaudeSandbox {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(RunOutcome::ClaudeSandbox {
             mode: self.mode,
+            protected_root: self.protected_root.clone(),
+            backend: self.backend.clone(),
+            tmpdir: self.tmpdir.clone(),
+            home: self.home.clone(),
             writable_roots: self.writable_roots.clone(),
             command: self.command.clone(),
         })
@@ -75,6 +87,10 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
+                protected_root: None,
+                backend: None,
+                tmpdir: None,
+                home: None,
                 writable_roots: vec![
                     PathBuf::from("/repo/.usagi/sessions/work"),
                     PathBuf::from("/repo/.git"),
@@ -94,6 +110,10 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Root,
+                protected_root: None,
+                backend: None,
+                tmpdir: None,
+                home: None,
                 writable_roots: vec![],
                 command: vec!["claude".to_owned()],
             }

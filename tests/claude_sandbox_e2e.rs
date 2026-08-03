@@ -27,14 +27,41 @@ fn outside_writable_roots() -> PathBuf {
 fn the_launcher_never_lets_a_child_write_outside_its_writable_roots() {
     let outside = outside_writable_roots();
     let denied = outside.join("denied");
-    let allowed = tempfile::Builder::new()
+    let allowed_dir = tempfile::Builder::new()
         .prefix("usagi-sandbox-")
         .tempdir_in("/tmp")
         .expect("short writable root");
+    let allowed = allowed_dir
+        .path()
+        .canonicalize()
+        .expect("canonical writable root");
+    let protected = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .expect("canonical protected root");
+    let tmpdir = allowed.clone();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("test home")
+        .canonicalize()
+        .expect("canonical test home");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .args(["claude-sandbox", "--mode", "session", "--writable-root"])
-        .arg(allowed.path())
+    let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    command
+        .args(["claude-sandbox", "--mode", "session", "--protected-root"])
+        .arg(protected)
+        .arg("--tmpdir")
+        .arg(tmpdir)
+        .arg("--home")
+        .arg(home)
+        .arg("--writable-root")
+        .arg(allowed);
+    #[cfg(target_os = "macos")]
+    command.arg("--backend").arg(
+        PathBuf::from("/usr/bin/sandbox-exec")
+            .canonicalize()
+            .expect("shipping sandbox backend"),
+    );
+    let status = command
         .arg("--")
         .args(["/bin/sh", "-c"])
         .arg(format!("echo escaped > {}", denied.display()))

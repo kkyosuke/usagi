@@ -2,7 +2,7 @@
 //!
 //! Claude は必ず platform sandbox の中で起動する（多層防御の hard boundary）。この module は
 //! 「どの backend を、どの引数で exec するか」だけを決める純粋な決定部で、platform 判定・backend
-//! の探索・`$TMPDIR` / `$HOME` の読み取り・実 exec は合成ルートが束ねる。ここには値だけが渡り、
+//! の bootstrap 解決・policy path の検証・実 exec は合成ルートが束ねる。ここには値だけが渡り、
 //! IO を持たないためユニットテストで全分岐を被覆できる。
 //!
 //! **fail-closed**: sandbox backend が無い、または未対応 platform では [`SandboxPlan::Reject`] を
@@ -77,6 +77,8 @@ pub struct SandboxRequest {
     pub platform: Platform,
     /// 起動モード。
     pub mode: SandboxMode,
+    /// session mode で writable にしてはならない workspace root。
+    pub protected_root: Option<PathBuf>,
     /// 解決済み backend 実行ファイル（macOS: `sandbox-exec` / Linux: `bwrap`）。無ければ `None`。
     pub backend: Option<PathBuf>,
     /// provisioner が起動 scope から渡す writable root。
@@ -128,6 +130,9 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
             argv: program_args.to_vec(),
         };
     }
+    if let Some(reason) = invalid_policy_reason(request) {
+        return SandboxPlan::Reject { reason };
+    }
     let roots = writable_roots(request);
     match request.platform {
         Platform::Unsupported => SandboxPlan::Reject {
@@ -149,6 +154,28 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
             },
         },
     }
+}
+
+fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
+    if request
+        .backend
+        .as_ref()
+        .is_some_and(|backend| !backend.is_absolute())
+    {
+        return Some("sandbox backend が absolute path ではありません".to_owned());
+    }
+    let protected = (request.mode == SandboxMode::Session)
+        .then_some(request.protected_root.as_deref())
+        .flatten();
+    for root in writable_roots(request) {
+        if !root.is_absolute() || root == Path::new("/") {
+            return Some("writable root が安全な absolute path ではありません".to_owned());
+        }
+        if protected.is_some_and(|workspace| workspace.starts_with(&root)) {
+            return Some("writable root が保護対象 workspace の ancestor です".to_owned());
+        }
+    }
+    None
 }
 
 fn reject_backend(backend: &str) -> SandboxPlan {
@@ -299,6 +326,7 @@ mod tests {
         SandboxRequest {
             platform,
             mode: SandboxMode::Session,
+            protected_root: Some(PathBuf::from("/repo")),
             backend: backend.map(PathBuf::from),
             launch_roots: vec![PathBuf::from("/repo/.usagi/sessions/work")],
             tmpdir: Some(PathBuf::from("/tmp/user")),
@@ -452,6 +480,22 @@ mod tests {
         // TMPDIR / HOME が無ければ由来 root は増えない。
         assert!(!roots.iter().any(|root| root.ends_with(".claude")));
         assert_eq!(roots.len(), 2);
+    }
+
+    #[test]
+    fn session_policy_rejects_root_relative_and_workspace_ancestor_write_roots() {
+        for root in ["/", "relative", "/repo"] {
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.launch_roots = vec![PathBuf::from(root)];
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("writable root")),
+                "{root} must be rejected"
+            );
+        }
+        let request = request(Platform::Linux, Some("relative/bwrap"));
+        assert!(plan(&request).into_reject().unwrap().contains("backend"));
     }
 
     #[test]

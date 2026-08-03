@@ -73,6 +73,14 @@ pub enum RunOutcome {
     ClaudeSandbox {
         /// session（worktree 隔離）か root（コーディネータ）か。
         mode: SandboxMode,
+        /// session workspace の保護対象 root。
+        protected_root: Option<PathBuf>,
+        /// daemon bootstrap が確定した canonical sandbox backend。
+        backend: Option<PathBuf>,
+        /// daemon bootstrap が確定した temporary directory。
+        tmpdir: Option<PathBuf>,
+        /// daemon bootstrap が確定した home directory。
+        home: Option<PathBuf>,
         /// sandbox が書き込みを許す起動固有 root（複数指定可）。
         writable_roots: Vec<PathBuf>,
         /// sandbox の中で exec する program と引数（`claude …`）。
@@ -184,6 +192,18 @@ pub enum Command {
         /// 起動モード（session / root）
         #[arg(long)]
         mode: SandboxModeArg,
+        /// session workspace の保護対象 root
+        #[arg(long)]
+        protected_root: Option<PathBuf>,
+        /// daemon bootstrap が確定した canonical sandbox backend
+        #[arg(long)]
+        backend: Option<PathBuf>,
+        /// daemon bootstrap が確定した temporary directory
+        #[arg(long)]
+        tmpdir: Option<PathBuf>,
+        /// daemon bootstrap が確定した home directory
+        #[arg(long)]
+        home: Option<PathBuf>,
         /// sandbox が書き込みを許す起動固有 root（複数指定可）
         #[arg(long = "writable-root")]
         writable_root: Vec<PathBuf>,
@@ -329,10 +349,18 @@ impl Command {
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
             Command::ClaudeSandbox {
                 mode,
+                protected_root,
+                backend,
+                tmpdir,
+                home,
                 writable_root,
                 command,
             } => Box::new(hooks::ClaudeSandbox {
                 mode: mode.into(),
+                protected_root,
+                backend,
+                tmpdir,
+                home,
                 writable_roots: writable_root,
                 command,
             }),

@@ -874,7 +874,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   許す。backend は macOS が `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
   `/var` `/tmp` `/etc` は `/private` 側も許可）、Linux が `bwrap`。backend 不在・未対応 platform では
   **無保護フォールバックせず起動を拒否する**（fail-closed）。sandbox 計画の純粋な決定部は `usagi-core` の
-  [`usecase::claude_sandbox`] にあり、platform / backend / 環境の解決と実 exec は合成ルートが束ねる。
+  [`usecase::claude_sandbox`] にあり、daemon bootstrap が backend を absolute canonical path として一度だけ
+  確定する。launcher は Agent child の `PATH` / `TMPDIR` / `HOME` を policy 解決に使わない。
+  workspace environment の `PATH` / `TMPDIR` / `HOME` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` は secret 解決前に
+  typed admission error として拒否する。writable root は absolute canonical directory・owner・symlink identity と
+  session workspace の protected ancestor を daemon と exec 直前の両境界で検証する。
   この launcher で子を包む指示は非 durable な `SpawnProvision`（`sandbox_launcher`）に載り、durable な launch
   snapshot は素の product program（`claude`）を保つ。
 
@@ -911,7 +915,8 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   は両 mode に配線し、`guard-workspace` は session 起動だけに足す（root の書き込み境界は sandbox が担う）。
 - **`TMPDIR` 伝播**: 拘束された子が自分の一時領域へ書けるよう、`TMPDIR` を公開 terminal 環境
-  （`TERMINAL_ENVIRONMENT_VARIABLES`）に含めて子へ渡す。launcher は同じ値を writable root に足す。
+  （`TERMINAL_ENVIRONMENT_VARIABLES`）に含めて子へ渡す。writable-root policy には daemon bootstrap が
+  trusted environment から独立に確定・検証した canonical path を使う。
 - **テスト専用 seam**: `usagi_core::usecase::claude_sandbox::passthrough_requested` は、環境変数
   `USAGI_CLAUDE_SANDBOX_PASSTHROUGH=1` を見たときだけ launcher が拘束を省いて product をそのまま exec する
   ことを許す。`bwrap` を持たない Linux CI でも live 配線（launcher・`--settings`・PTY ライフサイクル）を
