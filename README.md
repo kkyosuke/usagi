@@ -1,35 +1,248 @@
 # usagi
 
-`usagi` をゼロから作り直す v2 の開発ツリー。リポジトリルートがそのまま v2 の
-Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独立したプロジェクト
-として退避してある。
+<div align="center">
 
-| 場所 | 内容 |
+<pre>
+   (\(\
+   (='-')     ╻ ╻ ┏━┓ ┏━┓ ┏━╸ ╻
+  o(_(")(")   ┃ ┃ ┗━┓ ┣━┫ ┃╺┓ ┃
+              ┗━┛ ┗━┛ ╹ ╹ ┗━┛ ╹
+</pre>
+
+**AI エージェントの並列開発を、セッション・worktree・端末ごと束ねる TUI / CLI**
+
+複数の AI エージェントを隔離された worktree で動かし、作業の委譲から PR の確認までを
+ひとつの画面で進める。
+
+[![Test](https://github.com/KKyosuke/usagi/actions/workflows/test.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/test.yml)
+[![Coverage](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+
+</div>
+
+> この README はフルリライト中の **v2** を説明する。現在 GitHub Releases で配布している
+> バイナリは [v1](v1/README.md) であり、v2 はリポジトリルートからソースで実行する。
+
+## usagi でできること
+
+- リポジトリごとに workspace を登録し、Welcome 画面から切り替える。
+- 作業単位ごとに `.usagi/sessions/<name>/` の git worktree を作り、変更を隔離する。
+- Claude、Codex、Sakana AI の Agent と通常の terminal を daemon 管理の PTY で動かす。
+- TUI を閉じても daemon 上の Agent と terminal を継続し、次回 attach または明示 resume する。
+- session の状態、Git 差分、PR、ノートを Home 画面で確認する。
+- AI エージェントへ MCP 経由で issue、memory、session の委譲・観測ツールを公開する。
+- session role、環境変数、利用する Agent、issue / memory ツールの有効・無効を設定する。
+
+設計上の位置づけと現在の実装範囲は
+[プロジェクト概要](document/01-overview.md)、画面とキー操作の詳細は
+[TUI 仕様](document/03-tui.md)を参照する。
+
+## 画面
+
+`usagi` を起動すると Welcome 画面を表示する。登録済み workspace を **Open** から選ぶほか、
+最近使った workspace を **Recent** から直接開き、**New** で既存リポジトリの登録または clone、
+**Config** で全体設定の編集ができる。
+
+workspace を開くと Home へ移り、左側に session、右側に選択した session の Preview / Terminal /
+Diff / Notes と live pane を表示する。
+
+```text
+┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ─────┐
+│   feature-login      │                                          │
+│   12m ago  #42  +18  │  選択中 session の情報・端末・差分       │
+│ > review-auth        │                                          │
+│   now      ↑1   +4   │  Agent と shell は daemon-owned PTY で   │
+│   + new session      │  動き、TUI はここへ attach する           │
+└──────────────────────┴──────────────────────────────────────────┘
+```
+
+Home の基本操作は次のとおり。
+
+| 操作 | 動作 |
 |---|---|
-| `/`（ルート） | v2 の実装。CI（fmt / clippy / test / coverage 100%）の対象 |
-| `v1/` | 退避した旧実装。仕様ドキュメント（`v1/document/`）ごと独立した Cargo プロジェクトで、ルートの workspace から exclude され、専用の CI で検証する |
+| `↑` / `↓`、`j` / `k` | session を選ぶ |
+| `←` / `→`、`h` / `l` | Preview / Terminal / Diff / Notes を切り替える |
+| `Enter` / `t` | 選択した session の Closeup を開く |
+| `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
+| `:` | Overview のコマンドパレットを開く |
+| `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
+| `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
-## 構成（v2）
+live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
+daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
+[workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
 
-「TUI 面 / daemon 面 / 入口面（CLI・MCP）/ 共通（common）」の 4 クレート＋合成ルートの
-Cargo workspace。各クレート内はクリーンアーキテクチャの依存方向を守る（正本は
-[document/02-architecture.md](document/02-architecture.md)）。
+## 必要なもの
 
+- Rust / Cargo（`rust-toolchain.toml` で必要な nightly toolchain を固定）
+- Git
+- 起動する Agent の CLI（必要なものだけ）
+  - Claude: `claude`
+  - OpenAI Codex: `codex`
+  - Sakana AI: `codex-fugu`
+
+v2 の daemon IPC と PTY 管理は Unix transport を使うため、現行の主要な実行対象は macOS / Linux である。
+
+## インストール
+
+v2 はまだ GitHub Releases の配布対象ではない。リポジトリを clone し、ルートからビルドする。
+
+```bash
+git clone https://github.com/KKyosuke/usagi.git
+cd usagi
+cargo build --release
 ```
+
+生成されるバイナリは `target/release/usagi` にある。Cargo の bin directory へ導入する場合は次を使う。
+
+```bash
+cargo install --path . --locked
+```
+
+配布中の v1 を使う場合は [v1 の Installation](v1/README.md#installation) を参照する。
+
+### Tab 補完
+
+`usagi completion <shell>` は、CLI 定義から補完スクリプトを標準出力へ生成する。
+
+```bash
+source <(usagi completion bash)
+usagi completion zsh > ~/.zfunc/_usagi
+usagi completion fish > ~/.config/fish/completions/usagi.fish
+```
+
+## Quick Start
+
+### 1. workspace を開く
+
+対象のリポジトリを登録して直接開く。
+
+```bash
+usagi open /path/to/project
+```
+
+引数を省略するとカレントディレクトリを開く。次回からは `usagi` の Welcome にある Open / Recent
+から選べる。新しいリポジトリを clone したい場合は Welcome の New を使う。
+
+### 2. session を作る
+
+Home の `+ new session` を選んで名前を入力するか、コマンドパレットで作成する。
+
+```text
+session create feature-login
+```
+
+CLI から daemon へ直接依頼することもできる。
+
+```bash
+usagi session create feature-login
+usagi session create review-auth --role reviewer
+```
+
+session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
+role は作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
+詳細は [session role](document/10-session-roles.md)を参照する。
+
+### 3. Agent または terminal を開く
+
+session を選んで Closeup に入り、`agent` または `terminal` を実行する。新しい pane は daemon が所有し、
+TUI は live output を表示して入力を転送する。TUI を終了しても process は daemon 上で継続する。
+
+Agent の選択例:
+
+```text
+agent             # workspace の既定 Agent
+agent -m claude
+agent -m codex
+agent -m sakana.ai
+terminal
+```
+
+daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
+`session resume <name>` で明示的に再開する。
+
+### 4. 状態と PR を確認する
+
+session の 2 行目には最終利用時刻、PR、base branch との差分を表示する。`p` で PR 一覧、`d` で diff、
+`n` で session の scratchpad を開く。PR を選んで Enter を押すと既定のブラウザで開く。
+
+## AI エージェントとの連携
+
+daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、
+次のような操作を行える。
+
+| 系統 | 用途 |
+|---|---|
+| `session_*` | session の作成・削除・状態確認、prompt 配送、別 Agent への委譲 |
+| `issue_*` | git で共有する `.usagi/issues/` のタスクを検索・更新する |
+| `memory_*` | git で共有する `.usagi/memory/` の知識を保存・検索する |
+| `agent_*` | 委譲した worker の完了報告と inbox を扱う |
+| `user_decision_*` | Agent から利用者へ判断を依頼し、TUI で回答する |
+| `supervisor_*` | 複数 step の durable な実行・再試行・確認を管理する |
+
+issue / memory tool は workspace 設定で無効化できる。MCP の公開 tool、認証、daemon への反映経路は
+[MCP サーバ仕様](document/07-mcp.md)が正本である。
+
+## 設定
+
+Welcome の Config は全体設定、workspace のコマンドパレットにある `config` はその workspace の設定を編集する。
+
+| 設定 | 内容 |
+|---|---|
+| Theme / Modal mode | TUI の配色と Overview / Closeup の操作方式 |
+| Agent | 新しい Agent pane の既定 CLI |
+| Issue / Memory | 対応する MCP tool 群の公開可否 |
+| Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
+| Roles | session / root ごとの追加 instruction と既定 role |
+
+環境変数は Overview の `env [workspace|global]` で編集する。同名の値は workspace 側が優先され、
+`op://vault/item/field` は 1Password CLI で解決してから子プロセスへ渡される。secret 本体は設定ファイルに保存しない。
+保存場所、解決順序、予約変数は [環境変数設定](document/09-env.md)を参照する。
+
+## CLI
+
+| コマンド | 用途 |
+|---|---|
+| `usagi` / `usagi hop` | Welcome TUI を開く |
+| `usagi open [path]` | workspace を登録して直接開く |
+| `usagi config` | Global Config を開く |
+| `usagi doctor` | 必要ツールの診断画面を開く |
+| `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
+| `usagi completion <shell>` | shell 補完を生成する |
+| `usagi version` / `usagi --version` | version を表示する |
+| `usagi session ...` | daemon-owned session を作成・削除・resume する |
+| `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
+| `usagi daemon install-service` | macOS の LaunchAgent として daemon を登録する |
+
+`stop` / `restart` は live Agent や terminal があると拒否する。巻き添えにしてよい場合だけ `--force` を付ける。
+macOS 以外では LaunchAgent の install / uninstall は利用できない。全コマンドの現在の動作は
+[実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
+
+> 現在の公開 release は v1 である。ソースから起動した v2 で `usagi update` を実行すると、公開中の
+> v1 バイナリがインストールされる。
+
+## アーキテクチャ
+
+v2 は TUI、daemon、CLI / MCP、共通ロジックを分離した 4 クレートと、実 IO を束ねる合成ルートで構成する。
+
+```text
 .
-├── Cargo.toml          # workspace ルート ＋ 配布バイナリ usagi（bin）のパッケージ
-├── src/
-│   └── main.rs         # 合成ルート。実 IO をここで束ね、各面へ dispatch する
+├── Cargo.toml          # workspace と配布バイナリ usagi
+├── src/                # 合成ルート: process / terminal / OS IO
 └── crates/
-    ├── core/           # usagi-core: 共通の domain / usecase / 共有 infrastructure
-    ├── cli/            # usagi-cli: 入口面。CLI サブコマンドと MCP サーバ（usagi-core にのみ依存）
-    ├── daemon/         # usagi-daemon: daemon 面（usagi-core にのみ依存）
-    └── tui/            # usagi-tui: TUI 面（usagi-core にのみ依存）
+    ├── core/           # domain / usecase / 共有 infrastructure
+    ├── cli/            # CLI と stdio MCP server
+    ├── daemon/         # session・Agent・PTY の authority
+    └── tui/            # 純粋な TUI state・描画・入力処理
 ```
 
-## 開発
+実行面同士は直接依存せず `usagi-core` の型と port を介する。依存方向、各クレートの責務、process argv
+contract は [アーキテクチャ](document/02-architecture.md)が正本である。
 
-リポジトリルートで実行する。toolchain は `rust-toolchain.toml` が nightly に固定する。
+## Development
+
+toolchain は `rust-toolchain.toml` に固定されている。リポジトリルートで実行する。
 
 | 目的 | コマンド |
 |---|---|
@@ -39,28 +252,23 @@ Cargo workspace。各クレート内はクリーンアーキテクチャの依�
 | テスト | `cargo test --workspace --quiet` |
 | 実行 | `cargo run -- [args]` |
 
-どの gate をいつ通すか（編集中・commit 前・push 前、および CI に一本化した重い full gate）は
-[document/06-conventions.md の品質チェック](document/06-conventions.md#品質チェックリスク比例の-gate)が正本である。
+変更中・commit 前・CI で必要な gate は異なる。coverage 100% を含む品質基準、ブランチ、コミット、PR、
+リリースの規約は [開発規約](document/06-conventions.md)を正本とする。v2 の仕様ドキュメント全体は
+[document/README.md](document/README.md)から参照できる。
 
-現在のコマンド動作（CLI・TUI・daemon）は
-[v2 の実装状態](document/01-overview.md#現在の実装状態)を参照する。
+## v1
 
-## 方針
-
-- 実 IO（標準入出力・サブプロセス・端末・PTY）は引数やジェネリックで注入し、
-  本物の IO は `src/main.rs` で束ねる。ロジックはすべてユニットテスト可能に保つ
-  （テストカバレッジ 100% を維持する）。
-- 依存クレートは必要になった時点で追加する（v1 の依存を先回りで持ち込まない）。
-- コミット・PR・品質チェックの規約は [document/06-conventions.md](document/06-conventions.md) に従う。
-
-## v1 を使う・参照する
-
-退避した v1 は `v1/` 配下でそのまま完結してビルドできる。
+旧実装は [v1/](v1/README.md) に、仕様書を含む独立した Cargo プロジェクトとして退避している。
+ルート workspace のビルド対象には含まれない。
 
 ```bash
 cd v1
 cargo build --release
 ```
 
-機能・画面・データ仕様のリファレンスは [v1/README.md](v1/README.md) と
-[v1/document/](v1/document/README.md) を参照する。
+v1 のコマンド、画面、データ構造、orchestration を参照するときは
+[v1 ドキュメント](v1/document/README.md)を使う。退避版は v1 実装のスナップショットであり更新しない。
+
+## License
+
+[MIT](LICENSE)

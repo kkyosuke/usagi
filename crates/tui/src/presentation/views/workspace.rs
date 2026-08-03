@@ -164,8 +164,13 @@ pub struct HomeProjection {
     sessions: Vec<ProjectedSession>,
     selected: Selection,
     active: Option<SessionId>,
+    /// Session drawn in the right pane. Switch previews the row under the
+    /// cursor; every other case shows the command target ([`preview_session`]).
+    preview: Option<SessionId>,
     mode: HomeMode,
-    active_phase: TargetPhase,
+    /// Phase line of the previewed session, not of the command target: the right
+    /// pane is one surface and must not mix two sessions' material.
+    preview_phase: TargetPhase,
     feedback: Option<Feedback>,
     mascot_tick: u64,
     /// Presentation-only message. Runtime state currently supplies `None`; this
@@ -294,15 +299,17 @@ impl HomeProjection {
             .create_session_form()
             .and_then(CreateSessionForm::selected_role)
             .map(|role| role.id.to_string());
+        let preview = preview_session(state);
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
             selected: state.selected(),
             active: state.active(),
+            preview,
             mode: match state.route() {
                 crate::usecase::application::controller::Route::Home(mode) => mode,
             },
-            active_phase: state.active().map_or(TargetPhase::Absent, |session| {
+            preview_phase: preview.map_or(TargetPhase::Absent, |session| {
                 state.phase_for(Target::Session(session))
             }),
             feedback: state.feedback().cloned(),
@@ -515,7 +522,17 @@ impl HomeProjection {
     }
 
     fn active_label(&self) -> &str {
-        match self.active {
+        self.session_label(self.active)
+    }
+
+    /// Label of the session the right pane previews. Switch names the row under
+    /// the cursor; Closeup names the target it operates on.
+    fn preview_label(&self) -> &str {
+        self.session_label(self.preview)
+    }
+
+    fn session_label(&self, session: Option<SessionId>) -> &str {
+        match session {
             Some(id) => self
                 .sessions
                 .iter()
@@ -524,6 +541,24 @@ impl HomeProjection {
             None => "No session selected",
         }
     }
+}
+
+/// The session the right pane previews.
+///
+/// Switch owns sidebar navigation, so its right pane follows the cursor: moving
+/// it is how the user looks at another session before choosing to act on it.
+/// Every other case — Closeup, the `+ new session` action row, an open Director
+/// drawer — shows the command target instead. `WorkspaceRuntime::preview_pane`
+/// resolves the same session so the tab strip and the header name one session.
+fn preview_session(state: &AppState) -> Option<SessionId> {
+    let crate::usecase::application::controller::Route::Home(mode) = state.route();
+    if mode == HomeMode::Switch
+        && !state.director_drawer_open()
+        && let Selection::Target(Target::Session(session)) = state.selected()
+    {
+        return Some(session);
+    }
+    state.active()
 }
 
 fn pane_tab_label(tab: &PaneTab) -> String {
@@ -827,6 +862,11 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
         Style::new().dim().paint(" > "),
         Role::Success.style().bold().paint(&home.workspace_name),
     );
+    // The drawer button reads as one more entry in the same right-hand strip as
+    // the mode toggle, so it follows the toggle's active/inactive contrast: the
+    // accent belongs to whatever is currently in front. A closed drawer is dim
+    // like an unselected mode; an open one takes the accent plus reverse so the
+    // frontmost surface is unambiguous.
     let director = if home.director_drawer.is_some() {
         Role::Accent
             .style()
@@ -834,9 +874,8 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .reverse()
             .paint(&format!("[ {DIRECTOR_ICON} director ]"))
     } else {
-        Role::Accent
-            .style()
-            .bold()
+        Style::new()
+            .dim()
             .paint(&format!("[ {DIRECTOR_ICON} director ]"))
     };
     let notice = (!home.unread_decision_ids.is_empty())
@@ -1774,9 +1813,14 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     };
     let header = format!(
         " {}",
-        Role::Accent.style().bold().paint(home.active_label())
+        Role::Accent.style().bold().paint(home.preview_label())
     );
-    let footer_hint = format!("[{mode}] active pane");
+    // Switch's pane is a read-only preview of the hovered row, so it says so:
+    // the pane the user is looking at is not yet the one commands act on.
+    let footer_hint = match home.mode {
+        HomeMode::Switch => format!("[{mode}] preview pane"),
+        HomeMode::Closeup => format!("[{mode}] active pane"),
+    };
     let footer = Style::new()
         .dim()
         .paint(&widgets::clip_to_width(&footer_hint, width));
@@ -1835,7 +1879,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
                 &home.pane_detail.as_ref().map_or_else(
-                    || format!("  agent: {}", phase_label(home.active_phase)),
+                    || format!("  agent: {}", phase_label(home.preview_phase)),
                     |detail| format!("  agent: {detail}"),
                 ),
                 width,
@@ -2086,6 +2130,40 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn home_header_director_button_is_dim_until_its_drawer_is_frontmost() {
+        // The accent in the right-hand strip marks what is in front. A closed
+        // drawer must read like an unselected mode chip (dim) in both Home
+        // modes, so it cannot compete with the active mode for attention.
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let dim_button = Style::new()
+            .dim()
+            .paint(&format!("[ {DIRECTOR_ICON} director ]"));
+        let accent_button = Role::Accent
+            .style()
+            .bold()
+            .reverse()
+            .paint(&format!("[ {DIRECTOR_ICON} director ]"));
+
+        let mut closed = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[]);
+        assert!(home_header_layout(80, &closed).line.ends_with(&dim_button));
+        closed.mode = HomeMode::Closeup;
+        assert!(home_header_layout(80, &closed).line.ends_with(&dim_button));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let mut open = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[]);
+        assert!(home_header_layout(80, &open).line.ends_with(&accent_button));
+        open.mode = HomeMode::Closeup;
+        assert!(home_header_layout(80, &open).line.ends_with(&accent_button));
+
+        // The clipped narrow-width fallback drops the mode toggle but keeps the
+        // same closed-state dimming, so the button never brightens as it shrinks.
+        let clipped = home_header_layout(10, &closed).line;
+        assert!(clipped.starts_with("\u{1b}[2m"));
+        assert!(!clipped.contains("36"));
     }
 
     #[test]
@@ -3416,6 +3494,52 @@ mod tests {
         let name = right_header.find("session").expect("session name");
         let tab = right_header.find("Agent").expect("agent tab");
         assert!(name < tab);
+    }
+
+    #[test]
+    fn switch_names_the_hovered_session_in_the_right_pane_and_closeup_names_the_target() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let sessions = [
+            projected_session(first, "first", "/work/first"),
+            projected_session(second, "second", "/work/second"),
+        ];
+        let mut state = AppState::home(workspace, vec![first, second]);
+        // Activate the first session, then return to Switch and hover the second.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.active(), Some(first));
+
+        let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions);
+        let frame = render_home(18, 100, &switch);
+        let right = |frame: &[String], row: usize| {
+            strip(&frame[row])
+                .split_once('│')
+                .expect("pane divider")
+                .1
+                .to_owned()
+        };
+        // The right pane follows the cursor, not the target Closeup would act on.
+        assert!(right(&frame, CHROME_ROWS).contains("second"));
+        assert!(!right(&frame, CHROME_ROWS).contains("first"));
+        // …and says so, because the hovered pane is not yet the command target.
+        assert!(
+            frame
+                .iter()
+                .any(|line| strip(line).contains("preview pane"))
+        );
+        assert!(!frame.iter().any(|line| strip(line).contains("active pane")));
+
+        // Entering Closeup makes the hovered session the target; the pane header
+        // is unchanged, and the footer now names an active pane.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.active(), Some(second));
+        let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions);
+        let frame = render_home(18, 100, &closeup);
+        assert!(right(&frame, CHROME_ROWS).contains("second"));
+        assert!(frame.iter().any(|line| strip(line).contains("active pane")));
     }
 
     /// The right pane is bright only while it owns input: a Closeup route whose

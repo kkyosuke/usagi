@@ -13,6 +13,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
+  - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
 - [指示モード（Director mode）](#指示モードdirector-mode)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
@@ -277,6 +278,26 @@ Overview、Closeup action、PR、preview、text、notes、
 environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
 
+### Switch の右ペインは cursor の preview
+
+Switch は左 sidebar が navigation を持つため、右ペインは cursor（hover）が指す session の preview である。
+見出しの session 名、tab strip、agent phase 行、live terminal の viewport はいずれも cursor 行に追従し、
+footer は `[Switch] preview pane` と表示して、まだ command の対象ではないことを示す。Closeup は active
+managed session を描き、footer は `[Closeup] active pane` になる。
+
+| mode / cursor 行 | 右ペインが描く対象 |
+|---|---|
+| Switch・session 行 | その session（cursor が指す hover 対象） |
+| Switch・`+ new session` 行 | active managed session（session を指していないため target へ退避する） |
+| Switch・Director drawer が開いている | active managed session（drawer が前面の handoff を所有する） |
+| Closeup | active managed session |
+
+preview は表示だけを移し、command target（active）と live PTY 入力の宛先は動かさない。cursor の移動が
+active を変えないのは [Home と target](#home-と-target) のとおりで、Switch は PTY へキーを流さないため、
+入力は常に active target の focus 済み tab へ向かう。一度も開かれていない session を hover した場合は、
+未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
+追従するため、同時に attach する live terminal は従来どおり 1 つである。
+
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
 editor を表示する。Esc は editor から一覧へ戻り、一覧では overlay を閉じるだけで durable decision を変更しない。
@@ -395,6 +416,11 @@ Unicode display width による clip と hit-test を維持する。workspace br
 pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
 そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
 と hit-test は同じ terminal cell を指す。
+
+button の強調は mode toggle と同じ「前面にある面がアクセント」の対比に従う。drawer が閉じているときは
+選択されていない mode chip と同じ dim で描き、Switch / Closeup のどちらでも accent を持たない。drawer を開いた
+frame だけ accent + reverse になり、前面の面が一意に読める。狭幅で mode toggle を落として button だけを
+clip する場合も、この対比は変わらない。
 
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
@@ -1174,6 +1200,9 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
 - **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付ける。
   default の CLI が install されていない場合は `the configured agent CLI is not installed` として拒否する。
+- daemon が CLI の未認証・readiness 不成立などで起動を拒否した場合は、daemon が返した安全な復旧理由を error modal に
+  表示する。protocol rejection を接続失敗へ置き換えないため、`agent -m codex` では install・sign-in を確認して再試行
+  すべきことを画面上で判断できる。
 - **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m sak` → `agent -m sakana.ai`、
   `agent --` → `agent --model` のように候補が 1 つなら確定し、**候補が複数のときは Tab を押すたびに巡回する**
   （`agent -m c` → `agent -m claude` → `agent -m codex` → `agent -m claude`）。曖昧さで Tab が無反応になることはない。

@@ -30,8 +30,8 @@ use crate::presentation::views::workspace::{
 };
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, DirectorNew, Effect, HomeMode, Overlay, Route, TabDirection,
-    Target, update,
+    AppEvent, AppKey, AppState, DirectorNew, Effect, HomeMode, Overlay, Route, Selection,
+    TabDirection, Target, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -173,6 +173,64 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn panes(&self) -> &PaneRegistry {
         &self.panes
+    }
+
+    /// The session the right pane previews, when it is not the command target.
+    ///
+    /// Switch owns sidebar navigation, so its right pane follows the row under
+    /// the cursor instead of the target Closeup last operated on: moving the
+    /// cursor is how the user looks at another session. `None` keeps the active
+    /// target's pane, which covers Closeup, the `+ new session` action row, and
+    /// an open Director drawer (the drawer's own foreground handoff owns the
+    /// registry's active entry and must not be overridden by a hover).
+    fn preview_session(&self) -> Option<SessionId> {
+        if self.state.director_drawer_open()
+            || !matches!(self.state.route(), Route::Home(HomeMode::Switch))
+        {
+            return None;
+        }
+        match self.state.selected() {
+            Selection::Target(Target::Session(session)) => Some(session),
+            Selection::Target(Target::Root(_)) | Selection::NewSession => None,
+        }
+    }
+
+    /// The pane state the right pane draws this frame.
+    ///
+    /// Closeup draws the managed target it operates on; Switch draws the hovered
+    /// session's pane. A hovered session the registry has never opened has no
+    /// entry, so it draws the same inert empty pane as an unopened target.
+    #[must_use]
+    pub fn preview_pane(&self) -> &PaneState {
+        match self.preview_session() {
+            Some(session) => self
+                .panes
+                .pane(Target::Session(session))
+                .unwrap_or_else(|| self.panes.inactive_pane()),
+            None => self.managed_pane(),
+        }
+    }
+
+    /// The live terminal the right pane draws and the shell keeps attached.
+    ///
+    /// This is [`Self::focused_terminal`] except while Switch previews another
+    /// session, where it is that session's selected live tab. Live PTY input
+    /// stays on [`Self::focused_terminal`]: Switch never routes keystrokes into
+    /// a terminal ([`Self::wants_live_input`]), so the preview only moves which
+    /// terminal the shell attaches to for output.
+    #[must_use]
+    pub fn preview_terminal(&self) -> Option<TerminalRef> {
+        let Some(session) = self.preview_session() else {
+            return self.focused_terminal();
+        };
+        match self.panes.pane(Target::Session(session))?.selected() {
+            PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal.clone()),
+            PaneSelection::Tab(
+                TabSelection::Pending(_) | TabSelection::Ready(_) | TabSelection::Interrupted(_),
+            )
+            | PaneSelection::Target(_)
+            | PaneSelection::None => None,
+        }
     }
 
     /// Bypass runtime admission in tests so presentation tests can prove their
@@ -1357,7 +1415,7 @@ impl WorkspaceRuntime {
         let root_cwd = root_cwd.into();
         let projection =
             HomeProjection::from_state(&self.state, workspace_name, &root_cwd, sessions)
-                .with_pane(self.managed_pane())
+                .with_pane(self.preview_pane())
                 .with_metrics(metrics)
                 .with_git_diffs(git_diffs)
                 .with_terminal_view(
@@ -2036,6 +2094,96 @@ mod tests {
         // Completion promotes the tab but does not steal focus; focusing it does.
         let _ = runtime.focus_terminal(target, terminal.clone());
         assert_eq!(runtime.focused_terminal(), Some(terminal));
+    }
+
+    /// Drive two sessions into Switch with a live terminal opened on the first,
+    /// leaving the cursor on the first row and `first` both active and hovered.
+    fn switch_with_a_live_first_session(
+        workspace: WorkspaceId,
+        first: SessionId,
+        second: SessionId,
+    ) -> (WorkspaceRuntime, TerminalRef) {
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![first, second]);
+        let target = Target::Session(first);
+        let _ = runtime.handle_key(Key::Enter); // Closeup on the first session
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, first);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        let _ = runtime.focus_terminal(target, terminal.clone());
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO)); // back to Switch
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+        assert_eq!(runtime.state().active(), Some(first));
+        (runtime, terminal)
+    }
+
+    #[test]
+    fn switch_previews_the_hovered_session_instead_of_the_command_target() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let (mut runtime, terminal) = switch_with_a_live_first_session(workspace, first, second);
+
+        // The cursor still rests on the active session, so the preview is the
+        // pane Closeup would operate on.
+        assert_eq!(runtime.preview_terminal(), Some(terminal.clone()));
+        assert_eq!(runtime.preview_pane().tabs().len(), 1);
+
+        // Hovering the second session previews that session instead. It has
+        // never been opened, so its pane is the inert empty one — while the
+        // command target, and therefore live input, stays on the first session.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
+        assert!(runtime.preview_pane().tabs().is_empty());
+        assert_eq!(runtime.preview_terminal(), None);
+        assert_eq!(runtime.state().active(), Some(first));
+        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+
+        // The `+ new session` row names no session, so the preview falls back to
+        // the command target rather than blanking the pane.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
+        assert_eq!(runtime.preview_pane().tabs().len(), 1);
+        assert_eq!(runtime.preview_terminal(), Some(terminal.clone()));
+
+        // Hovering the first session again previews its live tab.
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Up));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Up));
+        assert_eq!(runtime.preview_terminal(), Some(terminal));
+    }
+
+    #[test]
+    fn a_hovered_session_without_a_live_tab_previews_no_terminal() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let (mut runtime, _) = switch_with_a_live_first_session(workspace, first, second);
+
+        // Give the second session a pending tab: the registry now has an entry
+        // for it, but its selection is not a live tab.
+        let target = Target::Session(second);
+        let _ = runtime.request_pane(target, OperationId::new(), PaneKind::Agent);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
+        assert_eq!(runtime.preview_pane().tabs().len(), 1);
+        assert_eq!(runtime.preview_terminal(), None);
+    }
+
+    #[test]
+    fn an_open_director_drawer_keeps_the_preview_on_its_own_foreground() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let (mut runtime, _) = switch_with_a_live_first_session(workspace, first, second);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Down)); // hover the second session
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert!(runtime.state().director_drawer_open());
+
+        // The drawer owns the foreground handoff, so a sidebar hover must not
+        // move the previewed pane or terminal out from under it.
+        assert_eq!(runtime.preview_terminal(), runtime.focused_terminal());
+        assert_eq!(runtime.preview_pane().tabs().len(), 1);
+        assert_eq!(runtime.preview_pane().tabs(), runtime.managed_pane().tabs());
     }
 
     #[test]
