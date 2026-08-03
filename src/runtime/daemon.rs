@@ -139,8 +139,7 @@ use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
 };
 use usagi_daemon::usecase::terminal::{
-    Geometry, Output, PtyWriteError, PtyWriter, SnapshotWire, SpawnFailure,
-    output_pipeline_counters,
+    Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
 };
 use usagi_daemon::usecase::terminal_ipc::{
     GENERIC_TERMINAL_LIMIT, GenericTerminalRuntime, ResolvedTerminalScope,
@@ -1249,25 +1248,13 @@ impl DecisionWaker for DeferredDecisionWaker {
 /// safe unavailable error rather than a client-side fallback.
 struct SharedAgent(SharedAgentRuntime);
 impl AgentTerminalActor for SharedAgent {
-    fn handle_terminal(
+    fn handle(
         &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
+        context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
         request: usagi_core::usecase::client::TerminalRequest,
-        wire: SnapshotWire,
     ) -> TerminalOutcome {
         match self.0.lock() {
-            Ok(mut agent) => AgentTerminalActor::handle_terminal(
-                &mut *agent,
-                connection,
-                client,
-                request_id,
-                action,
-                request,
-                wire,
-            ),
+            Ok(mut agent) => AgentTerminalActor::handle(&mut *agent, context, request),
             Err(_) => {
                 TerminalOutcome::Handled(Err(usagi_core::infrastructure::ipc::ProtocolError::new(
                     usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
@@ -1873,16 +1860,15 @@ fn process_resource_usage() -> Option<(u64, u64)> {
 
 type SharedMetricsBroker = Arc<Mutex<MetricsBroker>>;
 type SharedProcessResourceSampler = Arc<Mutex<ProcessResourceSampler>>;
-impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
-    fn request(
+impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
+    fn handle(
         &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
-        payload: serde_json::Value,
-        wire: SnapshotWire,
-    ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
+        request: usagi_core::usecase::client::TerminalRequest,
+    ) -> Result<
+        usagi_daemon::usecase::terminal_owner::TerminalResponse,
+        usagi_core::infrastructure::ipc::ProtocolError,
+    > {
         self.0
             .lock()
             .map_err(|_| {
@@ -1891,7 +1877,7 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
                     "terminal owner is unavailable",
                 )
             })?
-            .request(connection, client, request_id, action, payload, wire)
+            .handle(context, request)
     }
     fn inventory(
         &self,
@@ -8803,10 +8789,34 @@ mod tests {
     use usagi_core::usecase::client::{
         TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
     };
-    use usagi_daemon::presentation::ipc::TerminalOwner;
+    use usagi_daemon::presentation::ipc::encode_terminal_response;
+    use usagi_daemon::usecase::terminal::SnapshotWire;
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+    use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
+
+    fn request_terminal_json(
+        owner: &mut dyn TerminalOwner,
+        connection: ConnectionId,
+        client: ClientId,
+        request_id: RequestId,
+        _action: TerminalAction,
+        payload: serde_json::Value,
+        wire: SnapshotWire,
+    ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        let request = serde_json::from_value(payload).unwrap();
+        owner
+            .handle(
+                TerminalRequestContext {
+                    connection,
+                    client,
+                    request: request_id,
+                },
+                request,
+            )
+            .map(|response| encode_terminal_response(response, wire))
+    }
 
     fn daemon_test_info() -> AppInfo {
         AppInfo {
@@ -12972,36 +12982,32 @@ instructions = "{instructions}"
             launch_operation: None,
         };
         let terminal: TerminalRef = serde_json::from_value(
-            runtime
-                .lock()
-                .unwrap()
-                .request(
-                    connection,
-                    client,
-                    RequestId::new(),
-                    TerminalAction::Launch,
-                    serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap()["terminal"]
-                .clone(),
-        )
-        .unwrap();
-        let subscription = runtime
-            .lock()
-            .unwrap()
-            .request(
+            request_terminal_json(
+                &mut *runtime.lock().unwrap(),
                 connection,
                 client,
                 RequestId::new(),
-                TerminalAction::Attach,
-                serde_json::to_value(TerminalRequest::Attach {
-                    terminal: terminal.clone(),
-                })
-                .unwrap(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
                 SnapshotWire::RawTail,
             )
-            .unwrap()["subscription"]
+            .unwrap()["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        let subscription = request_terminal_json(
+            &mut *runtime.lock().unwrap(),
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            serde_json::to_value(TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            })
+            .unwrap(),
+            SnapshotWire::RawTail,
+        )
+        .unwrap()["subscription"]
             .as_u64()
             .unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -13037,7 +13043,8 @@ instructions = "{instructions}"
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                runtime.lock().unwrap().request(
+                request_terminal_json(
+                    &mut *runtime.lock().unwrap(),
                     connection,
                     client,
                     RequestId::new(),
@@ -13059,61 +13066,55 @@ instructions = "{instructions}"
 
         let exit_connection = ConnectionId::new();
         let exit_client = ClientId::new();
-        let exit_subscription = runtime
-            .lock()
-            .unwrap()
-            .request(
-                exit_connection,
-                exit_client,
-                RequestId::new(),
-                TerminalAction::Attach,
-                serde_json::to_value(TerminalRequest::Attach {
-                    terminal: terminal.clone(),
-                })
-                .unwrap(),
-                SnapshotWire::RawTail,
-            )
-            .unwrap()["subscription"]
+        let exit_subscription = request_terminal_json(
+            &mut *runtime.lock().unwrap(),
+            exit_connection,
+            exit_client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            serde_json::to_value(TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            })
+            .unwrap(),
+            SnapshotWire::RawTail,
+        )
+        .unwrap()["subscription"]
             .as_u64()
             .unwrap();
-        runtime
-            .lock()
-            .unwrap()
-            .request(
-                exit_connection,
-                exit_client,
-                RequestId::new(),
-                TerminalAction::Input,
-                serde_json::to_value(TerminalRequest::Input {
-                    terminal: terminal.clone(),
-                    subscription: exit_subscription,
-                    input_seq: 0,
-                    input_operation: None,
-                    bytes: b"exit\n".to_vec(),
-                })
-                .unwrap(),
-                SnapshotWire::RawTail,
-            )
-            .unwrap();
+        request_terminal_json(
+            &mut *runtime.lock().unwrap(),
+            exit_connection,
+            exit_client,
+            RequestId::new(),
+            TerminalAction::Input,
+            serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription: exit_subscription,
+                input_seq: 0,
+                input_operation: None,
+                bytes: b"exit\n".to_vec(),
+            })
+            .unwrap(),
+            SnapshotWire::RawTail,
+        )
+        .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let response = runtime
-                .lock()
-                .unwrap()
-                .request(
-                    connection,
-                    client,
-                    RequestId::new(),
-                    TerminalAction::Resume,
-                    serde_json::to_value(TerminalRequest::Resume {
-                        terminal: terminal.clone(),
-                        after_offset: 0,
-                    })
-                    .unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap();
+            let response = request_terminal_json(
+                &mut *runtime.lock().unwrap(),
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Resume,
+                serde_json::to_value(TerminalRequest::Resume {
+                    terminal: terminal.clone(),
+                    after_offset: 0,
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap();
             if response["exited"] == true {
                 break;
             }
@@ -13687,23 +13688,23 @@ instructions = "{instructions}"
             },
         );
         let old_terminal: TerminalRef = serde_json::from_value(
-            first
-                .request(
-                    ConnectionId::new(),
-                    ClientId::new(),
-                    RequestId::new(),
-                    TerminalAction::Launch,
-                    serde_json::to_value(TerminalRequest::Launch {
-                        intent: TerminalLaunchIntent {
-                            request: request.clone(),
-                            geometry: TerminalGeometry { cols: 80, rows: 24 },
-                            launch_operation: None,
-                        },
-                    })
-                    .unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap()["terminal"]
+            request_terminal_json(
+                &mut first,
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: TerminalLaunchIntent {
+                        request: request.clone(),
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
+                    },
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap()["terminal"]
                 .clone(),
         )
         .unwrap();
@@ -13769,16 +13770,16 @@ instructions = "{instructions}"
                 },
             ),
         ] {
-            let error = second
-                .request(
-                    ConnectionId::new(),
-                    ClientId::new(),
-                    RequestId::new(),
-                    action,
-                    serde_json::to_value(request).unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap_err();
+            let error = request_terminal_json(
+                &mut second,
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                action,
+                serde_json::to_value(request).unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
             assert_eq!(
                 error.code,
                 usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
@@ -13787,23 +13788,23 @@ instructions = "{instructions}"
         assert_eq!(*second_effects.lock().unwrap(), RestartEffects::default());
 
         let new_terminal: TerminalRef = serde_json::from_value(
-            second
-                .request(
-                    ConnectionId::new(),
-                    ClientId::new(),
-                    RequestId::new(),
-                    TerminalAction::Launch,
-                    serde_json::to_value(TerminalRequest::Launch {
-                        intent: TerminalLaunchIntent {
-                            request,
-                            geometry: TerminalGeometry { cols: 80, rows: 24 },
-                            launch_operation: None,
-                        },
-                    })
-                    .unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap()["terminal"]
+            request_terminal_json(
+                &mut second,
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: TerminalLaunchIntent {
+                        request,
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
+                    },
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap()["terminal"]
                 .clone(),
         )
         .unwrap();
@@ -14026,18 +14027,31 @@ instructions = "{instructions}"
         seen: Vec<TerminalAction>,
     }
 
-    impl TerminalOwner for FenceWitness {
-        fn request(
+    impl usagi_daemon::usecase::terminal_owner::TerminalOwner for FenceWitness {
+        fn handle(
             &mut self,
-            _connection: ConnectionId,
-            _client: ClientId,
-            _request_id: RequestId,
-            action: TerminalAction,
-            _payload: serde_json::Value,
-            _wire: usagi_daemon::usecase::terminal::SnapshotWire,
-        ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+            _context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
+            request: TerminalRequest,
+        ) -> Result<
+            usagi_daemon::usecase::terminal_owner::TerminalResponse,
+            usagi_core::infrastructure::ipc::ProtocolError,
+        > {
+            let action = match request {
+                TerminalRequest::Launch { .. } => TerminalAction::Launch,
+                TerminalRequest::Inventory { .. } => TerminalAction::Inventory,
+                TerminalRequest::Attach { .. } => TerminalAction::Attach,
+                TerminalRequest::Resume { .. } => TerminalAction::Resume,
+                TerminalRequest::Resync { .. } => TerminalAction::Resync,
+                TerminalRequest::Input { .. } => TerminalAction::Input,
+                TerminalRequest::InputOutcome { .. } => TerminalAction::InputOutcome,
+                TerminalRequest::Resize { .. } => TerminalAction::Resize,
+                TerminalRequest::Detach { .. } => TerminalAction::Detach,
+                TerminalRequest::CompletedInventory { .. } => TerminalAction::CompletedInventory,
+                TerminalRequest::Observe { .. } => TerminalAction::Observe,
+                TerminalRequest::Dismiss { .. } => TerminalAction::Dismiss,
+            };
             self.seen.push(action);
-            Ok(serde_json::json!({"served": true}))
+            Ok(usagi_daemon::usecase::terminal_owner::TerminalResponse::Detached)
         }
 
         fn disconnect(&mut self, _connection: ConnectionId) {}
@@ -14175,11 +14189,18 @@ instructions = "{instructions}"
     }
 
     fn attach_request() -> serde_json::Value {
-        serde_json::json!({
-            "kind": "terminal",
-            "action": "attach",
-            "payload": {"operation": "attach", "terminal": null},
+        let terminal = usagi_core::domain::id::TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        serde_json::to_value(DaemonRequest::Terminal {
+            action: TerminalAction::Attach,
+            payload: serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
         })
+        .unwrap()
     }
 
     /// The fence changes nothing for the one active generation this build runs:

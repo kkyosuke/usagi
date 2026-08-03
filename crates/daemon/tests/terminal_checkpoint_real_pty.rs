@@ -37,8 +37,8 @@ use usagi_core::domain::agent::{
     AgentProfile, AgentProfileId, DurableLaunchSnapshot, LaunchMode, LaunchPlan, LaunchRequest,
 };
 use usagi_core::domain::id::{
-    ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalRef,
-    WorkspaceId, WorktreeId,
+    ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
+    TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::terminal_launch::{
     DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchRequest,
@@ -53,7 +53,7 @@ use usagi_core::usecase::vt_screen::{
     ActiveBuffer, Geometry as ScreenGeometry, RowCheckpoint, ScreenCheckpoint, VtScreen,
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
-use usagi_daemon::presentation::ipc::TerminalOwner;
+use usagi_daemon::presentation::ipc::encode_terminal_response;
 use usagi_daemon::usecase::agent_ipc::{
     AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
     TerminalOutcome,
@@ -68,12 +68,15 @@ use usagi_daemon::usecase::runtime::{
     RuntimeStoreSnapshot, SpawnProvision,
 };
 use usagi_daemon::usecase::terminal::{
-    Geometry, MAX_RETAINED_OUTPUT_BYTES, Output, OutputPipelineCounters, PtyWriteError, PtyWriter,
-    SCREEN_CELLS_AGGREGATE_MAX, SCREEN_CELLS_PER_TERMINAL_MAX, SnapshotWire, SpawnFailure,
-    output_pipeline_counters,
+    Geometry, InputAck, MAX_RETAINED_OUTPUT_BYTES, Output, OutputPipelineCounters, PtyWriteError,
+    PtyWriter, SCREEN_CELLS_AGGREGATE_MAX, SCREEN_CELLS_PER_TERMINAL_MAX, SnapshotWire,
+    SpawnFailure, output_pipeline_counters,
 };
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
+};
+use usagi_daemon::usecase::terminal_owner::{
+    TerminalOwner, TerminalRequestContext, TerminalResponse,
 };
 
 // ---- the painted screen -----------------------------------------------------
@@ -447,7 +450,7 @@ trait DaemonOwner {
         &mut self,
         connection: ConnectionId,
         client: ClientId,
-        action: TerminalAction,
+        _action: TerminalAction,
         request: TerminalRequest,
         wire: SnapshotWire,
     ) -> Value;
@@ -462,17 +465,23 @@ impl DaemonOwner for AgentOwner {
         &mut self,
         connection: ConnectionId,
         client: ClientId,
-        action: TerminalAction,
+        _action: TerminalAction,
         request: TerminalRequest,
         wire: SnapshotWire,
     ) -> Value {
-        let outcome =
-            self.0
-                .handle_terminal(connection, client, RequestId::new(), action, request, wire);
+        let outcome = self.0.handle(
+            TerminalRequestContext {
+                connection,
+                client,
+                request: RequestId::new(),
+            },
+            request,
+        );
         match outcome {
-            TerminalOutcome::Handled(result) => {
-                result.expect("the Agent owner completes its terminal request")
-            }
+            TerminalOutcome::Handled(result) => encode_terminal_response(
+                result.expect("the Agent owner completes its terminal request"),
+                wire,
+            ),
             TerminalOutcome::NotOwned => panic!("the Agent owner owns the terminal it launched"),
         }
     }
@@ -503,16 +512,18 @@ impl DaemonOwner for GenericOwner {
         request: TerminalRequest,
         wire: SnapshotWire,
     ) -> Value {
-        TerminalOwner::request(
+        let _ = action;
+        let response = TerminalOwner::handle(
             self,
-            connection,
-            client,
-            RequestId::new(),
-            action,
-            serde_json::to_value(request).expect("the terminal request vocabulary serializes"),
-            wire,
+            TerminalRequestContext {
+                connection,
+                client,
+                request: RequestId::new(),
+            },
+            request,
         )
-        .expect("the generic owner completes its terminal request")
+        .expect("the generic owner completes its terminal request");
+        encode_terminal_response(response, wire)
     }
     fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) {
         GenericTerminalRuntime::output(self, terminal, bytes)
@@ -1022,6 +1033,40 @@ fn checkpoint_contract<O: DaemonOwner>(scenario: Scenario<O>, label: &str) {
 
 /// Both real daemon owners are held to one checkpoint contract, in one test so
 /// the process-local retention counters stay deterministic.
+#[test]
+fn presentation_encoder_preserves_launch_and_input_outcome_wire_shapes() {
+    let terminal = TerminalRef {
+        daemon_generation: DaemonGeneration::new(),
+        terminal_id: TerminalId::new(),
+        workspace_id: WorkspaceId::new(),
+        session_id: Some(SessionId::new()),
+        worktree_id: WorktreeId::new(),
+    };
+    let launch_operation = OperationId::new();
+    let launch = encode_terminal_response(
+        TerminalResponse::Launch {
+            terminal: terminal.clone(),
+            launch_operation,
+            replayed: false,
+        },
+        SnapshotWire::RawTail,
+    );
+    assert_eq!(launch["terminal"], json!(terminal));
+    assert_eq!(launch["launch_operation"], json!(launch_operation));
+    assert_eq!(launch["replayed"], false);
+
+    let final_outcome = encode_terminal_response(
+        TerminalResponse::InputOutcome(Some(InputAck::Written)),
+        SnapshotWire::RawTail,
+    );
+    assert_eq!(final_outcome["outcome"], "final");
+    assert_eq!(final_outcome["ack"], json!(InputAck::Written));
+    assert_eq!(
+        encode_terminal_response(TerminalResponse::InputOutcome(None), SnapshotWire::RawTail)["outcome"],
+        "unknown"
+    );
+}
+
 #[test]
 fn terminal_checkpoint_real_pty() {
     checkpoint_contract(generic_scenario(), "generic");

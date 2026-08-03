@@ -4,53 +4,12 @@
 
 use std::io::{self, Read, Write};
 
+use crate::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext, TerminalResponse};
 use serde_json::json;
 use usagi_core::infrastructure::ipc::{
     Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
     ResponseOutcome, ServerHello, ServerProtocol, negotiate, read_json_frame, write_json_frame,
 };
-
-/// Daemon-owned terminal actor port.  The transport never interprets a
-/// terminal payload itself and therefore cannot accidentally echo it or turn a
-/// failed request into a local fallback.  Implementations are serialized by
-/// the composition root and may own a generic coordinator, profile resolver,
-/// durable store and PTY adapter.
-pub trait TerminalOwner {
-    /// Handles one terminal request. `wire` is the snapshot payload this
-    /// connection negotiated, so an attach / resync / resize response carries
-    /// either the legacy raw tail or the semantic screen checkpoint — never a
-    /// payload the peer did not negotiate.
-    fn request(
-        &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
-        payload: serde_json::Value,
-        wire: crate::usecase::terminal::SnapshotWire,
-    ) -> Result<serde_json::Value, ProtocolError>;
-    /// Lists the daemon-owned runtimes this owner holds in the exact requested
-    /// scope. The default owner holds none; the generic terminal owner returns
-    /// its running terminals. `SharedTerminalOwner` merges this with the Agent
-    /// owner so a client's `Inventory` request sees both kinds.
-    fn inventory(
-        &self,
-        _scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
-        Vec::new()
-    }
-    /// Lists this owner's exited tombstones in the exact requested scope (#525).
-    /// The default owner holds none; the generic terminal owner returns its
-    /// exited terminals. `SharedTerminalOwner` merges this with the Agent owner
-    /// and stamps each entry's authoritative workspace-global visibility.
-    fn completed_inventory(
-        &self,
-        _scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
-        Vec::new()
-    }
-    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
-}
 
 /// The generation authority one client connection is served under.
 ///
@@ -410,30 +369,24 @@ pub fn handle_admitted_connection_with_terminal_and(
                             payload,
                         }) = serde_json::from_value(body.clone())
                         {
-                            if client_incarnation.is_none() && carries_input_operation(&payload) {
-                                Err(ProtocolError::new(
-                                    ErrorCode::Unauthenticated,
-                                    "durable terminal input requires a canonical client incarnation",
-                                ))
-                            } else {
-                                match usagi_core::domain::id::RequestId::parse(&request_id.0) {
-                                    Ok(owner_request_id) => terminal
-                                        .request(
-                                            connection,
-                                            client,
-                                            owner_request_id,
-                                            action,
-                                            payload,
-                                            crate::usecase::terminal::SnapshotWire::for_revision(
-                                                hello.protocol.revision,
-                                            ),
-                                        )
-                                        .map(ok_response),
-                                    Err(_) => Err(ProtocolError::new(
-                                        ErrorCode::InvalidArgument,
-                                        "terminal request_id must be a canonical resource ID",
-                                    )),
-                                }
+                            match usagi_core::domain::id::RequestId::parse(&request_id.0) {
+                                Ok(owner_request_id) => dispatch_terminal_request(
+                                    terminal,
+                                    TerminalRequestContext {
+                                        connection,
+                                        client,
+                                        request: owner_request_id,
+                                    },
+                                    client_incarnation.is_some(),
+                                    action,
+                                    payload,
+                                    hello.protocol.revision,
+                                )
+                                .map(ok_response),
+                                Err(_) => Err(ProtocolError::new(
+                                    ErrorCode::InvalidArgument,
+                                    "terminal request_id must be a canonical resource ID",
+                                )),
                             }
                         } else {
                             let dispatched = dispatch_request(
@@ -487,6 +440,110 @@ fn carries_input_operation(payload: &serde_json::Value) -> bool {
     payload
         .get("input_operation")
         .is_some_and(|operation| !operation.is_null())
+}
+
+fn dispatch_terminal_request(
+    terminal: &mut dyn TerminalOwner,
+    context: TerminalRequestContext,
+    canonical_client: bool,
+    action: usagi_core::usecase::client::TerminalAction,
+    payload: serde_json::Value,
+    revision: u16,
+) -> Result<serde_json::Value, ProtocolError> {
+    if !canonical_client && carries_input_operation(&payload) {
+        return Err(ProtocolError::new(
+            ErrorCode::Unauthenticated,
+            "durable terminal input requires a canonical client incarnation",
+        ));
+    }
+    let request = decode_terminal_request(action, payload)?;
+    terminal.handle(context, request).map(|response| {
+        encode_terminal_response(
+            response,
+            crate::usecase::terminal::SnapshotWire::for_revision(revision),
+        )
+    })
+}
+
+fn decode_terminal_request(
+    action: usagi_core::usecase::client::TerminalAction,
+    payload: serde_json::Value,
+) -> Result<usagi_core::usecase::client::TerminalRequest, ProtocolError> {
+    use usagi_core::usecase::client::{TerminalAction, TerminalRequest};
+
+    let request = serde_json::from_value(payload).map_err(|_| {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "invalid terminal request vocabulary",
+        )
+    })?;
+    let matches = matches!(
+        (&action, &request),
+        (TerminalAction::Launch, TerminalRequest::Launch { .. })
+            | (TerminalAction::Inventory, TerminalRequest::Inventory { .. })
+            | (TerminalAction::Attach, TerminalRequest::Attach { .. })
+            | (TerminalAction::Resume, TerminalRequest::Resume { .. })
+            | (TerminalAction::Resync, TerminalRequest::Resync { .. })
+            | (TerminalAction::Input, TerminalRequest::Input { .. })
+            | (
+                TerminalAction::InputOutcome,
+                TerminalRequest::InputOutcome { .. }
+            )
+            | (TerminalAction::Resize, TerminalRequest::Resize { .. })
+            | (TerminalAction::Detach, TerminalRequest::Detach { .. })
+            | (
+                TerminalAction::CompletedInventory,
+                TerminalRequest::CompletedInventory { .. }
+            )
+            | (TerminalAction::Observe, TerminalRequest::Observe { .. })
+            | (TerminalAction::Dismiss, TerminalRequest::Dismiss { .. })
+    );
+    matches.then_some(request).ok_or_else(|| {
+        ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "terminal action does not match its payload",
+        )
+    })
+}
+
+#[must_use]
+pub fn encode_terminal_response(
+    response: TerminalResponse,
+    wire: crate::usecase::terminal::SnapshotWire,
+) -> serde_json::Value {
+    match response {
+        TerminalResponse::Launch {
+            terminal,
+            launch_operation,
+            replayed,
+        } => json!({
+            "terminal": terminal,
+            "launch_operation": launch_operation,
+            "replayed": replayed,
+        }),
+        TerminalResponse::Inventory(terminals) => json!({ "terminals": terminals }),
+        TerminalResponse::Attached(attached) => json!(attached.into_frame(wire)),
+        TerminalResponse::Resumed { output, exited } => {
+            json!({ "output": output, "exited": exited })
+        }
+        TerminalResponse::Snapshot(snapshot) => json!(snapshot.into_frame(wire)),
+        TerminalResponse::Detached => json!({}),
+        TerminalResponse::Input(ack) => json!({ "ack": ack }),
+        TerminalResponse::InputOutcome(Some(ack)) => {
+            json!({ "outcome": "final", "ack": ack })
+        }
+        TerminalResponse::InputOutcome(None) => json!({ "outcome": "unknown" }),
+        TerminalResponse::CompletedInventory(entries) => json!({ "entries": entries }),
+        TerminalResponse::Visibility {
+            visibility,
+            applied,
+            conflict,
+        } => json!({
+            "visibility": visibility,
+            "applied": applied,
+            "conflict": conflict,
+        }),
+    }
 }
 
 fn ok_response(body: serde_json::Value) -> (ResponseOutcome, serde_json::Value) {
@@ -619,30 +676,24 @@ mod tests {
         fail: bool,
         requests: usize,
         disconnects: usize,
-        wires: Vec<crate::usecase::terminal::SnapshotWire>,
         /// The client incarnation each routed request was attributed to.
         clients: Vec<usagi_core::domain::id::ClientId>,
     }
     impl TerminalOwner for RecordingTerminal {
-        fn request(
+        fn handle(
             &mut self,
-            _: usagi_core::domain::id::ConnectionId,
-            client: usagi_core::domain::id::ClientId,
-            _: usagi_core::domain::id::RequestId,
-            _: usagi_core::usecase::client::TerminalAction,
-            _: serde_json::Value,
-            wire: crate::usecase::terminal::SnapshotWire,
-        ) -> Result<serde_json::Value, ProtocolError> {
+            context: TerminalRequestContext,
+            _: usagi_core::usecase::client::TerminalRequest,
+        ) -> Result<TerminalResponse, ProtocolError> {
             self.requests += 1;
-            self.wires.push(wire);
-            self.clients.push(client);
+            self.clients.push(context.client);
             if self.fail {
                 Err(ProtocolError::new(
                     ErrorCode::Unavailable,
                     "terminal failed",
                 ))
             } else {
-                Ok(json!({"terminal": "handled"}))
+                Ok(TerminalResponse::Inventory(Vec::new()))
             }
         }
 
@@ -744,6 +795,19 @@ mod tests {
         }
     }
     fn terminal_request(request_id: String) -> Envelope {
+        use usagi_core::domain::{
+            id::{WorkspaceId, WorktreeId},
+            terminal_launch::TerminalLaunchScope,
+        };
+        let payload =
+            serde_json::to_value(usagi_core::usecase::client::TerminalRequest::Inventory {
+                scope: TerminalLaunchScope {
+                    workspace_id: WorkspaceId::new(),
+                    session_id: None,
+                    worktree_id: WorktreeId::new(),
+                },
+            })
+            .unwrap();
         Envelope {
             protocol: ProtocolVersion {
                 generation: 1,
@@ -755,7 +819,7 @@ mod tests {
                 timeout_ms: None,
                 body: serde_json::to_value(usagi_core::usecase::client::DaemonRequest::Terminal {
                     action: usagi_core::usecase::client::TerminalAction::Inventory,
-                    payload: json!({}),
+                    payload,
                 })
                 .unwrap(),
             },
@@ -779,10 +843,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.protocol.revision, 1);
-        assert!(matches!(
+        assert_eq!(
             read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
-            Some(Bootstrap::ServerHello(_))
-        ));
+            Some(Bootstrap::ServerHello(result))
+        );
     }
     /// A fence that refuses everything, and counts what it was asked.
     ///
@@ -1146,7 +1210,172 @@ mod tests {
                 &mut test_dispatch,
             )
             .unwrap();
-            assert_eq!(terminal.wires, vec![expected_wire]);
+            assert_eq!(SnapshotWire::for_revision(expected_revision), expected_wire);
+            assert_eq!(terminal.requests, 1);
+        }
+    }
+
+    #[test]
+    fn snapshot_response_shaping_is_owned_by_the_presentation_adapter() {
+        use crate::usecase::terminal::{Geometry, Snapshot, SnapshotWire};
+        use crate::usecase::terminal_owner::TerminalResponse;
+        use usagi_core::domain::id::{
+            DaemonGeneration as OwnerGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId,
+            WorktreeId,
+        };
+        use usagi_core::usecase::vt_screen::VtScreen;
+
+        let mut screen = VtScreen::new(2, 3);
+        screen.advance(b"x");
+        let snapshot = Snapshot {
+            terminal: TerminalRef {
+                daemon_generation: OwnerGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: WorkspaceId::new(),
+                session_id: Some(SessionId::new()),
+                worktree_id: WorktreeId::new(),
+            },
+            revision: 1,
+            base_offset: 0,
+            output_offset: 1,
+            geometry: Geometry { cols: 3, rows: 2 },
+            replay: b"x".to_vec(),
+            screen: Box::new(screen.checkpoint()),
+            exited: None,
+        };
+
+        let raw = encode_terminal_response(
+            TerminalResponse::Snapshot(snapshot.clone()),
+            SnapshotWire::RawTail,
+        );
+        assert_eq!(raw["replay"], json!(b"x".to_vec()));
+        assert!(raw.get("screen").is_none());
+        assert_eq!(raw["base_offset"], 0);
+
+        let checkpoint = encode_terminal_response(
+            TerminalResponse::Snapshot(snapshot),
+            SnapshotWire::ScreenCheckpoint,
+        );
+        assert!(checkpoint.get("replay").is_none());
+        assert!(checkpoint.get("screen").is_some());
+        assert_eq!(checkpoint["base_offset"], 1);
+    }
+
+    #[test]
+    fn presentation_encoder_and_typed_owner_cover_terminal_finals() {
+        use crate::usecase::terminal::{InputAck, SnapshotWire};
+        use usagi_core::domain::{
+            id::{
+                DaemonGeneration as OwnerGeneration, OperationId, SessionId, TerminalId,
+                TerminalRef, WorkspaceId, WorktreeId,
+            },
+            terminal_launch::TerminalLaunchScope,
+        };
+
+        let terminal_ref = TerminalRef {
+            daemon_generation: OwnerGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let operation = OperationId::new();
+        let launch = encode_terminal_response(
+            TerminalResponse::Launch {
+                terminal: terminal_ref.clone(),
+                launch_operation: operation,
+                replayed: false,
+            },
+            SnapshotWire::RawTail,
+        );
+        assert_eq!(launch["terminal"], json!(terminal_ref));
+        assert_eq!(launch["launch_operation"], json!(operation));
+        assert_eq!(launch["replayed"], false);
+        assert_eq!(
+            encode_terminal_response(
+                TerminalResponse::InputOutcome(Some(InputAck::Written)),
+                SnapshotWire::RawTail,
+            )["outcome"],
+            "final"
+        );
+        assert_eq!(
+            encode_terminal_response(TerminalResponse::InputOutcome(None), SnapshotWire::RawTail,)
+                ["outcome"],
+            "unknown"
+        );
+
+        let scope = TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let mut owner = RecordingTerminal::default();
+        assert!(TerminalOwner::completed_inventory(&owner, &scope).is_empty());
+        TerminalOwner::disconnect(&mut owner, usagi_core::domain::id::ConnectionId::new());
+        assert_eq!(owner.disconnects, 1);
+    }
+
+    #[test]
+    fn malformed_and_mismatched_terminal_payloads_are_rejected_before_owner_effects() {
+        use usagi_core::domain::{
+            id::{WorkspaceId, WorktreeId},
+            terminal_launch::TerminalLaunchScope,
+        };
+        use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
+
+        let request = |action, payload| Envelope {
+            protocol: ProtocolVersion {
+                generation: 1,
+                revision: 1,
+            },
+            daemon_generation: DaemonGeneration("current".into()),
+            kind: EnvelopeKind::Request {
+                request_id: usagi_core::infrastructure::ipc::RequestId(
+                    usagi_core::domain::id::RequestId::new().to_string(),
+                ),
+                timeout_ms: None,
+                body: serde_json::to_value(DaemonRequest::Terminal { action, payload }).unwrap(),
+            },
+        };
+        let inventory = serde_json::to_value(TerminalRequest::Inventory {
+            scope: TerminalLaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+        })
+        .unwrap();
+        let mismatched = request(TerminalAction::Attach, inventory);
+        let malformed = request(TerminalAction::Attach, json!({"operation": "bogus"}));
+
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        write_json_frame(&mut input, &mismatched, 1024).unwrap();
+        write_json_frame(&mut input, &malformed, 1024).unwrap();
+        let mut output = Vec::new();
+        let mut terminal = RecordingTerminal::default();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut output,
+            &server(),
+            &UnfencedConnection,
+            &mut terminal,
+            &mut test_dispatch,
+        )
+        .unwrap();
+        assert_eq!(terminal.requests, 0);
+
+        let mut output = Cursor::new(output);
+        let _ = read_json_frame::<Bootstrap>(&mut output, 1024).unwrap();
+        for _ in 0..2 {
+            let reply = read_json_frame::<Envelope>(&mut output, 1024)
+                .unwrap()
+                .unwrap();
+            let (outcome, _) = reply.kind_response();
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap()["value"]["code"],
+                json!("invalid_argument")
+            );
         }
     }
 
@@ -1194,7 +1423,7 @@ mod tests {
                 outcome: ResponseOutcome::Ok,
                 ref body,
                 ..
-            } if body == &json!({"terminal": "handled"})
+            } if body == &json!({"terminals": []})
         ));
         assert!(replies[1..].iter().all(|reply| matches!(
             reply.kind,
@@ -1307,13 +1536,13 @@ mod tests {
         let response = read_json_frame::<Envelope>(&mut output, 1024)
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            response.kind,
-            EnvelopeKind::Response {
-                outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(_),
-                ..
-            }
-        ));
+        assert_eq!(
+            std::mem::discriminant(&response.kind_response().0),
+            std::mem::discriminant(&ResponseOutcome::Error(ProtocolError::new(
+                ErrorCode::Internal,
+                "variant marker",
+            )))
+        );
     }
 
     #[test]
@@ -1340,10 +1569,9 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
-        let mut bad = hello();
-        if let Bootstrap::ClientHello(value) = &mut bad {
-            value.required_capabilities.push("missing".into());
-        }
+        let mut bad_hello = client_hello();
+        bad_hello.required_capabilities.push("missing".into());
+        let bad = Bootstrap::ClientHello(bad_hello);
         let mut input = Vec::new();
         write_json_frame(&mut input, &bad, 1024).unwrap();
         let mut output = Vec::new();
@@ -1352,10 +1580,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(matches!(
-            read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
-            Some(Bootstrap::Error(_))
-        ));
+        let reply = read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::mem::discriminant(&reply),
+            std::mem::discriminant(&Bootstrap::Error(ProtocolError::new(
+                ErrorCode::Internal,
+                "variant marker",
+            )))
+        );
     }
 
     #[test]
@@ -1394,15 +1628,12 @@ mod tests {
         // client working in another one.
         assert_eq!(terminal.requests, 0);
         let mut replies = Cursor::new(output);
-        let mut refused = None;
-        if let Some(Bootstrap::Error(error)) =
-            read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
-        {
-            refused = Some(error);
-        }
-        let refusal = refused.expect("a foreign workspace is answered with a typed error frame");
-        assert!(is_workspace_mismatch(&refusal));
-        assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
+        let refused = read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap();
+        assert!(matches!(
+            refused,
+            Some(Bootstrap::Error(ref error))
+                if is_workspace_mismatch(error) && error.message.contains(TRUSTED_ROOT)
+        ));
         assert_eq!(
             read_json_frame::<Envelope>(&mut replies, 1024).unwrap(),
             None
@@ -1443,15 +1674,15 @@ mod tests {
 
             assert_eq!(terminal.requests, 0, "{selected}");
             let mut replies = Cursor::new(output);
-            let mut refused = None;
-            if let Some(Bootstrap::Error(error)) =
-                read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
-            {
-                refused = Some(error);
-            }
-            let refusal = refused.expect("an unserved workspace is answered with a typed error");
-            assert!(is_workspace_mismatch(&refusal), "{selected}");
-            assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
+            let refused = read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap();
+            assert!(
+                matches!(
+                    refused,
+                    Some(Bootstrap::Error(ref error))
+                        if is_workspace_mismatch(error) && error.message.contains(TRUSTED_ROOT)
+                ),
+                "{selected}"
+            );
         }
 
         // Selecting the workspace this daemon serves reaches the runtime as usual.
@@ -1522,10 +1753,9 @@ mod tests {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
         assert!(handshake(&mut Cursor::new(input), &mut BrokenWriter, &server()).is_err());
-        let mut bad = hello();
-        if let Bootstrap::ClientHello(value) = &mut bad {
-            value.required_capabilities.push("missing".into());
-        }
+        let mut bad_hello = client_hello();
+        bad_hello.required_capabilities.push("missing".into());
+        let bad = Bootstrap::ClientHello(bad_hello);
         let mut input = Vec::new();
         write_json_frame(&mut input, &bad, 1024).unwrap();
         assert!(handshake(&mut Cursor::new(input), &mut BrokenWriter, &server()).is_err());

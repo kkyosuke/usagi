@@ -22,7 +22,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::Utc;
-use serde_json::{Value, json};
 use usagi_core::{
     domain::session_lifecycle::AgentPhase,
     domain::{
@@ -35,9 +34,9 @@ use usagi_core::{
             ProviderResumeRef, ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
         },
         id::{
-            AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence,
-            ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
-            TerminalRef, WorkspaceId, WorktreeId,
+            AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, CompletionFence, ConnectionId,
+            DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId,
+            WorktreeId,
         },
     },
     infrastructure::ipc::{ErrorCode, ProtocolError, agent_operation_digest},
@@ -49,12 +48,9 @@ use usagi_core::{
         DispatchStore,
     },
     usecase::agent_phase::agent_phase_aggregation_rank,
-    usecase::client::{
-        AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalAction, TerminalRequest,
-    },
+    usecase::client::{AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalRequest},
 };
 
-use crate::presentation::ipc::TerminalOwner;
 use crate::usecase::{
     terminal_retention_ipc::SharedTerminalRetention,
     terminal_visibility_ipc::SharedTerminalVisibility,
@@ -64,7 +60,10 @@ use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
     runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
-    terminal::{Geometry, InputRequest, PtyWriter, RegistryError, SnapshotWire},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
+    terminal_owner::{
+        TerminalOwner as TerminalOwnerPort, TerminalRequestContext, TerminalResponse,
+    },
 };
 
 /// A daemon-resolved, fully fenced checkout for an available scope (a managed
@@ -158,9 +157,9 @@ struct McpCaller {
 }
 
 /// The routing decision for a terminal request that addresses a `TerminalRef`.
-pub enum TerminalOutcome {
+pub enum TerminalOutcome<T = TerminalResponse> {
     /// The Agent owner recognizes the terminal and produced this result.
-    Handled(Result<Value, ProtocolError>),
+    Handled(Result<T, ProtocolError>),
     /// The terminal is not an Agent terminal; the caller must try the generic
     /// terminal owner instead.
     NotOwned,
@@ -170,16 +169,11 @@ pub enum TerminalOutcome {
 /// owner can compose it with the generic terminal owner without duplicating the
 /// ownership loop.
 pub trait AgentTerminalActor {
-    /// Handles one terminal request addressed to an Agent terminal. `wire` is
-    /// the snapshot payload this connection negotiated.
-    fn handle_terminal(
+    /// Handles one typed terminal request addressed to an Agent terminal.
+    fn handle(
         &mut self,
-        connection: ConnectionId,
-        client: ClientId,
-        request_id: RequestId,
-        action: TerminalAction,
+        context: TerminalRequestContext,
         request: TerminalRequest,
-        wire: SnapshotWire,
     ) -> TerminalOutcome;
     /// Lists the Agent runtimes this actor holds in the exact requested scope.
     /// `SharedTerminalOwner` merges this with the generic terminal owner so a
@@ -1975,21 +1969,22 @@ impl AgentRuntime {
 
     fn dispatch_terminal(
         &mut self,
-        connection: ConnectionId,
-        client: ClientId,
-        request_id: RequestId,
-        action: TerminalAction,
+        context: TerminalRequestContext,
         request: TerminalRequest,
         runtime: &AgentRuntimeRef,
-        wire: SnapshotWire,
-    ) -> Result<Value, ProtocolError> {
-        match (action, request) {
-            (TerminalAction::Attach, TerminalRequest::Attach { .. }) => self
+    ) -> Result<TerminalResponse, ProtocolError> {
+        let TerminalRequestContext {
+            connection,
+            client,
+            request: request_id,
+        } = context;
+        match request {
+            TerminalRequest::Attach { .. } => self
                 .coordinator
                 .attach_for_client(runtime, connection, client)
-                .map(|attached| json!(attached.into_frame(wire)))
+                .map(TerminalResponse::Attached)
                 .map_err(map_runtime_error),
-            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => {
+            TerminalRequest::Resume { after_offset, .. } => {
                 let output = self
                     .coordinator
                     .replay_from(runtime, after_offset)
@@ -2003,35 +1998,32 @@ impl AgentRuntime {
                     .terminal_exit_status(runtime)
                     .map_err(map_runtime_error)?
                     .is_some();
-                Ok(json!({ "output": output, "exited": exited }))
+                Ok(TerminalResponse::Resumed { output, exited })
             }
-            (TerminalAction::Resync, TerminalRequest::Resync { .. }) => self
+            TerminalRequest::Resync { .. } => self
                 .coordinator
                 .terminal_snapshot(runtime)
-                .map(|snapshot| json!(snapshot.into_frame(wire)))
+                .map(TerminalResponse::Snapshot)
                 .map_err(map_runtime_error),
-            (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => {
+            TerminalRequest::Resize { geometry, .. } => {
                 let geometry = terminal_geometry(geometry)?;
                 self.coordinator
                     .resize(runtime, geometry, &mut *self.pty)
-                    .map(|snapshot| json!(snapshot.into_frame(wire)))
+                    .map(TerminalResponse::Snapshot)
                     .map_err(map_runtime_error)
             }
-            (TerminalAction::Detach, TerminalRequest::Detach { subscription, .. }) => self
+            TerminalRequest::Detach { subscription, .. } => self
                 .coordinator
                 .detach(runtime, subscription, connection)
-                .map(|()| json!({}))
+                .map(|()| TerminalResponse::Detached)
                 .map_err(map_runtime_error),
-            (
-                TerminalAction::Input,
-                TerminalRequest::Input {
-                    subscription,
-                    input_seq,
-                    input_operation,
-                    bytes,
-                    ..
-                },
-            ) => {
+            TerminalRequest::Input {
+                subscription,
+                input_seq,
+                input_operation,
+                bytes,
+                ..
+            } => {
                 self.pty.select_terminal(&runtime.terminal);
                 self.coordinator
                     .input(
@@ -2047,22 +2039,19 @@ impl AgentRuntime {
                         &bytes,
                         &mut *self.pty,
                     )
-                    .map(|ack| json!({ "ack": ack }))
+                    .map(TerminalResponse::Input)
                     .map_err(map_runtime_error)
             }
-            (
-                TerminalAction::InputOutcome,
-                TerminalRequest::InputOutcome {
-                    input_operation, ..
-                },
-            ) => self
+            TerminalRequest::InputOutcome {
+                input_operation, ..
+            } => self
                 .coordinator
                 .input_outcome(runtime, client, input_operation)
-                .map(crate::usecase::terminal_ipc::input_outcome_body)
+                .map(TerminalResponse::InputOutcome)
                 .map_err(map_runtime_error),
             _ => Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
-                "terminal action does not match its payload",
+                "terminal request is not routed to an Agent terminal",
             )),
         }
     }
@@ -2094,14 +2083,10 @@ impl AgentRuntime {
 }
 
 impl AgentTerminalActor for AgentRuntime {
-    fn handle_terminal(
+    fn handle(
         &mut self,
-        connection: ConnectionId,
-        client: ClientId,
-        request_id: RequestId,
-        action: TerminalAction,
+        context: TerminalRequestContext,
         request: TerminalRequest,
-        wire: SnapshotWire,
     ) -> TerminalOutcome {
         let Some(terminal) = terminal_of(&request) else {
             return TerminalOutcome::NotOwned;
@@ -2109,9 +2094,7 @@ impl AgentTerminalActor for AgentRuntime {
         let Some(runtime) = self.coordinator.runtime_for_terminal(terminal) else {
             return TerminalOutcome::NotOwned;
         };
-        TerminalOutcome::Handled(self.dispatch_terminal(
-            connection, client, request_id, action, request, &runtime, wire,
-        ))
+        TerminalOutcome::Handled(self.dispatch_terminal(context, request, &runtime))
     }
 
     fn terminal_inventory(
@@ -2183,108 +2166,66 @@ impl<G, A> SharedTerminalOwner<G, A> {
 /// Encodes a compare-and-swap visibility outcome for the wire. `applied` marks
 /// a state raise, `conflict` marks a stale-revision retry that a client merges
 /// from `visibility` and re-sends.
-fn visibility_response(outcome: VisibilityOutcome) -> Value {
-    json!({
-        "visibility": outcome.snapshot(),
-        "applied": matches!(outcome, VisibilityOutcome::Applied(_)),
-        "conflict": !outcome.is_success(),
-    })
+fn visibility_response(outcome: VisibilityOutcome) -> TerminalResponse {
+    TerminalResponse::Visibility {
+        visibility: outcome.snapshot(),
+        applied: matches!(outcome, VisibilityOutcome::Applied(_)),
+        conflict: !outcome.is_success(),
+    }
 }
 
-impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOwner<G, A> {
-    fn request(
+impl<G: TerminalOwnerPort, A: AgentTerminalActor> TerminalOwnerPort for SharedTerminalOwner<G, A> {
+    fn handle(
         &mut self,
-        connection: ConnectionId,
-        client: ClientId,
-        request_id: RequestId,
-        action: TerminalAction,
-        payload: Value,
-        wire: SnapshotWire,
-    ) -> Result<Value, ProtocolError> {
+        context: TerminalRequestContext,
+        request: TerminalRequest,
+    ) -> Result<TerminalResponse, ProtocolError> {
         // Inventory addresses no single terminal, so it is not routed by
         // `handle_terminal`. Merge both owners' in-scope runtimes here so a
         // restoring client discovers Agent and generic terminals together.
-        if matches!(action, TerminalAction::Inventory) {
-            let Ok(TerminalRequest::Inventory { scope }) =
-                serde_json::from_value::<TerminalRequest>(payload.clone())
-            else {
-                return Err(ProtocolError::new(
-                    ErrorCode::InvalidArgument,
-                    "invalid terminal inventory scope",
-                ));
-            };
-            let mut entries = self.generic.inventory(&scope);
-            entries.extend(self.agent.terminal_inventory(&scope));
-            return Ok(json!({ "terminals": entries }));
+        if let TerminalRequest::Inventory { scope } = &request {
+            let mut entries = self.generic.inventory(scope);
+            entries.extend(self.agent.terminal_inventory(scope));
+            return Ok(TerminalResponse::Inventory(entries));
         }
         // CompletedInventory (like Inventory) addresses no single terminal: it
         // merges both owners' exited tombstones and stamps each with the
         // authoritative workspace-global visibility (#525).
-        if matches!(action, TerminalAction::CompletedInventory) {
-            let Ok(TerminalRequest::CompletedInventory { scope }) =
-                serde_json::from_value::<TerminalRequest>(payload.clone())
-            else {
-                return Err(ProtocolError::new(
-                    ErrorCode::InvalidArgument,
-                    "invalid completed terminal inventory scope",
-                ));
-            };
-            let mut entries = self.generic.completed_inventory(&scope);
-            entries.extend(self.agent.completed_inventory(&scope));
+        if let TerminalRequest::CompletedInventory { scope } = &request {
+            let mut entries = self.generic.completed_inventory(scope);
+            entries.extend(self.agent.completed_inventory(scope));
             self.visibility.stamp(&mut entries);
-            return Ok(json!({ "entries": entries }));
+            return Ok(TerminalResponse::CompletedInventory(entries));
         }
         // Observe / Dismiss mutate only the workspace-global visibility ledger,
         // never the terminal or its process. They are compare-and-swap and
         // return the authoritative snapshot so a client merges monotonically.
-        if matches!(action, TerminalAction::Observe | TerminalAction::Dismiss) {
-            let request = serde_json::from_value::<TerminalRequest>(payload).map_err(|_| {
-                ProtocolError::new(
-                    ErrorCode::InvalidArgument,
-                    "invalid terminal visibility request",
-                )
-            })?;
-            let outcome = match request {
-                TerminalRequest::Observe {
-                    terminal,
-                    expected_revision,
-                } => {
-                    let outcome = self.visibility.observe(&terminal, expected_revision);
-                    // Retention classes follow the authoritative visibility, so
-                    // the ledger evicts seen history before unseen history.
-                    self.retention
-                        .note_visibility(&terminal, outcome.snapshot().state);
-                    outcome
-                }
-                TerminalRequest::Dismiss {
-                    terminal,
-                    expected_revision,
-                } => {
-                    let outcome = self.visibility.dismiss(&terminal, expected_revision);
-                    self.retention
-                        .note_visibility(&terminal, outcome.snapshot().state);
-                    outcome
-                }
-                _ => {
-                    return Err(ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "terminal action does not match its payload",
-                    ));
-                }
-            };
+        if let TerminalRequest::Observe {
+            terminal,
+            expected_revision,
+        } = &request
+        {
+            let outcome = self.visibility.observe(terminal, *expected_revision);
+            // Retention classes follow the authoritative visibility, so the
+            // ledger evicts seen history before unseen history.
+            self.retention
+                .note_visibility(terminal, outcome.snapshot().state);
             return Ok(visibility_response(outcome));
         }
-        let routed = match serde_json::from_value::<TerminalRequest>(payload.clone()) {
-            Ok(request) => self
-                .agent
-                .handle_terminal(connection, client, request_id, action, request, wire),
-            Err(_) => TerminalOutcome::NotOwned,
-        };
+        if let TerminalRequest::Dismiss {
+            terminal,
+            expected_revision,
+        } = &request
+        {
+            let outcome = self.visibility.dismiss(terminal, *expected_revision);
+            self.retention
+                .note_visibility(terminal, outcome.snapshot().state);
+            return Ok(visibility_response(outcome));
+        }
+        let routed = self.agent.handle(context, request.clone());
         match routed {
             TerminalOutcome::Handled(result) => result,
-            TerminalOutcome::NotOwned => self
-                .generic
-                .request(connection, client, request_id, action, payload, wire),
+            TerminalOutcome::NotOwned => self.generic.handle(context, request),
         }
     }
 
@@ -2696,6 +2637,79 @@ mod tests {
     };
 
     use super::*;
+    use crate::usecase::terminal::SnapshotWire;
+    use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
+    use serde_json::{Value, json};
+    use usagi_core::domain::id::{ClientId, RequestId};
+    use usagi_core::usecase::client::TerminalAction;
+
+    trait JsonAgentTerminalActor {
+        fn handle_terminal(
+            &mut self,
+            connection: ConnectionId,
+            client: ClientId,
+            request_id: RequestId,
+            action: TerminalAction,
+            request: TerminalRequest,
+            wire: SnapshotWire,
+        ) -> TerminalOutcome<Value>;
+    }
+
+    impl<T: AgentTerminalActor> JsonAgentTerminalActor for T {
+        fn handle_terminal(
+            &mut self,
+            connection: ConnectionId,
+            client: ClientId,
+            request_id: RequestId,
+            action: TerminalAction,
+            request: TerminalRequest,
+            wire: SnapshotWire,
+        ) -> TerminalOutcome<Value> {
+            let matching = matches!(
+                (&action, &request),
+                (TerminalAction::Attach, TerminalRequest::Attach { .. })
+                    | (TerminalAction::Launch, TerminalRequest::Launch { .. })
+                    | (TerminalAction::Inventory, TerminalRequest::Inventory { .. })
+                    | (TerminalAction::Resume, TerminalRequest::Resume { .. })
+                    | (TerminalAction::Resync, TerminalRequest::Resync { .. })
+                    | (TerminalAction::Input, TerminalRequest::Input { .. })
+                    | (
+                        TerminalAction::InputOutcome,
+                        TerminalRequest::InputOutcome { .. }
+                    )
+                    | (TerminalAction::Resize, TerminalRequest::Resize { .. })
+                    | (TerminalAction::Detach, TerminalRequest::Detach { .. })
+                    | (
+                        TerminalAction::CompletedInventory,
+                        TerminalRequest::CompletedInventory { .. }
+                    )
+                    | (TerminalAction::Observe, TerminalRequest::Observe { .. })
+                    | (TerminalAction::Dismiss, TerminalRequest::Dismiss { .. })
+            );
+            if !matching {
+                return TerminalOutcome::Handled(Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "terminal action does not match its payload",
+                )));
+            }
+            match AgentTerminalActor::handle(
+                self,
+                TerminalRequestContext {
+                    connection,
+                    client,
+                    request: request_id,
+                },
+                request,
+            ) {
+                TerminalOutcome::Handled(result) => {
+                    TerminalOutcome::Handled(result.map(|response| {
+                        crate::usecase::terminal_owner::response_json(response, wire)
+                    }))
+                }
+                TerminalOutcome::NotOwned => TerminalOutcome::NotOwned,
+            }
+        }
+    }
     use crate::usecase::{
         claude::{ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner},
         codex::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner},
@@ -2891,18 +2905,14 @@ mod tests {
         inventory: Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>,
         completed: Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry>,
     }
-    impl TerminalOwner for FakeGeneric {
-        fn request(
+    impl TerminalOwnerPort for FakeGeneric {
+        fn handle(
             &mut self,
-            _: ConnectionId,
-            _: ClientId,
-            _: RequestId,
-            _: TerminalAction,
-            _: Value,
-            _: SnapshotWire,
-        ) -> Result<Value, ProtocolError> {
+            _: TerminalRequestContext,
+            _: TerminalRequest,
+        ) -> Result<TerminalResponse, ProtocolError> {
             self.requests += 1;
-            Ok(json!({ "generic": true }))
+            Ok(TerminalResponse::Inventory(Vec::new()))
         }
         fn inventory(
             &self,
@@ -5946,9 +5956,9 @@ mod tests {
                 SnapshotWire::RawTail,
             )
             .unwrap();
-        assert_eq!(generic["generic"], true);
+        assert_eq!(generic["terminals"], json!([]));
 
-        // Unparseable payload → generic owner.
+        // Malformed payload is rejected before either usecase owner runs.
         owner
             .request(
                 connection,
@@ -5958,10 +5968,10 @@ mod tests {
                 json!({ "operation": "bogus" }),
                 SnapshotWire::RawTail,
             )
-            .unwrap();
+            .unwrap_err();
 
-        owner.disconnect(connection);
-        assert_eq!(owner.generic.requests, 2);
+        TerminalOwner::disconnect(&mut owner, connection);
+        assert_eq!(owner.generic.requests, 1);
         assert_eq!(owner.generic.disconnects, 1);
     }
 
@@ -7016,14 +7026,48 @@ mod tests {
         ));
     }
 
-    fn handled(outcome: TerminalOutcome) -> Value {
+    fn handled(outcome: TerminalOutcome<Value>) -> Value {
         handled_result(outcome).unwrap()
     }
 
-    fn handled_result(outcome: TerminalOutcome) -> Result<Value, ProtocolError> {
+    fn handled_result(outcome: TerminalOutcome<Value>) -> Result<Value, ProtocolError> {
         match outcome {
             TerminalOutcome::Handled(result) => result,
             TerminalOutcome::NotOwned => Err(stale_terminal()),
         }
+    }
+
+    #[test]
+    fn agent_dispatch_refuses_non_terminal_typed_requests() {
+        let mut runtime = runtime();
+        let admission = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let runtime_ref = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        let error = runtime
+            .dispatch_terminal(
+                TerminalRequestContext {
+                    connection: ConnectionId::new(),
+                    client: ClientId::new(),
+                    request: RequestId::new(),
+                },
+                TerminalRequest::Inventory {
+                    scope: usagi_core::domain::terminal_launch::TerminalLaunchScope {
+                        workspace_id: WorkspaceId::new(),
+                        session_id: None,
+                        worktree_id: WorktreeId::new(),
+                    },
+                },
+                &runtime_ref,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
 }
