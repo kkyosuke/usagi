@@ -14538,9 +14538,10 @@ mod tests {
         assert_eq!(mutations.lock().unwrap().len(), 1);
         assert!(!ui.take_agent_observation_request());
 
-        ui.set_allowed_agent_sessions(BTreeSet::from([session]));
+        let allowed_sessions = BTreeSet::from([session]);
+        ui.set_allowed_agent_sessions(allowed_sessions.iter().copied());
         assert!(ui.take_agent_observation_request());
-        ui.set_allowed_agent_sessions(BTreeSet::from([session]));
+        ui.set_allowed_agent_sessions(allowed_sessions.iter().copied());
         assert!(!ui.take_agent_observation_request());
         let now = std::time::Duration::from_secs(1);
         retry.request_observation(now);
