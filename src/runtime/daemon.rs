@@ -515,11 +515,14 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
+            let sandbox_roots =
+                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
+                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode,
                 program: self.program,
                 workspace_root: &workspace_root,
-                launch_roots: &[],
+                launch_roots: &sandbox_roots,
                 tmpdir: self.sandbox_tmpdir.as_deref(),
                 home: self.sandbox_home.as_deref(),
                 backend: self.sandbox_backend.as_deref(),
@@ -536,7 +539,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 self.sandbox_backend.as_deref(),
                 self.sandbox_tmpdir.as_deref(),
                 self.sandbox_home.as_deref(),
-                &[],
+                &sandbox_roots,
             )
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
             spawn.set_sandbox_launcher(launcher);
@@ -561,6 +564,37 @@ impl CodexProvisioner for RootCodexProvisioner {
 /// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
 const CLAUDE_PROGRAM: &str = "claude";
 
+/// Ensure the launched agent's private state directory exists before a root
+/// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
+/// so the daemon creates and validates the provider-specific directory first.
+fn root_agent_writable_roots(
+    home: Option<&Path>,
+    program: &str,
+) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
+    let (Some(home), Some(state_directory)) =
+        (home, claude_sandbox::agent_state_directory(program))
+    else {
+        return Ok(Vec::new());
+    };
+    validate_owned_directory(home)?;
+    let state = home.join(state_directory);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(&state) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+    }
+    validate_owned_directory(&state)?;
+    state
+        .canonicalize()
+        .map(|state| vec![state])
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
+}
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
@@ -12604,6 +12638,47 @@ instructions = "{instructions}"
         assert_eq!(environment["GIT_PAGER"], "");
         assert_eq!(environment["GIT_EXTERNAL_DIFF"], "");
         assert_eq!(environment["GIT_OPTIONAL_LOCKS"], "0");
+    }
+
+    #[test]
+    fn root_codex_os_sandbox_admits_only_its_private_state_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = root_agent_writable_roots(Some(home.path()), "codex").unwrap();
+        assert_eq!(roots, [home.path().join(".codex").canonicalize().unwrap()]);
+        assert!(home.path().join(".codex").is_dir());
+        let launcher = claude_sandbox_launcher(
+            Path::new("/opt/usagi/bin/usagi"),
+            SandboxMode::Root,
+            Path::new("/repo"),
+            None,
+            None,
+            Some(home.path()),
+            &roots,
+        )
+        .unwrap();
+        assert!(
+            launcher.prefix.windows(2).any(|pair| {
+                pair[0] == "--writable-root" && pair[1] == roots[0].to_string_lossy()
+            })
+        );
+        assert!(
+            !launcher
+                .prefix
+                .windows(2)
+                .any(|pair| pair == ["--writable-root", "/repo"])
+        );
+        assert_eq!(
+            root_agent_writable_roots(None, "codex").unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            root_agent_writable_roots(Some(home.path()), "/bin/sh").unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            root_agent_writable_roots(Some(home.path()), "codex-fugu").unwrap(),
+            [home.path().join(".codex-fugu").canonicalize().unwrap()]
+        );
     }
 
     #[test]

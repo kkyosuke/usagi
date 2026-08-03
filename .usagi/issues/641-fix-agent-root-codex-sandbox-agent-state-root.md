@@ -1,5 +1,5 @@
 ---
-number: 638
+number: 641
 title: fix(agent): root sandbox に起動する agent CLI 自身の state root を許す
 status: done
 priority: high
