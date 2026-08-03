@@ -3496,7 +3496,7 @@ fn controller_terminal_view(
     controls: &mut LiveTerminalControls,
     viewport_rows: usize,
 ) -> Option<TerminalViewProjection> {
-    let terminal = runtime.focused_terminal();
+    let terminal = runtime.preview_terminal();
     let mut live_terminals = runtime.background_terminals();
     if let Some(terminal) = &terminal {
         live_terminals.push(terminal.clone());
@@ -4551,7 +4551,7 @@ fn home_frame_material(
 ) -> HomeFrameMaterial {
     let projection =
         HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
-            .with_pane(runtime.managed_pane())
+            .with_pane(runtime.preview_pane())
             .with_metrics(metrics)
             .with_git_diffs(git_diffs)
             .with_terminal_view(
@@ -5240,7 +5240,9 @@ fn drive_workspace_controller(
         let geometry =
             foreground_terminal_geometry(height, width, runtime.state().director_drawer_open());
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
-        ui.sync_foreground_terminal(runtime.focused_terminal().as_ref(), geometry);
+        // The right pane is what the foreground attachment serves, so it follows
+        // the previewed terminal: Switch's hover, Closeup's focus.
+        ui.sync_foreground_terminal(runtime.preview_terminal().as_ref(), geometry);
         ui.resize_terminals(geometry);
         let (terminal_view, terminal_rows_len, terminal_scroll) =
             poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);

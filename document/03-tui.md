@@ -13,6 +13,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
+  - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
 - [指示モード（Director mode）](#指示モードdirector-mode)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
@@ -266,6 +267,26 @@ Home の mode は Switch と Closeup である。Switch 中の右ペインは ta
 Closeup では右ペインを active な明度へ戻す。Overview、Closeup action、PR、preview、text、notes、
 environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
+
+### Switch の右ペインは cursor の preview
+
+Switch は左 sidebar が navigation を持つため、右ペインは cursor（hover）が指す session の preview である。
+見出しの session 名、tab strip、agent phase 行、live terminal の viewport はいずれも cursor 行に追従し、
+footer は `[Switch] preview pane` と表示して、まだ command の対象ではないことを示す。Closeup は active
+managed session を描き、footer は `[Closeup] active pane` になる。
+
+| mode / cursor 行 | 右ペインが描く対象 |
+|---|---|
+| Switch・session 行 | その session（cursor が指す hover 対象） |
+| Switch・`+ new session` 行 | active managed session（session を指していないため target へ退避する） |
+| Switch・Director drawer が開いている | active managed session（drawer が前面の handoff を所有する） |
+| Closeup | active managed session |
+
+preview は表示だけを移し、command target（active）と live PTY 入力の宛先は動かさない。cursor の移動が
+active を変えないのは [Home と target](#home-と-target) のとおりで、Switch は PTY へキーを流さないため、
+入力は常に active target の focus 済み tab へ向かう。一度も開かれていない session を hover した場合は、
+未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
+追従するため、同時に attach する live terminal は従来どおり 1 つである。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
