@@ -5396,6 +5396,15 @@ mod tests {
         );
         assert!(!runtime.authenticates_mcp_child(&credential, 9001));
         assert!(runtime.claim_mcp_child(9001, 9998, 4321).is_err());
+        let ambiguous = runtime.mcp_callers[&credential].clone();
+        runtime
+            .mcp_callers
+            .insert("ambiguous-runtime".into(), ambiguous);
+        assert_eq!(
+            runtime.claim_mcp_child(9001, 4321, 4321).unwrap_err().code,
+            ErrorCode::OwnershipUnknown
+        );
+        runtime.mcp_callers.remove("ambiguous-runtime");
         assert_eq!(
             runtime.claim_mcp_child(9001, 4321, 4321).unwrap(),
             credential
