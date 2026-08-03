@@ -1952,4 +1952,49 @@ mod tests {
         assert_eq!(completed[0].exit_status, 0);
         assert!(TerminalOwner::completed_inventory(&runtime, &foreign).is_empty());
     }
+
+    #[test]
+    fn typed_generic_port_handles_completed_inventory_and_refuses_visibility_commands() {
+        let scope = TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let mut runtime = runtime_for(scope.clone());
+        let context = TerminalRequestContext {
+            connection: ConnectionId::new(),
+            client: ClientId::new(),
+            request: RequestId::new(),
+        };
+        assert_eq!(
+            TerminalOwnerPort::handle(
+                &mut runtime,
+                context,
+                TerminalRequest::CompletedInventory { scope },
+            )
+            .unwrap(),
+            TerminalResponse::CompletedInventory(Vec::new())
+        );
+
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        assert_eq!(
+            TerminalOwnerPort::handle(
+                &mut runtime,
+                context,
+                TerminalRequest::Observe {
+                    terminal,
+                    expected_revision: 0,
+                },
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::InvalidArgument
+        );
+    }
 }

@@ -2194,38 +2194,26 @@ impl<G: TerminalOwnerPort, A: AgentTerminalActor> TerminalOwnerPort for SharedTe
         // Observe / Dismiss mutate only the workspace-global visibility ledger,
         // never the terminal or its process. They are compare-and-swap and
         // return the authoritative snapshot so a client merges monotonically.
-        if matches!(
-            &request,
-            TerminalRequest::Observe { .. } | TerminalRequest::Dismiss { .. }
-        ) {
-            let outcome = match request {
-                TerminalRequest::Observe {
-                    terminal,
-                    expected_revision,
-                } => {
-                    let outcome = self.visibility.observe(&terminal, expected_revision);
-                    // Retention classes follow the authoritative visibility, so
-                    // the ledger evicts seen history before unseen history.
-                    self.retention
-                        .note_visibility(&terminal, outcome.snapshot().state);
-                    outcome
-                }
-                TerminalRequest::Dismiss {
-                    terminal,
-                    expected_revision,
-                } => {
-                    let outcome = self.visibility.dismiss(&terminal, expected_revision);
-                    self.retention
-                        .note_visibility(&terminal, outcome.snapshot().state);
-                    outcome
-                }
-                _ => {
-                    return Err(ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "terminal action does not match its payload",
-                    ));
-                }
-            };
+        if let TerminalRequest::Observe {
+            terminal,
+            expected_revision,
+        } = &request
+        {
+            let outcome = self.visibility.observe(terminal, *expected_revision);
+            // Retention classes follow the authoritative visibility, so the
+            // ledger evicts seen history before unseen history.
+            self.retention
+                .note_visibility(terminal, outcome.snapshot().state);
+            return Ok(visibility_response(outcome));
+        }
+        if let TerminalRequest::Dismiss {
+            terminal,
+            expected_revision,
+        } = &request
+        {
+            let outcome = self.visibility.dismiss(terminal, *expected_revision);
+            self.retention
+                .note_visibility(terminal, outcome.snapshot().state);
             return Ok(visibility_response(outcome));
         }
         let routed = self.agent.handle(context, request.clone());
@@ -6992,5 +6980,39 @@ mod tests {
             TerminalOutcome::Handled(result) => result,
             TerminalOutcome::NotOwned => Err(stale_terminal()),
         }
+    }
+
+    #[test]
+    fn agent_dispatch_refuses_non_terminal_typed_requests() {
+        let mut runtime = runtime();
+        let admission = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let runtime_ref = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        let error = runtime
+            .dispatch_terminal(
+                TerminalRequestContext {
+                    connection: ConnectionId::new(),
+                    client: ClientId::new(),
+                    request: RequestId::new(),
+                },
+                TerminalRequest::Inventory {
+                    scope: usagi_core::domain::terminal_launch::TerminalLaunchScope {
+                        workspace_id: WorkspaceId::new(),
+                        session_id: None,
+                        worktree_id: WorktreeId::new(),
+                    },
+                },
+                &runtime_ref,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
 }

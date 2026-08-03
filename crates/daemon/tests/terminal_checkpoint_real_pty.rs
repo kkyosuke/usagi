@@ -37,8 +37,8 @@ use usagi_core::domain::agent::{
     AgentProfile, AgentProfileId, DurableLaunchSnapshot, LaunchMode, LaunchPlan, LaunchRequest,
 };
 use usagi_core::domain::id::{
-    ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalRef,
-    WorkspaceId, WorktreeId,
+    ClientId, ConnectionId, DaemonGeneration, OperationId, RequestId, SessionId, TerminalId,
+    TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::terminal_launch::{
     DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchRequest,
@@ -68,14 +68,16 @@ use usagi_daemon::usecase::runtime::{
     RuntimeStoreSnapshot, SpawnProvision,
 };
 use usagi_daemon::usecase::terminal::{
-    Geometry, MAX_RETAINED_OUTPUT_BYTES, Output, OutputPipelineCounters, PtyWriteError, PtyWriter,
-    SCREEN_CELLS_AGGREGATE_MAX, SCREEN_CELLS_PER_TERMINAL_MAX, SnapshotWire, SpawnFailure,
-    output_pipeline_counters,
+    Geometry, InputAck, MAX_RETAINED_OUTPUT_BYTES, Output, OutputPipelineCounters, PtyWriteError,
+    PtyWriter, SCREEN_CELLS_AGGREGATE_MAX, SCREEN_CELLS_PER_TERMINAL_MAX, SnapshotWire,
+    SpawnFailure, output_pipeline_counters,
 };
 use usagi_daemon::usecase::terminal_ipc::{
     GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
 };
-use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
+use usagi_daemon::usecase::terminal_owner::{
+    TerminalOwner, TerminalRequestContext, TerminalResponse,
+};
 
 // ---- the painted screen -----------------------------------------------------
 
@@ -1031,6 +1033,40 @@ fn checkpoint_contract<O: DaemonOwner>(scenario: Scenario<O>, label: &str) {
 
 /// Both real daemon owners are held to one checkpoint contract, in one test so
 /// the process-local retention counters stay deterministic.
+#[test]
+fn presentation_encoder_preserves_launch_and_input_outcome_wire_shapes() {
+    let terminal = TerminalRef {
+        daemon_generation: DaemonGeneration::new(),
+        terminal_id: TerminalId::new(),
+        workspace_id: WorkspaceId::new(),
+        session_id: Some(SessionId::new()),
+        worktree_id: WorktreeId::new(),
+    };
+    let launch_operation = OperationId::new();
+    let launch = encode_terminal_response(
+        TerminalResponse::Launch {
+            terminal: terminal.clone(),
+            launch_operation,
+            replayed: false,
+        },
+        SnapshotWire::RawTail,
+    );
+    assert_eq!(launch["terminal"], json!(terminal));
+    assert_eq!(launch["launch_operation"], json!(launch_operation));
+    assert_eq!(launch["replayed"], false);
+
+    let final_outcome = encode_terminal_response(
+        TerminalResponse::InputOutcome(Some(InputAck::Written)),
+        SnapshotWire::RawTail,
+    );
+    assert_eq!(final_outcome["outcome"], "final");
+    assert_eq!(final_outcome["ack"], json!(InputAck::Written));
+    assert_eq!(
+        encode_terminal_response(TerminalResponse::InputOutcome(None), SnapshotWire::RawTail)["outcome"],
+        "unknown"
+    );
+}
+
 #[test]
 fn terminal_checkpoint_real_pty() {
     checkpoint_contract(generic_scenario(), "generic");

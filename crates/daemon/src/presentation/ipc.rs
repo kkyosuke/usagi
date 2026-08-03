@@ -546,74 +546,6 @@ pub fn encode_terminal_response(
     }
 }
 
-/// JSON-facing terminal adapter used by callers that exercise the presentation
-/// mapping directly. Production connection dispatch uses the same decode and
-/// encode functions before calling the usecase-owned [`TerminalOwner`] port.
-pub trait JsonTerminalOwner {
-    fn request(
-        &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
-        payload: serde_json::Value,
-        wire: crate::usecase::terminal::SnapshotWire,
-    ) -> Result<serde_json::Value, ProtocolError>;
-
-    fn inventory(
-        &self,
-        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>;
-
-    fn completed_inventory(
-        &self,
-        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry>;
-
-    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
-}
-
-impl<T: TerminalOwner> JsonTerminalOwner for T {
-    fn request(
-        &mut self,
-        connection: usagi_core::domain::id::ConnectionId,
-        client: usagi_core::domain::id::ClientId,
-        request_id: usagi_core::domain::id::RequestId,
-        action: usagi_core::usecase::client::TerminalAction,
-        payload: serde_json::Value,
-        wire: crate::usecase::terminal::SnapshotWire,
-    ) -> Result<serde_json::Value, ProtocolError> {
-        let request = decode_terminal_request(action, payload)?;
-        self.handle(
-            TerminalRequestContext {
-                connection,
-                client,
-                request: request_id,
-            },
-            request,
-        )
-        .map(|response| encode_terminal_response(response, wire))
-    }
-
-    fn inventory(
-        &self,
-        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
-        TerminalOwner::inventory(self, scope)
-    }
-
-    fn completed_inventory(
-        &self,
-        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
-    ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
-        TerminalOwner::completed_inventory(self, scope)
-    }
-
-    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
-        TerminalOwner::disconnect(self, connection);
-    }
-}
-
 fn ok_response(body: serde_json::Value) -> (ResponseOutcome, serde_json::Value) {
     (ResponseOutcome::Ok, body)
 }
@@ -911,10 +843,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.protocol.revision, 1);
-        assert!(matches!(
+        assert_eq!(
             read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
-            Some(Bootstrap::ServerHello(_))
-        ));
+            Some(Bootstrap::ServerHello(result))
+        );
     }
     /// A fence that refuses everything, and counts what it was asked.
     ///
@@ -1330,18 +1262,91 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_mismatched_terminal_payloads_are_rejected_before_owner_effects() {
-        let mut mismatched = terminal_request(usagi_core::domain::id::RequestId::new().to_string());
-        let EnvelopeKind::Request { body, .. } = &mut mismatched.kind else {
-            unreachable!();
+    fn presentation_encoder_and_typed_owner_cover_terminal_finals() {
+        use crate::usecase::terminal::{InputAck, SnapshotWire};
+        use usagi_core::domain::{
+            id::{
+                DaemonGeneration as OwnerGeneration, OperationId, SessionId, TerminalId,
+                TerminalRef, WorkspaceId, WorktreeId,
+            },
+            terminal_launch::TerminalLaunchScope,
         };
-        body["action"] = json!("attach");
 
-        let mut malformed = terminal_request(usagi_core::domain::id::RequestId::new().to_string());
-        let EnvelopeKind::Request { body, .. } = &mut malformed.kind else {
-            unreachable!();
+        let terminal_ref = TerminalRef {
+            daemon_generation: OwnerGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
         };
-        body["payload"] = json!({"operation": "bogus"});
+        let operation = OperationId::new();
+        let launch = encode_terminal_response(
+            TerminalResponse::Launch {
+                terminal: terminal_ref.clone(),
+                launch_operation: operation,
+                replayed: false,
+            },
+            SnapshotWire::RawTail,
+        );
+        assert_eq!(launch["terminal"], json!(terminal_ref));
+        assert_eq!(launch["launch_operation"], json!(operation));
+        assert_eq!(launch["replayed"], false);
+        assert_eq!(
+            encode_terminal_response(
+                TerminalResponse::InputOutcome(Some(InputAck::Written)),
+                SnapshotWire::RawTail,
+            )["outcome"],
+            "final"
+        );
+        assert_eq!(
+            encode_terminal_response(TerminalResponse::InputOutcome(None), SnapshotWire::RawTail,)
+                ["outcome"],
+            "unknown"
+        );
+
+        let scope = TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let mut owner = RecordingTerminal::default();
+        assert!(TerminalOwner::completed_inventory(&owner, &scope).is_empty());
+        TerminalOwner::disconnect(&mut owner, usagi_core::domain::id::ConnectionId::new());
+        assert_eq!(owner.disconnects, 1);
+    }
+
+    #[test]
+    fn malformed_and_mismatched_terminal_payloads_are_rejected_before_owner_effects() {
+        use usagi_core::domain::{
+            id::{WorkspaceId, WorktreeId},
+            terminal_launch::TerminalLaunchScope,
+        };
+        use usagi_core::usecase::client::{DaemonRequest, TerminalAction, TerminalRequest};
+
+        let request = |action, payload| Envelope {
+            protocol: ProtocolVersion {
+                generation: 1,
+                revision: 1,
+            },
+            daemon_generation: DaemonGeneration("current".into()),
+            kind: EnvelopeKind::Request {
+                request_id: usagi_core::infrastructure::ipc::RequestId(
+                    usagi_core::domain::id::RequestId::new().to_string(),
+                ),
+                timeout_ms: None,
+                body: serde_json::to_value(DaemonRequest::Terminal { action, payload }).unwrap(),
+            },
+        };
+        let inventory = serde_json::to_value(TerminalRequest::Inventory {
+            scope: TerminalLaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+        })
+        .unwrap();
+        let mismatched = request(TerminalAction::Attach, inventory);
+        let malformed = request(TerminalAction::Attach, json!({"operation": "bogus"}));
 
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -1366,16 +1371,11 @@ mod tests {
             let reply = read_json_frame::<Envelope>(&mut output, 1024)
                 .unwrap()
                 .unwrap();
-            assert!(matches!(
-                reply.kind,
-                EnvelopeKind::Response {
-                    outcome: ResponseOutcome::Error(ProtocolError {
-                        code: ErrorCode::InvalidArgument,
-                        ..
-                    }),
-                    ..
-                }
-            ));
+            let (outcome, _) = reply.kind_response();
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap()["value"]["code"],
+                json!("invalid_argument")
+            );
         }
     }
 
@@ -1536,13 +1536,13 @@ mod tests {
         let response = read_json_frame::<Envelope>(&mut output, 1024)
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            response.kind,
-            EnvelopeKind::Response {
-                outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(_),
-                ..
-            }
-        ));
+        assert_eq!(
+            std::mem::discriminant(&response.kind_response().0),
+            std::mem::discriminant(&ResponseOutcome::Error(ProtocolError::new(
+                ErrorCode::Internal,
+                "variant marker",
+            )))
+        );
     }
 
     #[test]
@@ -1569,10 +1569,9 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
-        let mut bad = hello();
-        if let Bootstrap::ClientHello(value) = &mut bad {
-            value.required_capabilities.push("missing".into());
-        }
+        let mut bad_hello = client_hello();
+        bad_hello.required_capabilities.push("missing".into());
+        let bad = Bootstrap::ClientHello(bad_hello);
         let mut input = Vec::new();
         write_json_frame(&mut input, &bad, 1024).unwrap();
         let mut output = Vec::new();
@@ -1581,10 +1580,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(matches!(
-            read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
-            Some(Bootstrap::Error(_))
-        ));
+        let reply = read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::mem::discriminant(&reply),
+            std::mem::discriminant(&Bootstrap::Error(ProtocolError::new(
+                ErrorCode::Internal,
+                "variant marker",
+            )))
+        );
     }
 
     #[test]
@@ -1623,15 +1628,12 @@ mod tests {
         // client working in another one.
         assert_eq!(terminal.requests, 0);
         let mut replies = Cursor::new(output);
-        let mut refused = None;
-        if let Some(Bootstrap::Error(error)) =
-            read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
-        {
-            refused = Some(error);
-        }
-        let refusal = refused.expect("a foreign workspace is answered with a typed error frame");
-        assert!(is_workspace_mismatch(&refusal));
-        assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
+        let refused = read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap();
+        assert!(matches!(
+            refused,
+            Some(Bootstrap::Error(ref error))
+                if is_workspace_mismatch(error) && error.message.contains(TRUSTED_ROOT)
+        ));
         assert_eq!(
             read_json_frame::<Envelope>(&mut replies, 1024).unwrap(),
             None
@@ -1672,15 +1674,15 @@ mod tests {
 
             assert_eq!(terminal.requests, 0, "{selected}");
             let mut replies = Cursor::new(output);
-            let mut refused = None;
-            if let Some(Bootstrap::Error(error)) =
-                read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap()
-            {
-                refused = Some(error);
-            }
-            let refusal = refused.expect("an unserved workspace is answered with a typed error");
-            assert!(is_workspace_mismatch(&refusal), "{selected}");
-            assert!(refusal.message.contains(TRUSTED_ROOT), "{refusal:?}");
+            let refused = read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap();
+            assert!(
+                matches!(
+                    refused,
+                    Some(Bootstrap::Error(ref error))
+                        if is_workspace_mismatch(error) && error.message.contains(TRUSTED_ROOT)
+                ),
+                "{selected}"
+            );
         }
 
         // Selecting the workspace this daemon serves reaches the runtime as usual.
@@ -1751,10 +1753,9 @@ mod tests {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
         assert!(handshake(&mut Cursor::new(input), &mut BrokenWriter, &server()).is_err());
-        let mut bad = hello();
-        if let Bootstrap::ClientHello(value) = &mut bad {
-            value.required_capabilities.push("missing".into());
-        }
+        let mut bad_hello = client_hello();
+        bad_hello.required_capabilities.push("missing".into());
+        let bad = Bootstrap::ClientHello(bad_hello);
         let mut input = Vec::new();
         write_json_frame(&mut input, &bad, 1024).unwrap();
         assert!(handshake(&mut Cursor::new(input), &mut BrokenWriter, &server()).is_err());

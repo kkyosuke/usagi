@@ -8607,11 +8607,34 @@ mod tests {
     use usagi_core::usecase::client::{
         TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
     };
-    use usagi_daemon::presentation::ipc::JsonTerminalOwner as TerminalOwner;
+    use usagi_daemon::presentation::ipc::encode_terminal_response;
     use usagi_daemon::usecase::terminal::SnapshotWire;
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+    use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
+
+    fn request_terminal_json(
+        owner: &mut dyn TerminalOwner,
+        connection: ConnectionId,
+        client: ClientId,
+        request_id: RequestId,
+        _action: TerminalAction,
+        payload: serde_json::Value,
+        wire: SnapshotWire,
+    ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        let request = serde_json::from_value(payload).unwrap();
+        owner
+            .handle(
+                TerminalRequestContext {
+                    connection,
+                    client,
+                    request: request_id,
+                },
+                request,
+            )
+            .map(|response| encode_terminal_response(response, wire))
+    }
 
     fn daemon_test_info() -> AppInfo {
         AppInfo {
@@ -12711,36 +12734,32 @@ instructions = "{instructions}"
             launch_operation: None,
         };
         let terminal: TerminalRef = serde_json::from_value(
-            runtime
-                .lock()
-                .unwrap()
-                .request(
-                    connection,
-                    client,
-                    RequestId::new(),
-                    TerminalAction::Launch,
-                    serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap()["terminal"]
-                .clone(),
-        )
-        .unwrap();
-        let subscription = runtime
-            .lock()
-            .unwrap()
-            .request(
+            request_terminal_json(
+                &mut *runtime.lock().unwrap(),
                 connection,
                 client,
                 RequestId::new(),
-                TerminalAction::Attach,
-                serde_json::to_value(TerminalRequest::Attach {
-                    terminal: terminal.clone(),
-                })
-                .unwrap(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
                 SnapshotWire::RawTail,
             )
-            .unwrap()["subscription"]
+            .unwrap()["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        let subscription = request_terminal_json(
+            &mut *runtime.lock().unwrap(),
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            serde_json::to_value(TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            })
+            .unwrap(),
+            SnapshotWire::RawTail,
+        )
+        .unwrap()["subscription"]
             .as_u64()
             .unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -12776,7 +12795,8 @@ instructions = "{instructions}"
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                runtime.lock().unwrap().request(
+                request_terminal_json(
+                    &mut *runtime.lock().unwrap(),
                     connection,
                     client,
                     RequestId::new(),
@@ -12798,61 +12818,55 @@ instructions = "{instructions}"
 
         let exit_connection = ConnectionId::new();
         let exit_client = ClientId::new();
-        let exit_subscription = runtime
-            .lock()
-            .unwrap()
-            .request(
-                exit_connection,
-                exit_client,
-                RequestId::new(),
-                TerminalAction::Attach,
-                serde_json::to_value(TerminalRequest::Attach {
-                    terminal: terminal.clone(),
-                })
-                .unwrap(),
-                SnapshotWire::RawTail,
-            )
-            .unwrap()["subscription"]
+        let exit_subscription = request_terminal_json(
+            &mut *runtime.lock().unwrap(),
+            exit_connection,
+            exit_client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            serde_json::to_value(TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            })
+            .unwrap(),
+            SnapshotWire::RawTail,
+        )
+        .unwrap()["subscription"]
             .as_u64()
             .unwrap();
-        runtime
-            .lock()
-            .unwrap()
-            .request(
-                exit_connection,
-                exit_client,
-                RequestId::new(),
-                TerminalAction::Input,
-                serde_json::to_value(TerminalRequest::Input {
-                    terminal: terminal.clone(),
-                    subscription: exit_subscription,
-                    input_seq: 0,
-                    input_operation: None,
-                    bytes: b"exit\n".to_vec(),
-                })
-                .unwrap(),
-                SnapshotWire::RawTail,
-            )
-            .unwrap();
+        request_terminal_json(
+            &mut *runtime.lock().unwrap(),
+            exit_connection,
+            exit_client,
+            RequestId::new(),
+            TerminalAction::Input,
+            serde_json::to_value(TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription: exit_subscription,
+                input_seq: 0,
+                input_operation: None,
+                bytes: b"exit\n".to_vec(),
+            })
+            .unwrap(),
+            SnapshotWire::RawTail,
+        )
+        .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let response = runtime
-                .lock()
-                .unwrap()
-                .request(
-                    connection,
-                    client,
-                    RequestId::new(),
-                    TerminalAction::Resume,
-                    serde_json::to_value(TerminalRequest::Resume {
-                        terminal: terminal.clone(),
-                        after_offset: 0,
-                    })
-                    .unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap();
+            let response = request_terminal_json(
+                &mut *runtime.lock().unwrap(),
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Resume,
+                serde_json::to_value(TerminalRequest::Resume {
+                    terminal: terminal.clone(),
+                    after_offset: 0,
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap();
             if response["exited"] == true {
                 break;
             }
@@ -13426,23 +13440,23 @@ instructions = "{instructions}"
             },
         );
         let old_terminal: TerminalRef = serde_json::from_value(
-            first
-                .request(
-                    ConnectionId::new(),
-                    ClientId::new(),
-                    RequestId::new(),
-                    TerminalAction::Launch,
-                    serde_json::to_value(TerminalRequest::Launch {
-                        intent: TerminalLaunchIntent {
-                            request: request.clone(),
-                            geometry: TerminalGeometry { cols: 80, rows: 24 },
-                            launch_operation: None,
-                        },
-                    })
-                    .unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap()["terminal"]
+            request_terminal_json(
+                &mut first,
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: TerminalLaunchIntent {
+                        request: request.clone(),
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
+                    },
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap()["terminal"]
                 .clone(),
         )
         .unwrap();
@@ -13508,16 +13522,16 @@ instructions = "{instructions}"
                 },
             ),
         ] {
-            let error = second
-                .request(
-                    ConnectionId::new(),
-                    ClientId::new(),
-                    RequestId::new(),
-                    action,
-                    serde_json::to_value(request).unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap_err();
+            let error = request_terminal_json(
+                &mut second,
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                action,
+                serde_json::to_value(request).unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
             assert_eq!(
                 error.code,
                 usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
@@ -13526,23 +13540,23 @@ instructions = "{instructions}"
         assert_eq!(*second_effects.lock().unwrap(), RestartEffects::default());
 
         let new_terminal: TerminalRef = serde_json::from_value(
-            second
-                .request(
-                    ConnectionId::new(),
-                    ClientId::new(),
-                    RequestId::new(),
-                    TerminalAction::Launch,
-                    serde_json::to_value(TerminalRequest::Launch {
-                        intent: TerminalLaunchIntent {
-                            request,
-                            geometry: TerminalGeometry { cols: 80, rows: 24 },
-                            launch_operation: None,
-                        },
-                    })
-                    .unwrap(),
-                    SnapshotWire::RawTail,
-                )
-                .unwrap()["terminal"]
+            request_terminal_json(
+                &mut second,
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: TerminalLaunchIntent {
+                        request,
+                        geometry: TerminalGeometry { cols: 80, rows: 24 },
+                        launch_operation: None,
+                    },
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap()["terminal"]
                 .clone(),
         )
         .unwrap();
