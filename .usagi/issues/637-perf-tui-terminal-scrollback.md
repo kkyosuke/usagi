@@ -1,13 +1,13 @@
 ---
 number: 637
 title: perf(tui): terminal 出力時の scrollback 全再構築を差分化する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, terminal, performance, rendering]
 dependson: []
 related: [389, 527, 535, 554, 587]
 created_at: 2026-08-02T23:42:45.638393+00:00
-updated_at: 2026-08-02T23:43:09.916392+00:00
+updated_at: 2026-08-03T01:31:01.363451+00:00
 ---
 
 ## 問題・発生条件
@@ -98,3 +98,32 @@ tracked file を変更せず、`TerminalScreen` の公開 API を使う release 
 - 1 completion に複数 contiguous chunk がある burst で、cache publish が coalesce されることを assert する。
 - 100 / 1,000 / 10,000 行の append benchmark を残し、append の latency が retained row 数に線形増加しないことと frame budget を記録する。
 - 実 PTY E2E で長い出力を流しながら input、modal、quit が所定時間内に完了することを確認する。
+
+## 実装時の決定
+
+### 全履歴 cache ではなく viewport 遅延投影を採用
+
+`TerminalSession` の `display_cache: Vec<String>` を撤去した。PTY chunk の適用、resize、接続状態変更は `VtScreen` だけを更新し、retained history の ANSI 文字列化や URL scan を行わない。
+
+Home が描画素材を要求するときは、まず末尾の有効行数を文字列 allocation 無しで求め、`display_row_window(start, end)` が要求された retained row だけを投影する。URL が viewport 境界を跨ぐ場合は、従来と同じ wrap 判定でその logical line の先頭・末尾まで scan 範囲を広げる。したがって通常経路は viewport 行数に比例し、長い wrapped line だけが正しさに必要な範囲を追加で払う。
+
+selection / copy は明示操作時に untrimmed cells 全体を snapshot する既存契約を残した。これによりdrag中の出力で選択対象が動かず、通常出力へ全履歴costを戻さない。
+
+### 実測（実装後）
+
+起票時と同じ release probe（24×80、20回のviewport投影）では、retained row数に依存しない結果になった。
+
+| retained rows | 通常行・20 viewport | 各行に URL・20 viewport |
+|---:|---:|---:|
+| 100 | 0.520 ms | 1.685 ms |
+| 1,000 | 0.522 ms | 1.714 ms |
+| 10,000 | 0.506 ms | 1.793 ms |
+
+10,000行の1回あたりは通常約0.025 ms、URLあり約0.090 ms。起票時のfull rebuild（10.60–43.00 ms/回）に対し約420–480倍短く、履歴長による線形増加も消えた。
+
+### 回帰固定
+
+- 10,000行のunwrapped historyで24行windowのscan範囲が24行だけであることをassertした。
+- wrapped URLの途中から始まるwindowがfull projectionの同じsliceと一致し、scanがlogical-line先頭まで広がることをassertした。
+- blank live cursorを有効行数へ含め、非liveのblank paddingを除く契約をassertした。
+- 既存のterminal screen/session、link click、selection/copy、checkpoint/resize、CJK/SGR parity testsを通した。

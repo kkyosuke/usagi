@@ -472,12 +472,6 @@ pub struct TerminalSession {
     /// set it and therefore always reassert PTY geometry.
     detached_geometry: bool,
     screen: TerminalScreen,
-    /// Rendered retained rows cached between output/resize/state changes.
-    ///
-    /// The presentation loop redraws much more often than terminal output
-    /// changes. Keeping this projection here avoids rebuilding and rescanning up
-    /// to the full scrollback limit on every 16 ms UI tick.
-    display_cache: Vec<String>,
     subscription: Option<TerminalSubscription>,
     cursor: u64,
     input_seq: u64,
@@ -518,14 +512,12 @@ impl TerminalSession {
     #[must_use]
     pub fn new(terminal: TerminalRef, geometry: Geometry) -> Self {
         let screen = screen_for(geometry);
-        let display_cache = screen.rows_with_scrollback();
         Self {
             terminal,
             geometry,
             synchronized_geometry: None,
             detached_geometry: false,
             screen,
-            display_cache,
             subscription: None,
             cursor: 0,
             input_seq: 0,
@@ -591,22 +583,27 @@ impl TerminalSession {
     /// The retained terminal history projected into an active terminal pane.
     #[must_use]
     pub fn display_rows_with_scrollback(&self) -> Vec<String> {
-        self.display_cache.clone()
+        match self.state {
+            SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
+            SessionState::Reconnecting
+            | SessionState::Disconnected
+            | SessionState::Orphaned
+            | SessionState::Exited => self.screen.rows_with_scrollback(),
+        }
     }
 
-    /// Number of retained rendered rows without cloning the scrollback.
+    /// Number of retained rendered rows without projecting the scrollback.
     #[must_use]
-    pub const fn display_row_count(&self) -> usize {
-        self.display_cache.len()
+    pub fn display_row_count(&self) -> usize {
+        self.screen
+            .rows_with_scrollback_count(self.state == SessionState::Live)
     }
 
-    /// Clone only the retained rows needed by the current viewport.
+    /// Render only the retained rows needed by the current viewport.
     #[must_use]
     pub fn display_row_window(&self, start: usize, end: usize) -> Vec<String> {
-        self.display_cache
-            .get(start.min(self.display_cache.len())..end.min(self.display_cache.len()))
-            .unwrap_or_default()
-            .to_vec()
+        self.screen
+            .rows_with_scrollback_window(start, end, self.state == SessionState::Live)
     }
 
     /// Projects the retained output with a cell-precise visual selection.
@@ -759,7 +756,6 @@ impl TerminalSession {
                     self.synchronized_geometry = Some(geometry);
                     self.screen
                         .resize(geometry.rows as usize, geometry.cols as usize);
-                    self.refresh_display_cache();
                     self.set_current_error(None);
                 }
                 Err(error) => {
@@ -994,7 +990,6 @@ impl TerminalSession {
         self.detached_geometry = true;
         self.retry_at = None;
         self.retry_attempt = 0;
-        self.refresh_display_cache();
         self.set_current_error(Some("terminal detached".to_owned()));
     }
 
@@ -1004,7 +999,6 @@ impl TerminalSession {
         chunks: Vec<TerminalChunk>,
         now: Instant,
     ) {
-        let mut changed = false;
         for chunk in chunks {
             let contiguous = chunk.start_offset == self.cursor
                 && chunk.end_offset >= chunk.start_offset
@@ -1016,10 +1010,6 @@ impl TerminalSession {
             }
             self.screen.advance(&chunk.data);
             self.cursor = chunk.end_offset;
-            changed = true;
-        }
-        if changed {
-            self.refresh_display_cache();
         }
     }
 
@@ -1104,7 +1094,6 @@ impl TerminalSession {
         } else {
             SessionState::Live
         };
-        self.refresh_display_cache();
         let exit = attach
             .exited
             .then(|| error_message(TerminalError::Exited).to_owned());
@@ -1146,7 +1135,6 @@ impl TerminalSession {
         self.state = SessionState::Reconnecting;
         self.retry_at = Some(now + retry_delay(self.retry_attempt));
         self.retry_attempt = self.retry_attempt.saturating_add(1);
-        self.refresh_display_cache();
         self.set_current_error(Some(refusal.message()));
     }
 
@@ -1155,7 +1143,6 @@ impl TerminalSession {
             TerminalError::Unavailable | TerminalError::InputEffectUnknown => {
                 self.subscription = None;
                 self.state = SessionState::Reconnecting;
-                self.refresh_display_cache();
                 self.retry_at = Some(now + retry_delay(self.retry_attempt));
                 self.retry_attempt = self.retry_attempt.saturating_add(1);
                 let message = error_message(error).to_owned();
@@ -1178,18 +1165,7 @@ impl TerminalSession {
         self.retry_at = None;
         self.retry_attempt = 0;
         self.state = state;
-        self.refresh_display_cache();
         self.set_current_error(Some(error_message(error).to_owned()));
-    }
-
-    fn refresh_display_cache(&mut self) {
-        self.display_cache = match self.state {
-            SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
-            SessionState::Reconnecting
-            | SessionState::Disconnected
-            | SessionState::Orphaned
-            | SessionState::Exited => self.screen.rows_with_scrollback(),
-        };
     }
 
     fn latch_input_uncertainty(&mut self, message: String) {
@@ -1582,7 +1558,6 @@ mod tests {
             session.screen.rows_with_scrollback_and_cursor()
         );
         session.state = SessionState::Exited;
-        session.refresh_display_cache();
         assert_eq!(
             session.display_rows_with_scrollback(),
             vec!["one", "two", "three"]
