@@ -9,7 +9,7 @@
 //! カーソル移動と選択の純粋操作だけを公開する。
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{TextInput, modal};
+use crate::presentation::widgets::{TextInput, centered_padding, modal, normalize_size};
 use crate::presentation::workspace_runtime::AgentReopenChoice;
 use crate::usecase::{agent_command, closeup};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
@@ -156,6 +156,62 @@ impl CloseupModal {
                 .map_or_else(String::new, |action| action.name.to_owned()),
             ModalSelectionMode::Prompt => self.input.value().to_owned(),
         }
+    }
+
+    /// Resolve a left click on a visible action or inline subcommand to the
+    /// exact registry command Enter would submit from that row.
+    ///
+    /// The hit geometry is derived from the same fixed body, centering, and
+    /// narrow-terminal rules as [`render_over`], so the clickable row cannot
+    /// drift away from what the user sees. Prompt mode has no clickable action
+    /// rows and clicks outside the modal body are inert.
+    #[must_use]
+    pub fn submission_at(
+        &self,
+        raw_height: usize,
+        raw_width: usize,
+        column: u16,
+        row: u16,
+    ) -> Option<String> {
+        if self.selection_mode != ModalSelectionMode::Action {
+            return None;
+        }
+        let (height, width) = normalize_size(raw_height, raw_width);
+        if width < 4 {
+            return None;
+        }
+        let inner_width = modal::modal_inner_width(width, INNER_WIDTH);
+        let box_width = inner_width + 4;
+        let left = centered_padding(width, box_width);
+        let top = height.saturating_sub(BODY_HEIGHT + 2) / 2;
+        let column = usize::from(column);
+        let row = usize::from(row);
+        if column <= left
+            || column >= left + box_width - 1
+            || row <= top
+            || row > top + BODY_HEIGHT
+            || row >= height
+        {
+            return None;
+        }
+
+        let clicked_body_row = row - top - 1;
+        let mut body_row = 2 + usize::from(self.error.is_some());
+        for (index, action) in self.matches().into_iter().enumerate() {
+            if body_row < BODY_HEIGHT && clicked_body_row == body_row {
+                return Some(action.name.to_owned());
+            }
+            body_row += 1;
+            if self.expanded && index == self.selected {
+                for subcommand in self.subcommands() {
+                    if body_row < BODY_HEIGHT && clicked_body_row == body_row {
+                        return Some(format!("{} {}", action.name, subcommand.value));
+                    }
+                    body_row += 1;
+                }
+            }
+        }
+        None
     }
 
     /// Insert one character in Prompt mode.
@@ -491,7 +547,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
         lines.push(String::new());
     }
     lines.push(modal::footer(
-        "↑↓: select   →: expand   Enter: run   Esc: back",
+        "↑↓: select  →: more  Enter: run/click  Esc: back",
     ));
     modal::fixed_body(lines, BODY_HEIGHT)
 }
@@ -615,6 +671,31 @@ mod tests {
         none.expand_selected();
         assert_eq!(none.submission(), "agent");
         assert!(!joined(&none).contains("-m"));
+    }
+
+    #[test]
+    fn visible_action_and_subcommand_rows_are_clickable() {
+        // At 80x24 the 54-column, 12-row box starts at (13, 6). Its first
+        // action row (`agent`) is body row 2, therefore screen row 9.
+        let mut modal = CloseupModal::new("daemon");
+        assert_eq!(modal.submission_at(24, 80, 14, 9).as_deref(), Some("agent"));
+        assert_eq!(modal.submission_at(24, 3, 0, 0), None);
+        assert_eq!(modal.submission_at(24, 80, 12, 9), None);
+        assert_eq!(modal.submission_at(24, 80, 14, 8), None);
+        assert_eq!(modal.submission_at(24, 80, 14, 15), None);
+
+        modal.expand_selected();
+        assert_eq!(
+            modal.submission_at(24, 80, 14, 10).as_deref(),
+            Some("agent -m claude")
+        );
+        assert_eq!(
+            modal.submission_at(24, 80, 14, 11).as_deref(),
+            Some("agent -m codex")
+        );
+
+        let prompt = CloseupModal::with_selection_mode("daemon", ModalSelectionMode::Prompt);
+        assert_eq!(prompt.submission_at(24, 80, 14, 9), None);
     }
 
     #[test]

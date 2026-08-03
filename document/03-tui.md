@@ -882,7 +882,8 @@ Closeup action modal の表示と input owner は target entry の tab 有無と
 「tab 有無」は pending・live・document のいずれの tab も 1 枚として数える（live pane の有無ではない）ため、起動待ちの
 pending tab がある間は action modal を自動表示せず、その wave を覆わない。Switch で
 `Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が 1 枚も無い
-Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
+Closeup は action modal が management input を所有し、Enter または表示中の action 行の左クリックで
+`agent` / `terminal` を確定できる。action 行の click は背景 sidebar へ伝播しない。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
 を再び出すのは `Ctrl-O Ctrl-A` だけである。action modal が前面にある間の `Esc` / `Ctrl-C` は、tab の有無や forced
 表示か base surface かに依らず、modal を閉じて Switch へ戻る（`Ctrl-O Ctrl-O` と同じ着地で、action picker を dead-end に

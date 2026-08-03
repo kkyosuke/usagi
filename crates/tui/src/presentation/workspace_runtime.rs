@@ -598,18 +598,7 @@ impl WorkspaceRuntime {
             }
             Key::Enter => {
                 let submission = modal.submission();
-                let effects = self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)));
-                // An accepted command produces its effect and closes the overlay
-                // (which drops the modal). A refused one produces nothing and
-                // leaves the modal on screen, so carry the reducer's safe message
-                // into it — otherwise the refusal looks like a dead key.
-                if effects.is_empty() {
-                    let message = self.state.notice().map(|notice| notice.message.clone());
-                    if let Some(modal) = self.closeup_modal.as_mut() {
-                        modal.set_error(message);
-                    }
-                }
-                effects
+                self.submit_closeup_modal(submission)
             }
             Key::Escape => self.apply_event(AppEvent::Key(AppKey::Escape)),
             other => match app_event_from_key(other) {
@@ -617,6 +606,38 @@ impl WorkspaceRuntime {
                 None => Vec::new(),
             },
         }
+    }
+
+    /// Submit the visible Closeup action under a left click. Returns `None`
+    /// when the click is outside an actionable row so the shell may continue
+    /// its ordinary pointer routing.
+    #[must_use]
+    pub fn handle_closeup_click(
+        &mut self,
+        height: usize,
+        width: usize,
+        column: u16,
+        row: u16,
+    ) -> Option<Vec<Effect>> {
+        let submission = self
+            .closeup_modal
+            .as_ref()?
+            .submission_at(height, width, column, row)?;
+        Some(self.submit_closeup_modal(submission))
+    }
+
+    fn submit_closeup_modal(&mut self, submission: String) -> Vec<Effect> {
+        let effects = self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)));
+        // An accepted command produces its effect and closes the overlay
+        // (which drops the modal). A refused one produces nothing and leaves
+        // the modal on screen, so carry the reducer's safe message into it.
+        if effects.is_empty() {
+            let message = self.state.notice().map(|notice| notice.message.clone());
+            if let Some(modal) = self.closeup_modal.as_mut() {
+                modal.set_error(message);
+            }
+        }
+        effects
     }
 
     /// Reduce one [`AppEvent`] (key, resize, tick, backend, completion) and
@@ -1677,6 +1698,29 @@ mod tests {
         );
         // Submitting closes the action modal; the edge-triggered live-pane level
         // no longer re-opens it while the launched pane is still pending.
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+    }
+
+    #[test]
+    fn clicking_the_closeup_agent_row_launches_it() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+
+        // This is the visible `agent` row at 80x24 (see CloseupModal's geometry
+        // contract). The click must take the same submit path as Enter.
+        let effects = runtime
+            .handle_closeup_click(24, 80, 14, 9)
+            .expect("agent row is clickable");
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::LaunchAgent {
+                workspace: actual_workspace,
+                session: Some(actual_session),
+                ..
+            }] if *actual_workspace == workspace && *actual_session == session
+        ));
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
     }

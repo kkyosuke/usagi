@@ -5372,6 +5372,10 @@ fn drive_workspace_controller(
             effects
         } else if is_director_new_click(&key, &runtime, height, width) {
             runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
+        } else if let Key::Click { column, row } = key
+            && let Some(effects) = runtime.handle_closeup_click(height, width, column, row)
+        {
+            effects
         } else if let Key::Click { column, row } = key {
             // Header rendering and hit-testing share one layout projection, so
             // CJK breadcrumbs, notice presence, and narrow clipping cannot move
