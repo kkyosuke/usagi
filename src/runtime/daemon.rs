@@ -515,6 +515,8 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
+            let sandbox_roots = root_codex_writable_roots(self.sandbox_home.as_deref())
+                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
             if !self.sandbox_passthrough {
                 validate_root_git_common_dir_policy(
                     &workspace_root,
@@ -526,7 +528,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             validate_claude_sandbox_policy(
                 mode,
                 &workspace_root,
-                &[],
+                &sandbox_roots,
                 self.sandbox_tmpdir.as_deref(),
                 self.sandbox_home.as_deref(),
                 self.sandbox_backend.as_deref(),
@@ -543,7 +545,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 self.sandbox_backend.as_deref(),
                 self.sandbox_tmpdir.as_deref(),
                 self.sandbox_home.as_deref(),
-                &[],
+                &sandbox_roots,
             )
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
             spawn.set_sandbox_launcher(launcher);
@@ -562,6 +564,36 @@ impl CodexProvisioner for RootCodexProvisioner {
             spawn,
         })
     }
+}
+
+/// Codex keeps mutable runtime state (including its SQLite database) below
+/// `$HOME/.codex`. The root coordinator's outer OS sandbox admits that one
+/// provider-owned directory while keeping the repository and the rest of the
+/// home directory read-only.
+fn root_codex_writable_roots(
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
+    let Some(home) = home else {
+        return Ok(Vec::new());
+    };
+    validate_owned_directory(home)?;
+    let state = home.join(".codex");
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(&state) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+    }
+    validate_owned_directory(&state)?;
+    state
+        .canonicalize()
+        .map(|state| vec![state])
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
 }
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
@@ -12575,6 +12607,39 @@ instructions = "{instructions}"
         assert_eq!(environment["GIT_PAGER"], "");
         assert_eq!(environment["GIT_EXTERNAL_DIFF"], "");
         assert_eq!(environment["GIT_OPTIONAL_LOCKS"], "0");
+    }
+
+    #[test]
+    fn root_codex_os_sandbox_admits_only_its_private_state_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = root_codex_writable_roots(Some(home.path())).unwrap();
+        assert_eq!(roots, [home.path().join(".codex").canonicalize().unwrap()]);
+        assert!(home.path().join(".codex").is_dir());
+        let launcher = claude_sandbox_launcher(
+            Path::new("/opt/usagi/bin/usagi"),
+            SandboxMode::Root,
+            Path::new("/repo"),
+            None,
+            None,
+            Some(home.path()),
+            &roots,
+        )
+        .unwrap();
+        assert!(
+            launcher.prefix.windows(2).any(|pair| {
+                pair[0] == "--writable-root" && pair[1] == roots[0].to_string_lossy()
+            })
+        );
+        assert!(
+            !launcher
+                .prefix
+                .windows(2)
+                .any(|pair| pair == ["--writable-root", "/repo"])
+        );
+        assert_eq!(
+            root_codex_writable_roots(None).unwrap(),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]
