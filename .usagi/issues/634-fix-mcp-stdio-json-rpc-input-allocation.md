@@ -1,13 +1,13 @@
 ---
 number: 634
 title: fix(mcp): stdio JSON-RPC input を allocation 前に上限制御する
-status: todo
+status: done
 priority: medium
 labels: [review, security, mcp, cli, protocol, reliability]
 dependson: []
 related: [482, 604]
 created_at: 2026-08-02T23:13:59.982202+00:00
-updated_at: 2026-08-02T23:13:59.982202+00:00
+updated_at: 2026-08-03T02:05:30.299400+00:00
 ---
 
 ## Finding（medium / availability）

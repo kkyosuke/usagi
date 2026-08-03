@@ -99,13 +99,15 @@ envelope を検証するため、不正な通知が store や daemon に effect 
 | tool/daemon の実行中エラー | `-32603` Internal error | request id |
 
 `id` の無い object は notification として扱うため、validation error を含めて response は返さない。
-不正入力を受けても stdio serve loop は次の行を処理し続ける。
+1 message の JSON payload 上限は末尾 LF を除いて 1 MiB である。reader は最大 1 MiB + LF しか
+buffer に確保せず、上限超過時は request / notification の routing や error response を行わず、stdio
+connection を fail-closed で終了する。上限内の不正入力では stdio serve loop は次の行を処理し続ける。
 
 ## JSON-RPC メソッド
 
 serve ループが応答するメソッドは次のとおり。1 行 = 1 メッセージで、通知（`id` 無し）には
-応答しない。不正入力 1 行ではサーバを止めず、リクエスト単位のエラーは JSON-RPC エラー応答に
-整形する。
+応答しない。入力上限内の不正な 1 行ではサーバを止めず、リクエスト単位のエラーは JSON-RPC
+エラー応答に整形する。
 
 | メソッド | 役割 |
 |---|---|

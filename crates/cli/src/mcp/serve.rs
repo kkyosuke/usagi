@@ -8,7 +8,7 @@
 //! issue / memory は cwd の core store usecase、session 系は daemon client へ接続し、
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
@@ -28,6 +28,9 @@ use super::{resources, tools};
 /// サーバが対応する MCP プロトコルバージョン。
 const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// Maximum JSON payload accepted from one stdio line, excluding its trailing LF.
+pub const MAX_STDIO_MESSAGE_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServerState {
     AwaitingInitialize,
@@ -43,9 +46,10 @@ struct ServerCapabilities<'a> {
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
 ///
-/// トップレベルの誤り処理: **不正入力 1 行でサーバを止めない**。行は生バイトで読み、
-/// 非 UTF-8 はロッシー変換してパースエラー（`handle_line` が `-32700` を返す）に落とす。
-/// stdin の真の IO エラー（切断など）だけを伝播して終了する。リクエスト単位のエラー
+/// トップレベルの誤り処理: **上限内の不正入力 1 行でサーバを止めない**。非 UTF-8 は
+/// parse error (`-32700`) に落とす。JSON payload は末尾 LF を除いて
+/// [`MAX_STDIO_MESSAGE_BYTES`] bytes まで受け入れ、超過時は応答を生成せず fail-closed で
+/// [`io::ErrorKind::InvalidData`] を返す。リクエスト単位のエラー
 /// （不正 JSON・未知 method/tool・引数不正・tool 未実装）は `handle_line` が JSON-RPC
 /// エラー応答に整形し、ループは継続する。
 ///
@@ -53,7 +57,7 @@ struct ServerCapabilities<'a> {
 ///
 /// # Errors
 ///
-/// stdin の読み取り、または `out` への書き込みが IO エラーになった場合、そのエラーを返す。
+/// stdin の読み取り、`out` への書き込み、または入力行の上限超過時にエラーを返す。
 pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
     let mut unavailable = UnavailableClient;
     serve_with_client(input, out, version, &mut unavailable)
@@ -133,7 +137,7 @@ pub fn serve_with_client_and_features(
 ) -> io::Result<()> {
     // Fail before accepting input if metadata, route, schema, or capability drifted.
     drop(tools::registry_with_availability(availability));
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(MAX_STDIO_MESSAGE_BYTES + 1);
     let mut state = ServerState::AwaitingInitialize;
     let capabilities = ServerCapabilities {
         runtime_models: snapshot,
@@ -141,12 +145,17 @@ pub fn serve_with_client_and_features(
     };
     loop {
         buf.clear();
-        // 生バイトで 1 行読む。真の IO エラーだけ `?` で伝播する。
-        if input.read_until(b'\n', &mut buf)? == 0 {
+        if read_bounded_line(&mut input, &mut buf)? == 0 {
             return Ok(()); // EOF
         }
-        // 非 UTF-8 はロッシー変換（不正 JSON になり handle_line が parse error を返す）。
-        let line = String::from_utf8_lossy(&buf);
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            writeln!(
+                out,
+                "{}",
+                protocol::error(Value::Null, error_code::PARSE_ERROR, "parse error")
+            )?;
+            continue;
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -157,6 +166,22 @@ pub fn serve_with_client_and_features(
             writeln!(out, "{response}")?;
         }
     }
+}
+
+/// Read one LF-delimited message without allowing the destination to grow beyond
+/// the payload limit plus the delimiter. Oversize input is not drained: the stdio
+/// connection is closed by the caller so no unbounded work follows rejection.
+fn read_bounded_line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> io::Result<usize> {
+    let mut bounded = (&mut *input).take((MAX_STDIO_MESSAGE_BYTES + 1) as u64);
+    let read = bounded.read_until(b'\n', buf)?;
+    let has_lf = buf.last() == Some(&b'\n');
+    if read > MAX_STDIO_MESSAGE_BYTES && !has_lf {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("MCP stdio message exceeds {MAX_STDIO_MESSAGE_BYTES} byte limit"),
+        ));
+    }
+    Ok(read)
 }
 
 struct UnavailableClient;
@@ -678,10 +703,11 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState, agent_selector_schema,
-        apply_caller_policy, daemon_error_data, execute_tool, handle_line, handle_line_with_client,
-        normalize_caller_credential, serve, serve_with_client, serve_with_client_and_features,
-        serve_with_client_and_snapshot, session_tool_response,
+        MAX_STDIO_MESSAGE_BYTES, SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState,
+        agent_selector_schema, apply_caller_policy, daemon_error_data, execute_tool, handle_line,
+        handle_line_with_client, normalize_caller_credential, read_bounded_line, serve,
+        serve_with_client, serve_with_client_and_features, serve_with_client_and_snapshot,
+        session_tool_response,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -689,6 +715,7 @@ mod tests {
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use crate::mcp::tools::{ToolAvailability, registry};
     use serde_json::Value;
+    use std::io::{BufReader, Cursor, ErrorKind, Write};
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
@@ -1218,6 +1245,101 @@ mod tests {
     }
 
     #[test]
+    fn bounded_stdio_reader_accepts_payload_at_limit_and_rejects_limit_plus_one() {
+        for payload_len in [MAX_STDIO_MESSAGE_BYTES - 1, MAX_STDIO_MESSAGE_BYTES] {
+            let mut input = vec![b' '; payload_len];
+            input.push(b'\n');
+            let mut reader = Cursor::new(input);
+            let mut buf = Vec::new();
+            assert_eq!(
+                read_bounded_line(&mut reader, &mut buf).unwrap(),
+                payload_len + 1
+            );
+            assert_eq!(buf.len(), payload_len + 1);
+        }
+
+        let mut input = vec![b' '; MAX_STDIO_MESSAGE_BYTES + 1];
+        input.push(b'\n');
+        let mut reader = Cursor::new(input);
+        let mut buf = Vec::new();
+        let error = read_bounded_line(&mut reader, &mut buf).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(buf.len(), MAX_STDIO_MESSAGE_BYTES + 1);
+    }
+
+    #[test]
+    fn boundary_sized_notifications_have_zero_effects_and_oversize_fails_closed() {
+        let notification =
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\",\"arguments\":{}}}";
+        for payload_len in [
+            MAX_STDIO_MESSAGE_BYTES - 1,
+            MAX_STDIO_MESSAGE_BYTES,
+            MAX_STDIO_MESSAGE_BYTES + 1,
+        ] {
+            let mut input = notification.to_vec();
+            input.resize(payload_len, b' ');
+            input.push(b'\n');
+            let mut output = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"effect": true}))),
+                requests: vec![],
+            };
+            let result = serve_with_client_and_snapshot(
+                input.as_slice(),
+                &mut output,
+                "9.9.9",
+                &mut client,
+                &RuntimeModelSnapshot::default(),
+            );
+            if payload_len <= MAX_STDIO_MESSAGE_BYTES {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
+            }
+            assert!(output.is_empty());
+            assert!(client.requests.is_empty());
+        }
+    }
+
+    #[test]
+    fn unterminated_multichunk_oversize_input_fails_closed_with_bounded_buffer() {
+        let input = vec![b'x'; MAX_STDIO_MESSAGE_BYTES + 4096];
+        let mut reader = BufReader::with_capacity(17, Cursor::new(input));
+        let mut buf = Vec::new();
+        let error = read_bounded_line(&mut reader, &mut buf).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(buf.len(), MAX_STDIO_MESSAGE_BYTES + 1);
+    }
+
+    #[test]
+    fn oversize_invalid_utf8_request_and_notification_have_zero_effects() {
+        for prefix in [
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\",\"arguments\":{}}}".as_slice(),
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\",\"arguments\":{}}}".as_slice(),
+        ] {
+            let mut input = prefix.to_vec();
+            input.resize(MAX_STDIO_MESSAGE_BYTES + 1, 0xff);
+            input.push(b'\n');
+            let mut output = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"effect": true}))),
+                requests: vec![],
+            };
+            let error = serve_with_client_and_snapshot(
+                BufReader::with_capacity(31, Cursor::new(input)),
+                &mut output,
+                "9.9.9",
+                &mut client,
+                &RuntimeModelSnapshot::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(output.is_empty());
+            assert!(client.requests.is_empty());
+        }
+    }
+
+    #[test]
     fn raw_stdio_negotiates_version_and_enforces_lifecycle_without_effects() {
         let input = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
@@ -1298,6 +1420,25 @@ mod tests {
         assert_eq!(parse_error["error"]["code"], -32700);
         let ping: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(ping["id"], 9);
+    }
+
+    #[test]
+    fn non_utf8_parse_error_propagates_output_failure() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(ErrorKind::BrokenPipe, "closed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(ErrorKind::BrokenPipe, "closed"))
+            }
+        }
+
+        let mut writer = FailingWriter;
+        assert_eq!(writer.flush().unwrap_err().kind(), ErrorKind::BrokenPipe);
+        let error = serve([0xff, b'\n'].as_slice(), &mut writer, "9.9.9").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
     }
 
     #[test]
