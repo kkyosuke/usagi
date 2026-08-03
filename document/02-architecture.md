@@ -881,8 +881,9 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
   起動する。session の書き込みは own worktree だけに閉じ込め、root coordinator は起動固有 root（cwd・
-  workspace の `.usagi`・Git common dir・usagi state）と普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・Claude state、
-  macOS は加えて Keychain / MDS cache）へ書ける。読み取りは許す。backend は macOS が
+  workspace の `.usagi`・Git common dir・usagi state）と普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain / MDS cache）へ
+  書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
   `/var` `/tmp` `/etc` は `/private` 側も許可）、Linux が `bwrap`。backend 不在・未対応 platform では
   **無保護フォールバックせず起動を拒否する**（fail-closed）。sandbox 計画の純粋な決定部は `usagi-core` の
@@ -922,8 +923,8 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   `<worktree>/.usagi/claude` へ daemon-issued environment で固定する。したがって sibling session、root の tracked
   issue source、daemon durable state は path の表記や symlink alias にかかわらず read-only である。root coordinator
   には起動固有 writable root を渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を
-  read-only に保つ。launcher は repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・Claude state・
-  macOS の Keychain / MDS cache）だけを足す。
+  read-only に保つ。launcher は repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  [起動する agent CLI 自身の state](#agent-state-の-writable-root)・macOS の Keychain / MDS cache）だけを足す。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
   （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
@@ -938,14 +939,35 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   E2E で通すためのもので、**shipping ビルドには存在しない**（合成ルートが `cfg!(debug_assertions)` を渡すため、
   release ビルドでは常に無効）。
 
+#### agent state の writable root
+
+root mode の launcher は、**exec する program 自身の state directory** を `$HOME` 配下の writable root に
+足す。agent CLI は自分の state / 認証キャッシュを `$HOME` 配下へ書くため（Codex は state DB
+`~/.codex/state_5.sqlite`）、これが無いと sandbox の中で起動そのものができない。grant は起動する CLI に
+追従し、他 provider の state へは広がらない。
+
+| program | writable にする state root |
+|---|---|
+| `claude` | `~/.claude` |
+| `codex` | `~/.codex` |
+| `codex-fugu`（sakana.ai） | `~/.codex-fugu` |
+
+- 判定は launcher が exec する program（`--` の先頭）の basename だけを根拠にし、値の正本は
+  `usagi-core` の `domain::settings::DefaultModel::state_directory` である（executable と state の置き場所を
+  1 つの事実として持つ）。usagi が launch しない未知 program には state root を与えない（fail-closed）。
+- daemon 側の policy 検証も同じ program から state root を決め、保護対象 workspace（および linked worktree の
+  Git common dir）と重なる構成を拒否する。
+- session mode はこの grant を使わない。writable root は own worktree だけで、state は daemon-issued
+  environment（`CLAUDE_CONFIG_DIR` / `TMPDIR`）で worktree 内へ向ける。
+
 Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 root 起動は interactive/headless とも `--sandbox read-only --ask-for-approval never`、session 起動は interactive の
 `workspace-write` と headless の session 専用 bypass を使うため、root で approval/sandbox bypass を選ばない。さらに
 root Codex も daemon-owned OS sandbox launcher で包み、provider sandbox と独立に checkout を read-only にする。
-この外側の sandbox は Codex の SQLite runtime state と認証情報を保持する owner-controlled な
-`$HOME/.codex` だけを provider 固有 writable root として許可し、home の他領域と repository は read-only のまま維持する。
+この外側の sandbox が許可する provider 固有 writable root は
+[agent state の writable root](#agent-state-の-writable-root)が正本である。
 
 root の read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
 diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など
