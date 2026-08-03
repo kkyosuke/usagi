@@ -966,8 +966,8 @@ resume subcommand と durable argv の `--` / initial prompt より前に置き�
 root 起動は interactive/headless とも `--sandbox read-only --ask-for-approval never`、session 起動は interactive の
 `workspace-write` と headless の session 専用 bypass を使うため、root で approval/sandbox bypass を選ばない。さらに
 root Codex も daemon-owned OS sandbox launcher で包み、provider sandbox と独立に checkout を read-only にする。
-この外側の sandbox は Codex の SQLite runtime state と認証情報を保持する owner-controlled な
-`$HOME/.codex` だけを provider 固有 writable root として許可し、home の他領域と repository は read-only のまま維持する。
+この外側の sandbox が許可する provider 固有 writable root は
+[agent state の writable root](#agent-state-の-writable-root)が正本である。
 
 root の read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
 diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など
