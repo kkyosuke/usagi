@@ -174,7 +174,9 @@ fn root_deny_reason(
         };
         return workspace_guard::command_mutates_repo(command).then(|| {
             format!(
-                "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。"
+                "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。\
+                 Git は `git --no-pager --no-optional-locks <subcommand>` を使い、diff 系には \
+                 `--no-ext-diff --no-textconv` も指定してください。"
             )
         });
     }
@@ -404,7 +406,7 @@ mod tests {
         let git = payload(
             temp.path(),
             "Bash",
-            serde_json::json!({"command": "git status"}),
+            serde_json::json!({"command": "git --no-pager --no-optional-locks status"}),
         );
         assert_eq!(deny_reason(&git), None);
         let read = payload(
@@ -439,6 +441,8 @@ mod tests {
             "rm -f file",
             "env git commit -m x",
             "/usr/bin/git commit -m x",
+            "git -c diff.external=touch diff --ext-diff",
+            "git --no-pager --no-optional-locks diff HEAD",
             "command git status",
         ] {
             let payload = payload(temp.path(), "Bash", serde_json::json!({"command": command}));

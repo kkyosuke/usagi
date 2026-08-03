@@ -905,7 +905,7 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 | 層 | 何を止めるか | 配線 |
 |---|---|---|
 | agent instruction | root coordinator と session worktree の責務・作業範囲の取り違え | core SSoT の scope 別 system prompt → `--append-system-prompt <prompt>` |
-| 論理境界（`PreToolUse` フック） | worktree の外を狙うツール呼び出し | `--settings` の `PreToolUse` → `usagi guard-workspace`（session 起動のみ） |
+| 論理境界（`PreToolUse` フック） | session の worktree 外書き込みと root の repository mutation | `--settings` の `PreToolUse` → `usagi guard-workspace`（両 mode） |
 | hard boundary（OS sandbox） | 許可 root 外への**すべての**書き込み | `usagi claude-sandbox --mode <mode> --writable-root … -- claude …` |
 
 - **system prompt**: `usagi-core` の `domain::agent::prompt` が持つ scope 別本文を、非 durable な
@@ -920,12 +920,14 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   data home、普遍領域を追加しない。`TMPDIR` は worktree 自体、`CLAUDE_CONFIG_DIR` は
   `<worktree>/.usagi/claude` へ daemon-issued environment で固定する。したがって sibling session、root の tracked
   issue source、daemon durable state は path の表記や symlink alias にかかわらず read-only である。root coordinator
-  は project root・workspace の `.usagi`・Git common dir・usagi state（data home の base）を起動固有 root とし、
-  launcher が普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・Claude state・macOS の Keychain / MDS cache）を足す。
+  には起動固有 writable root を渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を
+  read-only に保つ。launcher は repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・Claude state・
+  macOS の Keychain / MDS cache）だけを足す。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
   （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
-  は両 mode に配線し、`guard-workspace` は session 起動だけに足す（root の書き込み境界は sandbox が担う）。
+  と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
+  も checkout と Git common dir の書き込みを拒否する。
 - **`TMPDIR` 伝播**: root coordinator は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
   root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証する。session は
   shared temporary directory を launcher policy へ渡さず、daemon-issued environment で own worktree へ上書きする。
@@ -938,6 +940,15 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
+root 起動は interactive/headless とも `--sandbox read-only --ask-for-approval never`、session 起動は interactive の
+`workspace-write` と headless の session 専用 bypass を使うため、root で approval/sandbox bypass を選ばない。さらに
+root Codex も daemon-owned OS sandbox launcher で包み、provider sandbox と独立に checkout を read-only にする。
+
+root の read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
+diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など
+外部 process を起動しうる option は拒否する。Agent child の daemon-issued environment は system/global config、
+fsmonitor、hook、submodule recursion、optional index lock、pager、external diff を無効化し、repository config や公開
+terminal environment が guard の前提を差し替えない。
 
 ## 入口面 MCP の tool dispatch
 

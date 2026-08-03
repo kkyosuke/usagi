@@ -1651,6 +1651,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     let fixtures = AgentFixtures::new(fixture_root.path());
     fixtures.write();
     let codex_count = fixtures.codex_count.clone();
+    let codex_argv = fixtures.codex_argv.clone();
     let claude_count = fixtures.claude_count.clone();
     let claude_argv = fixtures.claude_argv.clone();
     let fixture_path = fixtures.path_env();
@@ -1720,6 +1721,23 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
     send(&mut master, b"codex-initial\r");
     wait_for_screen_since(&captured, first_baseline, "codex-input:codex-initial");
+    let root_codex_argv = fs::read_to_string(&codex_argv).unwrap();
+    assert!(
+        root_codex_argv.contains("--sandbox read-only"),
+        "{root_codex_argv}"
+    );
+    assert!(
+        root_codex_argv.contains("--ask-for-approval never"),
+        "{root_codex_argv}"
+    );
+    assert!(
+        !root_codex_argv.contains("workspace-write"),
+        "{root_codex_argv}"
+    );
+    assert!(
+        !root_codex_argv.contains("--dangerously-bypass-approvals-and-sandbox"),
+        "{root_codex_argv}"
+    );
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, first_baseline, "[switch]");
     let status = quit_from_switch(&mut master, &mut first, &captured, first_baseline);
@@ -1736,8 +1754,8 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
         launch_agent(home.path(), workspace_id, Some(session_id), "claude");
     wait_for_file_lines(&claude_count, 2);
     // live 配線: 両 scope の Claude は `usagi claude-sandbox … -- claude` 経由で起動し、
-    // `--settings` のフック JSON と scope 別 system prompt を受け取る。`guard-workspace` は session
-    // 起動だけに配線される（root は OS sandbox の writable root に委ねる）。
+    // `--settings` のフック JSON と scope 別 system prompt を受け取る。`guard-workspace` は両 scope
+    // に配線され、root は OS sandbox と二重に repository mutation を拒否する。
     let launched_argv = fs::read_to_string(&claude_argv).unwrap();
     let launched: Vec<&str> = launched_argv.lines().collect();
     assert_eq!(launched.len(), 2, "{launched_argv}");
@@ -1770,7 +1788,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
             .iter()
             .filter(|argv| argv.contains("guard-workspace"))
             .count(),
-        1,
+        2,
         "{launched_argv}"
     );
     let first_processes = agent_processes(home.path(), 3);
@@ -2182,14 +2200,14 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     let root_claude_id = claude_session_id(
         launch_argv
             .iter()
-            .find(|argv| !argv.contains("guard-workspace"))
+            .find(|argv| argv.contains("root ディレクトリ（統括環境）"))
             .expect("the root Claude launch is recorded"),
         "--session-id",
     );
     let session_claude_id = claude_session_id(
         launch_argv
             .iter()
-            .find(|argv| argv.contains("guard-workspace"))
+            .find(|argv| argv.contains("セッション専用の worktree"))
             .expect("the managed-session Claude launch is recorded"),
         "--session-id",
     );

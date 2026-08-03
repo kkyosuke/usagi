@@ -468,6 +468,10 @@ struct RootCodexProvisioner {
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
+    sandbox_backend: Option<PathBuf>,
+    sandbox_tmpdir: Option<PathBuf>,
+    sandbox_home: Option<PathBuf>,
+    sandbox_passthrough: bool,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -501,17 +505,60 @@ impl CodexProvisioner for RootCodexProvisioner {
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+        let mut spawn = SpawnProvision::new(
+            launch_environment(
+                &user,
+                mcp_environment(context, &self.data_home, &workspace_root)
+                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
+            ),
+            arguments,
+        );
+        if mode == SandboxMode::Root {
+            if !self.sandbox_passthrough {
+                validate_root_git_common_dir_policy(
+                    &workspace_root,
+                    self.sandbox_tmpdir.as_deref(),
+                    self.sandbox_home.as_deref(),
+                )
+                .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+            }
+            validate_claude_sandbox_policy(
+                mode,
+                &workspace_root,
+                &[],
+                self.sandbox_tmpdir.as_deref(),
+                self.sandbox_home.as_deref(),
+                self.sandbox_backend.as_deref(),
+                self.sandbox_passthrough,
+            )
+            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            let protected_root = workspace_root
+                .canonicalize()
+                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            let launcher = claude_sandbox_launcher(
+                &self.mcp_command,
+                mode,
+                &protected_root,
+                self.sandbox_backend.as_deref(),
+                self.sandbox_tmpdir.as_deref(),
+                self.sandbox_home.as_deref(),
+                &[],
+            )
+            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+            spawn.set_sandbox_launcher(launcher);
+            insert_root_git_environment(&mut spawn);
+            if self.sandbox_passthrough {
+                spawn.insert_daemon_environment(
+                    EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                        .expect("literal environment variable name is valid"),
+                    "1".to_owned(),
+                );
+            }
+        }
         Ok(CodexProvision {
             working_directory,
             environment_allowlist: launch_allowlist(context, &user),
-            spawn: SpawnProvision::new(
-                launch_environment(
-                    &user,
-                    mcp_environment(context, &self.data_home, &workspace_root)
-                        .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
-                ),
-                arguments,
-            ),
+            spawn,
         })
     }
 }
@@ -543,16 +590,18 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
-        // `guard-workspace` フックは session 起動だけに配線し、root 起動では書き込みの境界を
-        // sandbox の writable root に委ねる。
+        // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
-        let launch_roots =
-            claude_writable_roots(mode, &working_directory, &workspace_root, &self.data_home);
+        let launch_roots = claude_writable_roots(mode, &working_directory);
         let (sandbox_tmpdir, sandbox_home) = if mode == SandboxMode::Session {
             (None, None)
         } else {
             (self.sandbox_tmpdir.as_deref(), self.sandbox_home.as_deref())
         };
+        if mode == SandboxMode::Root && !self.sandbox_passthrough {
+            validate_root_git_common_dir_policy(&workspace_root, sandbox_tmpdir, sandbox_home)
+                .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
+        }
         validate_claude_sandbox_policy(
             mode,
             &workspace_root,
@@ -595,7 +644,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
         arguments.extend(
-            claude_settings_arguments(&self.mcp_command, mode)
+            claude_settings_arguments(&self.mcp_command)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
         );
         arguments.extend(claude_system_prompt_arguments(
@@ -623,6 +672,8 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             {
                 spawn.insert_daemon_environment(name, value);
             }
+        } else {
+            insert_root_git_environment(&mut spawn);
         }
         if self.sandbox_passthrough {
             spawn.insert_daemon_environment(
@@ -649,30 +700,16 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
     }
 }
 
-/// The launch-specific writable roots handed to `usagi claude-sandbox`.  The
-/// launcher adds universal areas (`$TMPDIR`, `/tmp`, Claude state, …) only for a
-/// root coordinator. A session launch receives exactly its own worktree; its temp
-/// and Claude state environment is redirected below that worktree during provision.
-///
-/// The data home is granted as the mode-neutral base rather than the daemon's
-/// selected directory: the child re-applies the runtime mode itself, so it may
-/// still have to create that child directory. Production's base is the selected
-/// directory, so this grants exactly the daemon's own tree — never its parent.
-fn claude_writable_roots(
-    mode: SandboxMode,
-    working_directory: &Path,
-    workspace_root: &Path,
-    data_home: &paths::DataHome,
-) -> Vec<PathBuf> {
+/// The launch-specific writable roots handed to `usagi claude-sandbox`.
+/// A session launch receives exactly its own worktree. A root coordinator receives
+/// no repository-local writable root; daemon-owned MCP operations perform durable
+/// writes out of process, so the Agent child never needs write access to the checkout,
+/// `.git`, or `.usagi`.
+fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
         vec![working_directory.to_path_buf()]
     } else {
-        vec![
-            working_directory.to_path_buf(),
-            workspace_root.join(".usagi"),
-            workspace_root.join(".git"),
-            data_home.base().to_path_buf(),
-        ]
+        Vec::new()
     }
 }
 
@@ -691,6 +728,104 @@ fn session_claude_environment(
         ))
     })
     .collect()
+}
+
+/// Root providers may run the small read-only Git allowlist accepted by
+/// `guard-workspace`. Override process-launching repository configuration and
+/// optional index refreshes from daemon-owned, highest-precedence environment.
+fn insert_root_git_environment(spawn: &mut SpawnProvision) {
+    for (name, value) in [
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_COUNT", "5"),
+        ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+        ("GIT_CONFIG_VALUE_0", "false"),
+        ("GIT_CONFIG_KEY_1", "core.hooksPath"),
+        ("GIT_CONFIG_VALUE_1", "/dev/null"),
+        ("GIT_CONFIG_KEY_2", "submodule.recurse"),
+        ("GIT_CONFIG_VALUE_2", "false"),
+        ("GIT_CONFIG_KEY_3", "status.submoduleSummary"),
+        ("GIT_CONFIG_VALUE_3", "false"),
+        ("GIT_CONFIG_KEY_4", "diff.ignoreSubmodules"),
+        ("GIT_CONFIG_VALUE_4", "all"),
+        ("GIT_OPTIONAL_LOCKS", "0"),
+        ("GIT_PAGER", ""),
+        ("GIT_EXTERNAL_DIFF", ""),
+    ] {
+        spawn.insert_daemon_environment(
+            EnvironmentVariableName::new(name).expect("literal environment variable name is valid"),
+            value.to_owned(),
+        );
+    }
+}
+
+/// A linked worktree may keep its Git common directory outside the checkout.
+/// The root sandbox's host-wide writable areas must never cover that directory;
+/// otherwise a read-only checkout would still leave refs/index authority writable.
+fn validate_root_git_common_dir_policy(
+    workspace_root: &Path,
+    tmpdir: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<(), ()> {
+    let common = git_common_dir(workspace_root)?;
+    let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
+    writable.extend(tmpdir.map(Path::to_path_buf));
+    if let Some(home) = home {
+        writable.push(home.join(".claude"));
+        if cfg!(target_os = "macos") {
+            writable.push(home.join("Library/Keychains"));
+        }
+    }
+    if cfg!(target_os = "macos") {
+        writable.extend([
+            PathBuf::from("/Library/Keychains"),
+            PathBuf::from("/private/var/db/mds"),
+        ]);
+    }
+    let overlaps = writable.into_iter().any(|root| {
+        let root = root.canonicalize().unwrap_or(root);
+        common.starts_with(&root) || root.starts_with(&common)
+    });
+    (!overlaps).then_some(()).ok_or(())
+}
+
+fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
+    fn read_path(path: &Path, prefix: Option<&str>) -> Result<PathBuf, ()> {
+        let metadata = std::fs::metadata(path).map_err(|_| ())?;
+        if metadata.len() > 16 * 1024 {
+            return Err(());
+        }
+        let value = std::fs::read_to_string(path).map_err(|_| ())?;
+        let value = prefix.map_or(value.trim(), |prefix| {
+            value.trim().strip_prefix(prefix).map_or("", str::trim)
+        });
+        (!value.is_empty()).then(|| PathBuf::from(value)).ok_or(())
+    }
+
+    let marker = workspace_root.join(".git");
+    let marker_path = marker.canonicalize().map_err(|_| ())?;
+    let git_dir = if marker_path.is_dir() {
+        marker_path
+    } else {
+        let path = read_path(&marker_path, Some("gitdir:"))?;
+        let path = if path.is_absolute() {
+            path
+        } else {
+            workspace_root.join(path)
+        };
+        path.canonicalize().map_err(|_| ())?
+    };
+    let common_marker = git_dir.join("commondir");
+    if !common_marker.exists() {
+        return Ok(git_dir);
+    }
+    let path = read_path(&common_marker, None)?;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        git_dir.join(path)
+    };
+    path.canonicalize().map_err(|_| ())
 }
 
 /// Policy paths are daemon-owned inputs.  Validate their identity before user
@@ -732,23 +867,17 @@ fn validate_claude_sandbox_policy(
     if let Some(home) = home {
         validate_owned_directory(home)?;
         let claude_state = home.join(".claude");
-        if mode == SandboxMode::Session
-            && protected_workspace.starts_with(
-                claude_state
-                    .canonicalize()
-                    .unwrap_or_else(|_| claude_state.clone()),
-            )
+        let claude_state = claude_state.canonicalize().unwrap_or(claude_state);
+        if protected_workspace.starts_with(&claude_state)
+            || (mode == SandboxMode::Root && claude_state.starts_with(&protected_workspace))
         {
             return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
         }
         if cfg!(target_os = "macos") {
             let keychains = home.join("Library/Keychains");
-            if mode == SandboxMode::Session
-                && protected_workspace.starts_with(
-                    keychains
-                        .canonicalize()
-                        .unwrap_or_else(|_| keychains.clone()),
-                )
+            let keychains = keychains.canonicalize().unwrap_or(keychains);
+            if protected_workspace.starts_with(&keychains)
+                || (mode == SandboxMode::Root && keychains.starts_with(&protected_workspace))
             {
                 return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
             }
@@ -759,7 +888,9 @@ fn validate_claude_sandbox_policy(
         let canonical = root
             .canonicalize()
             .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-        if mode == SandboxMode::Session && protected_workspace.starts_with(canonical) {
+        if protected_workspace.starts_with(&canonical)
+            || (mode == SandboxMode::Root && canonical.starts_with(&protected_workspace))
+        {
             return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
         }
     }
@@ -861,12 +992,9 @@ fn claude_sandbox_launcher(
 /// `--settings <json>`: the scoped hook wiring Claude loads for this launch.
 /// The payload is passed inline so no host path or rendered product payload has
 /// to be materialized on disk.
-fn claude_settings_arguments(usagi: &Path, mode: SandboxMode) -> Result<Vec<String>, ()> {
+fn claude_settings_arguments(usagi: &Path) -> Result<Vec<String>, ()> {
     let usagi = usagi.to_str().ok_or(())?;
-    Ok(vec![
-        "--settings".to_owned(),
-        scoped_settings_json(usagi, mode == SandboxMode::Session),
-    ])
+    Ok(vec!["--settings".to_owned(), scoped_settings_json(usagi)])
 }
 
 /// The scope-specific system prompt passed as one opaque argv value. Unlike the
@@ -2622,6 +2750,26 @@ fn open_agent_runtime(
     // selects the base itself, so the pair — not a `parent()` guess — is what
     // keeps this from resolving one level above the data home (#608).
     let data_home = paths::DataHome::from_selected(data_dir, paths::runtime_mode());
+    let sandbox_platform = if cfg!(target_os = "macos") {
+        claude_sandbox::Platform::MacOs
+    } else if cfg!(target_os = "linux") {
+        claude_sandbox::Platform::Linux
+    } else {
+        claude_sandbox::Platform::Unsupported
+    };
+    let sandbox_backend = super::cli::resolve_sandbox_backend(sandbox_platform);
+    let sandbox_tmpdir = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok());
+    let sandbox_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok());
+    let sandbox_passthrough = claude_sandbox::passthrough_requested(
+        cfg!(debug_assertions),
+        std::env::var(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+            .ok()
+            .as_deref(),
+    );
     // Duplicate registration cannot happen for the two literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
@@ -2633,6 +2781,10 @@ fn open_agent_runtime(
             data_home: data_home.clone(),
             program: DefaultModel::OpenAi.command(),
             environment: Some(Arc::clone(&environment)),
+            sandbox_backend: sandbox_backend.clone(),
+            sandbox_tmpdir: sandbox_tmpdir.clone(),
+            sandbox_home: sandbox_home.clone(),
+            sandbox_passthrough,
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
@@ -2641,34 +2793,23 @@ fn open_agent_runtime(
             data_home: data_home.clone(),
             program: DefaultModel::SakanaAi.command(),
             environment: Some(Arc::clone(&environment)),
+            sandbox_backend: sandbox_backend.clone(),
+            sandbox_tmpdir: sandbox_tmpdir.clone(),
+            sandbox_home: sandbox_home.clone(),
+            sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
             readiness,
             mcp_command,
             data_home,
-            sandbox_backend: super::cli::resolve_sandbox_backend(if cfg!(target_os = "macos") {
-                claude_sandbox::Platform::MacOs
-            } else if cfg!(target_os = "linux") {
-                claude_sandbox::Platform::Linux
-            } else {
-                claude_sandbox::Platform::Unsupported
-            }),
-            sandbox_tmpdir: std::env::var_os("TMPDIR")
-                .map(PathBuf::from)
-                .and_then(|path| path.canonicalize().ok()),
-            sandbox_home: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .and_then(|path| path.canonicalize().ok()),
+            sandbox_backend,
+            sandbox_tmpdir,
+            sandbox_home,
             environment: Some(environment),
             // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
             // 配布バイナリは常に拘束された Claude だけを起動する。
-            sandbox_passthrough: claude_sandbox::passthrough_requested(
-                cfg!(debug_assertions),
-                std::env::var(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
-                    .ok()
-                    .as_deref(),
-            ),
+            sandbox_passthrough,
         }),
     );
     let runtime = AgentRuntime::hydrate_with_retention(
@@ -12321,17 +12462,63 @@ instructions = "{instructions}"
                 Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
             );
 
-            // 3. Sandbox scope: the base, and never the directory above it.
-            let roots = claude_writable_roots(
-                SandboxMode::Root,
-                Path::new("/repo/.usagi/sessions/work"),
-                Path::new("/repo"),
-                &data_home,
-            );
-            assert!(roots.contains(&base.to_path_buf()), "{roots:?}");
-            let above = base.parent().expect("a temporary directory has a parent");
-            assert!(!roots.iter().any(|root| root == above), "{roots:?}");
+            // 3. Root sandbox scope: daemon state is not writable by the Agent child.
+            let roots =
+                claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
+            assert!(roots.is_empty(), "{roots:?}");
         }
+    }
+
+    #[test]
+    fn root_git_environment_overrides_untrusted_process_launch_configuration() {
+        let mut spawn = SpawnProvision::new([], Vec::new());
+        insert_root_git_environment(&mut spawn);
+        let environment = spawn.compose_environment(&BTreeMap::from([
+            ("GIT_CONFIG_COUNT".to_owned(), "0".to_owned()),
+            ("GIT_PAGER".to_owned(), "touch PWNED".to_owned()),
+            ("GIT_EXTERNAL_DIFF".to_owned(), "touch".to_owned()),
+        ]));
+        assert_eq!(environment["GIT_CONFIG_COUNT"], "5");
+        assert_eq!(environment["GIT_CONFIG_KEY_0"], "core.fsmonitor");
+        assert_eq!(environment["GIT_CONFIG_VALUE_0"], "false");
+        assert_eq!(environment["GIT_CONFIG_KEY_1"], "core.hooksPath");
+        assert_eq!(environment["GIT_CONFIG_VALUE_1"], "/dev/null");
+        assert_eq!(environment["GIT_PAGER"], "");
+        assert_eq!(environment["GIT_EXTERNAL_DIFF"], "");
+        assert_eq!(environment["GIT_OPTIONAL_LOCKS"], "0");
+    }
+
+    #[test]
+    fn root_git_common_dir_must_not_overlap_sandbox_writable_state() {
+        std::fs::create_dir_all("target").unwrap();
+        let safe = tempfile::tempdir_in("target").unwrap();
+        std::fs::create_dir(safe.path().join(".git")).unwrap();
+        assert_eq!(
+            git_common_dir(safe.path()).unwrap(),
+            safe.path().join(".git").canonicalize().unwrap()
+        );
+        assert!(
+            validate_root_git_common_dir_policy(safe.path(), Some(Path::new("/tmp")), None).is_ok()
+        );
+
+        let linked = tempfile::tempdir_in("target").unwrap();
+        let common = tempfile::tempdir_in("/tmp").unwrap();
+        let git_dir = common.path().join("worktrees/linked");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            linked.path().join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            git_common_dir(linked.path()).unwrap(),
+            common.path().canonicalize().unwrap()
+        );
+        assert!(
+            validate_root_git_common_dir_policy(linked.path(), Some(Path::new("/tmp")), None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -12341,12 +12528,7 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&context);
         assert_eq!(mode, SandboxMode::Session);
 
-        let roots = claude_writable_roots(
-            mode,
-            Path::new("/repo/.usagi/sessions/work"),
-            Path::new("/repo"),
-            &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),
-        );
+        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"));
         assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
 
         let launcher =
@@ -12367,7 +12549,7 @@ instructions = "{instructions}"
             ]
         );
 
-        let arguments = claude_settings_arguments(usagi, mode).unwrap();
+        let arguments = claude_settings_arguments(usagi).unwrap();
         assert_eq!(arguments[0], "--settings");
         let settings: serde_json::Value = serde_json::from_str(&arguments[1]).unwrap();
         let pre_tool_use = settings["hooks"]["PreToolUse"][0]["hooks"]
@@ -12455,27 +12637,22 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn a_root_claude_is_confined_to_the_project_root_without_the_guard_hook() {
+    fn a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook() {
         let usagi = Path::new("/opt/usagi/bin/usagi");
         let mode = sandbox_mode(&provision_context(None));
         assert_eq!(mode, SandboxMode::Root);
 
-        // A root launch's cwd *is* the project root, so that root is writable.
-        let roots = claude_writable_roots(
-            mode,
-            Path::new("/repo"),
-            Path::new("/repo"),
-            &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),
-        );
-        assert!(roots.contains(&PathBuf::from("/repo")));
+        // A root launch's cwd is the project root, but it is not a writable root.
+        let roots = claude_writable_roots(mode, Path::new("/repo"));
+        assert!(roots.is_empty());
         let launcher =
             claude_sandbox_launcher(usagi, mode, Path::new("/repo"), None, None, None, &roots)
                 .unwrap();
         assert_eq!(&launcher.prefix[..3], ["claude-sandbox", "--mode", "root"]);
         assert_eq!(launcher.prefix.last().unwrap(), "--");
 
-        let arguments = claude_settings_arguments(usagi, mode).unwrap();
-        assert!(!arguments[1].contains("guard-workspace"));
+        let arguments = claude_settings_arguments(usagi).unwrap();
+        assert!(arguments[1].contains("guard-workspace"));
         // Lifecycle phase reporting stays wired for a root coordinator.
         assert!(arguments[1].contains("agent-phase running"));
     }

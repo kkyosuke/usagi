@@ -202,13 +202,12 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
 ///
 /// ライフサイクル event と phase の対応は core の [`AGENT_PHASE_HOOK_EVENTS`] が正本で、
 /// この関数はその表をそのまま `usagi agent-phase <phase>` へ写す。報告を受ける側の検証も
-/// 同じ表を使うため、配線と検証が分岐しない。session 起動（`include_guard = true`）では
-/// `PreToolUse` に `usagi guard-workspace` を並べて worktree を出るツール呼び出しを deny する。
-/// root 起動では `guard-workspace` を差し込まず、書き込みの hard boundary を OS sandbox
-/// （`claude-sandbox`）に委ねる。`usagi_command` はシェル経由で実行されるため単一引用符で
-/// quote する。
+/// 同じ表を使うため、配線と検証が分岐しない。すべての起動で `PreToolUse` に
+/// `usagi guard-workspace` を並べて scope 外のツール呼び出しを deny する。
+/// session では worktree 外への書き込みを、root では repository mutation を拒否する。
+/// `usagi_command` はシェル経由で実行されるため単一引用符で quote する。
 #[must_use]
-pub fn scoped_settings_json(usagi_command: &str, include_guard: bool) -> String {
+pub fn scoped_settings_json(usagi_command: &str) -> String {
     let quoted = shell_quote(usagi_command);
     let mut hooks = serde_json::Map::new();
     for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
@@ -216,7 +215,7 @@ pub fn scoped_settings_json(usagi_command: &str, include_guard: bool) -> String 
             "type": "command",
             "command": format!("{quoted} agent-phase {}", phase.as_token()),
         })];
-        if include_guard && event == "PreToolUse" {
+        if event == "PreToolUse" {
             entries.push(serde_json::json!({
                 "type": "command",
                 "command": format!("{quoted} guard-workspace"),
@@ -635,7 +634,7 @@ mod tests {
     #[test]
     fn session_settings_wire_guard_and_lifecycle_phase_hooks() {
         let settings: serde_json::Value =
-            serde_json::from_str(&scoped_settings_json("/opt/my usagi", true)).unwrap();
+            serde_json::from_str(&scoped_settings_json("/opt/my usagi")).unwrap();
         let pre_tool_use = &settings["hooks"]["PreToolUse"][0]["hooks"];
         // 空白を含むパスはシェル用に単一引用符で quote される。
         assert_eq!(
@@ -670,13 +669,12 @@ mod tests {
     }
 
     #[test]
-    fn root_settings_omit_guard_but_keep_phase_hooks() {
-        let json = scoped_settings_json("/usr/bin/usagi", false);
+    fn every_scope_keeps_guard_and_phase_hooks() {
+        let json = scoped_settings_json("/usr/bin/usagi");
         let settings: serde_json::Value = serde_json::from_str(&json).unwrap();
         let pre_tool_use = &settings["hooks"]["PreToolUse"][0]["hooks"];
-        // root では guard-workspace を差し込まない（OS sandbox に委ねる）。
-        assert_eq!(pre_tool_use.as_array().unwrap().len(), 1);
-        assert!(!json.contains("guard-workspace"));
+        assert_eq!(pre_tool_use.as_array().unwrap().len(), 2);
+        assert!(json.contains("guard-workspace"));
         // phase 報告は root でも残る。
         assert_eq!(
             settings["hooks"]["Notification"][0]["hooks"][0]["command"],

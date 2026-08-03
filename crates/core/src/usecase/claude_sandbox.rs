@@ -38,7 +38,7 @@ pub enum Platform {
 pub enum SandboxMode {
     /// session worktree に隔離されたエージェント。
     Session,
-    /// workspace root で動くコーディネータ。project root と一時領域だけを書き込み可にする。
+    /// workspace root で動くコーディネータ。repository は read-only にする。
     Root,
 }
 
@@ -77,7 +77,7 @@ pub struct SandboxRequest {
     pub platform: Platform,
     /// 起動モード。
     pub mode: SandboxMode,
-    /// session mode で writable にしてはならない workspace root。
+    /// writable root と重ねてはならない workspace root。
     pub protected_root: Option<PathBuf>,
     /// 解決済み backend 実行ファイル（macOS: `sandbox-exec` / Linux: `bwrap`）。無ければ `None`。
     pub backend: Option<PathBuf>,
@@ -164,14 +164,16 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
     {
         return Some("sandbox backend が absolute path ではありません".to_owned());
     }
-    let protected = (request.mode == SandboxMode::Session)
-        .then_some(request.protected_root.as_deref())
-        .flatten();
+    let protected = request.protected_root.as_deref();
     for root in writable_roots(request) {
         if !root.is_absolute() || root == Path::new("/") {
             return Some("writable root が安全な absolute path ではありません".to_owned());
         }
-        if protected.is_some_and(|workspace| workspace.starts_with(&root)) {
+        let overlaps_workspace = protected.is_some_and(|workspace| {
+            workspace.starts_with(&root)
+                || (request.mode == SandboxMode::Root && root.starts_with(workspace))
+        });
+        if overlaps_workspace {
             return Some("writable root が保護対象 workspace の ancestor です".to_owned());
         }
     }
@@ -388,6 +390,7 @@ mod tests {
     fn macos_wraps_claude_with_a_write_confining_profile() {
         let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         request.mode = SandboxMode::Root;
+        request.launch_roots.clear();
         let launched = plan(&request);
         // Launch を into_reject すると None（accessor の Launch 分岐を被覆）。
         assert!(launched.clone().into_reject().is_none());
@@ -397,8 +400,8 @@ mod tests {
         let profile = &argv[1];
         assert!(profile.contains("(deny file-write*)"));
         assert!(profile.contains("mode=root"));
-        // 起動固有 root と普遍領域の双方が subpath になる。
-        assert!(profile.contains("(subpath \"/repo/.usagi/sessions/work\")"));
+        // Repository-local root は無く、普遍領域だけが subpath になる。
+        assert!(!profile.contains("/repo"));
         assert!(profile.contains("(subpath \"/tmp\")"));
         assert!(profile.contains("(subpath \"/home/dev/.claude\")"));
         assert!(profile.contains("(subpath \"/home/dev/Library/Keychains\")"));
@@ -414,6 +417,7 @@ mod tests {
     fn macos_profile_strips_trailing_slashes_and_adds_private_firmlink_variants() {
         let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         request.mode = SandboxMode::Root;
+        request.launch_roots.clear();
         // 末尾スラッシュ付きの macOS 一時ディレクトリ（$TMPDIR の実値に近い形）。
         request.tmpdir = Some(PathBuf::from("/var/folders/ab/T/"));
         request.home = None;
@@ -501,8 +505,21 @@ mod tests {
                 "{root} must be rejected"
             );
         }
-        let request = request(Platform::Linux, Some("relative/bwrap"));
-        assert!(plan(&request).into_reject().unwrap().contains("backend"));
+        let relative_backend = request(Platform::Linux, Some("relative/bwrap"));
+        assert!(
+            plan(&relative_backend)
+                .into_reject()
+                .unwrap()
+                .contains("backend")
+        );
+
+        let mut root = request(Platform::Linux, Some("/usr/bin/bwrap"));
+        root.mode = SandboxMode::Root;
+        assert!(
+            plan(&root)
+                .into_reject()
+                .is_some_and(|reason| reason.contains("writable root"))
+        );
     }
 
     #[test]
