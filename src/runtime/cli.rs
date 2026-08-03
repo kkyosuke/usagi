@@ -17,149 +17,220 @@ use super::{daemon, tui};
 
 // 各 `RunOutcome` を実行面へ接続するだけの routing match。arm が増えて 100 行を超えるが、
 // 分割しても routing の一覧性が下がるだけなので too_many_lines を許容する。
-#[allow(clippy::too_many_lines)]
-#[coverage(off)]
+#[coverage(off)] // Parsed action to production stdio composition.
 pub(crate) fn dispatch(
     args: Vec<std::ffi::OsString>,
     out: &mut dyn Write,
     err: &mut dyn Write,
     info: &AppInfo,
 ) -> std::io::Result<ExitCode> {
-    match usagi_cli::cli::run(args, info.version, out, err)? {
-        RunOutcome::Exit(code) => Ok(exit_code(code)),
-        RunOutcome::LaunchTui(request) => {
-            let entry = match request {
-                TuiRequest::Welcome => EntryScreen::Welcome,
-                TuiRequest::Workspace { path } => {
-                    let path =
-                        tui::resolve_workspace_path(&path.unwrap_or(std::env::current_dir()?))?;
-                    EntryScreen::Workspace { path }
-                }
-                TuiRequest::Config => EntryScreen::Config,
-                TuiRequest::Doctor => EntryScreen::Doctor,
-            };
-            tui::launch(out, info, &entry).map(|()| ExitCode::SUCCESS)
+    let outcome = usagi_cli::cli::run(args, info.version, out, err)?;
+    let action = Action::from(&outcome);
+    action_io::execute_action(action, outcome, out, err, info)
+}
+
+enum Action {
+    Exit,
+    LaunchWelcome,
+    LaunchWorkspace,
+    LaunchConfig,
+    LaunchDoctor,
+    LaunchDaemon,
+    RequestDaemonReplacement,
+    LaunchMcp,
+    CaptureCodexSession,
+    ReportAgentPhase,
+    GuardWorkspace,
+    ClaudeSandbox,
+    DaemonRequest,
+    SelfUpdate,
+}
+
+impl From<&RunOutcome> for Action {
+    fn from(outcome: &RunOutcome) -> Self {
+        match outcome {
+            RunOutcome::Exit(_) => Self::Exit,
+            RunOutcome::LaunchTui(TuiRequest::Welcome) => Self::LaunchWelcome,
+            RunOutcome::LaunchTui(TuiRequest::Workspace { .. }) => Self::LaunchWorkspace,
+            RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
+            RunOutcome::LaunchTui(TuiRequest::Doctor) => Self::LaunchDoctor,
+            RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
+            RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
+            RunOutcome::LaunchMcp => Self::LaunchMcp,
+            RunOutcome::CaptureCodexSession => Self::CaptureCodexSession,
+            RunOutcome::ReportAgentPhase { .. } => Self::ReportAgentPhase,
+            RunOutcome::GuardWorkspace => Self::GuardWorkspace,
+            RunOutcome::ClaudeSandbox { .. } => Self::ClaudeSandbox,
+            RunOutcome::DaemonRequest(_) => Self::DaemonRequest,
+            RunOutcome::SelfUpdate { .. } => Self::SelfUpdate,
         }
-        RunOutcome::LaunchDaemon(command) => {
-            daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
-        }
-        RunOutcome::RequestDaemonReplacement { force } => {
-            match daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)? {
-                Ok(()) => Ok(ExitCode::SUCCESS),
-                Err(error) => {
-                    write_client_error(err, "daemon replacement refused", &error)?;
-                    Ok(ExitCode::FAILURE)
+    }
+}
+
+// Each action arm binds a fully classified route to production stdin, process,
+// daemon, or terminal IO. The classification above remains coverage-visible.
+mod action_io {
+    #![coverage(off)]
+
+    use super::{
+        Action, AppInfo, ClientPolicy, DaemonClient, EntryScreen, ExitCode, LauncherPolicyInputs,
+        RunOutcome, TuiRequest, Write, claude_sandbox, daemon, exit_code, guard_workspace, tui,
+        write_client_error, write_daemon_outcome,
+    };
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn execute_action(
+        action: Action,
+        outcome: RunOutcome,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+        info: &AppInfo,
+    ) -> std::io::Result<ExitCode> {
+        match (action, outcome) {
+            (Action::Exit, RunOutcome::Exit(code)) => Ok(exit_code(code)),
+            (Action::LaunchWelcome, RunOutcome::LaunchTui(TuiRequest::Welcome)) => {
+                tui::launch(out, info, &EntryScreen::Welcome).map(|()| ExitCode::SUCCESS)
+            }
+            (Action::LaunchWorkspace, RunOutcome::LaunchTui(TuiRequest::Workspace { path })) => {
+                let path = tui::resolve_workspace_path(&path.unwrap_or(std::env::current_dir()?))?;
+                tui::launch(out, info, &EntryScreen::Workspace { path }).map(|()| ExitCode::SUCCESS)
+            }
+            (Action::LaunchConfig, RunOutcome::LaunchTui(TuiRequest::Config)) => {
+                tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
+            }
+            (Action::LaunchDoctor, RunOutcome::LaunchTui(TuiRequest::Doctor)) => {
+                tui::launch(out, info, &EntryScreen::Doctor).map(|()| ExitCode::SUCCESS)
+            }
+            (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
+                daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
+            }
+            (Action::RequestDaemonReplacement, RunOutcome::RequestDaemonReplacement { force }) => {
+                match daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)? {
+                    Ok(()) => Ok(ExitCode::SUCCESS),
+                    Err(error) => {
+                        write_client_error(err, "daemon replacement refused", &error)?;
+                        Ok(ExitCode::FAILURE)
+                    }
                 }
             }
-        }
-        RunOutcome::LaunchMcp => {
-            let stdin = std::io::stdin();
-            match daemon::policy_client(ClientPolicy::mcp()) {
-                Ok(mut client) => {
-                    usagi_cli::mcp::serve_with_client(stdin.lock(), out, info.version, &mut client)
-                        .map(|()| ExitCode::SUCCESS)
-                }
-                Err(error) => {
-                    writeln!(err, "daemon unavailable: {error}")?;
-                    Ok(ExitCode::FAILURE)
+            (Action::LaunchMcp, RunOutcome::LaunchMcp) => {
+                let stdin = std::io::stdin();
+                match daemon::policy_client(ClientPolicy::mcp()) {
+                    Ok(mut client) => usagi_cli::mcp::serve_with_client(
+                        stdin.lock(),
+                        out,
+                        info.version,
+                        &mut client,
+                    )
+                    .map(|()| ExitCode::SUCCESS),
+                    Err(error) => {
+                        writeln!(err, "daemon unavailable: {error}")?;
+                        Ok(ExitCode::FAILURE)
+                    }
                 }
             }
-        }
-        RunOutcome::CaptureCodexSession => {
-            let stdin = std::io::stdin();
-            let mut input = stdin.lock();
-            let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
-            let request = match usagi_cli::cli::hooks::codex_session_capture::request_from_hook(
-                &mut input, credential,
-            ) {
-                Ok(request) => request,
-                Err(error) => {
-                    writeln!(err, "Codex session capture failed: {error}")?;
-                    return Ok(ExitCode::FAILURE);
-                }
-            };
-            match daemon::policy_client(ClientPolicy::cli()) {
-                Ok(mut client) => match client.request(request) {
-                    Ok(_) => Ok(ExitCode::SUCCESS),
+            (Action::CaptureCodexSession, RunOutcome::CaptureCodexSession) => {
+                let stdin = std::io::stdin();
+                let mut input = stdin.lock();
+                let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
+                let request = match usagi_cli::cli::hooks::codex_session_capture::request_from_hook(
+                    &mut input, credential,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        writeln!(err, "Codex session capture failed: {error}")?;
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
+                match daemon::policy_client(ClientPolicy::cli()) {
+                    Ok(mut client) => match client.request(request) {
+                        Ok(_) => Ok(ExitCode::SUCCESS),
+                        Err(error) => {
+                            write_client_error(err, "Codex session capture failed", &error)?;
+                            Ok(ExitCode::FAILURE)
+                        }
+                    },
                     Err(error) => {
                         write_client_error(err, "Codex session capture failed", &error)?;
                         Ok(ExitCode::FAILURE)
                     }
-                },
-                Err(error) => {
-                    write_client_error(err, "Codex session capture failed", &error)?;
-                    Ok(ExitCode::FAILURE)
                 }
             }
-        }
-        RunOutcome::ReportAgentPhase { phase } => {
-            let stdin = std::io::stdin();
-            let mut input = stdin.lock();
-            let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
-            let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
-                &mut input, &phase, credential,
-            ) {
-                Ok(request) => request,
-                Err(error) => {
-                    writeln!(err, "agent phase report failed: {error}")?;
-                    return Ok(ExitCode::FAILURE);
-                }
-            };
-            match daemon::policy_client(ClientPolicy::cli()) {
-                Ok(mut client) => match client.request(request) {
-                    Ok(_) => Ok(ExitCode::SUCCESS),
+            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase }) => {
+                let stdin = std::io::stdin();
+                let mut input = stdin.lock();
+                let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
+                let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
+                    &mut input, &phase, credential,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        writeln!(err, "agent phase report failed: {error}")?;
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
+                match daemon::policy_client(ClientPolicy::cli()) {
+                    Ok(mut client) => match client.request(request) {
+                        Ok(_) => Ok(ExitCode::SUCCESS),
+                        Err(error) => {
+                            write_client_error(err, "agent phase report failed", &error)?;
+                            Ok(ExitCode::FAILURE)
+                        }
+                    },
                     Err(error) => {
                         write_client_error(err, "agent phase report failed", &error)?;
                         Ok(ExitCode::FAILURE)
                     }
-                },
-                Err(error) => {
-                    write_client_error(err, "agent phase report failed", &error)?;
-                    Ok(ExitCode::FAILURE)
                 }
             }
-        }
-        RunOutcome::GuardWorkspace => guard_workspace(out),
-        RunOutcome::ClaudeSandbox {
-            mode,
-            protected_root,
-            backend,
-            tmpdir,
-            home,
-            writable_roots,
-            command,
-        } => claude_sandbox(
-            mode,
-            LauncherPolicyInputs {
-                protected_root,
-                backend,
-                tmpdir,
-                home,
-                writable_roots,
-            },
-            command,
-            err,
-        ),
-        RunOutcome::DaemonRequest(request) => match daemon::policy_client(ClientPolicy::cli()) {
-            Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
-            Err(error) => {
-                write_client_error(err, "daemon unavailable", &error)?;
-                Ok(ExitCode::FAILURE)
+            (Action::GuardWorkspace, RunOutcome::GuardWorkspace) => guard_workspace(out),
+            (
+                Action::ClaudeSandbox,
+                RunOutcome::ClaudeSandbox {
+                    mode,
+                    protected_root,
+                    backend,
+                    tmpdir,
+                    home,
+                    writable_roots,
+                    command,
+                },
+            ) => claude_sandbox(
+                mode,
+                LauncherPolicyInputs {
+                    protected_root,
+                    backend,
+                    tmpdir,
+                    home,
+                    writable_roots,
+                },
+                command,
+                err,
+            ),
+            (Action::DaemonRequest, RunOutcome::DaemonRequest(request)) => {
+                match daemon::policy_client(ClientPolicy::cli()) {
+                    Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
+                    Err(error) => {
+                        write_client_error(err, "daemon unavailable", &error)?;
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
             }
-        },
-        RunOutcome::SelfUpdate { command } => {
-            let result = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .output()?;
-            out.write_all(&result.stdout)?;
-            err.write_all(&result.stderr)?;
-            if result.status.success() {
-                writeln!(out, "usagi was updated; restart it to use the new binary.")?;
-                Ok(ExitCode::SUCCESS)
-            } else {
-                Ok(exit_code(result.status.code().unwrap_or(1)))
+            (Action::SelfUpdate, RunOutcome::SelfUpdate { command }) => {
+                let result = std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(command)
+                    .output()?;
+                out.write_all(&result.stdout)?;
+                err.write_all(&result.stderr)?;
+                if result.status.success() {
+                    writeln!(out, "usagi was updated; restart it to use the new binary.")?;
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    Ok(exit_code(result.status.code().unwrap_or(1)))
+                }
             }
+            _ => unreachable!("action classification and outcome diverged"),
         }
     }
 }
@@ -429,16 +500,17 @@ fn exit_code(code: i32) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    #![coverage(off)]
-
     use std::io::{self, Write};
+    use std::path::PathBuf;
 
+    use usagi_cli::cli::{DaemonCommand, RunOutcome, TuiRequest};
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
-    use usagi_core::usecase::client::{ClientError, DaemonReply};
+    use usagi_core::usecase::claude_sandbox::SandboxMode;
+    use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
-        LauncherPolicyError, validate_launcher_policy_inputs, write_client_error,
-        write_daemon_outcome,
+        Action, LauncherPolicyError, exit_code, validate_launcher_policy_inputs,
+        write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
@@ -596,7 +668,86 @@ mod tests {
     }
 
     #[test]
+    fn process_exit_codes_are_bounded_to_the_platform_representation() {
+        assert_eq!(exit_code(0), std::process::ExitCode::SUCCESS);
+        assert_eq!(exit_code(7), std::process::ExitCode::from(7));
+        assert_eq!(exit_code(-1), std::process::ExitCode::from(1));
+        assert_eq!(exit_code(256), std::process::ExitCode::from(1));
+    }
+
+    #[test]
+    fn every_parsed_outcome_maps_to_one_typed_runtime_action() {
+        let assert_route = |outcome: RunOutcome, expected: Action| {
+            assert_eq!(
+                std::mem::discriminant(&Action::from(&outcome)),
+                std::mem::discriminant(&expected)
+            );
+        };
+        assert_route(RunOutcome::Exit(7), Action::Exit);
+        assert_route(
+            RunOutcome::LaunchTui(TuiRequest::Welcome),
+            Action::LaunchWelcome,
+        );
+        assert_route(
+            RunOutcome::LaunchTui(TuiRequest::Workspace {
+                path: Some(PathBuf::from("workspace")),
+            }),
+            Action::LaunchWorkspace,
+        );
+        assert_route(
+            RunOutcome::LaunchTui(TuiRequest::Config),
+            Action::LaunchConfig,
+        );
+        assert_route(
+            RunOutcome::LaunchTui(TuiRequest::Doctor),
+            Action::LaunchDoctor,
+        );
+        assert_route(
+            RunOutcome::LaunchDaemon(DaemonCommand::Start),
+            Action::LaunchDaemon,
+        );
+        assert_route(
+            RunOutcome::RequestDaemonReplacement { force: true },
+            Action::RequestDaemonReplacement,
+        );
+        assert_route(RunOutcome::LaunchMcp, Action::LaunchMcp);
+        assert_route(RunOutcome::CaptureCodexSession, Action::CaptureCodexSession);
+        assert_route(
+            RunOutcome::ReportAgentPhase {
+                phase: "working".into(),
+            },
+            Action::ReportAgentPhase,
+        );
+        assert_route(RunOutcome::GuardWorkspace, Action::GuardWorkspace);
+        assert_route(
+            RunOutcome::ClaudeSandbox {
+                mode: SandboxMode::Session,
+                protected_root: None,
+                backend: None,
+                tmpdir: None,
+                home: None,
+                writable_roots: vec![PathBuf::from("worktree")],
+                command: vec!["claude".into()],
+            },
+            Action::ClaudeSandbox,
+        );
+        assert_route(
+            RunOutcome::DaemonRequest(DaemonRequest::Rollover {
+                operation_id: "operation".into(),
+            }),
+            Action::DaemonRequest,
+        );
+        assert_route(
+            RunOutcome::SelfUpdate {
+                command: "install".into(),
+            },
+            Action::SelfUpdate,
+        );
+    }
+
+    #[test]
     fn accepted_reply_propagates_output_failure() {
+        BrokenWriter.flush().unwrap();
         let result = write_daemon_outcome(
             Ok(DaemonReply::Accepted {
                 operation_id: "operation".into(),

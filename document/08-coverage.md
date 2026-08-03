@@ -11,7 +11,7 @@ v2 の `#[coverage(off)]` の移行 inventory。許可条件と更新手順の�
 - [基準値](#基準値)
 - [領域別返済順序](#領域別返済順序)
 - [TUI の返済結果](#tui-の返済結果)
-- [root・CLI の内訳](#rootcli-の内訳)
+- [root・CLI の返済結果](#rootcli-の返済結果)
 
 ## 基準値
 
@@ -47,7 +47,7 @@ TUI の残存 75 件は理由付きの `composition`、`real_io`、`generic_mono
 controller reducer、Effect executor、entry selection、completion、input classifier、error projection には例外を残さない。
 production graph の検査方法は [Production screen graph harness](03-tui.md#production-screen-graph-harness) を参照する。
 
-## root・CLI の内訳
+## root・CLI の返済結果
 
 #625 で `crates/cli/src/**` の `migration_debt` 22 件を返済し、CLI/MCP の parser、route selection、
 schema projection、caller policy、error mapping を coverage 対象へ戻した。cwd、global/workspace settings、
@@ -55,12 +55,17 @@ runtime executable snapshot を束ねる `serve_with_client` を `composition` �
 単相化される issue adapter の `cfg(test)` instance だけを `generic_monomorphization` 例外とし、shipping instance は coverage
 対象に保つ。direct unit と production E2E の双方で parser・store error・projection を検証する。
 
-| path | 件数 | review 先 |
-|---|---:|---|
-| `crates/cli/src/**` | 2 | MCP composition 境界と issue adapter の test-build 単相化 |
-| `src/main.rs` | 1 | ロジックを持たない composition なら `composition` 候補 |
-| `src/runtime/bootstrap.rs` | 3 | bootstrap recovery 判断を coverage 対象へ戻し、readiness/build helper だけ返済候補 |
-| `src/runtime/cli.rs` | 2 | CLI routing を coverage 対象へ戻し、実行面の束縛だけ候補 |
-| `src/runtime/clipboard.rs` | 3 | platform process IO だけ `real_io` 候補 |
-| `src/runtime/launchd.rs` | 5 | plist 生成・判断は削除対象、launchd process IO だけ `real_io` 候補 |
-| **合計** | **16** | owner `root-cli`、期限 2027-01-31 |
+#626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。
+残す registry entry は production の process・filesystem・環境を束ねる module または最終 composition だけである。
+
+| path | coverage 対象へ戻した責務 | 残存例外 |
+|---|---|---|
+| `crates/cli/src/**` | #625 で parser・route selection・schema projection・caller policy・error mapping | MCP composition と test-build 単相化の 2 件 |
+| `src/main.rs` | なし（argv・stdio の最終合成だけを持つ） | `main` 1 件（`composition`） |
+| `src/runtime/bootstrap.rs` | expected build 判定、readiness 上限・workspace refusal・error mapping、test module | この返済対象は 0 件。別 owner の generic 単相化 2 件だけ残る |
+| `src/runtime/cli.rs` | 全 `RunOutcome` から typed action への routing | parser/stdio の `dispatch` と production action IO module の 2 件（`composition`） |
+| `src/runtime/clipboard.rs` | platform command ordering、fallback、partial/all failure の集約 | 環境参照・clipboard process module 1 件（`real_io`） |
+| `src/runtime/launchd.rs` | plist path・escaping・生成、install/uninstall の存在判定と error propagation | home・filesystem・`launchctl` module 1 件（`real_io`） |
+
+root・CLI 側で残す 7 件は `coverage-off-allowlist.json` に owner `root-cli`、期限 2027-01-31、
+対応する shipping/fake test を登録する。bootstrap の generic 単相化 2 件は owner `daemon` の既存例外である。

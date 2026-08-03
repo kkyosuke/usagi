@@ -29,6 +29,19 @@ const READINESS_ATTEMPTS: u32 = 40;
 pub(crate) const READINESS_CEILING: Duration = READINESS_DELAY.saturating_mul(READINESS_ATTEMPTS);
 const READINESS_DELAY: Duration = Duration::from_millis(50);
 
+// Keep endpoint ownership in the generic composition function while the
+// retry/error decision below has one type-erased, coverage-visible instance.
+macro_rules! wait_for_stream {
+    ($connect:expr) => {{
+        let mut ready = None;
+        wait_for_ready(&mut || {
+            ready = Some($connect()?);
+            Ok(())
+        })?;
+        ready.expect("a successful readiness probe stores its endpoint")
+    }};
+}
+
 // The unit suite exercises every action, readiness, recovery, and build-fence
 // transition. LLVM nevertheless counts the separately generated production
 // `IpcClient` instantiation as uncovered for branches exercised by the fake
@@ -78,21 +91,21 @@ where
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             start().map_err(BootstrapError::Start)?;
-            let stream = wait_for_ready(&mut connect)?;
-            require_expected_build(&stream, expected_build, &build_of)?;
+            let stream = wait_for_stream!(connect);
+            require_expected_build(build_of(&stream), expected_build)?;
             Ok(stream)
         }
         Err(error) if can_attempt_stale_recovery(error.kind()) => {
             match recover_stale().map_err(BootstrapError::Recovery)? {
                 StaleRecovery::Recovered => {
                     start().map_err(BootstrapError::Start)?;
-                    let stream = wait_for_ready(&mut connect)?;
-                    require_expected_build(&stream, expected_build, &build_of)?;
+                    let stream = wait_for_stream!(connect);
+                    require_expected_build(build_of(&stream), expected_build)?;
                     Ok(stream)
                 }
                 StaleRecovery::OwnerActive => {
-                    let stream = wait_for_ready(&mut connect)?;
-                    require_expected_build(&stream, expected_build, &build_of)?;
+                    let stream = wait_for_stream!(connect);
+                    require_expected_build(build_of(&stream), expected_build)?;
                     Ok(stream)
                 }
                 StaleRecovery::NotProven => Err(BootstrapError::Connect(error)),
@@ -120,8 +133,8 @@ where
     B: Fn(&S) -> &BuildIdentity,
 {
     restart().map_err(BootstrapError::Restart)?;
-    let stream = wait_for_ready(&mut connect)?;
-    require_expected_build(&stream, expected_build, &build_of)?;
+    let stream = wait_for_stream!(connect);
+    require_expected_build(build_of(&stream), expected_build)?;
     Ok(stream)
 }
 
@@ -209,16 +222,11 @@ impl fmt::Display for BootstrapError {
 
 impl std::error::Error for BootstrapError {}
 
-#[coverage(off)]
-fn require_expected_build<S, B>(
-    stream: &S,
+fn require_expected_build(
+    actual_build: &BuildIdentity,
     expected_build: &BuildIdentity,
-    build_of: &B,
-) -> Result<(), BootstrapError>
-where
-    B: Fn(&S) -> &BuildIdentity,
-{
-    match build_artifact_decision(build_of(stream), expected_build, false) {
+) -> Result<(), BootstrapError> {
+    match build_artifact_decision(actual_build, expected_build, false) {
         BuildArtifactDecision::Reuse => Ok(()),
         BuildArtifactDecision::RolloverTrigger | BuildArtifactDecision::ForceReplace => {
             Err(BootstrapError::ReplacementBuildMismatch)
@@ -227,15 +235,11 @@ where
     }
 }
 
-#[coverage(off)]
-fn wait_for_ready<S, C>(connect: &mut C) -> Result<S, BootstrapError>
-where
-    C: FnMut() -> io::Result<S>,
-{
+fn wait_for_ready(connect: &mut dyn FnMut() -> io::Result<()>) -> Result<(), BootstrapError> {
     let mut last_error = io::Error::other("daemon did not publish an endpoint");
     for _ in 0..READINESS_ATTEMPTS {
         match connect() {
-            Ok(stream) => return Ok(stream),
+            Ok(()) => return Ok(()),
             // A workspace refusal is the endpoint's final answer, not a
             // publication delay: waiting cannot change it, so report it at once
             // instead of spending the readiness budget on it.
@@ -253,12 +257,14 @@ where
 }
 
 #[cfg(test)]
-#[coverage(off)]
 mod tests {
-    use super::{BootstrapError, StaleRecovery, connect_or_start, restart_and_connect};
+    use super::{
+        BootstrapError, StaleRecovery, connect_or_start, restart_and_connect, workspace_refusal,
+    };
     use std::cell::Cell;
     use std::io;
     use usagi_core::infrastructure::ipc::{BuildIdentity, build_rollover_trigger};
+    use usagi_core::usecase::client::ClientError;
 
     #[derive(Debug)]
     struct Endpoint {
@@ -289,12 +295,78 @@ mod tests {
         &stream.build
     }
 
+    fn rollover(
+        error: BootstrapError,
+    ) -> Option<usagi_core::infrastructure::ipc::BuildRolloverTrigger> {
+        match error {
+            BootstrapError::RolloverRequired(trigger) => Some(trigger),
+            _ => None,
+        }
+    }
+
+    fn workspace_mismatch(
+        error: BootstrapError,
+    ) -> Option<usagi_core::infrastructure::ipc::ProtocolError> {
+        match error {
+            BootstrapError::WorkspaceMismatch(refusal) => Some(refusal),
+            _ => None,
+        }
+    }
+
     fn lifecycle_error() -> io::Result<()> {
         Err(io::Error::other("lifecycle action failed"))
     }
 
     fn recovery_error() -> io::Result<StaleRecovery> {
         Err(io::Error::other("private cleanup detail"))
+    }
+
+    fn assert_same_variant(actual: &BootstrapError, expected: &BootstrapError) {
+        assert_eq!(
+            std::mem::discriminant(actual),
+            std::mem::discriminant(expected)
+        );
+    }
+
+    fn assert_recovery_requires_expected_build(recovery: StaleRecovery) {
+        let connects = Cell::new(0);
+        let expected = build("current");
+        let error = connect_or_start(
+            || {
+                let call = connects.get();
+                connects.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                } else {
+                    Ok(endpoint("wrong-owner", "old"))
+                }
+            },
+            || Ok(()),
+            || Ok(recovery),
+            &expected,
+            "local",
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_same_variant(&error, &BootstrapError::ReplacementBuildMismatch);
+    }
+
+    fn assert_safe_message(error: &BootstrapError, expected: &str) {
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn workspace_refusal_ignores_untyped_and_non_protocol_errors() {
+        assert_eq!(
+            workspace_refusal(&io::Error::from(io::ErrorKind::ConnectionRefused)),
+            None
+        );
+        assert_eq!(workspace_refusal(&io::Error::other("untyped")), None);
+        assert_eq!(
+            workspace_refusal(&io::Error::other(ClientError::BuildIdentityUnavailable)),
+            None
+        );
     }
 
     #[test]
@@ -360,21 +432,20 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Start(_)));
+        assert_same_variant(
+            &error,
+            &BootstrapError::Start(io::Error::other("expected variant")),
+        );
         assert_eq!(starts.get(), 1);
     }
 
     #[test]
     fn unproven_stale_endpoint_is_not_started() {
-        let starts = Cell::new(0);
         let recoveries = Cell::new(0);
         let expected = build("current");
         let error = connect_or_start(
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
+            lifecycle_error,
             || {
                 recoveries.set(recoveries.get() + 1);
                 Ok(StaleRecovery::NotProven)
@@ -385,8 +456,10 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Connect(_)));
-        assert_eq!(starts.get(), 0);
+        assert_same_variant(
+            &error,
+            &BootstrapError::Connect(io::Error::other("expected variant")),
+        );
         assert_eq!(recoveries.get(), 1);
     }
 
@@ -458,7 +531,10 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Connect(_)));
+        assert_same_variant(
+            &error,
+            &BootstrapError::Connect(io::Error::other("expected variant")),
+        );
     }
 
     #[test]
@@ -474,7 +550,10 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Recovery(_)));
+        assert_same_variant(
+            &error,
+            &BootstrapError::Recovery(io::Error::other("expected variant")),
+        );
         assert_eq!(error.to_string(), "daemon endpoint could not be recovered");
     }
 
@@ -500,34 +579,16 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(error, BootstrapError::Readiness(_)));
+        assert_same_variant(
+            &error,
+            &BootstrapError::Readiness(io::Error::other("expected variant")),
+        );
     }
 
     #[test]
     fn recovered_or_active_owner_requires_the_expected_build() {
-        for recovery in [StaleRecovery::Recovered, StaleRecovery::OwnerActive] {
-            let connects = Cell::new(0);
-            let expected = build("current");
-            let error = connect_or_start(
-                || {
-                    let call = connects.get();
-                    connects.set(call + 1);
-                    if call == 0 {
-                        Err(io::Error::from(io::ErrorKind::ConnectionRefused))
-                    } else {
-                        Ok(endpoint("wrong-owner", "old"))
-                    }
-                },
-                || Ok(()),
-                || Ok(recovery),
-                &expected,
-                "local",
-                false,
-                endpoint_build,
-            )
-            .unwrap_err();
-            assert!(matches!(error, BootstrapError::ReplacementBuildMismatch));
-        }
+        assert_recovery_requires_expected_build(StaleRecovery::Recovered);
+        assert_recovery_requires_expected_build(StaleRecovery::OwnerActive);
     }
 
     #[test]
@@ -543,7 +604,10 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(start_error, BootstrapError::Start(_)));
+        assert_same_variant(
+            &start_error,
+            &BootstrapError::Start(io::Error::other("expected variant")),
+        );
 
         let readiness_error = connect_or_start(
             || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
@@ -555,7 +619,10 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(readiness_error, BootstrapError::Readiness(_)));
+        assert_same_variant(
+            &readiness_error,
+            &BootstrapError::Readiness(io::Error::other("expected variant")),
+        );
     }
 
     #[test]
@@ -571,9 +638,8 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        let BootstrapError::RolloverRequired(trigger) = error else {
-            panic!("mismatch must return a typed trigger");
-        };
+        let trigger = rollover(error).unwrap();
+        assert!(rollover(BootstrapError::UnknownBuildIdentity).is_none());
         assert_eq!(trigger.channel, "development");
         assert!(!trigger.forced);
         assert_eq!(
@@ -599,9 +665,7 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        let BootstrapError::RolloverRequired(trigger) = error else {
-            panic!("force must return a typed trigger");
-        };
+        let trigger = rollover(error).unwrap();
         assert!(trigger.forced);
 
         let stream = connect_or_start(
@@ -621,8 +685,9 @@ mod tests {
     fn selected_cold_restart_requires_the_expected_replacement_build() {
         let expected = build("current");
         let restarts = Cell::new(0);
+        let connect = || Ok(endpoint("replacement", "current"));
         let stream = restart_and_connect(
-            || Ok(endpoint("replacement", "current")),
+            connect,
             || {
                 restarts.set(restarts.get() + 1);
                 Ok(())
@@ -634,14 +699,12 @@ mod tests {
         assert_eq!(stream.name, "replacement");
         assert_eq!(restarts.get(), 1);
 
-        let restart_error = restart_and_connect(
-            || Ok(endpoint("unused", "current")),
-            lifecycle_error,
-            &expected,
-            endpoint_build,
-        )
-        .unwrap_err();
-        assert!(matches!(restart_error, BootstrapError::Restart(_)));
+        let restart_error =
+            restart_and_connect(connect, lifecycle_error, &expected, endpoint_build).unwrap_err();
+        assert_same_variant(
+            &restart_error,
+            &BootstrapError::Restart(io::Error::other("expected variant")),
+        );
 
         let mismatch = restart_and_connect(
             || Ok(endpoint("wrong", "old")),
@@ -650,7 +713,7 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(mismatch, BootstrapError::ReplacementBuildMismatch));
+        assert_same_variant(&mismatch, &BootstrapError::ReplacementBuildMismatch);
     }
 
     #[test]
@@ -666,7 +729,7 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(unknown, BootstrapError::UnknownBuildIdentity));
+        assert_same_variant(&unknown, &BootstrapError::UnknownBuildIdentity);
 
         let missing_target = connect_or_start(
             || {
@@ -688,10 +751,7 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(
-            missing_target,
-            BootstrapError::UnknownBuildIdentity
-        ));
+        assert_same_variant(&missing_target, &BootstrapError::UnknownBuildIdentity);
 
         let calls = Cell::new(0);
         let unknown_after_start = connect_or_start(
@@ -712,10 +772,7 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(
-            unknown_after_start,
-            BootstrapError::UnknownBuildIdentity
-        ));
+        assert_same_variant(&unknown_after_start, &BootstrapError::UnknownBuildIdentity);
     }
 
     #[test]
@@ -732,20 +789,12 @@ mod tests {
         .unwrap_err();
         let refused =
             || Err::<Endpoint, _>(io::Error::other(ClientError::Protocol(refusal.clone())));
-        let starts = Cell::new(0);
-        let recoveries = Cell::new(0);
         let expected = build("current");
 
         let error = connect_or_start(
             refused,
-            || {
-                starts.set(starts.get() + 1);
-                Ok(())
-            },
-            || {
-                recoveries.set(recoveries.get() + 1);
-                Ok(StaleRecovery::Recovered)
-            },
+            lifecycle_error,
+            recovery_error,
             &expected,
             "local",
             false,
@@ -756,12 +805,9 @@ mod tests {
         // The endpoint answered, so it is neither absent nor stale: replacing or
         // restarting a daemon that legitimately owns another workspace would be
         // both useless and destructive.
-        let BootstrapError::WorkspaceMismatch(surfaced) = error else {
-            panic!("a workspace refusal must be classified, not read as unavailable");
-        };
+        let surfaced = workspace_mismatch(error).unwrap();
+        assert!(workspace_mismatch(BootstrapError::UnknownBuildIdentity).is_none());
         assert_eq!(surfaced, refusal);
-        assert_eq!(starts.get(), 0);
-        assert_eq!(recoveries.get(), 0);
         // The caller renders the daemon's own message, which names the workspace
         // that is served.
         assert_eq!(
@@ -772,10 +818,7 @@ mod tests {
         // An explicit cold replacement is refused for the same reason.
         let restart_error =
             restart_and_connect(refused, || Ok(()), &expected, endpoint_build).unwrap_err();
-        assert!(matches!(
-            restart_error,
-            BootstrapError::WorkspaceMismatch(_)
-        ));
+        assert!(workspace_mismatch(restart_error).is_some());
 
         // Only this refusal is reclassified. Every other typed client failure
         // keeps its existing connect handling, so the fence cannot swallow an
@@ -797,44 +840,42 @@ mod tests {
             endpoint_build,
         )
         .unwrap_err();
-        assert!(matches!(unrelated, BootstrapError::Connect(_)));
+        assert_same_variant(
+            &unrelated,
+            &BootstrapError::Connect(io::Error::other("expected variant")),
+        );
     }
 
     #[test]
     fn bootstrap_errors_render_only_safe_messages() {
-        let errors = [
-            (
-                BootstrapError::Connect(io::Error::from(io::ErrorKind::ConnectionRefused)),
-                "daemon endpoint is unavailable",
-            ),
-            (
-                BootstrapError::Recovery(io::Error::other("private recovery detail")),
-                "daemon endpoint could not be recovered",
-            ),
-            (
-                BootstrapError::Start(io::Error::other("private start detail")),
-                "daemon could not be started",
-            ),
-            (
-                BootstrapError::Restart(io::Error::other("private restart detail")),
-                "daemon generation could not be restarted",
-            ),
-            (
-                BootstrapError::Readiness(io::Error::from(io::ErrorKind::TimedOut)),
-                "daemon did not become ready",
-            ),
-            (
-                BootstrapError::UnknownBuildIdentity,
-                "daemon build identity is unavailable",
-            ),
-            (
-                BootstrapError::ReplacementBuildMismatch,
-                "replacement daemon build does not match this client",
-            ),
-        ];
-        for (error, expected) in errors {
-            assert_eq!(error.to_string(), expected);
-        }
+        assert_safe_message(
+            &BootstrapError::Connect(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            "daemon endpoint is unavailable",
+        );
+        assert_safe_message(
+            &BootstrapError::Recovery(io::Error::other("private recovery detail")),
+            "daemon endpoint could not be recovered",
+        );
+        assert_safe_message(
+            &BootstrapError::Start(io::Error::other("private start detail")),
+            "daemon could not be started",
+        );
+        assert_safe_message(
+            &BootstrapError::Restart(io::Error::other("private restart detail")),
+            "daemon generation could not be restarted",
+        );
+        assert_safe_message(
+            &BootstrapError::Readiness(io::Error::from(io::ErrorKind::TimedOut)),
+            "daemon did not become ready",
+        );
+        assert_safe_message(
+            &BootstrapError::UnknownBuildIdentity,
+            "daemon build identity is unavailable",
+        );
+        assert_safe_message(
+            &BootstrapError::ReplacementBuildMismatch,
+            "replacement daemon build does not match this client",
+        );
         let trigger = build_rollover_trigger(&build("old"), &build("new"), "local", false).unwrap();
         assert!(
             BootstrapError::RolloverRequired(trigger)
