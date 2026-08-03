@@ -164,8 +164,13 @@ pub struct HomeProjection {
     sessions: Vec<ProjectedSession>,
     selected: Selection,
     active: Option<SessionId>,
+    /// Session drawn in the right pane. Switch previews the row under the
+    /// cursor; every other case shows the command target ([`preview_session`]).
+    preview: Option<SessionId>,
     mode: HomeMode,
-    active_phase: TargetPhase,
+    /// Phase line of the previewed session, not of the command target: the right
+    /// pane is one surface and must not mix two sessions' material.
+    preview_phase: TargetPhase,
     feedback: Option<Feedback>,
     mascot_tick: u64,
     /// Presentation-only message. Runtime state currently supplies `None`; this
@@ -294,15 +299,17 @@ impl HomeProjection {
             .create_session_form()
             .and_then(CreateSessionForm::selected_role)
             .map(|role| role.id.to_string());
+        let preview = preview_session(state);
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
             selected: state.selected(),
             active: state.active(),
+            preview,
             mode: match state.route() {
                 crate::usecase::application::controller::Route::Home(mode) => mode,
             },
-            active_phase: state.active().map_or(TargetPhase::Absent, |session| {
+            preview_phase: preview.map_or(TargetPhase::Absent, |session| {
                 state.phase_for(Target::Session(session))
             }),
             feedback: state.feedback().cloned(),
@@ -496,7 +503,17 @@ impl HomeProjection {
     }
 
     fn active_label(&self) -> &str {
-        match self.active {
+        self.session_label(self.active)
+    }
+
+    /// Label of the session the right pane previews. Switch names the row under
+    /// the cursor; Closeup names the target it operates on.
+    fn preview_label(&self) -> &str {
+        self.session_label(self.preview)
+    }
+
+    fn session_label(&self, session: Option<SessionId>) -> &str {
+        match session {
             Some(id) => self
                 .sessions
                 .iter()
@@ -505,6 +522,24 @@ impl HomeProjection {
             None => "No session selected",
         }
     }
+}
+
+/// The session the right pane previews.
+///
+/// Switch owns sidebar navigation, so its right pane follows the cursor: moving
+/// it is how the user looks at another session before choosing to act on it.
+/// Every other case — Closeup, the `+ new session` action row, an open Director
+/// drawer — shows the command target instead. `WorkspaceRuntime::preview_pane`
+/// resolves the same session so the tab strip and the header name one session.
+fn preview_session(state: &AppState) -> Option<SessionId> {
+    let crate::usecase::application::controller::Route::Home(mode) = state.route();
+    if mode == HomeMode::Switch
+        && !state.director_drawer_open()
+        && let Selection::Target(Target::Session(session)) = state.selected()
+    {
+        return Some(session);
+    }
+    state.active()
 }
 
 fn pane_tab_label(tab: &PaneTab) -> String {
@@ -1758,9 +1793,14 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     };
     let header = format!(
         " {}",
-        Role::Accent.style().bold().paint(home.active_label())
+        Role::Accent.style().bold().paint(home.preview_label())
     );
-    let footer_hint = format!("[{mode}] active pane");
+    // Switch's pane is a read-only preview of the hovered row, so it says so:
+    // the pane the user is looking at is not yet the one commands act on.
+    let footer_hint = match home.mode {
+        HomeMode::Switch => format!("[{mode}] preview pane"),
+        HomeMode::Closeup => format!("[{mode}] active pane"),
+    };
     let footer = Style::new()
         .dim()
         .paint(&widgets::clip_to_width(&footer_hint, width));
@@ -1819,7 +1859,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
                 &home.pane_detail.as_ref().map_or_else(
-                    || format!("  agent: {}", phase_label(home.active_phase)),
+                    || format!("  agent: {}", phase_label(home.preview_phase)),
                     |detail| format!("  agent: {detail}"),
                 ),
                 width,
@@ -3434,6 +3474,52 @@ mod tests {
         let name = right_header.find("session").expect("session name");
         let tab = right_header.find("Agent").expect("agent tab");
         assert!(name < tab);
+    }
+
+    #[test]
+    fn switch_names_the_hovered_session_in_the_right_pane_and_closeup_names_the_target() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let sessions = [
+            projected_session(first, "first", "/work/first"),
+            projected_session(second, "second", "/work/second"),
+        ];
+        let mut state = AppState::home(workspace, vec![first, second]);
+        // Activate the first session, then return to Switch and hover the second.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.active(), Some(first));
+
+        let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions);
+        let frame = render_home(18, 100, &switch);
+        let right = |frame: &[String], row: usize| {
+            strip(&frame[row])
+                .split_once('│')
+                .expect("pane divider")
+                .1
+                .to_owned()
+        };
+        // The right pane follows the cursor, not the target Closeup would act on.
+        assert!(right(&frame, CHROME_ROWS).contains("second"));
+        assert!(!right(&frame, CHROME_ROWS).contains("first"));
+        // …and says so, because the hovered pane is not yet the command target.
+        assert!(
+            frame
+                .iter()
+                .any(|line| strip(line).contains("preview pane"))
+        );
+        assert!(!frame.iter().any(|line| strip(line).contains("active pane")));
+
+        // Entering Closeup makes the hovered session the target; the pane header
+        // is unchanged, and the footer now names an active pane.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.active(), Some(second));
+        let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions);
+        let frame = render_home(18, 100, &closeup);
+        assert!(right(&frame, CHROME_ROWS).contains("second"));
+        assert!(frame.iter().any(|line| strip(line).contains("active pane")));
     }
 
     #[test]
