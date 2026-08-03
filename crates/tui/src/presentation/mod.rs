@@ -2271,11 +2271,13 @@ impl WorkspaceUi {
         if let Some(context) = self.agent_tab_intent.as_mut() {
             context.allowed_sessions = sessions;
         }
-        // Lifecycle membership is authoritative for target retention. Use the
-        // same coalesced controller request as Reopen so an idle,
-        // already-successful controller observes removals exactly once; an
-        // in-flight job is fenced and an outage keeps its backoff.
-        self.agent_observation_requested |= changed;
+        if changed {
+            // Lifecycle membership is authoritative for target retention. Use
+            // the same coalesced controller request as Reopen so an idle,
+            // already-successful controller observes removals exactly once;
+            // an in-flight job is fenced and an outage keeps its backoff.
+            self.request_agent_observation();
+        }
     }
 
     /// Project the already-polled rows for `terminal`, optionally highlighting an
@@ -6970,8 +6972,9 @@ mod tests {
         assert!(!rows[0].removing);
 
         // The reducer receives the lifecycle so it can gate attach by capability.
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         super::sync_runtime_sessions(&mut runtime, &ui, &[]);
+        assert_eq!(runtime.state().sessions(), &[session]);
         assert_eq!(
             runtime.state().session_lifecycles().get(&session).copied(),
             Some(SessionLifecycle::Failed)
