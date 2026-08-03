@@ -1,13 +1,13 @@
 ---
 number: 625
 title: test(cli): MCP・CLI decision path を coverage 対象へ戻す
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, test, coverage, cli, mcp]
 dependson: [484]
 related: [453]
 created_at: 2026-08-02T23:07:31.755387+00:00
-updated_at: 2026-08-03T00:07:17.463020+00:00
+updated_at: 2026-08-03T01:32:45.773202+00:00
 ---
 
 ## Finding（P2 / coverage gate の盲点）
