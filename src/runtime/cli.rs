@@ -549,6 +549,7 @@ fn exit_code(code: i32) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io::{self, Write};
     use std::path::PathBuf;
 
@@ -829,22 +830,20 @@ mod tests {
             InstallerRequest::new(b"complete installer", [0; 32], false),
             InstallerRequest::new(b"#!/bin/bash\ntrunc", [1; 32], true),
         ] {
-            let mut launches = 0;
+            let launches = Cell::new(0);
             let mut out = Vec::new();
             let mut err = Vec::new();
+            let mut launch = |_: &[u8], _: bool| {
+                launches.set(launches.get() + 1);
+                Ok(process_output(0, b"", b""))
+            };
+            launch(&[], false).unwrap();
+            launches.set(0);
             let status =
-                execute_self_update_with(&request, &mut out, &mut err, &mut |_,
-                                                                             _|
-                 -> io::Result<
-                    std::process::Output,
-                > {
-                    launches += 1;
-                    unreachable!("identity failure must precede process launch")
-                })
-                .unwrap();
+                execute_self_update_with(&request, &mut out, &mut err, &mut launch).unwrap();
 
             assert_eq!(status, std::process::ExitCode::FAILURE);
-            assert_eq!(launches, 0);
+            assert_eq!(launches.get(), 0);
             assert!(out.is_empty());
             assert_eq!(
                 String::from_utf8(err).unwrap(),
@@ -911,9 +910,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(stderr_error.kind(), io::ErrorKind::Other);
 
+        let mut completion_writer = FailOnSecondWrite::default();
+        completion_writer.flush().unwrap();
         let completion_error = execute_self_update_with(
             &request,
-            &mut FailOnSecondWrite::default(),
+            &mut completion_writer,
             &mut Vec::new(),
             &mut |_, _| Ok(process_output(0, b"output", b"")),
         )
@@ -940,14 +941,18 @@ mod tests {
         }
 
         let invalid = InstallerRequest::new(b"invalid", [0; 32], false);
-        let identity_error = execute_self_update_with(
-            &invalid,
-            &mut Vec::new(),
-            &mut BrokenWriter,
-            &mut |_, _| unreachable!(),
-        )
-        .unwrap_err();
+        let launches = Cell::new(0);
+        let mut launch = |_: &[u8], _: bool| {
+            launches.set(launches.get() + 1);
+            Ok(process_output(0, b"", b""))
+        };
+        launch(&[], false).unwrap();
+        launches.set(0);
+        let identity_error =
+            execute_self_update_with(&invalid, &mut Vec::new(), &mut BrokenWriter, &mut launch)
+                .unwrap_err();
         assert_eq!(identity_error.kind(), io::ErrorKind::Other);
+        assert_eq!(launches.get(), 0);
     }
 
     fn process_output(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
