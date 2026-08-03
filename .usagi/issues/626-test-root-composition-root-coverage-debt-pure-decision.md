@@ -1,13 +1,13 @@
 ---
 number: 626
 title: test(root): composition root の coverage debt を pure decision から除く
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, test, coverage, runtime, cli]
 dependson: [484]
 related: [453]
 created_at: 2026-08-02T23:07:31.856402+00:00
-updated_at: 2026-08-03T00:53:10.268476+00:00
+updated_at: 2026-08-03T01:40:21.506706+00:00
 ---
 
 ## Finding（P2 / coverage policy 違反）
