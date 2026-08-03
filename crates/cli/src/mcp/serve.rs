@@ -715,7 +715,7 @@ mod tests {
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use crate::mcp::tools::{ToolAvailability, registry};
     use serde_json::Value;
-    use std::io::{BufReader, Cursor, ErrorKind};
+    use std::io::{BufReader, Cursor, ErrorKind, Write};
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
@@ -1420,6 +1420,25 @@ mod tests {
         assert_eq!(parse_error["error"]["code"], -32700);
         let ping: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(ping["id"], 9);
+    }
+
+    #[test]
+    fn non_utf8_parse_error_propagates_output_failure() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(ErrorKind::BrokenPipe, "closed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::new(ErrorKind::BrokenPipe, "closed"))
+            }
+        }
+
+        let mut writer = FailingWriter;
+        assert_eq!(writer.flush().unwrap_err().kind(), ErrorKind::BrokenPipe);
+        let error = serve([0xff, b'\n'].as_slice(), &mut writer, "9.9.9").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
     }
 
     #[test]
