@@ -77,4 +77,13 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, RunOutcome::SelfUpdate(request) if request.select_version()));
     }
+
+    #[test]
+    fn output_failure_prevents_both_update_modes_from_reaching_the_runtime() {
+        for select_version in [false, true] {
+            let mut output = &mut [][..];
+            let error = Update { select_version }.run(&mut output).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
+        }
+    }
 }
