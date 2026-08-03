@@ -13,20 +13,25 @@ pub struct Update {
 }
 
 impl Run for Update {
-    #[coverage(off)]
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
-        let command = install_command(REPOSITORY, self.select_version)
-            .ok_or_else(|| io::Error::other("usagi repository URL is not a GitHub URL"))?;
-        if self.select_version {
-            writeln!(out, "select a usagi release to install...")?;
-        } else {
-            writeln!(
-                out,
-                "downloading and installing the latest usagi release..."
-            )?;
-        }
-        Ok(RunOutcome::SelfUpdate { command })
+        run_with_repository(REPOSITORY, self.select_version, out)
     }
+}
+
+fn run_with_repository(
+    repository: &str,
+    select_version: bool,
+    out: &mut dyn Write,
+) -> io::Result<RunOutcome> {
+    let Some(command) = install_command(repository, select_version) else {
+        return Err(io::Error::other("usagi repository URL is not a GitHub URL"));
+    };
+    if select_version {
+        writeln!(out, "select a usagi release to install...")?;
+    } else {
+        writeln!(out, "downloading latest usagi release...")?;
+    }
+    Ok(RunOutcome::SelfUpdate { command })
 }
 
 /// Build the documented installer invocation for a GitHub repository URL.
@@ -65,7 +70,7 @@ fn valid_github_slug(slug: &str) -> Option<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Update, install_command};
+    use super::{Update, install_command, run_with_repository};
     use crate::cli::{Run, RunOutcome};
 
     #[test]
@@ -101,7 +106,14 @@ mod tests {
 
     #[test]
     fn version_selection_requests_the_interactive_installer_mode() {
-        let command = install_command("https://github.com/KKyosuke/usagi", true).unwrap();
-        assert!(command.ends_with("bash -s -- --select-version"));
+        let mut out = Vec::new();
+        let outcome =
+            run_with_repository("https://github.com/KKyosuke/usagi", true, &mut out).unwrap();
+        assert!(
+            matches!(outcome, RunOutcome::SelfUpdate { command } if command.ends_with("bash -s -- --select-version"))
+        );
+        assert!(String::from_utf8(out).unwrap().contains("select"));
+
+        assert!(run_with_repository("https://example.com/usagi", false, &mut Vec::new()).is_err());
     }
 }

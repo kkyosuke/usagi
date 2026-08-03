@@ -12,6 +12,10 @@ use std::sync::{Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use usagi_cli::mcp::tool::{Tool, ToolError};
+use usagi_cli::mcp::tools::issue::{
+    IssueCreate, IssueDelete, IssueGet, IssueSearch, IssueToPrompt, IssueUpdate,
+};
 use usagi_core::domain::settings::{DefaultModel, LocalSettings, Settings};
 use usagi_core::infrastructure::ipc::{
     BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
@@ -37,6 +41,26 @@ use daemon_fixture::{Channel, DaemonHome};
 /// Serialize those starts so parallel integration tests cannot race its process
 /// discovery and readiness publication on a loaded CI runner.
 static DAEMON_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn shipping_issue_adapters_cover_defensive_parsing_and_missing_projection() {
+    for tool in [
+        &IssueCreate as &dyn Tool,
+        &IssueGet,
+        &IssueToPrompt,
+        &IssueSearch,
+        &IssueUpdate,
+        &IssueDelete,
+    ] {
+        assert!(!tool.description().is_empty());
+        assert!(matches!(tool.call("{"), Err(ToolError::InvalidParams(_))));
+    }
+    assert_eq!(IssueGet.call(r#"{"number":4294967295}"#).unwrap(), "null");
+    assert!(matches!(
+        IssueToPrompt.call(r#"{"number":4294967295}"#),
+        Err(ToolError::Execution(_))
+    ));
+}
 
 fn short_home() -> DaemonHome {
     DaemonHome::new()

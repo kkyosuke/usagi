@@ -49,12 +49,18 @@ production graph の検査方法は [Production screen graph harness](03-tui.md#
 
 ## root・CLI の内訳
 
+#625 で `crates/cli/src/**` の `migration_debt` 22 件を返済し、CLI/MCP の parser、route selection、
+schema projection、caller policy、error mapping を coverage 対象へ戻した。cwd、global/workspace settings、
+runtime executable snapshot を束ねる `serve_with_client` を `composition` 例外として残す。また、shipping binary と別に
+単相化される issue adapter の `cfg(test)` instance だけを `generic_monomorphization` 例外とし、shipping instance は coverage
+対象に保つ。direct unit と production E2E の双方で parser・store error・projection を検証する。
+
 | path | 件数 | review 先 |
 |---|---:|---|
-| `crates/cli/src/**` | 22 | command/MCP parser・error mapping は削除対象。stdio / process 境界だけ `real_io` 候補 |
+| `crates/cli/src/**` | 2 | MCP composition 境界と issue adapter の test-build 単相化 |
 | `src/main.rs` | 1 | ロジックを持たない composition なら `composition` 候補 |
 | `src/runtime/bootstrap.rs` | 3 | bootstrap recovery 判断を coverage 対象へ戻し、readiness/build helper だけ返済候補 |
 | `src/runtime/cli.rs` | 2 | CLI routing を coverage 対象へ戻し、実行面の束縛だけ候補 |
 | `src/runtime/clipboard.rs` | 3 | platform process IO だけ `real_io` 候補 |
 | `src/runtime/launchd.rs` | 5 | plist 生成・判断は削除対象、launchd process IO だけ `real_io` 候補 |
-| **合計** | **36** | owner `root-cli`、期限 2027-01-31 |
+| **合計** | **16** | owner `root-cli`、期限 2027-01-31 |

@@ -11,7 +11,6 @@ pub struct Version {
 }
 
 impl Run for Version {
-    #[coverage(off)]
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
         writeln!(out, "usagi {}", self.version)?;
         Ok(RunOutcome::Exit(0))

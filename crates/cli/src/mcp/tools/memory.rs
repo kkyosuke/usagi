@@ -9,7 +9,6 @@ use usagi_core::usecase::memory::{self, MemoryFilter, MemoryPatch};
 
 use crate::mcp::tool::{Tool, ToolError};
 
-#[coverage(off)] // Production cwd resolution is exercised by the process E2E.
 fn store() -> MemoryStore {
     MemoryStore::new(
         std::env::current_dir().expect("MCP server already resolved its cwd at startup"),
