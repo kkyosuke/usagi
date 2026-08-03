@@ -11,10 +11,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use support::mcp::McpHarness;
+use support::mcp::{FixtureArgv, McpHarness};
 use usagi_core::domain::{
     agent::{AgentProfileId, CallerRef, ModelSelector},
     id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
+    role::RoleId,
+    settings::DEFAULT_LOCAL_LLM_MODEL,
     user_decision::UserDecision,
 };
 use usagi_core::infrastructure::store::{
@@ -264,6 +266,8 @@ printf '%s\n%s\n%s\n' \
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
     assert!(dispatch.contains("investigate flaky startup"));
     assert!(!dispatch.contains("DELEGATE_ROLE_SECRET"));
+    let argv = wait_for_fixture_argv(&mcp, "codex", None, "DELEGATE_ROLE_SECRET");
+    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None, false);
     let sessions = tool_text(&mcp.tool("session_list", &json!({})));
     let delegated_session = sessions["sessions"]
         .as_array()
@@ -870,6 +874,359 @@ fn write_session_role_catalog(mcp: &McpHarness, id: &str, summary: &str, instruc
     .unwrap();
 }
 
+fn wait_for_fixture_argv(
+    mcp: &McpHarness,
+    runtime: &str,
+    user_prompt: Option<&str>,
+    instruction_marker: &str,
+) -> FixtureArgv {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(capture) = mcp.fixture_argv().into_iter().find(|capture| {
+            capture.runtime == runtime
+                && capture
+                    .arguments
+                    .iter()
+                    .any(|argument| argument.contains(instruction_marker))
+                && user_prompt.is_none_or(|prompt| {
+                    capture.arguments.iter().any(|argument| argument == prompt)
+                })
+        }) {
+            return capture;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shipping {runtime} argv was not captured before timeout"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn assert_shipping_role_argv(
+    capture: &FixtureArgv,
+    role_id: &str,
+    instructions: &str,
+    user_prompt: Option<&str>,
+    local_llm: bool,
+) {
+    let role = RoleId::new(role_id).unwrap();
+    let expected = usagi_core::domain::agent::prompt::session_system_prompt_with_role(
+        false,
+        Some((&role, instructions)),
+        local_llm,
+    );
+    let system_prompt = if capture.runtime == "claude" {
+        let positions = capture
+            .arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| (argument == "--append-system-prompt").then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            positions.len(),
+            1,
+            "Claude system prompt flag count changed"
+        );
+        capture
+            .arguments
+            .get(positions[0] + 1)
+            .expect("Claude system prompt value is missing")
+            .clone()
+    } else {
+        assert!(
+            matches!(capture.runtime.as_str(), "codex" | "codex-fugu"),
+            "unexpected fixture runtime"
+        );
+        let assignments = capture
+            .arguments
+            .iter()
+            .filter(|argument| argument.starts_with("developer_instructions="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assignments.len(),
+            1,
+            "Codex-compatible developer instruction count changed"
+        );
+        let parsed: toml::Value = toml::from_str(assignments[0])
+            .expect("shipping developer_instructions must remain valid TOML");
+        parsed["developer_instructions"]
+            .as_str()
+            .expect("developer_instructions must remain a TOML string")
+            .to_owned()
+    };
+    assert!(
+        system_prompt == expected,
+        "shipping system prompt composition or ordering changed"
+    );
+    assert_eq!(system_prompt.matches(instructions).count(), 1);
+    assert_eq!(
+        system_prompt
+            .matches(&format!("<role id=\"{role_id}\">"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        capture
+            .arguments
+            .iter()
+            .filter(|argument| argument.contains(instructions))
+            .count(),
+        1,
+        "role instruction escaped its single ephemeral system argument"
+    );
+    if let Some(user_prompt) = user_prompt {
+        assert_eq!(
+            capture
+                .arguments
+                .iter()
+                .filter(|argument| argument.as_str() == user_prompt)
+                .count(),
+            1,
+            "initial user prompt argv changed"
+        );
+        assert!(
+            !user_prompt.contains(instructions),
+            "role instruction entered the initial user prompt"
+        );
+    }
+}
+
+fn assert_shipping_legacy_argv(capture: &FixtureArgv) {
+    let expected = usagi_core::domain::agent::prompt::session_system_prompt(false, false);
+    let assignments = capture
+        .arguments
+        .iter()
+        .filter(|argument| argument.starts_with("developer_instructions="))
+        .collect::<Vec<_>>();
+    assert_eq!(assignments.len(), 1);
+    let parsed: toml::Value = toml::from_str(assignments[0]).unwrap();
+    assert!(
+        parsed["developer_instructions"].as_str() == Some(expected.as_str()),
+        "role-free shipping argv no longer uses the legacy session prompt"
+    );
+}
+
+fn assert_secret_absent_from_durable_data(mcp: &McpHarness, secrets: &[&str]) {
+    fn visit(path: &std::path::Path, fixture_argv: &std::path::Path, secrets: &[&str]) {
+        if path == fixture_argv {
+            return;
+        }
+        if path.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                visit(&entry.unwrap().path(), fixture_argv, secrets);
+            }
+            return;
+        }
+        let Ok(bytes) = fs::read(path) else {
+            return;
+        };
+        for secret in secrets {
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+                "role instruction entered durable daemon data"
+            );
+        }
+    }
+
+    visit(
+        &mcp.data_dir(),
+        &mcp.data_dir().join("fixture-argv"),
+        secrets,
+    );
+}
+
+#[test]
+fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
+    const ROLE_SECRET: &str = "SHIPPING_ROLE_SECRET";
+    const UPDATED_SECRET: &str = "SHIPPING_UPDATED_ROLE_SECRET";
+
+    let mut mcp = McpHarness::start_with_all_agents();
+    let caller_credential = mcp.launch_caller();
+    let legacy = mcp
+        .fixture_argv()
+        .into_iter()
+        .find(|capture| capture.runtime == "codex")
+        .expect("legacy caller argv was captured");
+    assert_shipping_legacy_argv(&legacy);
+    mcp.restart_with_credential(&caller_credential);
+    mcp.enable_local_llm();
+    write_session_role_catalog(
+        &mcp,
+        "shipping-reviewer",
+        "Review shipping argv",
+        ROLE_SECRET,
+    );
+
+    let cases = [
+        (
+            "sakana-ai",
+            "fixture-sakana",
+            "codex-fugu",
+            "check Sakana argv",
+        ),
+        ("claude", "fixture-claude", "claude", "check Claude argv"),
+        ("codex", "fixture-codex", "codex", "check Codex argv"),
+    ];
+    let mut responses = Vec::new();
+    let mut captures = Vec::new();
+    for (index, (runtime, model, executable, prompt)) in cases.into_iter().enumerate() {
+        let response = mcp.tool(
+            "session_dispatch",
+            &json!({
+                "session":{"name":format!("shipping-role-{index}"), "role":"shipping-reviewer"},
+                "agent":{"runtime":runtime,"model":model},
+                "prompt":prompt
+            }),
+        );
+        assert!(
+            response.get("error").is_none(),
+            "shipping {runtime} dispatch failed with code {:?}: {:?}",
+            response["error"]["code"].as_i64(),
+            response["error"]["message"].as_str()
+        );
+        assert!(!response.to_string().contains(ROLE_SECRET));
+        responses.push(response);
+        let capture = wait_for_fixture_argv(&mcp, executable, Some(prompt), ROLE_SECRET);
+        assert_shipping_role_argv(
+            &capture,
+            "shipping-reviewer",
+            ROLE_SECRET,
+            Some(prompt),
+            true,
+        );
+        captures.push(capture);
+    }
+
+    for capture in &captures {
+        assert!(
+            capture
+                .arguments
+                .iter()
+                .any(|argument| argument.contains(DEFAULT_LOCAL_LLM_MODEL)),
+            "local-LLM MCP configuration was not provisioned"
+        );
+    }
+
+    // Editing the catalog cannot rewrite the already-running process argv.
+    write_session_role_catalog(
+        &mcp,
+        "shipping-reviewer",
+        "Review updated shipping argv",
+        UPDATED_SECRET,
+    );
+    assert!(captures.iter().all(|capture| {
+        capture
+            .arguments
+            .iter()
+            .any(|argument| argument.contains(ROLE_SECRET))
+            && capture
+                .arguments
+                .iter()
+                .all(|argument| !argument.contains(UPDATED_SECRET))
+    }));
+
+    for response in responses {
+        assert!(!response.to_string().contains(ROLE_SECRET));
+    }
+    assert_secret_absent_from_durable_data(&mcp, &[ROLE_SECRET, UPDATED_SECRET]);
+}
+
+#[test]
+fn production_explicit_resume_rereads_role_definition_for_shipping_argv() {
+    const INITIAL_SECRET: &str = "RESUME_INITIAL_ROLE_SECRET";
+    const UPDATED_SECRET: &str = "RESUME_UPDATED_ROLE_SECRET";
+
+    let mut mcp = McpHarness::start_in_production();
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
+    write_session_role_catalog(&mcp, "resume-reviewer", "Resume review", INITIAL_SECRET);
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+resuming=false
+for argument in "$@"; do if [ "$argument" = resume ]; then resuming=true; fi; done
+if [ "$resuming" = false ]; then
+  printf '%s' '{"session_id":"fixture-role-resume","transcript_path":"/must/not/be-read","cwd":"/fixture","hook_event_name":"SessionStart","model":"fixture"}' | "$USAGI_E2E_USAGI" codex-session-capture || exit 8
+fi
+printf 'fixture-ready\n'
+while IFS= read -r line; do printf 'fixture-input:%s\n' "$line"; done
+"#,
+    );
+
+    let dispatched = mcp.tool(
+        "session_dispatch",
+        &json!({
+            "session":{"name":"role-resume", "role":"resume-reviewer"},
+            "agent":{"runtime":"codex","model":"fixture-codex"},
+            "prompt":"capture resumable role"
+        }),
+    );
+    assert!(dispatched.get("error").is_none(), "initial dispatch failed");
+    assert!(!dispatched.to_string().contains(INITIAL_SECRET));
+    let initial = wait_for_fixture_argv(
+        &mcp,
+        "codex",
+        Some("capture resumable role"),
+        INITIAL_SECRET,
+    );
+    assert_shipping_role_argv(
+        &initial,
+        "resume-reviewer",
+        INITIAL_SECRET,
+        Some("capture resumable role"),
+        false,
+    );
+    mcp.interrupt_daemon();
+    mcp.restart_with_credential(&caller_credential);
+    wait_until(|| {
+        let sessions = mcp.tool("session_list", &json!({}));
+        sessions.get("error").is_none()
+            && tool_text(&sessions)["sessions"]
+                .as_array()
+                .is_some_and(|sessions| {
+                    sessions.iter().any(|session| {
+                        session["name"] == "role-resume" && session["agent_resumable"] == true
+                    })
+                })
+    });
+
+    write_session_role_catalog(
+        &mcp,
+        "resume-reviewer",
+        "Updated resume review",
+        UPDATED_SECRET,
+    );
+    let resumed = mcp.tool("session_resume", &json!({"name":"role-resume"}));
+    assert!(resumed.get("error").is_none(), "explicit resume failed");
+    assert!(!resumed.to_string().contains(UPDATED_SECRET));
+    let replacement = wait_for_fixture_argv(&mcp, "codex", None, UPDATED_SECRET);
+    assert_shipping_role_argv(&replacement, "resume-reviewer", UPDATED_SECRET, None, false);
+    assert!(
+        replacement
+            .arguments
+            .iter()
+            .any(|argument| argument == "resume")
+    );
+    assert!(
+        replacement
+            .arguments
+            .iter()
+            .all(|argument| !argument.contains(INITIAL_SECRET)),
+        "explicit resume retained the stale role definition"
+    );
+    assert!(
+        initial
+            .arguments
+            .iter()
+            .all(|argument| !argument.contains(UPDATED_SECRET)),
+        "catalog edit rewrote the first child argv"
+    );
+    assert_secret_absent_from_durable_data(&mcp, &[INITIAL_SECRET, UPDATED_SECRET]);
+}
+
 #[test]
 fn production_agent_fixture_is_injected_without_cli_credentials() {
     let mut mcp = McpHarness::start();
@@ -1108,6 +1465,7 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One process-spanning dispatch keeps completion and argv assertions together.
 fn production_dispatch_worker_complete_reaches_the_caller_inbox() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();
@@ -1138,6 +1496,19 @@ printf '%s\n%s\n%s\n' \
         serde_json::from_str(dispatched["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(admission["run_id"].is_string());
     assert!(admission["terminal"].is_object());
+    let argv = wait_for_fixture_argv(
+        &mcp,
+        "codex",
+        Some("complete through MCP"),
+        "DISPATCH_ROLE_SECRET",
+    );
+    assert_shipping_role_argv(
+        &argv,
+        "coder",
+        "DISPATCH_ROLE_SECRET",
+        Some("complete through MCP"),
+        false,
+    );
 
     let session = tool_text(&mcp.tool("session_get", &json!({"name":"mcp-worker"})));
     assert_eq!(session["role_id"], "coder");

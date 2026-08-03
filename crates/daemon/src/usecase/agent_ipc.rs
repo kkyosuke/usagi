@@ -42,7 +42,7 @@ use usagi_core::{
     },
     infrastructure::ipc::{ErrorCode, ProtocolError, agent_operation_digest},
     infrastructure::runtime_model::{
-        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, supported_agent_runtimes,
     },
     infrastructure::store::dispatch::{
         AgentAdmissionReservation, CredentialProvenance as DispatchCredentialProvenance,
@@ -1061,7 +1061,10 @@ impl AgentRuntime {
         if !WorkspaceAgentConfig::read(workspace_root).allows(runtime.as_str(), model.as_str()) {
             return Err(dispatch_runtime_model_not_allowed());
         }
-        if !self.locator.is_available(runtime.as_str()) {
+        if !self
+            .locator
+            .is_available(runtime_executable(runtime.as_str()))
+        {
             return Err(dispatch_runtime_unavailable());
         }
         if self
@@ -1144,7 +1147,10 @@ impl AgentRuntime {
             if !config.allows(worker.runtime.as_str(), worker.model.as_str()) {
                 return Err(dispatch_runtime_model_not_allowed());
             }
-            if !self.locator.is_available(worker.runtime.as_str()) {
+            if !self
+                .locator
+                .is_available(runtime_executable(worker.runtime.as_str()))
+            {
                 return Err(dispatch_runtime_unavailable());
             }
         }
@@ -2497,6 +2503,12 @@ fn dispatch_runtime_unavailable() -> ProtocolError {
         ErrorCode::Unavailable,
         "dispatch runtime executable is unavailable",
     )
+}
+
+fn runtime_executable(runtime: &str) -> &str {
+    supported_agent_runtimes()
+        .find(|supported| supported.id == runtime)
+        .map_or(runtime, |supported| supported.executable)
 }
 
 fn dispatch_admission_incomplete() -> ProtocolError {
@@ -5637,6 +5649,49 @@ mod tests {
         let incomplete = preflight(&runtime, &admitted.to_string(), "finish", "test").unwrap_err();
         assert_eq!(incomplete.code, ErrorCode::OwnershipUnknown);
         assert!(incomplete.message.contains("cannot be spawned again"));
+    }
+
+    #[test]
+    fn sakana_dispatch_preflight_checks_the_codex_fugu_executable() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("codex-fugu");
+        std::fs::write(&executable, "fixture").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
+        std::fs::write(
+            workspace.path().join(".usagi/config.toml"),
+            "[agents.sakana-ai]\nmodels = [\"fixture\"]\n",
+        )
+        .unwrap();
+        let runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let operation = OperationId::new().to_string();
+        let sakana = AgentProfileId::new("sakana-ai").unwrap();
+        let model = ModelSelector::new("fixture").unwrap();
+
+        runtime
+            .preflight_dispatch(
+                &operation,
+                "inspect argv",
+                &sakana,
+                &model,
+                workspace.path(),
+            )
+            .unwrap();
+        std::fs::remove_file(executable).unwrap();
+        assert_eq!(
+            runtime
+                .preflight_dispatch(
+                    &operation,
+                    "inspect argv",
+                    &sakana,
+                    &model,
+                    workspace.path()
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        assert_eq!(runtime_executable("unknown-runtime"), "unknown-runtime");
     }
 
     #[test]

@@ -52,7 +52,14 @@ pub struct McpHarness {
     channel: Channel,
     fixture_bin: PathBuf,
     fixture_log: PathBuf,
+    fixture_argv: PathBuf,
     process: McpProcess,
+}
+
+#[derive(Clone)]
+pub struct FixtureArgv {
+    pub runtime: String,
+    pub arguments: Vec<String>,
 }
 
 struct McpProcess {
@@ -65,7 +72,7 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
-        Self::start_at(Channel::Local, None, false, None)
+        Self::start_at(Channel::Local, None, false, None, false)
     }
 
     /// production channel（`USAGI_RUNTIME_MODE=production`）で起動する。
@@ -74,29 +81,37 @@ impl McpHarness {
     /// 「base と selected の関係」を base 側から間違えても local では露見しない。
     #[must_use]
     pub fn start_in_production() -> Self {
-        Self::start_at(Channel::Production, None, false, None)
+        Self::start_at(Channel::Production, None, false, None, false)
+    }
+
+    /// Every shipping Agent grammar, including Sakana AI's `codex-fugu`.
+    #[must_use]
+    pub fn start_with_all_agents() -> Self {
+        Self::start_at(Channel::Local, None, false, None, true)
     }
 
     #[must_use]
     pub fn start_in_session(name: &str) -> Self {
-        Self::start_at(Channel::Local, Some(name), false, None)
+        Self::start_at(Channel::Local, Some(name), false, None, false)
     }
 
     #[must_use]
     pub fn start_with_tool_availability(issue: bool, memory: bool) -> Self {
-        Self::start_at(Channel::Local, None, false, Some((issue, memory)))
+        Self::start_at(Channel::Local, None, false, Some((issue, memory)), false)
     }
 
     #[must_use]
     pub fn start_in_nested_session(name: &str) -> Self {
-        Self::start_at(Channel::Local, Some(name), true, None)
+        Self::start_at(Channel::Local, Some(name), true, None, false)
     }
 
+    #[allow(clippy::too_many_lines)] // One fixture setup keeps its workspace, daemon, and Agent paths aligned.
     fn start_at(
         channel: Channel,
         session: Option<&str>,
         nested: bool,
         tool_availability: Option<(bool, bool)>,
+        all_agents: bool,
     ) -> Self {
         let workspace = short_dir("usagi-mcp-workspace-");
         git(workspace.path(), &["init", "-q"]);
@@ -118,13 +133,22 @@ impl McpHarness {
         configure_tool_availability(channel, home.path(), tool_availability);
         let fixture_bin = home.path().join("fixture-bin");
         let fixture_log = home.path().join("fixture-agent.log");
+        let fixture_argv = home.path().join("fixture-argv");
         fs::create_dir(&fixture_bin).unwrap();
-        install_fixture_agent(&fixture_bin, "codex", &fixture_log);
-        install_fixture_agent(&fixture_bin, "claude", &fixture_log);
+        fs::create_dir(&fixture_argv).unwrap();
+        install_fixture_agent(&fixture_bin, "codex", &fixture_log, &fixture_argv);
+        install_fixture_agent(&fixture_bin, "claude", &fixture_log, &fixture_argv);
+        if all_agents {
+            install_fixture_agent(&fixture_bin, "codex-fugu", &fixture_log, &fixture_argv);
+        }
         fs::create_dir(workspace.path().join(".usagi")).unwrap();
         fs::write(
             workspace.path().join(".usagi/config.toml"),
-            "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n",
+            if all_agents {
+                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n"
+            } else {
+                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n"
+            },
         )
         .unwrap();
         git(workspace.path(), &["add", ".usagi/config.toml"]);
@@ -164,7 +188,7 @@ impl McpHarness {
             std::env::var("PATH").unwrap_or_default()
         );
         let mut child = usagi_command(home.path(), channel, &cwd, &["mcp".as_ref()])
-            .env("PATH", path)
+            .env("PATH", &path)
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -180,6 +204,7 @@ impl McpHarness {
             channel,
             fixture_bin,
             fixture_log,
+            fixture_argv,
             process: McpProcess {
                 child,
                 stdin,
@@ -271,6 +296,55 @@ impl McpHarness {
         &self.fixture_log
     }
 
+    /// Captured child argv, preserving opaque argument boundaries with NUL
+    /// framing. Callers deliberately decide what is safe to include in an
+    /// assertion message.
+    pub fn fixture_argv(&self) -> Vec<FixtureArgv> {
+        let mut paths = fs::read_dir(&self.fixture_argv)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let runtime = path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .split('.')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                let bytes = fs::read(path).unwrap();
+                if bytes.last() != Some(&0) {
+                    return None;
+                }
+                let arguments = bytes
+                    .split(|byte| *byte == 0)
+                    .filter(|argument| !argument.is_empty())
+                    .map(|argument| String::from_utf8(argument.to_vec()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                Some(FixtureArgv { runtime, arguments })
+            })
+            .collect()
+    }
+
+    pub fn enable_local_llm(&self) {
+        let storage = Storage::new(self.data_dir());
+        let mut settings = storage.load_settings().unwrap();
+        settings.local_llm.enabled = true;
+        storage.save_settings(&settings).unwrap();
+    }
+
+    /// Stop the shipping daemon so its live Agent runtimes become retained
+    /// interrupted conversations. A subsequent MCP restart cold-starts it.
+    pub fn interrupt_daemon(&self) {
+        reap(self.home.path());
+    }
+
     /// Replace one fixture runtime before dispatching it. Follow-up MCP suites
     /// use this seam to make a worker call `agent_complete` or `agent_fail`
     /// without relying on a real provider login.
@@ -279,7 +353,7 @@ impl McpHarness {
         let executable = self.fixture_bin.join(runtime);
         fs::write(
             &executable,
-            materialize_fixture_script(script, &self.fixture_log),
+            materialize_fixture_script(script, &self.fixture_log, &self.fixture_argv),
         )
         .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -443,15 +517,23 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-fn materialize_fixture_script(script: &str, log: &Path) -> String {
-    script
+fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
+    let script = script
         .replace("$USAGI_MCP_FIXTURE_LOG", log.to_str().unwrap())
-        .replace("$USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"))
+        .replace("$USAGI_E2E_USAGI", env!("CARGO_BIN_EXE_usagi"));
+    let capture = format!(
+        "if ! [ \"$1\" = login ] || ! [ \"$2\" = status ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
+        argv.display()
+    );
+    script.strip_prefix("#!/bin/sh\n").map_or_else(
+        || format!("{capture}{script}"),
+        |body| format!("#!/bin/sh\n{capture}{body}"),
+    )
 }
 
-fn install_fixture_agent(bin: &Path, name: &str, log: &Path) {
-    let script = "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$0 $*\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"$USAGI_MCP_CALLER_CREDENTIAL\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n'\nwhile IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\n";
+fn install_fixture_agent(bin: &Path, name: &str, log: &Path, argv: &Path) {
+    let script = "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${0##*/}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"$USAGI_MCP_CALLER_CREDENTIAL\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n'\nwhile IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\n";
     let executable = bin.join(name);
-    fs::write(&executable, materialize_fixture_script(script, log)).unwrap();
+    fs::write(&executable, materialize_fixture_script(script, log, argv)).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
 }
