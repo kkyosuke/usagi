@@ -11,7 +11,7 @@ use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::prompt::session_system_prompt_with_role;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
-use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
@@ -1473,14 +1473,17 @@ impl DecisionWaker for DeferredDecisionWaker {
 
 /// Locks the shared Agent owner for one terminal request; a poisoned lock is a
 /// safe unavailable error rather than a client-side fallback.
-struct SharedAgent(SharedAgentRuntime);
+struct SharedAgent {
+    runtime: SharedAgentRuntime,
+    disconnected: Sender<ConnectionId>,
+}
 impl AgentTerminalActor for SharedAgent {
     fn handle(
         &mut self,
         context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
         request: usagi_core::usecase::client::TerminalRequest,
     ) -> TerminalOutcome {
-        match self.0.lock() {
+        match self.runtime.lock() {
             Ok(mut agent) => AgentTerminalActor::handle(&mut *agent, context, request),
             Err(_) => {
                 TerminalOutcome::Handled(Err(usagi_core::infrastructure::ipc::ProtocolError::new(
@@ -1500,7 +1503,7 @@ impl AgentTerminalActor for SharedAgent {
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
         // A poisoned lock is a safe empty inventory, never a client fallback.
-        self.0
+        self.runtime
             .lock()
             .map(|agent| AgentTerminalActor::terminal_inventory(&*agent, scope))
             .unwrap_or_default()
@@ -1510,15 +1513,18 @@ impl AgentTerminalActor for SharedAgent {
         scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Vec<usagi_core::domain::terminal_visibility::CompletedTerminalEntry> {
         // A poisoned lock is a safe empty tombstone list, never a fallback.
-        self.0
+        self.runtime
             .lock()
             .map(|agent| AgentTerminalActor::completed_inventory(&*agent, scope))
             .unwrap_or_default()
     }
     fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
-        if let Ok(mut agent) = self.0.lock() {
-            AgentTerminalActor::disconnect(&mut *agent, connection);
-        }
+        // Connection workers must release their socket and JoinHandle promptly.
+        // Runtime cleanup can be O(number of terminals) and contends with live
+        // output/input, so serialize it on the daemon-owned cleanup worker
+        // instead of leaving one blocked worker (and three socket descriptors)
+        // behind for every short-lived client.
+        let _ = self.disconnected.send(connection);
     }
 }
 
@@ -2123,11 +2129,49 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
             |terminal| terminal.completed_inventory(scope),
         )
     }
-    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
-        if let Ok(mut terminal) = self.0.lock() {
-            terminal.disconnect(connection);
-        }
+    fn disconnect(&mut self, _connection: usagi_core::domain::id::ConnectionId) {
+        // `SharedAgent::disconnect` enqueues the one cleanup operation for both
+        // owners. Running generic cleanup here as well would put this connection
+        // worker back behind the runtime mutex and defeat bounded socket life.
     }
+}
+
+/// Serializes connection-local terminal cleanup away from socket workers.
+///
+/// A disconnect visits every terminal ledger. Long-lived chats can make that
+/// visit contend with output and input requests; doing it in the connection
+/// worker retains the accepted reader, writer, and retirement descriptor until
+/// the mutex is acquired. One daemon-owned consumer bounds the contention and
+/// lets the connection worker close all three descriptors immediately.
+fn start_connection_cleanup_worker(
+    agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
+    disconnected: Receiver<ConnectionId>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    start_connection_cleanup_worker_with(disconnected, move |connection| {
+        if let Ok(mut agent) = agent.lock() {
+            AgentTerminalActor::disconnect(&mut *agent, connection);
+        }
+        if let Ok(mut terminal) = terminal.lock() {
+            usagi_daemon::usecase::terminal_owner::TerminalOwner::disconnect(
+                &mut *terminal,
+                connection,
+            );
+        }
+    })
+}
+
+fn start_connection_cleanup_worker_with(
+    disconnected: Receiver<ConnectionId>,
+    mut cleanup: impl FnMut(ConnectionId) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-connection-cleanup".to_string())
+        .spawn(move || {
+            while let Ok(connection) = disconnected.recv() {
+                cleanup(connection);
+            }
+        })
 }
 
 use super::bootstrap;
@@ -2249,6 +2293,12 @@ fn spawn_ipc_server(
         Arc::clone(&projection),
         Arc::clone(&supervisor),
     )?;
+    // Socket workers only enqueue connection-local ledger cleanup. The single
+    // consumer prevents a disconnect storm from retaining one accepted socket
+    // triplet per worker while all of them contend on the terminal owners.
+    let (disconnected, disconnects) = mpsc::channel();
+    let connection_cleanup =
+        start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
     start_pr_projection_worker(Arc::clone(&pr_inventory), Arc::clone(&projection))?;
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     consume_user_decision_events(&decisions)
@@ -2312,6 +2362,8 @@ fn spawn_ipc_server(
         supervisor,
         fence,
         workers,
+        disconnected,
+        connection_cleanup,
         shutdown,
     )
 }
@@ -3121,6 +3173,8 @@ fn start_ipc_accept_loop(
     supervisor: SharedSupervisorRuntime,
     fence: Arc<GenerationFence>,
     workers: Arc<ClientWorkers>,
+    disconnected: Sender<ConnectionId>,
+    connection_cleanup: std::thread::JoinHandle<()>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     std::thread::Builder::new()
@@ -3203,6 +3257,7 @@ fn start_ipc_accept_loop(
                         let supervisor = Arc::clone(&supervisor);
                         let connection_fence = Arc::clone(&fence);
                         let connection_data_dir = data_dir.clone();
+                        let connection_disconnected = disconnected.clone();
                         // Retained before the worker starts so a collection that
                         // begins while this connection is still being set up
                         // cannot miss it. Reaping first keeps the retained set
@@ -3275,7 +3330,10 @@ fn start_ipc_accept_loop(
                                 let mut writer = writer.into_inner();
                                 let mut owner =
                                     SharedTerminalOwner::with_visibility_and_retention(
-                                        SharedAgent(agent_owner),
+                                        SharedAgent {
+                                            runtime: agent_owner,
+                                            disconnected: connection_disconnected,
+                                        },
                                         SharedTerminal(terminal),
                                         visibility,
                                         retention,
@@ -3357,6 +3415,13 @@ fn start_ipc_accept_loop(
                 ErrorLog::record(&format!(
                     "daemon shutdown retired with client worker failures: {report:?}"
                 ));
+            }
+            // Every connection worker has now returned and dropped its sender.
+            // Closing the last producer drains all queued ledger cleanup before
+            // the owner runtimes are allowed to leave the daemon generation.
+            drop(disconnected);
+            if connection_cleanup.join().is_err() {
+                ErrorLog::record("daemon connection cleanup worker panicked");
             }
             listener
         })
@@ -7285,17 +7350,29 @@ impl Write for PreHandshakeDeadlineStream {
 /// so what is retained alongside it is a duplicate descriptor that
 /// `shutdown(2)` can close from the outside.
 #[derive(Clone)]
-struct AcceptedStream(Arc<std::os::unix::net::UnixStream>);
+struct AcceptedStream(Arc<Mutex<Option<std::os::unix::net::UnixStream>>>);
 
 impl AcceptedStream {
     fn new(stream: std::os::unix::net::UnixStream) -> Self {
-        Self(Arc::new(stream))
+        Self(Arc::new(Mutex::new(Some(stream))))
     }
 }
 
 impl ConnectionShutdown for AcceptedStream {
     fn shutdown(&self) -> std::io::Result<()> {
-        self.0.shutdown(std::net::Shutdown::Both)
+        // The worker and collector share one closeable duplicate, not one fd
+        // each. Taking it here means normal worker completion releases the
+        // retirement descriptor immediately even though the finished
+        // JoinHandle remains registered until the accept loop's next reap.
+        let Some(stream) = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return Ok(());
+        };
+        stream.shutdown(std::net::Shutdown::Both)
     }
 }
 
@@ -15283,5 +15360,42 @@ instructions = "{instructions}"
             0,
             "retirement closes the socket"
         );
+    }
+
+    /// A finished worker can stay in `ClientWorkers` until the next accept
+    /// triggers reaping. Its collection handle must not keep the accepted fd
+    /// open during that interval: a long-lived daemon otherwise accumulates one
+    /// descriptor for every historical short-lived client.
+    #[test]
+    fn worker_completion_closes_the_shared_retirement_descriptor_before_reaping() {
+        let (mut peer, accepted) = std::os::unix::net::UnixStream::pair().unwrap();
+        let retained = AcceptedStream::new(accepted);
+        let completion = retained.clone();
+
+        drop(ShutdownAcceptedStreamOnDrop(Some(completion)));
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).unwrap(), 0);
+        assert!(retained.shutdown().is_ok(), "closing twice is idempotent");
+    }
+
+    #[test]
+    fn connection_cleanup_worker_drains_disconnects_in_order_before_shutdown() {
+        let (disconnected, disconnects) = mpsc::channel();
+        let cleaned = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&cleaned);
+        let worker = start_connection_cleanup_worker_with(disconnects, move |connection| {
+            observed.lock().unwrap().push(connection);
+        })
+        .unwrap();
+        let first = ConnectionId::new();
+        let second = ConnectionId::new();
+
+        disconnected.send(first).unwrap();
+        disconnected.send(second).unwrap();
+        drop(disconnected);
+        worker.join().unwrap();
+
+        assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
     }
 }
