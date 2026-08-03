@@ -1,13 +1,13 @@
 ---
 number: 631
 title: fix(security): root Agent の repository mutation を fail-closed にする
-status: in-progress
+status: done
 priority: high
 labels: [review, security, orchestration, daemon, agent, claude, codex, sandbox]
 dependson: []
 related: [107, 377, 537, 630]
 created_at: 2026-08-02T23:13:59.705211+00:00
-updated_at: 2026-08-03T01:58:23.496625+00:00
+updated_at: 2026-08-03T02:26:41.432042+00:00
 ---
 
 ## Finding（P0 security）
