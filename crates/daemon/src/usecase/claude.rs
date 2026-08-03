@@ -245,7 +245,7 @@ fn render_plan(
         argv.extend(["--model".into(), model.as_str().into()]);
     }
     if let Some(prompt) = &request.initial_prompt {
-        argv.push(prompt.clone());
+        argv.extend(["--".into(), prompt.clone()]);
     }
     LaunchPlan::new(
         profile.id.clone(),
@@ -358,7 +358,13 @@ mod tests {
         assert_eq!(resolved.snapshot.plan.program, "claude");
         assert_eq!(
             resolved.snapshot.plan.argv,
-            ["--print", "--model", "sonnet", "inspect this workspace"]
+            [
+                "--print",
+                "--model",
+                "sonnet",
+                "--",
+                "inspect this workspace"
+            ]
         );
         let durable = serde_json::to_string(&resolved.snapshot).unwrap();
         assert!(!durable.contains("CLAUDE_TOKEN"));
@@ -374,6 +380,112 @@ mod tests {
             ]
         );
         assert!(resolved.provider_resume.is_none());
+    }
+
+    #[test]
+    fn option_like_initial_prompts_are_opaque_positional_values() {
+        for prompt in [
+            "--version",
+            "--settings=/tmp/x",
+            "--dangerously-skip-permissions",
+            "-c",
+        ] {
+            let mut request = request();
+            request.initial_prompt = Some(prompt.to_owned());
+            let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+            let resolved = adapter.resolve(&request).unwrap();
+
+            assert_eq!(
+                resolved.snapshot.plan.argv,
+                ["--print", "--model", "sonnet", "--", prompt],
+                "{prompt} must stay after Claude's option terminator"
+            );
+        }
+    }
+
+    #[test]
+    fn argv_matrix_keeps_provision_resume_model_and_prompt_order() {
+        fn effective_argv(resolved: &ResolvedLaunch) -> Vec<String> {
+            resolved
+                .provision
+                .arguments()
+                .iter()
+                .chain(&resolved.snapshot.plan.argv)
+                .cloned()
+                .collect()
+        }
+
+        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let headless = adapter.resolve(&request()).unwrap();
+        assert_eq!(
+            effective_argv(&headless),
+            [
+                "--settings",
+                "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
+                "--print",
+                "--model",
+                "sonnet",
+                "--",
+                "inspect this workspace",
+            ]
+        );
+
+        let mut interactive_request = request();
+        interactive_request.mode = LaunchMode::Interactive;
+        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let interactive = adapter.resolve(&interactive_request).unwrap();
+        let session_id = interactive
+            .provider_resume
+            .as_ref()
+            .unwrap()
+            .native_session_id
+            .expose_sensitive()
+            .to_owned();
+        assert_eq!(
+            effective_argv(&interactive),
+            [
+                "--settings",
+                "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
+                "--session-id",
+                session_id.as_str(),
+                "--model",
+                "sonnet",
+                "--",
+                "inspect this workspace",
+            ]
+        );
+
+        let mut resume_request = interactive_request;
+        resume_request.resume = true;
+        resume_request.provider_resume = interactive.provider_resume;
+        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let resumed = adapter.resolve(&resume_request).unwrap();
+        assert_eq!(
+            effective_argv(&resumed),
+            [
+                "--settings",
+                "/scoped/claude.json",
+                "--append-system-prompt",
+                "ephemeral system prompt",
+                "--resume",
+                session_id.as_str(),
+                "--model",
+                "sonnet",
+                "--",
+                "inspect this workspace",
+            ]
+        );
+
+        let mut no_prompt = request();
+        no_prompt.mode = LaunchMode::Interactive;
+        no_prompt.initial_prompt = None;
+        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let no_prompt = adapter.resolve(&no_prompt).unwrap();
+        assert_eq!(no_prompt.snapshot.plan.argv, ["--model", "sonnet"]);
     }
 
     #[test]

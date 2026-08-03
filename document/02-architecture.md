@@ -655,6 +655,16 @@ stream、error detail に残らない。optional local LLM の MCP server と de
 ephemeral provision にだけ載せる（配線条件と順序は
 [7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線) が正本）。
 
+Claude の実効 argv は次の順序に固定する。
+
+```text
+provision 引数 -> --session-id/--resume? -> mode 引数 -> --model <model>? -> -- -> initial prompt
+```
+
+dispatch / delegate 由来の initial prompt は untrusted な opaque data であり、存在する場合は必ず option
+terminator `--` の直後に単一の positional value として置く。これにより `--version`、`--settings`、permission
+flag、subcommand に似た prompt も provider option として再解釈されない。
+
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
 credential、secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・
 error detail に載せない。
