@@ -54,7 +54,6 @@ struct ServerCapabilities<'a> {
 /// # Errors
 ///
 /// stdin の読み取り、または `out` への書き込みが IO エラーになった場合、そのエラーを返す。
-#[coverage(off)]
 pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
     let mut unavailable = UnavailableClient;
     serve_with_client(input, out, version, &mut unavailable)
@@ -68,7 +67,7 @@ pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Res
 ///
 /// Returns only stdin/stdout IO errors; daemon failures are encoded as
 /// JSON-RPC responses so one failed tool call does not stop the server.
-#[coverage(off)]
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=default_serve_returns_a_structured_unavailable_error_for_session_tools
 pub fn serve_with_client(
     input: impl BufRead,
     out: &mut dyn Write,
@@ -99,7 +98,6 @@ pub fn serve_with_client(
 ///
 /// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
 /// responses so serving continues.
-#[coverage(off)]
 pub fn serve_with_client_and_snapshot(
     input: impl BufRead,
     out: &mut dyn Write,
@@ -163,7 +161,6 @@ pub fn serve_with_client_and_features(
 
 struct UnavailableClient;
 impl DaemonClient for UnavailableClient {
-    #[coverage(off)]
     fn request(&mut self, _request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         Err(ClientError::Unavailable(
             "managed daemon client is not configured".into(),
@@ -173,7 +170,6 @@ impl DaemonClient for UnavailableClient {
 
 /// 1 リクエスト行を処理して応答文字列を返す。通知（`id` 無し）は `None`。
 #[cfg(test)]
-#[coverage(off)]
 fn handle_line(line: &str, version: &str) -> Option<String> {
     let mut unavailable = UnavailableClient;
     let mut state = ServerState::Ready;
@@ -189,7 +185,6 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
     )
 }
 
-#[coverage(off)]
 fn handle_line_with_client(
     line: &str,
     version: &str,
@@ -266,7 +261,6 @@ fn handle_notification(method: &str, state: &mut ServerState) {
 }
 
 /// method 別に応答 `Value` を組み立てる。
-#[coverage(off)]
 fn respond(
     method: &str,
     id: Value,
@@ -326,7 +320,6 @@ fn respond(
 }
 
 /// `initialize` の結果（プロトコル版・capabilities・serverInfo）。
-#[coverage(off)]
 fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'static str> {
     let Some(protocol_version) = params
         .and_then(|params| params.get("protocolVersion"))
@@ -345,7 +338,6 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
 }
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
-#[coverage(off)]
 fn tools_list_result(snapshot: &RuntimeModelSnapshot, availability: ToolAvailability) -> Value {
     let tools: Vec<Value> = tools::registry_with_availability(availability)
         .iter()
@@ -370,7 +362,6 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot, availability: ToolAvailabi
 
 /// `tools/call` を処理する。実装済み tool を store / daemon 経路へ送り、未実装 tool と
 /// daemon の protocol error は JSON-RPC エラーとして返す。
-#[coverage(off)]
 fn tools_call(
     id: Value,
     params: Option<&Value>,
@@ -418,21 +409,32 @@ fn tools_call(
     if let Err(ToolError::InvalidParams(message)) = descriptor.validate(&arguments, &schema) {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    apply_caller_policy(descriptor.caller_policy(), &mut arguments);
+    let caller_credential = caller_credential();
+    apply_caller_policy(
+        descriptor.caller_policy(),
+        &mut arguments,
+        caller_credential.as_deref(),
+    );
     if matches!(name, "session_create" | "session_delegate_issue")
         && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    execute_tool(id, descriptor, arguments, client)
+    execute_tool(
+        id,
+        descriptor,
+        arguments,
+        client,
+        caller_credential.as_deref(),
+    )
 }
 
-#[coverage(off)]
 fn execute_tool(
     id: Value,
     descriptor: &ToolDescriptor,
     arguments: Value,
     client: &mut dyn DaemonClient,
+    caller_credential: Option<&str>,
 ) -> Value {
     match descriptor.route() {
         ToolRoute::AgentInventory => {
@@ -490,10 +492,9 @@ fn execute_tool(
                     action,
                     operation_id,
                     payload: arguments,
-                    caller_context: std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
-                        .ok()
-                        .filter(|credential| !credential.is_empty())
-                        .map(|credential| McpCallerContext { credential }),
+                    caller_context: caller_credential.map(|credential| McpCallerContext {
+                        credential: credential.to_owned(),
+                    }),
                 }),
             )
         }
@@ -609,7 +610,6 @@ fn daemon_body_response(id: Value, reply: Result<DaemonReply, ClientError>) -> V
     }
 }
 
-#[coverage(off)]
 fn store_tool_call(id: Value, descriptor: &ToolDescriptor, arguments: &Value) -> Value {
     match descriptor.call_store(arguments) {
         Ok(result) => protocol::success(
@@ -635,20 +635,32 @@ fn store_tool_call(id: Value, descriptor: &ToolDescriptor, arguments: &Value) ->
     }
 }
 
-#[coverage(off)]
-fn apply_caller_policy(policy: CallerPolicy, arguments: &mut Value) {
+fn caller_credential() -> Option<String> {
+    normalize_caller_credential(std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok())
+}
+
+fn normalize_caller_credential(credential: Option<String>) -> Option<String> {
+    match credential {
+        Some(credential) if !credential.is_empty() => Some(credential),
+        Some(_) | None => None,
+    }
+}
+
+fn apply_caller_policy(
+    policy: CallerPolicy,
+    arguments: &mut Value,
+    caller_credential: Option<&str>,
+) {
     if policy == CallerPolicy::SessionCredential
-        && let Ok(credential) = std::env::var("USAGI_MCP_CALLER_CREDENTIAL")
-        && !credential.is_empty()
+        && let Some(credential) = caller_credential
     {
-        arguments["_caller_credential"] = Value::String(credential);
+        arguments["_caller_credential"] = Value::String(credential.to_owned());
     }
 }
 
 /// `resources/read` を処理する。`uri` を取り出して resource レジストリを引き、本文を
 /// `contents` に包んで返す。`uri` 欠落は `INVALID_PARAMS`、未知 URI は resource が無い旨の
 /// `INVALID_PARAMS` を返す。
-#[coverage(off)]
 fn resources_read(id: Value, params: Option<&Value>) -> Value {
     let Some(uri) = params.and_then(|p| p.get("uri")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing resource uri");
@@ -667,19 +679,40 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 mod tests {
     use super::{
         SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState, agent_selector_schema,
-        daemon_error_data, handle_line, handle_line_with_client, serve, serve_with_client,
-        serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
+        apply_caller_policy, daemon_error_data, execute_tool, handle_line, handle_line_with_client,
+        normalize_caller_credential, serve, serve_with_client, serve_with_client_and_features,
+        serve_with_client_and_snapshot, session_tool_response,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
     };
-    use crate::mcp::tools::ToolAvailability;
+    use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use crate::mcp::tools::{ToolAvailability, registry};
     use serde_json::Value;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
         reply: Result<DaemonReply, ClientError>,
         requests: Vec<DaemonRequest>,
+    }
+
+    struct ErrorTool(fn() -> ToolError);
+    impl Tool for ErrorTool {
+        fn name(&self) -> &'static str {
+            "error_fixture"
+        }
+
+        fn description(&self) -> &'static str {
+            "error mapping fixture"
+        }
+
+        fn input_schema(&self) -> &'static str {
+            r#"{"type":"object","properties":{}}"#
+        }
+
+        fn call(&self, _params: &str) -> Result<String, ToolError> {
+            Err((self.0)())
+        }
     }
 
     struct FakeLocator(&'static [&'static str]);
@@ -923,6 +956,153 @@ mod tests {
         )
         .unwrap();
         assert_eq!(arguments["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn direct_initialized_request_and_legacy_migration_conflict_are_rejected() {
+        let initialized_request =
+            call(r#"{"jsonrpc":"2.0","id":1,"method":"notifications/initialized"}"#).unwrap();
+        assert_eq!(initialized_request["error"]["code"], -32600);
+
+        let conflict = call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_create","arguments":{"name":"one","agent_cli":"claude","runtime":"codex","model":"gpt-5"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(conflict["error"]["code"], -32602);
+        assert!(
+            conflict["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cannot be combined")
+        );
+    }
+
+    #[test]
+    fn exact_route_validation_and_unavailable_routes_map_protocol_errors() {
+        let invalid_workspace = call(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_resume_inventory","arguments":{"workspace_id":"not-a-resource-id"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(invalid_workspace["error"]["code"], -32602);
+
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        let registry = registry();
+        let resume = registry
+            .iter()
+            .find(|descriptor| descriptor.name() == "session_resume")
+            .unwrap();
+        let invalid_target = execute_tool(
+            serde_json::json!(2),
+            resume,
+            serde_json::json!({"target":{"continuation": 7}}),
+            &mut client,
+            None,
+        );
+        assert_eq!(invalid_target["error"]["code"], -32602);
+
+        let unavailable = ToolDescriptor::new(
+            Box::new(ErrorTool(|| ToolError::Unimplemented("unused"))),
+            ToolRoute::Unavailable("disabled"),
+            CallerPolicy::Public,
+        );
+        let response = execute_tool(
+            serde_json::json!(3),
+            &unavailable,
+            serde_json::json!({}),
+            &mut client,
+            None,
+        );
+        assert_eq!(response["error"]["code"], -32603);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("disabled")
+        );
+    }
+
+    #[test]
+    fn store_error_variants_and_caller_policies_keep_their_mapping() {
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        for (tool, expected) in [
+            (
+                ErrorTool(|| ToolError::UnknownTool("gone".into())),
+                crate::mcp::protocol::error_code::METHOD_NOT_FOUND,
+            ),
+            (
+                ErrorTool(|| ToolError::Unimplemented("later")),
+                crate::mcp::protocol::error_code::INTERNAL_ERROR,
+            ),
+            (
+                ErrorTool(|| ToolError::InvalidParams("invalid".into())),
+                crate::mcp::protocol::error_code::INVALID_PARAMS,
+            ),
+        ] {
+            let descriptor =
+                ToolDescriptor::new(Box::new(tool), ToolRoute::Store, CallerPolicy::Public);
+            assert_eq!(descriptor.name(), "error_fixture");
+            assert_eq!(descriptor.description(), "error mapping fixture");
+            assert!(descriptor.input_schema().contains("object"));
+            let response = execute_tool(
+                serde_json::json!(1),
+                &descriptor,
+                serde_json::json!({}),
+                &mut client,
+                None,
+            );
+            assert_eq!(response["error"]["code"], expected);
+        }
+
+        for policy in [
+            CallerPolicy::Public,
+            CallerPolicy::AgentCredential,
+            CallerPolicy::DaemonProvenance,
+        ] {
+            let mut arguments = serde_json::json!({});
+            apply_caller_policy(policy, &mut arguments, Some("secret"));
+            assert!(arguments.get("_caller_credential").is_none());
+        }
+        let mut arguments = serde_json::json!({});
+        apply_caller_policy(CallerPolicy::SessionCredential, &mut arguments, None);
+        assert!(arguments.get("_caller_credential").is_none());
+        apply_caller_policy(
+            CallerPolicy::SessionCredential,
+            &mut arguments,
+            Some("secret"),
+        );
+        assert_eq!(arguments["_caller_credential"], "secret");
+
+        let registry = registry();
+        let dispatch = registry
+            .iter()
+            .find(|descriptor| descriptor.name() == "session_get")
+            .unwrap();
+        let response = execute_tool(
+            serde_json::json!(2),
+            dispatch,
+            serde_json::json!({"name":"one"}),
+            &mut client,
+            Some("secret"),
+        );
+        assert!(response.get("result").is_some());
+        assert!(matches!(
+            client.requests.last(),
+            Some(DaemonRequest::DispatchTool { caller_context: Some(context), .. })
+                if context.credential == "secret"
+        ));
+
+        assert_eq!(normalize_caller_credential(None), None);
+        assert_eq!(normalize_caller_credential(Some(String::new())), None);
+        assert_eq!(
+            normalize_caller_credential(Some("secret".into())),
+            Some("secret".into())
+        );
     }
 
     #[test]

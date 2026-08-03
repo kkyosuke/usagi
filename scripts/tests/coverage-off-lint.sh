@@ -41,6 +41,12 @@ allowed_io() {
   printf '%s\n' '{"version":1,"entries":[]}' > "$dir/allowlist.json"
 }
 
+allowed_test_instance() {
+  local dir=$1
+  printf '%s\n' '#![cfg_attr(test, coverage(off))]' '// coverage: reason=generic_monomorphization owner=root-cli expires=2027-01-31 tests=shipping_e2e' 'fn route() {}' > "$dir/src/lib.rs"
+  printf '%s\n' '{"version":1,"entries":[]}' > "$dir/allowlist.json"
+}
+
 forbidden_reducer() {
   local dir=$1
   printf '%s\n' '#[coverage(off)] // coverage: reason=reducer owner=core expires=2027-01-31 tests=reducer_test' 'fn reduce() {}' > "$dir/src/lib.rs"
@@ -97,6 +103,7 @@ invalid_utf8_manifest() {
 }
 
 run_case allowed-io 0 'ok (1 exclusions)' allowed_io
+run_case allowed-test-instance 0 'ok (1 exclusions)' allowed_test_instance
 run_case forbidden-reducer 1 'forbidden reason "reducer"' forbidden_reducer
 run_case missing-reason 1 'missing reason' missing_reason
 run_case stale-symbol 1 'stale symbol src/lib.rs:fn:old:1' stale_symbol

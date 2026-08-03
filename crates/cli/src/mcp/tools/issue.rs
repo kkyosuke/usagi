@@ -1,12 +1,11 @@
+#![cfg_attr(test, coverage(off))]
+// coverage: reason=generic_monomorphization owner=root-cli expires=2027-01-31 tests=every_issue_adapter_maps_malformed_json_to_invalid_params,shipping_issue_adapters_cover_defensive_parsing_and_missing_projection,mcp_store_tools_round_trip_through_stdio_and_durable_files
+
 //! issue 系 MCP tool（`.usagi/issues/` のタスク issue 操作）。CLI の `usagi` には
 //! 出さないエージェント向けの IF で、CLI コマンドと同じ core usecase を呼ぶ兄弟。
-#![coverage(off)] // LLVM duplicates the serde/tool instantiations across lib and production E2E binaries.
-
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use usagi_core::domain::issue::{Issue, IssueSummary};
 use usagi_core::infrastructure::store::issue::IssueStore;
-use usagi_core::usecase::issue::{self, IssueFilter, IssuePatch, ListedIssue, NewIssue};
+use usagi_core::usecase::issue::{self, NewIssue};
 
 use crate::mcp::tool::{Tool, ToolError};
 
@@ -30,87 +29,9 @@ fn execution_error(error: &anyhow::Error) -> ToolError {
     ToolError::Execution(error.to_string())
 }
 
-#[derive(Serialize)]
-struct IssueView<'a> {
-    number: u32,
-    title: &'a str,
-    status: usagi_core::domain::issue::IssueStatus,
-    priority: usagi_core::domain::issue::IssuePriority,
-    labels: &'a [String],
-    dependson: &'a [u32],
-    related: &'a [u32],
-    parent: Option<u32>,
-    milestone: Option<&'a str>,
-    created_at: chrono::DateTime<Utc>,
-    updated_at: chrono::DateTime<Utc>,
-    body: &'a str,
-}
-
-impl<'a> From<&'a Issue> for IssueView<'a> {
-    fn from(issue: &'a Issue) -> Self {
-        Self {
-            number: issue.number,
-            title: &issue.title,
-            status: issue.status,
-            priority: issue.priority,
-            labels: &issue.labels,
-            dependson: &issue.dependson,
-            related: &issue.related,
-            parent: issue.parent,
-            milestone: issue.milestone.as_deref(),
-            created_at: issue.created_at,
-            updated_at: issue.updated_at,
-            body: &issue.body,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct ListedIssueView<'a> {
-    #[serde(flatten)]
-    summary: &'a IssueSummary,
-    ambiguous: bool,
-    ready: bool,
-    unmet_deps: &'a [u32],
-}
-
-#[derive(Serialize)]
-struct PromptView<'a> {
-    number: u32,
-    title: &'a str,
-    prompt: String,
-}
-
-impl<'a> From<&'a ListedIssue> for ListedIssueView<'a> {
-    fn from(issue: &'a ListedIssue) -> Self {
-        Self {
-            summary: &issue.summary,
-            ambiguous: issue.ambiguous,
-            ready: issue.is_ready(),
-            unmet_deps: &issue.unmet_deps,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct NumberArgs {
-    number: u32,
-}
-
-#[derive(Deserialize)]
-struct SearchArgs {
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(flatten)]
-    filter: IssueFilter,
-}
-
-#[derive(Deserialize)]
-struct UpdateArgs {
-    number: u32,
-    #[serde(flatten)]
-    patch: IssuePatch,
-}
+use super::issue_wire::{
+    IssueView, ListedIssueView, NumberArgs, PromptView, SearchArgs, UpdateArgs,
+};
 
 /// issue 系 tool の一覧。
 #[must_use]
@@ -139,9 +60,9 @@ impl Tool for IssueCreate {
         r#"{"type":"object","properties":{"title":{"type":"string"},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":"integer"},"milestone":{"type":"string"},"body":{"type":"string"}},"required":["title"]}"#
     }
     fn call(&self, params: &str) -> Result<String, ToolError> {
-        let store = writable_store().map_err(|error| execution_error(&error))?;
         let spec: NewIssue =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
+        let store = writable_store().map_err(|error| execution_error(&error))?;
         let created =
             issue::create(&store, spec, Utc::now()).map_err(|error| execution_error(&error))?;
         Ok(serde_json::to_string_pretty(&IssueView::from(&created))
@@ -151,6 +72,26 @@ impl Tool for IssueCreate {
 
 /// `issue_get` — issue の詳細を取得する。
 pub struct IssueGet;
+
+impl IssueGet {
+    pub(super) fn call_with_store(params: &str, store: &IssueStore) -> Result<String, ToolError> {
+        let args: NumberArgs = match serde_json::from_str(params) {
+            Ok(args) => args,
+            Err(error) => return Err(invalid_params(&error)),
+        };
+        let issue = match issue::get(store, args.number) {
+            Ok(issue) => issue,
+            Err(error) => return Err(execution_error(&error)),
+        };
+        issue.as_ref().map_or_else(
+            || Ok("null".to_owned()),
+            |issue| {
+                Ok(serde_json::to_string_pretty(&IssueView::from(issue))
+                    .expect("MCP wire views must serialize"))
+            },
+        )
+    }
+}
 
 impl Tool for IssueGet {
     fn name(&self) -> &'static str {
@@ -163,16 +104,7 @@ impl Tool for IssueGet {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
     fn call(&self, params: &str) -> Result<String, ToolError> {
-        let args: NumberArgs =
-            serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let issue = issue::get(&store(), args.number).map_err(|error| execution_error(&error))?;
-        issue.as_ref().map_or_else(
-            || Ok("null".to_owned()),
-            |issue| {
-                Ok(serde_json::to_string_pretty(&IssueView::from(issue))
-                    .expect("MCP wire views must serialize"))
-            },
-        )
+        Self::call_with_store(params, &store())
     }
 }
 
@@ -245,9 +177,9 @@ impl Tool for IssueUpdate {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":["integer","null"]},"milestone":{"type":["string","null"]},"body":{"type":"string"}},"required":["number"]}"#
     }
     fn call(&self, params: &str) -> Result<String, ToolError> {
-        let store = writable_store().map_err(|error| execution_error(&error))?;
         let args: UpdateArgs =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
+        let store = writable_store().map_err(|error| execution_error(&error))?;
         let Some(updated) = issue::update(&store, args.number, args.patch, Utc::now())
             .map_err(|error| execution_error(&error))?
         else {
@@ -272,9 +204,9 @@ impl Tool for IssueDelete {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
     fn call(&self, params: &str) -> Result<String, ToolError> {
-        let store = writable_store().map_err(|error| execution_error(&error))?;
         let args: NumberArgs =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
+        let store = writable_store().map_err(|error| execution_error(&error))?;
         let deleted =
             issue::delete(&store, args.number).map_err(|error| execution_error(&error))?;
         Ok(serde_json::to_string_pretty(

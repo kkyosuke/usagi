@@ -11,7 +11,7 @@ require "pathname"
 
 ALLOWED_REASONS = %w[real_io composition generic_monomorphization].freeze
 DEBT_REASON = "migration_debt"
-ATTRIBUTE = /^\s*#!?\[coverage\(off\)\]/
+ATTRIBUTE = /^\s*#!?\[(?:coverage\(off\)|cfg_attr\(test,\s*coverage\(off\)\))\]/
 INLINE = /\/\/\s*coverage:\s*(.+)$/
 IGNORED_ROOTS = %w[.git target v1].freeze
 
@@ -86,7 +86,7 @@ def scan(root)
       line = lines[index]
       next unless line.match?(ATTRIBUTE)
 
-      symbol = symbol_after(lines, index, line.include?("#!["))
+      symbol = symbol_after(lines, index, line.lstrip.start_with?("#!["))
       unless symbol
         errors << "#{relative}:#{index + 1}: cannot determine the attributed symbol"
         next
@@ -98,7 +98,7 @@ def scan(root)
         "symbol" => symbol,
         "occurrence" => occurrences[key],
         "line" => index + 1,
-        "inline" => inline_metadata(line)
+        "inline" => inline_metadata(line) || inline_metadata(lines[index + 1].to_s)
       }
     end.compact
   end

@@ -325,7 +325,6 @@ impl Command {
     /// dispatch はこの 1 か所の対応付けに集約し、実行自体は `Run::run` の一様な
     /// 呼び出しになる。`version` は `version` に合成ルートが注入する。
     #[must_use]
-    #[coverage(off)]
     pub fn into_handler(self, version: &str) -> Box<dyn Run> {
         use commands as h;
         match self {
@@ -394,7 +393,6 @@ struct Session {
 }
 
 impl Run for Session {
-    #[coverage(off)]
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         let (action, payload) = match &self.command {
             SessionCommand::Create { name, role } => (
@@ -456,7 +454,6 @@ impl Run for Session {
 /// コマンドを dispatch してハンドラを実行し、結果と出力文字列を得るテストヘルパ。
 /// `commands` / `hooks` 双方のハンドラテストから使い、`Command::into_handler` の各アームを被覆する。
 #[cfg(test)]
-#[coverage(off)]
 pub(crate) fn execute(command: Command) -> (RunOutcome, String) {
     let mut out = Vec::new();
     let outcome = command.into_handler("9.9.9").run(&mut out).unwrap();
@@ -482,7 +479,6 @@ pub(crate) fn execute(command: Command) -> (RunOutcome, String) {
 ///
 /// 解析済み `ArgMatches` を `Cli` に戻す変換に失敗した場合に panic する。matches は
 /// 直前に `Cli::command()` から生成したコマンド定義で解析したものなので、実際には起きない。
-#[coverage(off)]
 pub fn run(
     args: Vec<OsString>,
     version: &str,
@@ -515,7 +511,10 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, DaemonCommand, RunOutcome, SessionCommand, Shell, TuiRequest, run};
+    use super::{
+        Cli, Command, DaemonCommand, Run, RunOutcome, Session, SessionCommand, Shell, TuiRequest,
+        run,
+    };
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
@@ -763,6 +762,20 @@ mod tests {
             RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::AgentInventory { workspace })
                 if workspace == target.workspace_id
         ));
+
+        for command in [
+            SessionCommand::ResumeExact {
+                target: "not-json".into(),
+            },
+            SessionCommand::ResumeInventory {
+                workspace_id: "not-a-resource-id".into(),
+            },
+        ] {
+            assert_eq!(
+                Session { command }.run(&mut Vec::new()).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
     }
 
     #[test]
@@ -846,6 +859,22 @@ mod tests {
             assert!(err.is_empty());
             assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
         }
+    }
+
+    #[test]
+    fn run_dispatches_update_and_preserves_its_output() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "update", "-v"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(matches!(outcome, RunOutcome::SelfUpdate { .. }));
+        assert!(String::from_utf8(out).unwrap().contains("select"));
+        assert!(err.is_empty());
     }
 
     /// 不正なコマンドは `err` に出て非 0 終了。

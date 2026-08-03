@@ -8,6 +8,7 @@
 //! （`crate::cli::commands`）は同じ core usecase を呼ぶ兄弟である。
 
 pub mod issue;
+mod issue_wire;
 pub mod memory;
 pub mod session;
 pub mod supervisor;
@@ -567,6 +568,37 @@ mod tests {
         assert!(matches!(
             super::memory::MemoryGet.call("{}"),
             Err(ToolError::InvalidParams(_))
+        ));
+    }
+
+    fn assert_invalid_issue_json(tool: &dyn Tool) {
+        let error = tool.call("{").unwrap_err();
+        let actual = std::mem::discriminant(&error);
+        let expected = std::mem::discriminant(&ToolError::InvalidParams(String::new()));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn every_issue_adapter_maps_malformed_json_to_invalid_params() {
+        assert_invalid_issue_json(&super::issue::IssueCreate);
+        assert_invalid_issue_json(&super::issue::IssueGet);
+        assert_invalid_issue_json(&super::issue::IssueToPrompt);
+        assert_invalid_issue_json(&super::issue::IssueSearch);
+        assert_invalid_issue_json(&super::issue::IssueUpdate);
+        assert_invalid_issue_json(&super::issue::IssueDelete);
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = usagi_core::infrastructure::store::issue::IssueStore::new(temp.path());
+        assert_eq!(
+            super::issue::IssueGet::call_with_store(r#"{"number":4294967295}"#, &store).unwrap(),
+            "null"
+        );
+
+        std::fs::create_dir_all(temp.path().join(".usagi")).unwrap();
+        std::fs::write(temp.path().join(".usagi/issues"), "not a directory").unwrap();
+        assert!(matches!(
+            super::issue::IssueGet::call_with_store(r#"{"number":1}"#, &store),
+            Err(ToolError::Execution(_))
         ));
     }
 }
