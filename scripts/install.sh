@@ -83,6 +83,16 @@ select_release() {
     USAGI_VERSION="v${version}"
 }
 
+resolve_latest_release() {
+    local version
+    version="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"(v?[0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | sed -n '1p')"
+    [ -n "$version" ] || fail "could not resolve the latest stable release"
+    case "$version" in
+        v*) USAGI_VERSION=$version ;;
+        *) USAGI_VERSION="v${version}" ;;
+    esac
+}
+
 render_release_selector() {
     local releases=$1 release_count=$2 selected=$3 window_start=$4 redraw=$5
     local row index version marker badge c_reset c_bold c_pink c_cyan c_dim
@@ -225,13 +235,14 @@ verify_archive() {
 }
 
 verify_expected_version() {
-    local version_file=$1 candidate=$2 expected actual extra
+    local version_file=$1 candidate=$2 requested=$3 expected actual extra
     [ "$(wc -l < "$version_file" | tr -d ' ')" -eq 1 ] || fail "invalid version artifact"
     read -r expected extra < "$version_file" || fail "invalid version artifact"
     [ -n "$expected" ] && [ -z "${extra:-}" ] || fail "invalid version artifact"
     case "$expected" in
         v*) expected=${expected#v} ;;
     esac
+    [ "$expected" = "${requested#v}" ] || fail "version artifact does not match requested release $requested"
     actual="$(read_version "$candidate")"
     [ -n "$actual" ] || fail "staged usagi did not report a valid version"
     [ "$actual" = "$expected" ] || fail "staged usagi version $actual does not match release $expected"
@@ -241,15 +252,12 @@ verify_expected_version() {
 acquire_lock
 
 ASSET_NAME="$(platform_asset)"
-if [ -n "${USAGI_VERSION:-}" ]; then
-    case "$USAGI_VERSION" in
-        v[0-9]*.[0-9]*.[0-9]*) ;;
-        *) fail "invalid requested release version" ;;
-    esac
-    BASE_URL="https://github.com/${REPO}/releases/download/${USAGI_VERSION}"
-else
-    BASE_URL="https://github.com/${REPO}/releases/latest/download"
-fi
+if [ -z "${USAGI_VERSION:-}" ]; then resolve_latest_release; fi
+case "$USAGI_VERSION" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "invalid requested release version" ;;
+esac
+BASE_URL="https://github.com/${REPO}/releases/download/${USAGI_VERSION}"
 
 mkdir -p -- "$BIN_DIR"
 chmod 700 "$BIN_DIR"
@@ -270,7 +278,7 @@ verify_archive "$ARCHIVE"
 tar -xzf "$ARCHIVE" -C "$STAGE_DIR" -- usagi
 CANDIDATE="$STAGE_DIR/usagi"
 chmod 755 "$CANDIDATE"
-NEW_VERSION="$(verify_expected_version "$VERSION_FILE" "$CANDIDATE")"
+NEW_VERSION="$(verify_expected_version "$VERSION_FILE" "$CANDIDATE" "$USAGI_VERSION")"
 OLD_VERSION="$(read_version "$TARGET")"
 
 # STAGE_DIR is below BIN_DIR, so this rename stays on one filesystem. POSIX

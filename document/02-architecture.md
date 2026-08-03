@@ -848,10 +848,10 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   （`hop` / `mcp` / `daemon serve` / `agent-phase` / `guard-workspace` / `claude-sandbox`）も補完候補には含まれる
   （`--help` には出ない）。
 - **`update`** は実装済み: 通常は最新 GitHub Release を、`usagi update -v` では5行固定の一覧から `↑` / `↓` で選んで Enter で決定した release を、platform 固有 archive と SHA-256・release version artifact を使って
-  `scripts/install.sh` 経由で mode 0700 の private staging へ download する。installer は archive が path traversal /
+  mode 0700 の private staging へ download する。installer bytes とその SHA-256 identity は配布 binary に同梱し、起動前に検証するため、mutable branch や remote installer code を参照しない。latest と選択 version は最初に exact release tag へ固定し、archive・checksum・version artifact を同じ tag URL から取得する。installer は version artifact が固定した tag と一致することに加え、archive が path traversal /
   symlink / unexpected entry を含まず単一の通常ファイル `usagi` だけを持つこと、checksum、candidate version を検証する。
   更新全体を user-local lock で直列化し、検証後に `~/.usagi/bin` と同じ filesystem 上の atomic rename で置換するため、
-  途中失敗では旧 binary の bytes と mode が変わらない。CLI は trusted な installer command の要求だけを返し、network /
+  途中失敗では旧 binary の bytes と mode が変わらない。CLI は検証対象の installer bytes と identity を束ねた typed request だけを返し、network /
   subprocess の実 IO は合成ルートが実行する。installer は inherited CWD の binary を参照せず、検証 artifact のない旧 release
   へ fallback しない。更新後のバイナリは次回の `usagi` 起動から使われる。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ

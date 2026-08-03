@@ -2,10 +2,15 @@
 
 use std::io::{self, Write};
 
-use crate::cli::{Run, RunOutcome};
+use crate::cli::{InstallerRequest, Run, RunOutcome};
 
-/// usagi の GitHub repository URL。
-const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+/// この digest は `scripts/install.sh` と同じ build に固定する。変更時は unit test が
+/// 不一致を検出するため、review 可能な identity 更新として同時に変更する。
+const INSTALLER_SHA256: [u8; 32] = [
+    0xae, 0x80, 0x97, 0xce, 0x02, 0xcc, 0x06, 0x1a, 0xc8, 0xeb, 0xca, 0x8b, 0xe0, 0x69, 0x97, 0x7a,
+    0xb0, 0x79, 0x03, 0x90, 0xcc, 0xc9, 0xe9, 0x4b, 0xeb, 0x27, 0xd5, 0x9c, 0xad, 0xe4, 0x80, 0x61,
+];
+const INSTALLER: &[u8] = include_bytes!("../../../../../scripts/install.sh");
 
 /// `usagi update` のハンドラ。実際の subprocess は合成ルートが実行する。
 pub struct Update {
@@ -14,80 +19,38 @@ pub struct Update {
 
 impl Run for Update {
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
-        run_with_repository(REPOSITORY, self.select_version, out)
+        if self.select_version {
+            writeln!(out, "select a usagi release to install...")?;
+        } else {
+            writeln!(
+                out,
+                "downloading and installing the latest usagi release..."
+            )?;
+        }
+        Ok(RunOutcome::SelfUpdate(InstallerRequest::new(
+            INSTALLER,
+            INSTALLER_SHA256,
+            self.select_version,
+        )))
     }
-}
-
-fn run_with_repository(
-    repository: &str,
-    select_version: bool,
-    out: &mut dyn Write,
-) -> io::Result<RunOutcome> {
-    let Some(command) = install_command(repository, select_version) else {
-        return Err(io::Error::other("usagi repository URL is not a GitHub URL"));
-    };
-    if select_version {
-        writeln!(out, "select a usagi release to install...")?;
-    } else {
-        writeln!(out, "downloading latest usagi release...")?;
-    }
-    Ok(RunOutcome::SelfUpdate { command })
-}
-
-/// Build the documented installer invocation for a GitHub repository URL.
-fn install_command(repository: &str, select_version: bool) -> Option<String> {
-    let slug = repository
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .strip_prefix("https://github.com/")?;
-    valid_github_slug(slug)?;
-    let option = if select_version {
-        " -s -- --select-version"
-    } else {
-        ""
-    };
-    Some(format!(
-        "set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/{slug}/main/scripts/install.sh | bash{option}"
-    ))
-}
-
-fn valid_github_slug(slug: &str) -> Option<()> {
-    let mut parts = slug.split('/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    if parts.next().is_some()
-        || owner.is_empty()
-        || repo.is_empty()
-        || !owner
-            .bytes()
-            .chain(repo.bytes())
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return None;
-    }
-    Some(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Update, install_command, run_with_repository};
+    use sha2::{Digest, Sha256};
+
+    use super::{INSTALLER, INSTALLER_SHA256, Update};
     use crate::cli::{Run, RunOutcome};
 
     #[test]
-    fn installer_command_uses_the_release_downloading_script() {
+    fn embedded_installer_matches_its_immutable_digest_and_never_looks_up_main() {
         assert_eq!(
-            install_command("https://github.com/KKyosuke/usagi.git", false),
-            Some("set -o pipefail; cd /; curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash".into())
+            <[u8; 32]>::from(Sha256::digest(INSTALLER)),
+            INSTALLER_SHA256
         );
-        assert_eq!(install_command("https://example.com/usagi", false), None);
-        assert_eq!(
-            install_command("https://github.com/owner/repo;false", false),
-            None
-        );
-        assert_eq!(
-            install_command("https://github.com/owner/repo/extra", false),
-            None
-        );
+        let script = String::from_utf8_lossy(INSTALLER);
+        assert!(!script.contains("raw.githubusercontent.com"));
+        assert!(!script.contains("/main/scripts/install.sh"));
     }
 
     #[test]
@@ -99,7 +62,7 @@ mod tests {
         .run(&mut out)
         .unwrap();
         assert!(
-            matches!(outcome, RunOutcome::SelfUpdate { command } if command.contains("scripts/install.sh"))
+            matches!(outcome, RunOutcome::SelfUpdate(request) if !request.select_version() && request.verified_script() == Some(INSTALLER))
         );
         assert!(String::from_utf8(out).unwrap().contains("downloading"));
     }
@@ -107,13 +70,11 @@ mod tests {
     #[test]
     fn version_selection_requests_the_interactive_installer_mode() {
         let mut out = Vec::new();
-        let outcome =
-            run_with_repository("https://github.com/KKyosuke/usagi", true, &mut out).unwrap();
-        assert!(
-            matches!(outcome, RunOutcome::SelfUpdate { command } if command.ends_with("bash -s -- --select-version"))
-        );
-        assert!(String::from_utf8(out).unwrap().contains("select"));
-
-        assert!(run_with_repository("https://example.com/usagi", false, &mut Vec::new()).is_err());
+        let outcome = Update {
+            select_version: true,
+        }
+        .run(&mut out)
+        .unwrap();
+        assert!(matches!(outcome, RunOutcome::SelfUpdate(request) if request.select_version()));
     }
 }

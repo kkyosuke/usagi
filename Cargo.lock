@@ -1090,6 +1090,7 @@ dependencies = [
  "clap_complete",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
  "usagi-core",

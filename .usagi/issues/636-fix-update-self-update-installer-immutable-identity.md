@@ -1,13 +1,13 @@
 ---
 number: 636
 title: fix(update): self-update installer を immutable identity へ束縛する
-status: todo
+status: in-progress
 priority: high
 labels: [review, security, cli, update, release, supply-chain]
 dependson: []
 related: [461]
 created_at: 2026-08-02T23:14:00.167300+00:00
-updated_at: 2026-08-02T23:14:00.167300+00:00
+updated_at: 2026-08-03T00:07:23.629484+00:00
 ---
 
 ## Finding（high / update trust boundary）

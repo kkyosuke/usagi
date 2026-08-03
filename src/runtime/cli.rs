@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use usagi_cli::cli::{RunOutcome, TuiRequest};
+use usagi_cli::cli::{InstallerRequest, RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
 use usagi_core::usecase::claude_sandbox::{
     self, Platform, SandboxMode, SandboxPlan, SandboxRequest,
@@ -62,7 +62,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::GuardWorkspace => Self::GuardWorkspace,
             RunOutcome::ClaudeSandbox { .. } => Self::ClaudeSandbox,
             RunOutcome::DaemonRequest(_) => Self::DaemonRequest,
-            RunOutcome::SelfUpdate { .. } => Self::SelfUpdate,
+            RunOutcome::SelfUpdate(_) => Self::SelfUpdate,
         }
     }
 }
@@ -74,8 +74,8 @@ mod action_io {
 
     use super::{
         Action, AppInfo, ClientPolicy, DaemonClient, EntryScreen, ExitCode, LauncherPolicyInputs,
-        RunOutcome, TuiRequest, Write, claude_sandbox, daemon, exit_code, guard_workspace, tui,
-        write_client_error, write_daemon_outcome,
+        RunOutcome, TuiRequest, Write, claude_sandbox, daemon, execute_self_update, exit_code,
+        guard_workspace, tui, write_client_error, write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)]
@@ -216,22 +216,72 @@ mod action_io {
                     }
                 }
             }
-            (Action::SelfUpdate, RunOutcome::SelfUpdate { command }) => {
-                let result = std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(command)
-                    .output()?;
-                out.write_all(&result.stdout)?;
-                err.write_all(&result.stderr)?;
-                if result.status.success() {
-                    writeln!(out, "usagi was updated; restart it to use the new binary.")?;
-                    Ok(ExitCode::SUCCESS)
-                } else {
-                    Ok(exit_code(result.status.code().unwrap_or(1)))
-                }
+            (Action::SelfUpdate, RunOutcome::SelfUpdate(request)) => {
+                execute_self_update(&request, out, err)
             }
             _ => unreachable!("action classification and outcome diverged"),
         }
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=installer_identity_failure_has_zero_process_effects
+fn execute_self_update(
+    request: &InstallerRequest,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> std::io::Result<ExitCode> {
+    execute_self_update_with(request, out, err, |script, select_version| {
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("bash");
+        command
+            .arg("-s")
+            .arg("--")
+            .current_dir("/")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if select_version {
+            command.arg("--select-version");
+        }
+        let mut child = command.spawn()?;
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("installer stdin is unavailable"))?
+            .write_all(script);
+        if let Err(error) = write_result {
+            let _ = child.wait();
+            return Err(error);
+        }
+        child.wait_with_output()
+    })
+}
+
+fn execute_self_update_with<F>(
+    request: &InstallerRequest,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    launch: F,
+) -> std::io::Result<ExitCode>
+where
+    F: FnOnce(&[u8], bool) -> std::io::Result<std::process::Output>,
+{
+    let Some(script) = request.verified_script() else {
+        writeln!(
+            err,
+            "self-update refused: embedded installer identity is invalid"
+        )?;
+        return Ok(ExitCode::FAILURE);
+    };
+    let result = launch(script, request.select_version())?;
+    out.write_all(&result.stdout)?;
+    err.write_all(&result.stderr)?;
+    if result.status.success() {
+        writeln!(out, "usagi was updated; restart it to use the new binary.")?;
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(exit_code(result.status.code().unwrap_or(1)))
     }
 }
 
@@ -503,14 +553,14 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
-    use usagi_cli::cli::{DaemonCommand, RunOutcome, TuiRequest};
+    use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
     use usagi_core::usecase::claude_sandbox::SandboxMode;
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
-        Action, LauncherPolicyError, exit_code, validate_launcher_policy_inputs,
-        write_client_error, write_daemon_outcome,
+        Action, LauncherPolicyError, execute_self_update_with, exit_code,
+        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
@@ -738,11 +788,65 @@ mod tests {
             Action::DaemonRequest,
         );
         assert_route(
-            RunOutcome::SelfUpdate {
-                command: "install".into(),
-            },
+            RunOutcome::SelfUpdate(InstallerRequest::new(b"", [0; 32], false)),
             Action::SelfUpdate,
         );
+    }
+
+    #[test]
+    fn installer_identity_failure_has_zero_process_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("usagi");
+        std::fs::write(&installed, b"old binary bytes").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o751)).unwrap();
+        }
+        let before = std::fs::read(&installed).unwrap();
+        let before_mode = mode(&installed);
+
+        for request in [
+            InstallerRequest::new(b"complete installer", [0; 32], false),
+            InstallerRequest::new(b"#!/bin/bash\ntrunc", [1; 32], true),
+        ] {
+            let mut launches = 0;
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = execute_self_update_with(
+                &request,
+                &mut out,
+                &mut err,
+                |_, _| -> io::Result<std::process::Output> {
+                    launches += 1;
+                    unreachable!("identity failure must precede process launch")
+                },
+            )
+            .unwrap();
+
+            assert_eq!(status, std::process::ExitCode::FAILURE);
+            assert_eq!(launches, 0);
+            assert!(out.is_empty());
+            assert_eq!(
+                String::from_utf8(err).unwrap(),
+                "self-update refused: embedded installer identity is invalid\n"
+            );
+            assert_eq!(std::fs::read(&installed).unwrap(), before);
+            assert_eq!(mode(&installed), before_mode);
+        }
+    }
+
+    fn mode(path: &std::path::Path) -> u32 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path).unwrap().permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            0
+        }
     }
 
     #[test]

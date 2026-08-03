@@ -66,7 +66,11 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$url" ]
-if [ -z "$output" ] && [ "${url#https://api.github.com/repos/}" != "$url" ]; then
+if [ -z "$output" ] && [ "$url" = "https://api.github.com/repos/KKyosuke/usagi/releases/latest" ]; then
+    printf '%s\n' '{' '  "tag_name": "v2.0.0"' '}'
+    exit 0
+fi
+if [ -z "$output" ] && [ "$url" = "https://api.github.com/repos/KKyosuke/usagi/releases" ]; then
     printf '%s\n' \
         '[' \
         '  {' \
@@ -146,7 +150,15 @@ expect_failure() {
 prepare_case success
 make_binary "$CWD_DIR/usagi" 99.0.0 malicious-cwd-sentinel
 cp "$CWD_DIR/usagi" "$CASE_DIR/sentinel"
+FAKE_CURL_LOG="$CASE_DIR/curl.log"
+export FAKE_CURL_LOG
 run_installer >/dev/null
+unset FAKE_CURL_LOG
+grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
+if grep -Eq 'raw\.githubusercontent\.com|/releases/latest/download/' "$CASE_DIR/curl.log"; then
+    echo "latest update crossed a mutable installer or release URL" >&2
+    exit 1
+fi
 [ "$(readlink "$HOME_DIR/.usagi/bin/usagi" 2>/dev/null || true)" = "" ]
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 [ "$(mode "$HOME_DIR/.usagi/bin/usagi")" = 755 ]
@@ -231,6 +243,10 @@ prepare_case bad-checksum
 printf '%064d  %s\n' 0 "$ASSET" > "$FIXTURE_DIR/$ASSET.sha256"
 expect_failure
 
+prepare_case mismatched-asset-name
+printf '%s  %s\n' "$(sha256 "$FIXTURE_DIR/$ASSET")" "other-$ASSET" > "$FIXTURE_DIR/$ASSET.sha256"
+expect_failure
+
 prepare_case truncated
 head -c 20 "$FIXTURE_DIR/$ASSET" > "$FIXTURE_DIR/truncated"
 mv "$FIXTURE_DIR/truncated" "$FIXTURE_DIR/$ASSET"
@@ -253,6 +269,20 @@ expect_failure
 prepare_case wrong-version
 printf 'v2.0.1\n' > "$FIXTURE_DIR/$ASSET.version"
 expect_failure
+
+# Even an internally consistent archive/checksum/version response cannot cross
+# the exact tag identity selected before artifact downloads.
+prepare_case latest-response-swap
+make_fixture "$FIXTURE_DIR" 3.0.0
+expect_failure
+
+prepare_case selected-response-swap
+make_fixture "$FIXTURE_DIR" 3.0.0
+if run_installer_for_version >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+    echo "expected selected release response swap to fail" >&2
+    exit 1
+fi
+assert_old_preserved
 
 prepare_case missing-verification-artifact
 rm "$FIXTURE_DIR/$ASSET.version"
