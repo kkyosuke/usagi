@@ -164,6 +164,24 @@ impl DefaultModel {
         }
     }
 
+    /// The `$HOME`-relative directory this provider's CLI writes its own state
+    /// and auth cache into (`~/.claude`, `~/.codex`, `~/.codex-fugu`).
+    ///
+    /// It belongs next to [`command`](Self::command) because the executable and
+    /// the directory it writes are one fact: a launcher that confines writes has
+    /// to grant the state directory of the CLI it actually spawns, and a renamed
+    /// executable must not leave that grant pointing at another provider's
+    /// state. `sakana-ai` runs `codex-fugu`, whose state is `~/.codex-fugu`, so
+    /// it never shares Codex's rollouts.
+    #[must_use]
+    pub const fn state_directory(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude",
+            Self::OpenAi => ".codex",
+            Self::SakanaAi => ".codex-fugu",
+        }
+    }
+
     /// The user-facing token typed after `agent -m` and shown in the picker.
     #[must_use]
     pub const fn selector(self) -> &'static str {

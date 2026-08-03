@@ -9,10 +9,15 @@
 //! 返し、Claude を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
 //!
 //! session の writable root は provisioner が渡す own worktree だけである。root coordinator では、
-//! その起動固有 root に platform / 環境由来の普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・Claude state・
-//! macOS の Keychain / MDS cache）を加える。
+//! その起動固有 root に platform / 環境由来の普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・起動する
+//! agent CLI 自身の state・macOS の Keychain / MDS cache）を加える。
 //! sandbox は書き込みだけをこの root 集合に閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
+//!
+//! agent state は `~/.claude` 固定ではなく、[`agent_state_directory`] が **exec する program**
+//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.codex-fugu`）。
+//! 固定していた間、root の Codex は自分の state DB（`~/.codex/state_5.sqlite`）へ書けず
+//! 「attempt to write a readonly database」で起動できなかった。
 //!
 //! 唯一の例外は [`SandboxRequest::passthrough`] で、これは E2E テスト専用の seam である。
 //! [`passthrough_requested`] が唯一の判定点で、shipping（release）ビルドでは常に false を返すため、
@@ -21,6 +26,8 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+
+use crate::domain::settings::DefaultModel;
 
 /// sandbox を提供する対象 platform。`Unsupported`（Windows など）は fail-closed で拒否する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +195,18 @@ fn reject_backend(backend: &str) -> SandboxPlan {
     }
 }
 
+/// exec する program が自身の state / 認証キャッシュを書く `$HOME` 配下の directory 名。
+///
+/// 根拠は launcher が実際に exec する program（`command` の先頭）だけで、値の単一情報源は
+/// [`DefaultModel::state_directory`] である。したがって grant は起動する CLI と必ず一致し、
+/// provider を増やしても sandbox 側に写し漏れが起きない。usagi が launch しない未知 program
+/// には state root を与えない（fail-closed）。
+#[must_use]
+pub fn agent_state_directory(program: &str) -> Option<&'static str> {
+    let name = Path::new(program).file_name()?;
+    DefaultModel::from_selector(&name.to_string_lossy()).map(DefaultModel::state_directory)
+}
+
 /// 起動固有の root（provisioner 由来）と普遍領域を結合し、重複を除いた決定的な writable root 集合。
 fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut roots: BTreeSet<PathBuf> = request.launch_roots.iter().cloned().collect();
@@ -200,8 +219,14 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
         roots.insert(tmpdir.clone());
     }
     if let Some(home) = &request.home {
-        // Claude 自身の state / 認証キャッシュ。
-        roots.insert(home.join(".claude"));
+        // 起動する agent CLI 自身の state / 認証キャッシュ（`~/.claude` / `~/.codex` / `~/.codex-fugu`）。
+        if let Some(state) = request
+            .command
+            .first()
+            .and_then(|program| agent_state_directory(program))
+        {
+            roots.insert(home.join(state));
+        }
         if request.platform == Platform::MacOs {
             roots.insert(home.join("Library/Keychains"));
         }
@@ -476,6 +501,56 @@ mod tests {
         assert!(!argv.iter().any(|token| token.contains("Keychains")));
         // program と引数が末尾に来る。
         assert_eq!(&argv[argv.len() - 2..], ["claude", "--print"]);
+    }
+
+    #[test]
+    fn a_root_launch_grants_the_state_directory_of_the_agent_it_launches() {
+        // 固定の `~/.claude` を配っていた間、root の Codex は自分の state DB へ書けずに
+        // 「attempt to write a readonly database」で起動できなかった。grant は exec する
+        // program に追従する。
+        for (program, state) in [
+            ("claude", ".claude"),
+            ("codex", ".codex"),
+            ("codex-fugu", ".codex-fugu"),
+            // PATH 解決済みの絶対 path でも basename で判定する。
+            ("/opt/homebrew/bin/codex", ".codex"),
+        ] {
+            let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+            request.mode = SandboxMode::Root;
+            request.launch_roots.clear();
+            request.command = vec![program.to_owned()];
+            let roots = writable_roots(&request);
+            assert!(
+                roots.contains(&PathBuf::from(format!("/home/dev/{state}"))),
+                "{program} must be able to write ~/{state}"
+            );
+            // 他 provider の state は貰わない。
+            assert_eq!(
+                roots
+                    .iter()
+                    .filter(|root| root.starts_with("/home/dev") && !root.ends_with("Keychains"))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_program_receives_no_home_state_grant() {
+        let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+        request.mode = SandboxMode::Root;
+        request.launch_roots.clear();
+        request.command = vec!["/bin/sh".to_owned()];
+        assert!(
+            !writable_roots(&request)
+                .iter()
+                .any(|root| root.starts_with("/home/dev"))
+        );
+        // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
+        assert_eq!(agent_state_directory("sakana.ai"), Some(".codex-fugu"));
+        assert_eq!(agent_state_directory("gemini"), None);
+        assert_eq!(agent_state_directory(""), None);
+        assert_eq!(agent_state_directory("/"), None);
     }
 
     #[test]

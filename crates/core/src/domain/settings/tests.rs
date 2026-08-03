@@ -137,6 +137,12 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
     // through the `sakana-ai` profile.
     assert_eq!(DefaultModel::SakanaAi.command(), "codex-fugu");
     assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
+    // Each provider's CLI writes its own state directory, so a write-confining
+    // launcher can grant exactly the one it spawns.
+    assert_eq!(
+        DefaultModel::ALL.map(DefaultModel::state_directory),
+        [".claude", ".codex", ".codex-fugu"]
+    );
 }
 
 #[test]

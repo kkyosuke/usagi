@@ -515,23 +515,16 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
-            if !self.sandbox_passthrough {
-                validate_root_git_common_dir_policy(
-                    &workspace_root,
-                    self.sandbox_tmpdir.as_deref(),
-                    self.sandbox_home.as_deref(),
-                )
-                .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
-            }
-            validate_claude_sandbox_policy(
+            validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode,
-                &workspace_root,
-                &[],
-                self.sandbox_tmpdir.as_deref(),
-                self.sandbox_home.as_deref(),
-                self.sandbox_backend.as_deref(),
-                self.sandbox_passthrough,
-            )
+                program: self.program,
+                workspace_root: &workspace_root,
+                launch_roots: &[],
+                tmpdir: self.sandbox_tmpdir.as_deref(),
+                home: self.sandbox_home.as_deref(),
+                backend: self.sandbox_backend.as_deref(),
+                passthrough: self.sandbox_passthrough,
+            })
             .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
             let protected_root = workspace_root
                 .canonicalize()
@@ -563,6 +556,11 @@ impl CodexProvisioner for RootCodexProvisioner {
         })
     }
 }
+/// The Claude provisioner's product program: what the readiness probe proves,
+/// what the launcher execs, and whose `$HOME` state root the sandbox grants.
+/// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
+const CLAUDE_PROGRAM: &str = "claude";
+
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
@@ -586,7 +584,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         context: &ProvisionContext,
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
         self.readiness
-            .ready("claude")
+            .ready(CLAUDE_PROGRAM)
             .map_err(|()| ClaudeProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
@@ -599,19 +597,16 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         } else {
             (self.sandbox_tmpdir.as_deref(), self.sandbox_home.as_deref())
         };
-        if mode == SandboxMode::Root && !self.sandbox_passthrough {
-            validate_root_git_common_dir_policy(&workspace_root, sandbox_tmpdir, sandbox_home)
-                .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
-        }
-        validate_claude_sandbox_policy(
+        validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
-            &workspace_root,
-            &launch_roots,
-            sandbox_tmpdir,
-            sandbox_home,
-            self.sandbox_backend.as_deref(),
-            self.sandbox_passthrough,
-        )
+            program: CLAUDE_PROGRAM,
+            workspace_root: &workspace_root,
+            launch_roots: &launch_roots,
+            tmpdir: sandbox_tmpdir,
+            home: sandbox_home,
+            backend: self.sandbox_backend.as_deref(),
+            passthrough: self.sandbox_passthrough,
+        })
         .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
         let sandbox_roots = launch_roots
             .iter()
@@ -763,8 +758,12 @@ fn insert_root_git_environment(spawn: &mut SpawnProvision) {
 /// A linked worktree may keep its Git common directory outside the checkout.
 /// The root sandbox's host-wide writable areas must never cover that directory;
 /// otherwise a read-only checkout would still leave refs/index authority writable.
+///
+/// `program` names the agent CLI this launch execs, so the check covers the same
+/// `$HOME` state root the launcher will grant it.
 fn validate_root_git_common_dir_policy(
     workspace_root: &Path,
+    program: &str,
     tmpdir: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<(), ()> {
@@ -772,7 +771,8 @@ fn validate_root_git_common_dir_policy(
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
-        writable.push(home.join(".claude"));
+        writable
+            .extend(claude_sandbox::agent_state_directory(program).map(|state| home.join(state)));
         if cfg!(target_os = "macos") {
             writable.push(home.join("Library/Keychains"));
         }
@@ -840,15 +840,36 @@ enum ClaudeSandboxPolicyError {
     ProtectedWorkspaceAncestor,
 }
 
-fn validate_claude_sandbox_policy(
+/// daemon が確定した、1 回の launch 分の sandbox policy 入力。
+struct SandboxPolicyInputs<'a> {
     mode: SandboxMode,
-    workspace_root: &Path,
-    launch_roots: &[PathBuf],
-    tmpdir: Option<&Path>,
-    home: Option<&Path>,
-    backend: Option<&Path>,
+    /// sandbox の中で exec する agent CLI（`claude` / `codex` / `codex-fugu`）。root mode で
+    /// launcher が足す `$HOME` 配下の state root（`~/.claude` / `~/.codex` / …）を決めるため、
+    /// daemon 側の検証もこの program に追従する。
+    program: &'a str,
+    workspace_root: &'a Path,
+    launch_roots: &'a [PathBuf],
+    tmpdir: Option<&'a Path>,
+    home: Option<&'a Path>,
+    backend: Option<&'a Path>,
     passthrough: bool,
+}
+
+/// launcher へ host path を渡す前に通す policy gate。writable root 集合・`$HOME` 配下の
+/// state root・（root mode では）Git common dir を、保護対象 workspace と突き合わせる。
+fn validate_claude_sandbox_policy(
+    policy: &SandboxPolicyInputs<'_>,
 ) -> Result<(), ClaudeSandboxPolicyError> {
+    let SandboxPolicyInputs {
+        mode,
+        program,
+        workspace_root,
+        launch_roots,
+        tmpdir,
+        home,
+        backend,
+        passthrough,
+    } = *policy;
     if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return Err(ClaudeSandboxPolicyError::MissingBackend);
     }
@@ -857,6 +878,12 @@ fn validate_claude_sandbox_policy(
     }
     let backend = backend.ok_or(ClaudeSandboxPolicyError::MissingBackend)?;
     validate_sandbox_backend(backend)?;
+    if mode == SandboxMode::Root {
+        validate_root_git_common_dir_policy(workspace_root, program, tmpdir, home)
+            // Git common dir が writable 領域に入っていれば、read-only な checkout でも
+            // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
+            .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
+    }
     let protected_workspace = workspace_root
         .canonicalize()
         .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
@@ -867,12 +894,14 @@ fn validate_claude_sandbox_policy(
     }
     if let Some(home) = home {
         validate_owned_directory(home)?;
-        let claude_state = home.join(".claude");
-        let claude_state = claude_state.canonicalize().unwrap_or(claude_state);
-        if protected_workspace.starts_with(&claude_state)
-            || (mode == SandboxMode::Root && claude_state.starts_with(&protected_workspace))
-        {
-            return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+        if let Some(state) = claude_sandbox::agent_state_directory(program) {
+            let agent_state = home.join(state);
+            let agent_state = agent_state.canonicalize().unwrap_or(agent_state);
+            if protected_workspace.starts_with(&agent_state)
+                || (mode == SandboxMode::Root && agent_state.starts_with(&protected_workspace))
+            {
+                return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+            }
         }
         if cfg!(target_os = "macos") {
             let keychains = home.join("Library/Keychains");
@@ -12587,7 +12616,13 @@ instructions = "{instructions}"
             safe.path().join(".git").canonicalize().unwrap()
         );
         assert!(
-            validate_root_git_common_dir_policy(safe.path(), Some(Path::new("/tmp")), None).is_ok()
+            validate_root_git_common_dir_policy(
+                safe.path(),
+                CLAUDE_PROGRAM,
+                Some(Path::new("/tmp")),
+                None
+            )
+            .is_ok()
         );
 
         let linked = tempfile::tempdir_in("target").unwrap();
@@ -12605,9 +12640,42 @@ instructions = "{instructions}"
             common.path().canonicalize().unwrap()
         );
         assert!(
-            validate_root_git_common_dir_policy(linked.path(), Some(Path::new("/tmp")), None)
-                .is_err()
+            validate_root_git_common_dir_policy(
+                linked.path(),
+                CLAUDE_PROGRAM,
+                Some(Path::new("/tmp")),
+                None
+            )
+            .is_err()
         );
+
+        // The `$HOME` state root covered by this check is the launched agent's own
+        // (`~/.codex` for Codex), so a Git common directory under it is refused for
+        // that provider while an unknown program contributes no home-derived area.
+        let home = tempfile::tempdir_in("target").unwrap();
+        let state = home.path().join(".codex");
+        std::fs::create_dir_all(state.join("worktrees/linked")).unwrap();
+        let under_state = tempfile::tempdir_in("target").unwrap();
+        std::fs::write(
+            under_state.path().join(".git"),
+            format!("gitdir: {}\n", state.join("worktrees/linked").display()),
+        )
+        .unwrap();
+        std::fs::write(state.join("worktrees/linked/commondir"), "../..\n").unwrap();
+        for (program, allowed) in [("codex", false), ("claude", true), ("/bin/sh", true)] {
+            assert_eq!(
+                validate_root_git_common_dir_policy(
+                    under_state.path(),
+                    program,
+                    None,
+                    Some(&home.path().canonicalize().unwrap()),
+                )
+                .is_ok(),
+                allowed,
+                "{program} must {} a Git common directory under ~/.codex",
+                if allowed { "accept" } else { "refuse" }
+            );
+        }
     }
 
     #[test]
@@ -12692,15 +12760,16 @@ instructions = "{instructions}"
         let workspace_root = workspace.path().canonicalize().unwrap();
         let owned_root = owned.path().canonicalize().unwrap();
         let validate = |roots: &[PathBuf], tmpdir: Option<&Path>| {
-            validate_claude_sandbox_policy(
-                SandboxMode::Session,
-                &workspace_root,
-                roots,
+            validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                mode: SandboxMode::Session,
+                program: CLAUDE_PROGRAM,
+                workspace_root: &workspace_root,
+                launch_roots: roots,
                 tmpdir,
-                None,
-                Some(&backend),
-                false,
-            )
+                home: None,
+                backend: Some(&backend),
+                passthrough: false,
+            })
         };
 
         assert_eq!(
@@ -12722,6 +12791,55 @@ instructions = "{instructions}"
                 Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
             );
             std::fs::remove_file(alias).unwrap();
+        }
+    }
+
+    #[test]
+    fn root_sandbox_policy_checks_the_state_root_of_the_agent_it_launches() {
+        // The launcher grants the state directory of the CLI it execs, so the daemon
+        // checks that same directory against the protected workspace. A workspace
+        // living inside `~/.codex` is refused for Codex, accepted for a provider whose
+        // state is elsewhere, and unaffected by a program usagi does not launch.
+        let backend_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let backend = backend_dir.path().join("backend");
+        std::fs::write(&backend, "fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let backend = backend.canonicalize().unwrap();
+        // The fixture home stays outside `/tmp`, which a root launch may write in its
+        // own right: a Git common directory under it is refused for every provider.
+        std::fs::create_dir_all("target").unwrap();
+        let home = tempfile::tempdir_in("target").unwrap();
+        let home = home.path().canonicalize().unwrap();
+        let workspace_root = home.join(".codex/repo");
+        std::fs::create_dir_all(workspace_root.join(".git")).unwrap();
+
+        for (program, expected) in [
+            (
+                "codex",
+                Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
+            ),
+            ("codex-fugu", Ok(())),
+            ("claude", Ok(())),
+            ("/bin/sh", Ok(())),
+        ] {
+            assert_eq!(
+                validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                    mode: SandboxMode::Root,
+                    program,
+                    workspace_root: &workspace_root,
+                    launch_roots: &[],
+                    tmpdir: None,
+                    home: Some(&home),
+                    backend: Some(&backend),
+                    passthrough: false,
+                }),
+                expected,
+                "{program} state root against a workspace inside ~/.codex"
+            );
         }
     }
 
