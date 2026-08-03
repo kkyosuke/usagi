@@ -1,10 +1,11 @@
-//! Shipping `usagi claude-sandbox` session-scope filesystem boundary tests.
+//! Shipping `usagi claude-sandbox` Agent filesystem boundary tests.
 //!
 //! A missing backend is also fail-closed, so denied effects remain testable on every Unix CI host.
 //! The positive own-worktree case runs when the platform backend is operational.
 
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -41,6 +42,71 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .current_dir(own)
         .output()
         .expect("shipping launcher starts")
+}
+
+fn run_in_root(root: &Path, script: &str) -> Output {
+    let protected = root.canonicalize().expect("canonical protected root");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
+    command
+        .args(["claude-sandbox", "--mode", "root", "--protected-root"])
+        .arg(&protected);
+    #[cfg(target_os = "macos")]
+    command.arg("--backend").arg(
+        PathBuf::from("/usr/bin/sandbox-exec")
+            .canonicalize()
+            .expect("shipping sandbox backend"),
+    );
+    command
+        .args(["--", "/bin/sh", "-c", script])
+        .current_dir(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_COUNT", "5")
+        .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_1", "/dev/null")
+        .env("GIT_CONFIG_KEY_2", "submodule.recurse")
+        .env("GIT_CONFIG_VALUE_2", "false")
+        .env("GIT_CONFIG_KEY_3", "status.submoduleSummary")
+        .env("GIT_CONFIG_VALUE_3", "false")
+        .env("GIT_CONFIG_KEY_4", "diff.ignoreSubmodules")
+        .env("GIT_CONFIG_VALUE_4", "all")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_PAGER", "")
+        .env("GIT_EXTERNAL_DIFF", "")
+        .output()
+        .expect("shipping launcher starts")
+}
+
+fn tree_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        let mut entries = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            let relative = entry.strip_prefix(root).unwrap().to_path_buf();
+            let metadata = fs::symlink_metadata(&entry).unwrap();
+            if metadata.file_type().is_symlink() {
+                snapshot.insert(
+                    relative,
+                    fs::read_link(entry)
+                        .unwrap()
+                        .into_os_string()
+                        .into_encoded_bytes(),
+                );
+            } else if metadata.is_dir() {
+                visit(root, &entry, snapshot);
+            } else {
+                snapshot.insert(relative, fs::read(entry).unwrap());
+            }
+        }
+    }
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
 }
 
 fn assert_unchanged(path: &Path) {
@@ -119,6 +185,92 @@ fn session_scope_preserves_sibling_issue_and_daemon_authority_for_path_alias_mat
             "an operational backend must allow own-worktree writes: {}",
             String::from_utf8_lossy(&allowed.stderr)
         );
+    }
+
+    let _ = fs::remove_dir_all(&fixture);
+}
+
+#[test]
+fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("agent-root-read-only");
+    let _ = fs::remove_dir_all(&fixture);
+    fs::create_dir_all(&fixture).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&fixture)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    let pwned = fixture.join("PWNED");
+    git(&[
+        "config",
+        "diff.pwn.command",
+        &format!("touch {}", pwned.display()),
+    ]);
+    fs::write(fixture.join(".gitattributes"), "tracked diff=pwn\n").unwrap();
+    fs::write(fixture.join("tracked"), "base\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    git(&[
+        "config",
+        "core.fsmonitor",
+        &format!("touch {}", pwned.display()),
+    ]);
+    fs::write(fixture.join("tracked"), "changed\n").unwrap();
+    let before = tree_bytes(&fixture);
+
+    for script in [
+        "printf attack > tracked",
+        "touch created",
+        "ln -s /tmp escaped-link",
+        "git add tracked",
+        "git commit -am attack",
+        "git -c diff.external=touch diff --ext-diff -- tracked",
+        "git diff --ext-diff -- tracked",
+    ] {
+        let output = run_in_root(&fixture, script);
+        assert!(
+            !output.status.success(),
+            "mutation unexpectedly succeeded: {script}"
+        );
+        assert_eq!(
+            tree_bytes(&fixture),
+            before,
+            "repository changed after {script}"
+        );
+        assert!(!pwned.exists());
+    }
+
+    for script in [
+        "git --no-pager --no-optional-locks status --short",
+        "git --no-pager --no-optional-locks log --no-ext-diff --no-textconv -1",
+        "git --no-pager --no-optional-locks diff --no-ext-diff --no-textconv -- tracked",
+    ] {
+        let output = run_in_root(&fixture, script);
+        if !output.status.success() {
+            assert!(
+                sandbox_backend_unavailable(&output),
+                "read-only command failed: {script}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(
+            tree_bytes(&fixture),
+            before,
+            "repository changed after {script}"
+        );
+        assert!(!pwned.exists());
     }
 
     let _ = fs::remove_dir_all(&fixture);

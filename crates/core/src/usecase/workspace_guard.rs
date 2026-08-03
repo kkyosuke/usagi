@@ -69,8 +69,6 @@ const READ_ONLY_GIT_SUBCOMMANDS: &[&str] = &[
     "rev-list",
     "ls-files",
     "ls-tree",
-    "ls-remote",
-    "cat-file",
     "show-ref",
     "name-rev",
     "merge-base",
@@ -82,23 +80,25 @@ const READ_ONLY_GIT_SUBCOMMANDS: &[&str] = &[
     "diff-files",
     "for-each-ref",
     "count-objects",
-    "verify-commit",
-    "verify-tag",
-    "var",
-    "help",
     "version",
 ];
 
 /// サブコマンドより前の git グローバルオプションで、直後のトークンを値として消費するもの
 /// （例: `git -C /path commit`）。その値をサブコマンドと取り違えないために使う。
-const GIT_OPTS_WITH_VALUE: &[&str] = &[
-    "-C",
-    "-c",
-    "--git-dir",
-    "--work-tree",
-    "--namespace",
-    "--exec-path",
-    "--config-env",
+const GIT_OPTS_WITH_VALUE: &[&str] = &["-C", "--git-dir", "--work-tree", "--namespace"];
+
+/// Commands whose output can enter Git's diff machinery. They are allowed only
+/// when both external diff and textconv are explicitly disabled.
+const DIFF_CAPABLE_GIT_SUBCOMMANDS: &[&str] = &[
+    "log",
+    "diff",
+    "show",
+    "blame",
+    "reflog",
+    "whatchanged",
+    "diff-tree",
+    "diff-index",
+    "diff-files",
 ];
 
 /// root モードの `Bash` command がリポジトリ／ファイルシステムを変更しうるかどうか。
@@ -112,7 +112,8 @@ pub fn command_mutates_repo(command: &str) -> bool {
 ///
 /// これは意図的に小さな allowlist であってシェルパーサではない。シェル構文・ラッパー・
 /// インタプリタ・リダイレクト・コマンド置換・変更を伴うユーティリティ・未知の実行ファイルは
-/// すべて拒否する。絶対パスの `git` は basename で認識し、read-only サブコマンド list の対象に残す。
+/// すべて拒否する。任意 path に置かれた同名 executable を許可しないため、program は bare name
+/// だけを受け付け、daemon が固定した `PATH` で解決させる。
 #[must_use]
 pub fn root_command_is_read_only(command: &str) -> bool {
     if command.trim().is_empty()
@@ -132,35 +133,63 @@ pub fn root_command_is_read_only(command: &str) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(program);
-    if basename == "git" {
-        let Some(subcommand) = git_subcommand_from_tokens(&tokens[1..]) else {
+    if program == "git" {
+        let git_tokens = &tokens[1..];
+        let Some(subcommand) = git_subcommand_from_tokens(git_tokens) else {
             return false;
         };
+        let has_safe_global_options = git_tokens
+            .iter()
+            .take_while(|token| token.as_str() != subcommand)
+            .any(|token| token == "--no-pager")
+            && git_tokens
+                .iter()
+                .take_while(|token| token.as_str() != subcommand)
+                .any(|token| token == "--no-optional-locks");
+        let unsafe_option = git_tokens.iter().any(|token| {
+            token == "-c"
+                || token.starts_with("-c=")
+                || token == "--config-env"
+                || token.starts_with("--config-env=")
+                || token == "-C"
+                || token.starts_with("-C=")
+                || token == "--git-dir"
+                || token.starts_with("--git-dir=")
+                || token == "--work-tree"
+                || token.starts_with("--work-tree=")
+                || token == "--exec-path"
+                || token.starts_with("--exec-path=")
+                || token == "-o"
+                || token == "--output"
+                || token.starts_with("--output=")
+                || token == "--upload-pack"
+                || token.starts_with("--upload-pack=")
+                || token == "--open-files-in-pager"
+                || token.starts_with("--open-files-in-pager=")
+                || token == "-O"
+                || (token.starts_with("-O") && token.len() > 2)
+                || token == "-p"
+                || token == "--paginate"
+                || token.starts_with("--paginate=")
+                || token == "--ext-diff"
+                || token.starts_with("--ext-diff=")
+                || token == "--textconv"
+                || token.starts_with("--textconv=")
+                || token == "--show-signature"
+        });
+        let diff_helpers_disabled = !DIFF_CAPABLE_GIT_SUBCOMMANDS.contains(&subcommand)
+            || (git_tokens.iter().any(|token| token == "--no-ext-diff")
+                && git_tokens.iter().any(|token| token == "--no-textconv"));
         return READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
-            && !tokens.iter().any(|token| {
-                token == "-o"
-                    || token == "--output"
-                    || token.starts_with("--output=")
-                    || token == "--exec-path"
-                    || token.starts_with("--exec-path=")
-            });
+            && has_safe_global_options
+            && !unsafe_option
+            && diff_helpers_disabled;
     }
-    matches!(
-        basename,
-        "pwd"
-            | "ls"
-            | "cat"
-            | "head"
-            | "tail"
-            | "wc"
-            | "stat"
-            | "test"
-            | "true"
-            | "false"
-            | "which"
-            | "rg"
-            | "grep"
-    )
+    program == basename
+        && matches!(
+            basename,
+            "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "test" | "true" | "false"
+        )
 }
 
 fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
@@ -372,12 +401,12 @@ mod tests {
     #[test]
     fn read_only_git_commands_are_allowed() {
         for command in [
-            "git status",
-            "git log --oneline",
-            "git diff HEAD~1",
-            "git show abc123",
-            "git rev-parse HEAD",
-            "git ls-files",
+            "git --no-pager --no-optional-locks status",
+            "git --no-pager --no-optional-locks log --no-ext-diff --no-textconv --oneline",
+            "git --no-pager --no-optional-locks diff --no-ext-diff --no-textconv HEAD~1",
+            "git --no-pager --no-optional-locks show --no-ext-diff --no-textconv abc123",
+            "git --no-pager --no-optional-locks rev-parse HEAD",
+            "git --no-pager --no-optional-locks ls-files",
         ] {
             assert!(
                 !command_mutates_repo(command),
@@ -406,10 +435,11 @@ mod tests {
 
     #[test]
     fn global_options_before_the_subcommand_do_not_hide_it() {
-        // `-C <path>` / `-c <cfg>` は値トークンを消費する。サブコマンドはその後ろ。
+        // `-C <path>` は値トークンを消費するため mutation のサブコマンドを見失わない。
         assert!(command_mutates_repo("git -C /repo commit -m x"));
         assert!(command_mutates_repo("git -c user.name=x commit"));
-        assert!(!command_mutates_repo("git -C /repo status"));
+        // Root policy は repository/config scope の差し替え自体も拒否する。
+        assert!(command_mutates_repo("git -C /repo status"));
     }
 
     #[test]
@@ -443,17 +473,26 @@ mod tests {
             "env git status",
             "command git status",
             "/usr/bin/git commit -m x",
+            "/tmp/git --no-pager --no-optional-locks status",
+            "rg --pre=touch needle",
             "git log --output=/tmp/out",
+            "git -c diff.external=touch diff --ext-diff",
+            "git --config-env=diff.external=PWN git diff --ext-diff",
+            "git --no-pager --no-optional-locks diff HEAD",
+            "git --no-pager --no-optional-locks log --oneline",
+            "git --no-pager --no-optional-locks ls-remote --upload-pack=touch origin",
+            "git --no-pager --no-optional-locks -p status",
+            "git --no-pager --no-optional-locks show --no-ext-diff --no-textconv --show-signature",
+            "git --no-pager --no-optional-locks grep -Otouch needle",
             "echo $(git status)",
         ] {
             assert!(!root_command_is_read_only(command), "allowed {command}");
         }
         for command in [
-            "git status",
-            "/usr/bin/git log --oneline",
-            "git -C /repo diff",
-            "rg sandbox src",
-            "/bin/ls -la",
+            "git --no-pager --no-optional-locks status",
+            "git --no-pager --no-optional-locks log --no-ext-diff --no-textconv --oneline",
+            "git --no-pager --no-optional-locks diff --no-ext-diff --no-textconv",
+            "ls -la",
         ] {
             assert!(root_command_is_read_only(command), "denied {command}");
         }

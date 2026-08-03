@@ -128,6 +128,40 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
 }
 
 #[test]
+fn root_scope_never_bypasses_the_read_only_sandbox() {
+    for mode in [LaunchMode::Interactive, LaunchMode::Headless] {
+        let mut request = request(mode);
+        request.scope.session_id = None;
+        let snapshot = CodexAdapter::new(FakeProvisioner::ready())
+            .resolve(&request)
+            .unwrap()
+            .snapshot;
+        assert!(
+            snapshot
+                .plan
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        let approval_is_never = snapshot
+            .plan
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--ask-for-approval", "never"])
+            || snapshot
+                .plan
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["-c", "approval_policy=\"never\""]);
+        assert!(approval_is_never);
+        assert!(!snapshot.plan.argv.iter().any(|argument| {
+            argument == "--dangerously-bypass-approvals-and-sandbox"
+                || argument == "workspace-write"
+        }));
+    }
+}
+
+#[test]
 fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
     let mut adapter = CodexAdapter::sakana(FakeProvisioner::ready());
     assert_eq!(adapter.profile().id.as_str(), "sakana-ai");

@@ -275,17 +275,25 @@ fn render_plan(
     provision: &CodexProvision,
     program: &str,
 ) -> Result<LaunchPlan, LaunchValidationError> {
-    let mut argv = match request.mode {
-        LaunchMode::Interactive => vec![
+    let root = request.scope.session_id.is_none();
+    let mut argv = match (request.mode, root) {
+        (LaunchMode::Interactive, _) => vec![
             "--dangerously-bypass-hook-trust".into(),
             "--sandbox".into(),
-            "workspace-write".into(),
+            if root { "read-only" } else { "workspace-write" }.into(),
             "--ask-for-approval".into(),
             "never".into(),
         ],
-        LaunchMode::Headless => vec![
+        (LaunchMode::Headless, false) => vec![
             "exec".into(),
             "--dangerously-bypass-approvals-and-sandbox".into(),
+        ],
+        (LaunchMode::Headless, true) => vec![
+            "-c".into(),
+            "approval_policy=\"never\"".into(),
+            "exec".into(),
+            "--sandbox".into(),
+            "read-only".into(),
         ],
     };
     if let Some(model) = &request.model {
