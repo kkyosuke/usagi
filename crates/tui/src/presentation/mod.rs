@@ -2271,13 +2271,11 @@ impl WorkspaceUi {
         if let Some(context) = self.agent_tab_intent.as_mut() {
             context.allowed_sessions = sessions;
         }
-        if changed {
-            // Lifecycle membership is authoritative for target retention. Use
-            // the same coalesced controller request as Reopen so an idle,
-            // already-successful controller observes removals exactly once;
-            // an in-flight job is fenced and an outage keeps its backoff.
-            self.request_agent_observation();
-        }
+        // Lifecycle membership is authoritative for target retention. Use the
+        // same coalesced controller request as Reopen so an idle,
+        // already-successful controller observes removals exactly once; an
+        // in-flight job is fenced and an outage keeps its backoff.
+        self.agent_observation_requested |= changed;
     }
 
     /// Project the already-polled rows for `terminal`, optionally highlighting an
@@ -14538,10 +14536,9 @@ mod tests {
         assert_eq!(mutations.lock().unwrap().len(), 1);
         assert!(!ui.take_agent_observation_request());
 
-        let allowed_sessions = BTreeSet::from([session]);
-        ui.set_allowed_agent_sessions(allowed_sessions.iter().copied());
+        ui.set_allowed_agent_sessions(BTreeSet::from([session]));
         assert!(ui.take_agent_observation_request());
-        ui.set_allowed_agent_sessions(allowed_sessions.iter().copied());
+        ui.set_allowed_agent_sessions(BTreeSet::from([session]));
         assert!(!ui.take_agent_observation_request());
         let now = std::time::Duration::from_secs(1);
         retry.request_observation(now);
