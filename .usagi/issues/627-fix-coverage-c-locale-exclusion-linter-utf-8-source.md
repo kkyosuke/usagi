@@ -1,13 +1,13 @@
 ---
 number: 627
 title: fix(coverage): C locale でも exclusion linter を UTF-8 source に対応させる
-status: in-progress
+status: done
 priority: low
 labels: [review, v2, test, coverage, tooling]
 dependson: []
 related: [484]
 created_at: 2026-08-02T23:07:31.947688+00:00
-updated_at: 2026-08-03T01:06:29.270727+00:00
+updated_at: 2026-08-03T01:12:01.268298+00:00
 ---
 
 ## Finding（P3 / ローカル gate の再現可能な失敗）
