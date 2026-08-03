@@ -33,6 +33,26 @@ use usagi_core::usecase::env::SecretResolver;
 /// Resolved environment values, keyed by the bindings that produced them.
 type CachedEnvironment = (EnvBindings, BTreeMap<String, String>);
 
+/// Admission failures raised before any configured secret is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserEnvironmentError {
+    Limits(EnvLimitError),
+    ReservedLauncherVariable,
+}
+
+impl From<EnvLimitError> for UserEnvironmentError {
+    fn from(error: EnvLimitError) -> Self {
+        Self::Limits(error)
+    }
+}
+
+const CLAUDE_LAUNCHER_CONTROL_VARIABLES: [&str; 4] = [
+    "PATH",
+    "TMPDIR",
+    "HOME",
+    usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+];
+
 /// Resolved environment values for the configured bindings of one workspace.
 pub struct UserEnvironment<R = OpCli> {
     global: Storage,
@@ -56,12 +76,12 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
     /// The effective bindings for `workspace_root`: the global ones with the
     /// workspace's own layered on top. An unreadable settings file is logged and
     /// treated as "nothing configured", so a damaged file never blocks a launch.
-    fn configured(&self, workspace_root: &Path) -> Result<EnvBindings, EnvLimitError> {
+    fn configured(&self, workspace_root: &Path) -> Result<EnvBindings, UserEnvironmentError> {
         let global = match self.global.load_settings() {
             Ok(settings) => settings,
             Err(error) => {
                 if let Some(limit) = error.downcast_ref::<EnvLimitError>() {
-                    return Err(*limit);
+                    return Err((*limit).into());
                 }
                 ErrorLog::record(&format!("could not read global settings for env: {error}"));
                 Settings::default()
@@ -71,7 +91,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
             Ok(settings) => settings,
             Err(error) => {
                 if let Some(limit) = error.downcast_ref::<EnvLimitError>() {
-                    return Err(*limit);
+                    return Err((*limit).into());
                 }
                 ErrorLog::record(&format!(
                     "could not read workspace settings for env: {error}"
@@ -79,6 +99,13 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
                 usagi_core::domain::settings::LocalSettings::default()
             }
         };
+        if local
+            .env
+            .keys()
+            .any(|name| CLAUDE_LAUNCHER_CONTROL_VARIABLES.contains(&name.as_str()))
+        {
+            return Err(UserEnvironmentError::ReservedLauncherVariable);
+        }
         let bindings = global.with_local(&local).env;
         validate_env_limits(&bindings)?;
         Ok(bindings)
@@ -88,7 +115,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
     pub fn resolved(
         &self,
         workspace_root: &Path,
-    ) -> Result<BTreeMap<String, String>, EnvLimitError> {
+    ) -> Result<BTreeMap<String, String>, UserEnvironmentError> {
         let bindings = self.configured(workspace_root)?;
         let mut cache = self
             .cache
@@ -141,7 +168,7 @@ pub fn typed(values: &BTreeMap<String, String>) -> Vec<(EnvironmentVariableName,
 
 #[cfg(test)]
 mod tests {
-    use super::{UserEnvironment, allowlist, typed};
+    use super::{UserEnvironment, UserEnvironmentError, allowlist, typed};
     use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Mutex;
@@ -328,9 +355,82 @@ mod tests {
 
         assert_eq!(
             environment.resolved(workspace.path()),
-            Err(EnvLimitError::TooManyBindings)
+            Err(UserEnvironmentError::Limits(EnvLimitError::TooManyBindings))
         );
         assert!(environment.resolver.reads().is_empty());
+    }
+
+    #[test]
+    fn workspace_launcher_control_bindings_are_rejected_before_secret_resolution() {
+        let symlink_target = tempfile::tempdir().unwrap();
+        let symlink = symlink_target.path().with_extension("alias");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(symlink_target.path(), &symlink).unwrap();
+        let symlink_value = symlink.to_string_lossy();
+        let cases = [
+            ("PATH", "/workspace/fake-bin"),
+            ("TMPDIR", "/"),
+            ("HOME", "/"),
+            ("USAGI_CLAUDE_SANDBOX_PASSTHROUGH", "1"),
+            ("TMPDIR", symlink_value.as_ref()),
+        ];
+        for (name, value) in cases {
+            let data = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            write_global(
+                data.path(),
+                bindings(&[("CREDENTIAL", "op://Private/Credential/value")]),
+            );
+            write_workspace(workspace.path(), bindings(&[(name, value)]));
+            let environment =
+                UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+
+            assert_eq!(
+                environment.resolved(workspace.path()),
+                Err(UserEnvironmentError::ReservedLauncherVariable),
+                "{name} must fail admission"
+            );
+            assert!(
+                environment.resolver.reads().is_empty(),
+                "{name} must fail before resolving a credential"
+            );
+        }
+        #[cfg(unix)]
+        std::fs::remove_file(symlink).unwrap();
+    }
+
+    #[test]
+    fn a_settings_mutation_makes_the_second_dispatch_effect_free() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_workspace(
+            workspace.path(),
+            bindings(&[("CREDENTIAL", "op://Private/First/value")]),
+        );
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        assert!(
+            environment
+                .resolved(workspace.path())
+                .unwrap()
+                .contains_key("CREDENTIAL")
+        );
+
+        write_workspace(
+            workspace.path(),
+            bindings(&[
+                ("PATH", "/workspace/fake-bin"),
+                ("NEXT_CREDENTIAL", "op://Private/Second/value"),
+            ]),
+        );
+        assert_eq!(
+            environment.resolved(workspace.path()),
+            Err(UserEnvironmentError::ReservedLauncherVariable)
+        );
+        assert_eq!(
+            environment.resolver.reads(),
+            ["op://Private/First/value"],
+            "the rejected second dispatch must not resolve its credential"
+        );
     }
 
     #[test]
@@ -355,7 +455,7 @@ mod tests {
         let global = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
         assert_eq!(
             global.resolved(workspace.path()),
-            Err(EnvLimitError::TooManyBindings)
+            Err(UserEnvironmentError::Limits(EnvLimitError::TooManyBindings))
         );
         assert!(global.resolver.reads().is_empty());
 
@@ -376,7 +476,7 @@ mod tests {
             UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
         assert_eq!(
             workspace_env.resolved(workspace.path()),
-            Err(EnvLimitError::TooManyBindings)
+            Err(UserEnvironmentError::Limits(EnvLimitError::TooManyBindings))
         );
         assert!(workspace_env.resolver.reads().is_empty());
     }

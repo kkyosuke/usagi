@@ -2,7 +2,7 @@
 //! adapter へ接続する composition adapter。
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
@@ -122,9 +122,24 @@ pub(crate) fn dispatch(
         RunOutcome::GuardWorkspace => guard_workspace(out),
         RunOutcome::ClaudeSandbox {
             mode,
+            protected_root,
+            backend,
+            tmpdir,
+            home,
             writable_roots,
             command,
-        } => claude_sandbox(mode, writable_roots, command, err),
+        } => claude_sandbox(
+            mode,
+            LauncherPolicyInputs {
+                protected_root,
+                backend,
+                tmpdir,
+                home,
+                writable_roots,
+            },
+            command,
+            err,
+        ),
         RunOutcome::DaemonRequest(request) => match daemon::policy_client(ClientPolicy::cli()) {
             Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
             Err(error) => {
@@ -158,13 +173,13 @@ fn guard_workspace(out: &mut dyn Write) -> std::io::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-// Claude を OS sandbox の中で fail-closed 起動する合成の縁。実 platform / backend / 環境の解決と
+// Claude を OS sandbox の中で fail-closed 起動する合成の縁。実 platform / daemon-issued policy の再検証と
 // exec を束ね、純粋な起動計画は `usagi_core::usecase::claude_sandbox` に委ねる。backend 不在・未対応
 // platform では無保護フォールバックせず、拒否理由を stderr へ書いて失敗終了する。
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=macos_wraps_claude_with_a_write_confining_profile
 fn claude_sandbox(
     mode: SandboxMode,
-    writable_roots: Vec<PathBuf>,
+    policy: LauncherPolicyInputs,
     command: Vec<String>,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
@@ -175,13 +190,24 @@ fn claude_sandbox(
     } else {
         Platform::Unsupported
     };
+    if let Err(reason) = validate_launcher_policy_inputs(
+        policy.protected_root.as_deref(),
+        policy.backend.as_deref(),
+        policy.tmpdir.as_deref(),
+        policy.home.as_deref(),
+        &policy.writable_roots,
+    ) {
+        writeln!(err, "claude-sandbox: {reason:?}")?;
+        return Ok(ExitCode::FAILURE);
+    }
     let request = SandboxRequest {
         platform,
         mode,
-        backend: resolve_sandbox_backend(platform),
-        launch_roots: writable_roots,
-        tmpdir: std::env::var_os("TMPDIR").map(PathBuf::from),
-        home: std::env::var_os("HOME").map(PathBuf::from),
+        protected_root: policy.protected_root,
+        backend: policy.backend,
+        launch_roots: policy.writable_roots,
+        tmpdir: policy.tmpdir,
+        home: policy.home,
         // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
         // 配布バイナリはこの環境変数を見ても拘束を外さない。
         passthrough: claude_sandbox::passthrough_requested(
@@ -201,19 +227,98 @@ fn claude_sandbox(
     }
 }
 
-// 対象 platform の sandbox backend を探索する。macOS は既定パスの `sandbox-exec`、Linux は
-// PATH 上の `bwrap`。見つからなければ `None`（呼び出し側が fail-closed で拒否する）。
+struct LauncherPolicyInputs {
+    protected_root: Option<PathBuf>,
+    backend: Option<PathBuf>,
+    tmpdir: Option<PathBuf>,
+    home: Option<PathBuf>,
+    writable_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LauncherPolicyError {
+    Backend,
+    ProtectedRoot,
+    WritableRoot,
+}
+
+fn validate_launcher_policy_inputs(
+    protected_root: Option<&Path>,
+    backend: Option<&Path>,
+    tmpdir: Option<&Path>,
+    home: Option<&Path>,
+    writable_roots: &[PathBuf],
+) -> Result<(), LauncherPolicyError> {
+    if let Some(backend) = backend {
+        if !backend.is_absolute() {
+            return Err(LauncherPolicyError::Backend);
+        }
+        let metadata =
+            std::fs::symlink_metadata(backend).map_err(|_| LauncherPolicyError::Backend)?;
+        if !metadata.file_type().is_file() {
+            return Err(LauncherPolicyError::Backend);
+        }
+        if backend.canonicalize().ok().as_deref() != Some(backend) {
+            return Err(LauncherPolicyError::Backend);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(LauncherPolicyError::Backend);
+            }
+        }
+    }
+    for &protected_root in protected_root.as_slice() {
+        validate_launcher_directory(protected_root, LauncherPolicyError::ProtectedRoot)?;
+    }
+    for root in writable_roots {
+        validate_launcher_directory(root, LauncherPolicyError::WritableRoot)?;
+    }
+    for root in [tmpdir, home].into_iter().flatten() {
+        validate_launcher_directory(root, LauncherPolicyError::WritableRoot)?;
+    }
+    Ok(())
+}
+
+fn validate_launcher_directory(
+    path: &Path,
+    error: LauncherPolicyError,
+) -> Result<(), LauncherPolicyError> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(error);
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| error)?;
+    if !metadata.file_type().is_dir() {
+        return Err(error);
+    }
+    if path.canonicalize().ok().as_deref() != Some(path) {
+        return Err(error);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+// daemon bootstrap の trusted environment で sandbox backend を一度だけ探索する。macOS は既定パスの
+// `sandbox-exec`、Linux は PATH 上の `bwrap` を canonical absolute path にする。Agent child は再探索しない。
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=a_missing_backend_is_rejected_on_each_supported_platform
-fn resolve_sandbox_backend(platform: Platform) -> Option<PathBuf> {
+pub(crate) fn resolve_sandbox_backend(platform: Platform) -> Option<PathBuf> {
     match platform {
         Platform::MacOs => {
             let path = PathBuf::from("/usr/bin/sandbox-exec");
-            path.exists().then_some(path)
+            path.canonicalize().ok()
         }
         Platform::Linux => std::env::var_os("PATH").and_then(|paths| {
             std::env::split_paths(&paths)
                 .map(|directory| directory.join("bwrap"))
                 .find(|candidate| candidate.is_file())
+                .and_then(|candidate| candidate.canonicalize().ok())
         }),
         Platform::Unsupported => None,
     }
@@ -331,9 +436,154 @@ mod tests {
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
     use usagi_core::usecase::client::{ClientError, DaemonReply};
 
-    use super::{write_client_error, write_daemon_outcome};
+    use super::{
+        LauncherPolicyError, validate_launcher_policy_inputs, write_client_error,
+        write_daemon_outcome,
+    };
 
     struct BrokenWriter;
+
+    #[test]
+    fn launcher_policy_rejects_root_and_symlink_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let protected = root.path().canonicalize().unwrap();
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                None,
+                Some(std::path::Path::new("/")),
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::WritableRoot)
+        );
+        assert_eq!(
+            validate_launcher_policy_inputs(Some(std::path::Path::new("/")), None, None, None, &[],),
+            Err(LauncherPolicyError::ProtectedRoot)
+        );
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                None,
+                Some(&protected.join("missing-writable-root")),
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::WritableRoot)
+        );
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                Some(&protected.join("missing-sandbox-backend")),
+                None,
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::Backend)
+        );
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                Some(std::path::Path::new("Cargo.toml")),
+                None,
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::Backend)
+        );
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                Some(std::path::Path::new("/usr")),
+                None,
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::Backend)
+        );
+
+        let backend = tempfile::NamedTempFile::new().unwrap();
+        let backend_path = backend.path().canonicalize().unwrap();
+        assert_eq!(
+            validate_launcher_policy_inputs(Some(&protected), Some(&backend_path), None, None, &[],),
+            Err(LauncherPolicyError::Backend)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                Some(&backend_path),
+                Some(&protected),
+                Some(&protected),
+                std::slice::from_ref(&protected),
+            ),
+            Ok(())
+        );
+
+        #[cfg(unix)]
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                None,
+                Some(std::path::Path::new("/usr")),
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::WritableRoot)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_policy_rejects_direct_and_parent_symlink_aliases() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let protected_dir = tempfile::tempdir().unwrap();
+        let protected = protected_dir.path().canonicalize().unwrap();
+        let alias = protected.with_extension("alias");
+        symlink(&protected, &alias).unwrap();
+        assert_eq!(
+            validate_launcher_policy_inputs(Some(&protected), None, Some(&alias), None, &[]),
+            Err(LauncherPolicyError::WritableRoot)
+        );
+        std::fs::remove_file(alias).unwrap();
+
+        let real_parent_dir = tempfile::tempdir().unwrap();
+        let real_parent = real_parent_dir.path().canonicalize().unwrap();
+        let parent_alias = real_parent.with_extension("parent-alias");
+        symlink(&real_parent, &parent_alias).unwrap();
+        let directory = real_parent.join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                None,
+                Some(&parent_alias.join("directory")),
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::WritableRoot)
+        );
+        let executable = real_parent.join("executable");
+        std::fs::write(&executable, "fixture").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            validate_launcher_policy_inputs(
+                Some(&protected),
+                Some(&parent_alias.join("executable")),
+                None,
+                None,
+                &[],
+            ),
+            Err(LauncherPolicyError::Backend)
+        );
+        std::fs::remove_file(parent_alias).unwrap();
+    }
 
     impl Write for BrokenWriter {
         fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {

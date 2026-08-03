@@ -521,6 +521,11 @@ struct RootClaudeProvisioner {
     readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
+    /// daemon bootstrap の trusted environment から一度だけ確定した backend。
+    sandbox_backend: Option<PathBuf>,
+    /// daemon bootstrap の trusted environment から一度だけ確定した policy paths。
+    sandbox_tmpdir: Option<PathBuf>,
+    sandbox_home: Option<PathBuf>,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the sandbox and MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
@@ -542,6 +547,36 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // `guard-workspace` フックは session 起動だけに配線し、root 起動では書き込みの境界を
         // sandbox の writable root に委ねる。
         let mode = sandbox_mode(context);
+        let launch_roots =
+            claude_writable_roots(&working_directory, &workspace_root, &self.data_home);
+        validate_claude_sandbox_policy(
+            mode,
+            &workspace_root,
+            &launch_roots,
+            self.sandbox_tmpdir.as_deref(),
+            self.sandbox_home.as_deref(),
+            self.sandbox_backend.as_deref(),
+            self.sandbox_passthrough,
+        )
+        .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
+        let sandbox_roots = launch_roots
+            .iter()
+            .map(|root| root.canonicalize())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
+        let protected_root = workspace_root
+            .canonicalize()
+            .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
+        let sandbox_launcher = claude_sandbox_launcher(
+            &self.mcp_command,
+            mode,
+            &protected_root,
+            self.sandbox_backend.as_deref(),
+            self.sandbox_tmpdir.as_deref(),
+            self.sandbox_home.as_deref(),
+            &sandbox_roots,
+        )
+        .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let role =
             effective_role_instruction(&self.sessions, &self.data_home, &workspace_root, context)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
@@ -575,14 +610,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             ),
             arguments,
         );
-        spawn.set_sandbox_launcher(
-            claude_sandbox_launcher(
-                &self.mcp_command,
-                mode,
-                &claude_writable_roots(&working_directory, &workspace_root, &self.data_home),
-            )
-            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
-        );
+        spawn.set_sandbox_launcher(sandbox_launcher);
         if self.sandbox_passthrough {
             spawn.insert_daemon_environment(
                 EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
@@ -631,19 +659,160 @@ fn claude_writable_roots(
     ]
 }
 
+/// Policy paths are daemon-owned inputs.  Validate their identity before user
+/// bindings (and therefore secrets) are resolved.  The launcher later receives
+/// only these checked paths through argv and never consults its child environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeSandboxPolicyError {
+    MissingBackend,
+    InvalidBackend,
+    InvalidWritableRoot,
+    ProtectedWorkspaceAncestor,
+}
+
+fn validate_claude_sandbox_policy(
+    mode: SandboxMode,
+    workspace_root: &Path,
+    launch_roots: &[PathBuf],
+    tmpdir: Option<&Path>,
+    home: Option<&Path>,
+    backend: Option<&Path>,
+    passthrough: bool,
+) -> Result<(), ClaudeSandboxPolicyError> {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return Err(ClaudeSandboxPolicyError::MissingBackend);
+    }
+    if passthrough {
+        return Ok(());
+    }
+    let backend = backend.ok_or(ClaudeSandboxPolicyError::MissingBackend)?;
+    validate_sandbox_backend(backend)?;
+    let protected_workspace = workspace_root
+        .canonicalize()
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+
+    let mut roots = launch_roots.to_vec();
+    if let Some(tmpdir) = tmpdir {
+        roots.push(tmpdir.to_path_buf());
+    }
+    if let Some(home) = home {
+        validate_owned_directory(home)?;
+        let claude_state = home.join(".claude");
+        if mode == SandboxMode::Session
+            && protected_workspace.starts_with(
+                claude_state
+                    .canonicalize()
+                    .unwrap_or_else(|_| claude_state.clone()),
+            )
+        {
+            return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+        }
+        if cfg!(target_os = "macos") {
+            let keychains = home.join("Library/Keychains");
+            if mode == SandboxMode::Session
+                && protected_workspace.starts_with(
+                    keychains
+                        .canonicalize()
+                        .unwrap_or_else(|_| keychains.clone()),
+                )
+            {
+                return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+            }
+        }
+    }
+    for root in roots {
+        validate_owned_directory(&root)?;
+        let canonical = root
+            .canonicalize()
+            .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+        if mode == SandboxMode::Session && protected_workspace.starts_with(canonical) {
+            return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+        }
+    }
+    Ok(())
+}
+
+fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(ClaudeSandboxPolicyError::InvalidBackend);
+    }
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| ClaudeSandboxPolicyError::InvalidBackend)?;
+    if !metadata.file_type().is_file() || path.canonicalize().ok().as_deref() != Some(path) {
+        return Err(ClaudeSandboxPolicyError::InvalidBackend);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(ClaudeSandboxPolicyError::InvalidBackend);
+        }
+    }
+    Ok(())
+}
+
+fn validate_owned_directory(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    if !metadata.file_type().is_dir() || path_has_symlink_component(path) {
+        return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+        }
+    }
+    Ok(())
+}
+
+fn path_has_symlink_component(path: &Path) -> bool {
+    path.ancestors().any(|component| {
+        std::fs::symlink_metadata(component).map_or(true, |metadata| {
+            metadata.file_type().is_symlink() && !is_macos_system_firmlink(component)
+        })
+    })
+}
+
+fn is_macos_system_firmlink(path: &Path) -> bool {
+    cfg!(target_os = "macos") && matches!(path.to_str(), Some("/var" | "/tmp" | "/etc"))
+}
+
 /// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
 /// instruction that makes the spawned child the launcher instead of the bare
 /// product.  Host paths stay out of the durable launch snapshot.
 fn claude_sandbox_launcher(
     usagi: &Path,
     mode: SandboxMode,
+    protected_root: &Path,
+    backend: Option<&Path>,
+    tmpdir: Option<&Path>,
+    home: Option<&Path>,
     writable_roots: &[PathBuf],
 ) -> Result<SandboxLauncher, ()> {
     let mut prefix = vec![
         "claude-sandbox".to_owned(),
         "--mode".to_owned(),
         mode.as_str().to_owned(),
+        "--protected-root".to_owned(),
+        protected_root.to_str().ok_or(())?.to_owned(),
     ];
+    if let Some(backend) = backend {
+        prefix.push("--backend".to_owned());
+        prefix.push(backend.to_str().ok_or(())?.to_owned());
+    }
+    if let Some(tmpdir) = tmpdir {
+        prefix.push("--tmpdir".to_owned());
+        prefix.push(tmpdir.to_str().ok_or(())?.to_owned());
+    }
+    if let Some(home) = home {
+        prefix.push("--home".to_owned());
+        prefix.push(home.to_str().ok_or(())?.to_owned());
+    }
     for root in writable_roots {
         prefix.push("--writable-root".to_owned());
         prefix.push(root.to_str().ok_or(())?.to_owned());
@@ -689,7 +858,7 @@ fn claude_prompt_arguments(prompt: String) -> Vec<String> {
 fn configured_environment(
     environment: Option<&Arc<SharedUserEnvironment>>,
     workspace_root: &Path,
-) -> Result<BTreeMap<String, String>, usagi_core::domain::settings::EnvLimitError> {
+) -> Result<BTreeMap<String, String>, user_env::UserEnvironmentError> {
     environment.map_or_else(
         || Ok(BTreeMap::new()),
         |environment| environment.resolved(workspace_root),
@@ -2457,6 +2626,19 @@ fn open_agent_runtime(
             readiness,
             mcp_command,
             data_home,
+            sandbox_backend: super::cli::resolve_sandbox_backend(if cfg!(target_os = "macos") {
+                claude_sandbox::Platform::MacOs
+            } else if cfg!(target_os = "linux") {
+                claude_sandbox::Platform::Linux
+            } else {
+                claude_sandbox::Platform::Unsupported
+            }),
+            sandbox_tmpdir: std::env::var_os("TMPDIR")
+                .map(PathBuf::from)
+                .and_then(|path| path.canonicalize().ok()),
+            sandbox_home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .and_then(|path| path.canonicalize().ok()),
             environment: Some(environment),
             // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
             // 配布バイナリは常に拘束された Claude だけを起動する。
@@ -12052,7 +12234,9 @@ instructions = "{instructions}"
         // The workspace root itself is not writable for a session launch.
         assert!(!roots.contains(&PathBuf::from("/repo")));
 
-        let launcher = claude_sandbox_launcher(usagi, mode, &roots).unwrap();
+        let launcher =
+            claude_sandbox_launcher(usagi, mode, Path::new("/repo"), None, None, None, &roots)
+                .unwrap();
         assert_eq!(launcher.program, "/opt/usagi/bin/usagi");
         assert_eq!(
             launcher.prefix,
@@ -12060,6 +12244,8 @@ instructions = "{instructions}"
                 "claude-sandbox",
                 "--mode",
                 "session",
+                "--protected-root",
+                "/repo",
                 "--writable-root",
                 "/repo/.usagi/sessions/work",
                 "--writable-root",
@@ -12089,6 +12275,55 @@ instructions = "{instructions}"
     }
 
     #[test]
+    fn session_sandbox_policy_rejects_root_workspace_ancestors_and_symlink_aliases() {
+        let workspace = tempfile::tempdir().unwrap();
+        let owned = tempfile::tempdir().unwrap();
+        let backend_dir = tempfile::tempdir().unwrap();
+        let backend = backend_dir.path().join("backend");
+        std::fs::write(&backend, "fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let backend = backend.canonicalize().unwrap();
+        let workspace_root = workspace.path().canonicalize().unwrap();
+        let owned_root = owned.path().canonicalize().unwrap();
+        let validate = |roots: &[PathBuf], tmpdir: Option<&Path>| {
+            validate_claude_sandbox_policy(
+                SandboxMode::Session,
+                &workspace_root,
+                roots,
+                tmpdir,
+                None,
+                Some(&backend),
+                false,
+            )
+        };
+
+        assert_eq!(
+            validate(&[PathBuf::from("/")], None),
+            Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
+        );
+        assert_eq!(
+            validate(std::slice::from_ref(&workspace_root), None),
+            Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let alias = owned_root.with_extension("alias");
+            symlink(&owned_root, &alias).unwrap();
+            assert_eq!(
+                validate(&[], Some(&alias)),
+                Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
+            );
+            std::fs::remove_file(alias).unwrap();
+        }
+    }
+
+    #[test]
     fn a_root_claude_is_confined_to_the_project_root_without_the_guard_hook() {
         let usagi = Path::new("/opt/usagi/bin/usagi");
         let mode = sandbox_mode(&provision_context(None));
@@ -12101,7 +12336,9 @@ instructions = "{instructions}"
             &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),
         );
         assert!(roots.contains(&PathBuf::from("/repo")));
-        let launcher = claude_sandbox_launcher(usagi, mode, &roots).unwrap();
+        let launcher =
+            claude_sandbox_launcher(usagi, mode, Path::new("/repo"), None, None, None, &roots)
+                .unwrap();
         assert_eq!(&launcher.prefix[..3], ["claude-sandbox", "--mode", "root"]);
         assert_eq!(launcher.prefix.last().unwrap(), "--");
 

@@ -40,6 +40,7 @@ pub struct ClaudeProvision {
 pub enum ClaudeProvisionFailure {
     ExecutableUnavailable,
     MaterializationFailed,
+    InvalidSandboxPolicy,
 }
 
 /// Materializes Claude-private config, MCP, and hook artifacts for one scope.
@@ -170,7 +171,8 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
                 ClaudeProvisionFailure::ExecutableUnavailable => {
                     AdapterError::ExecutableUnavailable
                 }
-                ClaudeProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
+                ClaudeProvisionFailure::MaterializationFailed
+                | ClaudeProvisionFailure::InvalidSandboxPolicy => AdapterError::ProvisionFailed,
             })?;
         let provider_resume =
             provider_resume(request, &profile).map_err(AdapterError::Validation)?;
@@ -464,6 +466,13 @@ mod tests {
         ))));
         assert!(matches!(
             failed.resolve(&request()),
+            Err(AdapterError::ProvisionFailed)
+        ));
+        let mut invalid_policy = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+            ClaudeProvisionFailure::InvalidSandboxPolicy,
+        ))));
+        assert!(matches!(
+            invalid_policy.resolve(&request()),
             Err(AdapterError::ProvisionFailed)
         ));
 
