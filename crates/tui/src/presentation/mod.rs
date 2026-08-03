@@ -6962,6 +6962,11 @@ mod tests {
                 failure_summary: Some("create failed".into()),
             },
         )]));
+        let role = crate::usecase::application::controller::SessionRoleProjection {
+            role_id: None,
+            role_summary: Some("Reviewer".into()),
+        };
+        view.set_session_roles(BTreeMap::from([(session, role.clone())]));
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         // The projected sidebar row carries the Failed lifecycle and its reason.
@@ -6975,6 +6980,7 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         super::sync_runtime_sessions(&mut runtime, &ui, &[]);
         assert_eq!(runtime.state().sessions(), &[session]);
+        assert_eq!(runtime.state().session_roles().get(&session), Some(&role));
         assert_eq!(
             runtime.state().session_lifecycles().get(&session).copied(),
             Some(SessionLifecycle::Failed)
