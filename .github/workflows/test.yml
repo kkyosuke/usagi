@@ -95,6 +95,9 @@ jobs:
     - name: Test coverage(off) policy linter
       run: bash scripts/tests/coverage-off-lint.sh
 
+    - name: Test v1 coverage gate
+      run: bash scripts/tests/v1-coverage.sh
+
     - name: Enforce coverage(off) registry
       run: ruby scripts/coverage-off-lint.rb
 
