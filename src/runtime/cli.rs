@@ -722,6 +722,10 @@ mod tests {
         assert_route(
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
+                protected_root: None,
+                backend: None,
+                tmpdir: None,
+                home: None,
                 writable_roots: vec![PathBuf::from("worktree")],
                 command: vec!["claude".into()],
             },
