@@ -23,6 +23,45 @@ use clap_complete::Shell;
 use usagi_core::usecase::claude_sandbox::SandboxMode;
 use usagi_core::usecase::client::{DaemonRequest, SessionAction};
 
+/// 配布 binary に同梱され、その build identity に束縛された self-update installer。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallerRequest {
+    script: &'static [u8],
+    expected_sha256: [u8; 32],
+    select_version: bool,
+}
+
+impl InstallerRequest {
+    /// 同梱 bytes、build 時に固定した digest、起動 mode を一つの要求に束ねる。
+    #[must_use]
+    pub const fn new(
+        script: &'static [u8],
+        expected_sha256: [u8; 32],
+        select_version: bool,
+    ) -> Self {
+        Self {
+            script,
+            expected_sha256,
+            select_version,
+        }
+    }
+
+    /// Process を起動する前に同梱 installer の identity を検証する。
+    #[must_use]
+    pub fn verified_script(&self) -> Option<&'static [u8]> {
+        use sha2::{Digest, Sha256};
+
+        (<[u8; 32]>::from(Sha256::digest(self.script)) == self.expected_sha256)
+            .then_some(self.script)
+    }
+
+    /// Installer に対話的な version 選択を要求するか。
+    #[must_use]
+    pub const fn select_version(&self) -> bool {
+        self.select_version
+    }
+}
+
 /// CLI が合成ルートへ依頼する TUI の起動画面。
 ///
 /// `usagi-cli` は `usagi-tui` に依存せず、この入口面の要求だけを返す。合成ルートが
@@ -89,8 +128,8 @@ pub enum RunOutcome {
     /// A managed session mutation to be sent by the composition root through
     /// the daemon client. It deliberately is not executed against local state.
     DaemonRequest(DaemonRequest),
-    /// Download and install the latest released binary through the composition root.
-    SelfUpdate { command: String },
+    /// 配布 binary に束縛された installer で release binary を更新する。
+    SelfUpdate(InstallerRequest),
 }
 
 /// 実行可能な CLI サブコマンドの共通インターフェース。
