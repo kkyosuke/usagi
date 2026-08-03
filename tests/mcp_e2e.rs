@@ -479,6 +479,8 @@ fn production_delegate_brief_rejects_an_unknown_caller_without_creating_a_sessio
 #[test]
 fn production_supervisor_tools_observe_one_durable_aggregate() {
     let mut mcp = McpHarness::start();
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
     let started = mcp.tool(
         "supervisor_start",
         &json!({

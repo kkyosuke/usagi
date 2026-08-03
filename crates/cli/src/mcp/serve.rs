@@ -537,6 +537,9 @@ fn execute_tool(
                     action,
                     operation_id,
                     payload: arguments,
+                    caller_context: caller_credential.map(|credential| McpCallerContext {
+                        credential: credential.to_owned(),
+                    }),
                 }),
             )
         }
@@ -1121,6 +1124,24 @@ mod tests {
         assert!(matches!(
             client.requests.last(),
             Some(DaemonRequest::DispatchTool { caller_context: Some(context), .. })
+                if context.credential == "secret"
+        ));
+
+        let supervisor = registry
+            .iter()
+            .find(|descriptor| descriptor.name() == "supervisor_list")
+            .unwrap();
+        let response = execute_tool(
+            serde_json::json!(3),
+            supervisor,
+            serde_json::json!({}),
+            &mut client,
+            Some("secret"),
+        );
+        assert!(response.get("result").is_some());
+        assert!(matches!(
+            client.requests.last(),
+            Some(DaemonRequest::SupervisorTool { caller_context: Some(context), .. })
                 if context.credential == "secret"
         ));
 

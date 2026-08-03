@@ -3073,7 +3073,7 @@ fn start_ipc_accept_loop(
                                     admitted,
                                     connection_fence.as_ref(),
                                     &mut owner,
-                                    &mut |request_id, body, hello, connection, _client| match body
+                                    &mut |request_id, body, hello, _connection, client| match body
                                         .get("kind")
                                         .and_then(serde_json::Value::as_str)
                                     {
@@ -3086,7 +3086,10 @@ fn start_ipc_accept_loop(
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
-                                        Some("supervisor_tool") => dispatch_supervisor_tool(&supervisor, connection, request_id, &body, hello),
+                                        Some("supervisor_tool") => {
+                                            let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
+                                            dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
+                                        },
                                         Some("user_decision") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
@@ -3653,7 +3656,7 @@ fn dispatch_agent_tool(
 #[allow(clippy::too_many_lines)]
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
-    connection: usagi_core::domain::id::ConnectionId,
+    caller: Result<String, usagi_core::infrastructure::ipc::ProtocolError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -3714,171 +3717,189 @@ fn dispatch_supervisor_tool(
         action,
         operation_id,
         payload,
+        caller_context: _,
     }) = parsed
     else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let caller = format!("ipc-connection:{connection}");
     let result = runtime
         .lock()
         .map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "supervisor runtime is unavailable")
         })
-        .and_then(|runtime| match action {
-            SupervisorToolAction::Start => {
-                let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
-                    ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_start payload",
-                    )
-                })?;
-                let started = runtime
-                    .start(
-                        &caller,
-                        &operation_id,
-                        input.root_task,
-                        input.initial_task_dag,
-                        input.policy_selector,
-                        Utc::now(),
-                    )
-                    .map_err(supervisor_error)?;
-                runtime
-                    .tick(
-                        started.supervisor_run_id,
-                        Utc::now(),
-                        &mut DeferredDecisionWaker,
-                    )
-                    .map_err(supervisor_error)?;
-                serde_json::to_value(
-                    runtime
-                        .get(&caller, started.supervisor_run_id)
-                        .map_err(supervisor_error)?
-                        .ok_or_else(|| {
-                            ProtocolError::new(
-                                ErrorCode::Internal,
-                                "started supervisor run disappeared",
-                            )
-                        })?,
-                )
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
-                })
-            }
-            SupervisorToolAction::Get => {
-                let input: RunPayload = serde_json::from_value(payload).map_err(|_| {
-                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid supervisor_get payload")
-                })?;
-                serde_json::to_value(
-                    runtime
-                        .get(&caller, input.supervisor_run_id)
-                        .map_err(supervisor_error)?
-                        .ok_or_else(|| {
-                            ProtocolError::new(
-                                ErrorCode::OwnershipUnknown,
-                                "supervisor run is unavailable to this caller",
-                            )
-                        })?,
-                )
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
-                })
-            }
-            SupervisorToolAction::List => {
-                let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
-                    ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_list payload",
-                    )
-                })?;
-                if input.limit == 0
-                    || input.limit > 100
-                    || input.session.is_some()
-                    || input.caller.as_ref().is_some_and(|value| value != &caller)
-                {
-                    return Err(ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_list filter",
-                    ));
-                }
-                let offset = input
-                    .cursor
-                    .as_deref()
-                    .unwrap_or("0")
-                    .parse::<usize>()
-                    .map_err(|_| {
+        .and_then(|runtime| {
+            let caller = caller?;
+            match action {
+                SupervisorToolAction::Start => {
+                    let input: StartPayload = serde_json::from_value(payload).map_err(|_| {
                         ProtocolError::new(
                             ErrorCode::InvalidArgument,
-                            "invalid supervisor_list cursor",
+                            "invalid supervisor_start payload",
                         )
                     })?;
-                let runs = runtime
-                    .list(&caller, input.state)
-                    .map_err(supervisor_error)?;
-                let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
-                let next_cursor =
-                    (offset + page.len() < runs.len()).then(|| (offset + page.len()).to_string());
-                Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
-            }
-            SupervisorToolAction::Cancel => {
-                let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
-                    ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_cancel payload",
-                    )
-                })?;
-                serde_json::to_value(
-                    runtime
-                        .cancel(&caller, input.supervisor_run_id, input.reason, Utc::now())
-                        .map_err(supervisor_error)?,
-                )
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
-                })
-            }
-            SupervisorToolAction::ResolveEscalation => {
-                let input: ResolvePayload = serde_json::from_value(payload).map_err(|_| {
-                    ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_resolve_escalation payload",
-                    )
-                })?;
-                serde_json::to_value(
-                    runtime
-                        .resolve_escalation(
+                    let started = runtime
+                        .start(
                             &caller,
-                            input.supervisor_run_id,
-                            input.escalation_id,
-                            input.decision,
+                            &operation_id,
+                            input.root_task,
+                            input.initial_task_dag,
+                            input.policy_selector,
                             Utc::now(),
                         )
-                        .map_err(supervisor_error)?,
-                )
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Internal, "supervisor response encoding failed")
-                })
-            }
-            SupervisorToolAction::Events => {
-                let input: EventsPayload = serde_json::from_value(payload).map_err(|_| {
-                    ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_events payload",
+                        .map_err(supervisor_error)?;
+                    runtime
+                        .tick(
+                            started.supervisor_run_id,
+                            Utc::now(),
+                            &mut DeferredDecisionWaker,
+                        )
+                        .map_err(supervisor_error)?;
+                    serde_json::to_value(
+                        runtime
+                            .get(&caller, started.supervisor_run_id)
+                            .map_err(supervisor_error)?
+                            .ok_or_else(|| {
+                                ProtocolError::new(
+                                    ErrorCode::Internal,
+                                    "started supervisor run disappeared",
+                                )
+                            })?,
                     )
-                })?;
-                if input.limit == 0 || input.limit > 100 {
-                    return Err(ProtocolError::new(
-                        ErrorCode::InvalidArgument,
-                        "invalid supervisor_events limit",
-                    ));
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })
                 }
-                let (events, cursor) = runtime
-                    .events(
-                        &caller,
-                        input.supervisor_run_id,
-                        input.after_sequence,
-                        input.limit,
+                SupervisorToolAction::Get => {
+                    let input: RunPayload = serde_json::from_value(payload).map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_get payload",
+                        )
+                    })?;
+                    serde_json::to_value(
+                        runtime
+                            .get(&caller, input.supervisor_run_id)
+                            .map_err(supervisor_error)?
+                            .ok_or_else(|| {
+                                ProtocolError::new(
+                                    ErrorCode::OwnershipUnknown,
+                                    "supervisor run is unavailable to this caller",
+                                )
+                            })?,
                     )
-                    .map_err(supervisor_error)?;
-                Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })
+                }
+                SupervisorToolAction::List => {
+                    let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_list payload",
+                        )
+                    })?;
+                    if input.limit == 0
+                        || input.limit > 100
+                        || input.session.is_some()
+                        || input.caller.as_ref().is_some_and(|value| value != &caller)
+                    {
+                        return Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_list filter",
+                        ));
+                    }
+                    let offset = input
+                        .cursor
+                        .as_deref()
+                        .unwrap_or("0")
+                        .parse::<usize>()
+                        .map_err(|_| {
+                            ProtocolError::new(
+                                ErrorCode::InvalidArgument,
+                                "invalid supervisor_list cursor",
+                            )
+                        })?;
+                    let runs = runtime
+                        .list(&caller, input.state)
+                        .map_err(supervisor_error)?;
+                    let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
+                    let next_cursor = (offset + page.len() < runs.len())
+                        .then(|| (offset + page.len()).to_string());
+                    Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
+                }
+                SupervisorToolAction::Cancel => {
+                    let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_cancel payload",
+                        )
+                    })?;
+                    serde_json::to_value(
+                        runtime
+                            .cancel(&caller, input.supervisor_run_id, input.reason, Utc::now())
+                            .map_err(supervisor_error)?,
+                    )
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })
+                }
+                SupervisorToolAction::ResolveEscalation => {
+                    let input: ResolvePayload = serde_json::from_value(payload).map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_resolve_escalation payload",
+                        )
+                    })?;
+                    serde_json::to_value(
+                        runtime
+                            .resolve_escalation(
+                                &caller,
+                                input.supervisor_run_id,
+                                input.escalation_id,
+                                input.decision,
+                                Utc::now(),
+                            )
+                            .map_err(supervisor_error)?,
+                    )
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })
+                }
+                SupervisorToolAction::Events => {
+                    let input: EventsPayload = serde_json::from_value(payload).map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_events payload",
+                        )
+                    })?;
+                    if input.limit == 0 || input.limit > 100 {
+                        return Err(ProtocolError::new(
+                            ErrorCode::InvalidArgument,
+                            "invalid supervisor_events limit",
+                        ));
+                    }
+                    let (events, cursor) = runtime
+                        .events(
+                            &caller,
+                            input.supervisor_run_id,
+                            input.after_sequence,
+                            input.limit,
+                        )
+                        .map_err(supervisor_error)?;
+                    Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+                }
             }
         });
     match result {
@@ -3890,6 +3911,52 @@ fn dispatch_supervisor_tool(
             serde_json::json!(null),
         ),
     }
+}
+
+fn authenticated_supervisor_caller(
+    agent: &SharedAgentRuntime,
+    client: &usagi_core::domain::id::ClientId,
+    body: &serde_json::Value,
+) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    let credential = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::SupervisorTool { caller_context, .. } => caller_context,
+            _ => None,
+        })
+        .filter(|context| !context.credential.is_empty())
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "supervisor caller provenance is unknown",
+            )
+        })?;
+    let caller = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
+        .mcp_dispatch_caller(&credential.credential)
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "supervisor caller provenance is unknown",
+            )
+        })?;
+    Ok(supervisor_caller_descriptor(client, &caller))
+}
+
+fn supervisor_caller_descriptor(
+    client: &usagi_core::domain::id::ClientId,
+    caller: &usagi_core::domain::agent::CallerRef,
+) -> String {
+    let session = caller
+        .session_id
+        .map_or_else(|| "root".to_owned(), |session| session.to_string());
+    format!(
+        "ipc-client:{};session:{session};agent:{}",
+        client, caller.agent_id
+    )
 }
 
 fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
@@ -14219,6 +14286,329 @@ instructions = "{instructions}"
             outcomes.push(outcome);
         }
         (outcomes, owner.seen)
+    }
+
+    fn serve_supervisor_request(
+        runtime: &SharedSupervisorRuntime,
+        generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
+        hello: &usagi_core::infrastructure::ipc::ClientHello,
+        authenticated: Option<&usagi_core::domain::agent::CallerRef>,
+        body: serde_json::Value,
+    ) -> (
+        usagi_core::infrastructure::ipc::ResponseOutcome,
+        serde_json::Value,
+    ) {
+        use usagi_core::infrastructure::ipc::{
+            Bootstrap, DEFAULT_MAX_FRAME_BYTES, Envelope, EnvelopeKind, ErrorCode, ProtocolError,
+            RequestId as WireRequestId, read_json_frame, write_json_frame,
+        };
+        let protocol = usagi_daemon::presentation::ipc::server_protocol(
+            generation.clone(),
+            generation.0.clone(),
+            current_build(),
+            DaemonRecord::new(std::process::id()),
+            String::new(),
+        );
+        let negotiated = usagi_core::infrastructure::ipc::negotiate(hello, &protocol).unwrap();
+        let mut inbound = Vec::new();
+        write_json_frame(
+            &mut inbound,
+            &Bootstrap::ClientHello(hello.clone()),
+            DEFAULT_MAX_FRAME_BYTES,
+        )
+        .unwrap();
+        write_json_frame(
+            &mut inbound,
+            &Envelope {
+                protocol: negotiated.protocol,
+                daemon_generation: negotiated.daemon_generation,
+                kind: EnvelopeKind::Request {
+                    request_id: WireRequestId(RequestId::new().as_str().clone()),
+                    timeout_ms: None,
+                    body,
+                },
+            },
+            DEFAULT_MAX_FRAME_BYTES,
+        )
+        .unwrap();
+
+        let mut reader = std::io::Cursor::new(inbound);
+        let mut outbound = Vec::new();
+        let mut owner = FenceWitness::default();
+        usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
+            &mut reader,
+            &mut outbound,
+            &protocol,
+            &usagi_daemon::presentation::ipc::UnfencedConnection,
+            &mut owner,
+            &mut |request_id, body, server, _connection, client| {
+                let caller = authenticated.map_or_else(
+                    || {
+                        Err(ProtocolError::new(
+                            ErrorCode::OwnershipUnknown,
+                            "supervisor caller provenance is unknown",
+                        ))
+                    },
+                    |caller| Ok(supervisor_caller_descriptor(&client, caller)),
+                );
+                dispatch_supervisor_tool(runtime, caller, request_id, &body, server)
+            },
+        )
+        .unwrap();
+        let mut replies = std::io::Cursor::new(outbound);
+        assert!(matches!(
+            read_json_frame::<Bootstrap>(&mut replies, DEFAULT_MAX_FRAME_BYTES).unwrap(),
+            Some(Bootstrap::ServerHello(_))
+        ));
+        let reply = read_json_frame::<Envelope>(&mut replies, DEFAULT_MAX_FRAME_BYTES)
+            .unwrap()
+            .unwrap();
+        let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+            panic!("supervisor dispatcher returned a non-response envelope");
+        };
+        (outcome, body)
+    }
+
+    fn supervisor_request(
+        action: SupervisorToolAction,
+        operation_id: &str,
+        payload: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::to_value(DaemonRequest::SupervisorTool {
+            action,
+            operation_id: operation_id.to_owned(),
+            payload,
+            caller_context: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One matrix keeps every authority transition on one durable run.
+    fn supervisor_authority_survives_reconnect_and_rollover_but_not_forgery_or_restart() {
+        use chrono::Utc;
+        use usagi_core::domain::{
+            agent::CallerRef,
+            id::{AgentId, OperationId},
+            supervisor::{
+                EscalationDecision, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
+            },
+        };
+        use usagi_core::infrastructure::{
+            ipc::{ErrorCode, ResponseOutcome},
+            store::supervisor::SupervisorStore,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        let hello = fence_client_hello(Vec::new());
+        let first_generation = ipc_generation();
+        let start = supervisor_request(
+            SupervisorToolAction::Start,
+            "lost-response-operation",
+            serde_json::json!({"root_task":"root"}),
+        );
+
+        // The first response is deliberately discarded. A new production
+        // connection with the same handshake incarnation converges on its run.
+        let _ = serve_supervisor_request(
+            &runtime,
+            &first_generation,
+            &hello,
+            Some(&caller),
+            start.clone(),
+        );
+        let (retry_outcome, retry_body) =
+            serve_supervisor_request(&runtime, &first_generation, &hello, Some(&caller), start);
+        assert_eq!(retry_outcome, ResponseOutcome::Ok);
+        let run_id = retry_body["supervisor_run_id"].as_str().unwrap();
+
+        // A generation rollover keeps the daemon-issued credential registry and
+        // the process client incarnation, so every control surface remains owned.
+        let rollover = ipc_generation();
+        for (action, payload) in [
+            (
+                SupervisorToolAction::Get,
+                serde_json::json!({"supervisor_run_id":run_id}),
+            ),
+            (SupervisorToolAction::List, serde_json::json!({})),
+            (
+                SupervisorToolAction::Events,
+                serde_json::json!({"supervisor_run_id":run_id}),
+            ),
+        ] {
+            let (outcome, _) = serve_supervisor_request(
+                &runtime,
+                &rollover,
+                &hello,
+                Some(&caller),
+                supervisor_request(action, "observe", payload),
+            );
+            assert_eq!(outcome, ResponseOutcome::Ok);
+        }
+
+        // Put the aggregate in a real durable escalation so the authorized
+        // resolve path is exercised through the dispatcher too.
+        let store = SupervisorStore::new(temp.path());
+        let id = serde_json::from_value(retry_body["supervisor_run_id"].clone()).unwrap();
+        let run = store.load(id).unwrap().unwrap();
+        store
+            .apply(
+                id,
+                run.state_revision,
+                &SupervisorEvent {
+                    sequence: run.state_revision + 1,
+                    event_id: OperationId::new(),
+                    causation_id: None,
+                    correlation_id: None,
+                    observed_at: Utc::now(),
+                    payload_digest: "test-escalation".into(),
+                    source: SupervisorEventSource::Admission,
+                    kind: SupervisorEventKind::Escalate {
+                        task_id: None,
+                        reason: "operator decision required".into(),
+                        safe_evidence: "fixture".into(),
+                        choices: vec!["resume".into()],
+                    },
+                },
+            )
+            .unwrap();
+        let escalated = store.load(id).unwrap().unwrap();
+        let actual_escalation = escalated.escalation.unwrap().escalation_id;
+        let (resolved, _) = serve_supervisor_request(
+            &runtime,
+            &rollover,
+            &hello,
+            Some(&caller),
+            supervisor_request(
+                SupervisorToolAction::ResolveEscalation,
+                "resolve",
+                serde_json::json!({
+                    "supervisor_run_id":run_id,
+                    "escalation_id":actual_escalation,
+                    "decision":EscalationDecision::Resume,
+                }),
+            ),
+        );
+        assert_eq!(resolved, ResponseOutcome::Ok);
+
+        // A different incarnation or missing/expired capability cannot observe
+        // or mutate the run. In particular a daemon restart loses the in-memory
+        // credential registry even though the durable aggregate is reloaded.
+        let foreign_hello = fence_client_hello(Vec::new());
+        let foreign_scope = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        for (candidate_hello, authenticated) in [
+            (&foreign_hello, Some(&caller)),
+            (&hello, Some(&foreign_scope)),
+        ] {
+            let before = store.load(id).unwrap().unwrap();
+            for (action, operation, payload) in [
+                (
+                    SupervisorToolAction::Start,
+                    "lost-response-operation",
+                    serde_json::json!({"root_task":"root"}),
+                ),
+                (
+                    SupervisorToolAction::Get,
+                    "foreign-get",
+                    serde_json::json!({"supervisor_run_id":run_id}),
+                ),
+                (
+                    SupervisorToolAction::Events,
+                    "foreign-events",
+                    serde_json::json!({"supervisor_run_id":run_id}),
+                ),
+                (
+                    SupervisorToolAction::Cancel,
+                    "foreign-cancel",
+                    serde_json::json!({"supervisor_run_id":run_id,"reason":"foreign"}),
+                ),
+                (
+                    SupervisorToolAction::ResolveEscalation,
+                    "foreign-resolve",
+                    serde_json::json!({
+                        "supervisor_run_id":run_id,
+                        "escalation_id":actual_escalation,
+                        "decision":EscalationDecision::Cancel,
+                    }),
+                ),
+            ] {
+                let (outcome, _) = serve_supervisor_request(
+                    &runtime,
+                    &rollover,
+                    candidate_hello,
+                    authenticated,
+                    supervisor_request(action, operation, payload),
+                );
+                assert!(matches!(outcome, ResponseOutcome::Error(_)));
+                assert_eq!(store.load(id).unwrap().unwrap(), before);
+            }
+            let (listed, body) = serve_supervisor_request(
+                &runtime,
+                &rollover,
+                candidate_hello,
+                authenticated,
+                supervisor_request(
+                    SupervisorToolAction::List,
+                    "foreign-list",
+                    serde_json::json!({}),
+                ),
+            );
+            assert_eq!(listed, ResponseOutcome::Ok);
+            assert_eq!(body["runs"].as_array().unwrap().len(), 0);
+            assert_eq!(store.load(id).unwrap().unwrap(), before);
+        }
+        let before_unauthenticated = store.load(id).unwrap().unwrap();
+        let (unauthenticated, _) = serve_supervisor_request(
+            &runtime,
+            &rollover,
+            &hello,
+            None,
+            supervisor_request(
+                SupervisorToolAction::Cancel,
+                "missing-capability",
+                serde_json::json!({"supervisor_run_id":run_id,"reason":"foreign"}),
+            ),
+        );
+        assert!(
+            matches!(unauthenticated, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
+        assert_eq!(store.load(id).unwrap().unwrap(), before_unauthenticated);
+        let restarted = Arc::new(Mutex::new(SupervisorRuntime::new(temp.path())));
+        let (after_restart, _) = serve_supervisor_request(
+            &restarted,
+            &ipc_generation(),
+            &hello,
+            None,
+            supervisor_request(
+                SupervisorToolAction::Get,
+                "restart",
+                serde_json::json!({"supervisor_run_id":run_id}),
+            ),
+        );
+        assert!(
+            matches!(after_restart, ResponseOutcome::Error(error) if error.code == ErrorCode::OwnershipUnknown)
+        );
+
+        let (cancelled, _) = serve_supervisor_request(
+            &runtime,
+            &rollover,
+            &hello,
+            Some(&caller),
+            supervisor_request(
+                SupervisorToolAction::Cancel,
+                "cancel",
+                serde_json::json!({"supervisor_run_id":run_id,"reason":"owner"}),
+            ),
+        );
+        assert_eq!(cancelled, ResponseOutcome::Ok);
     }
 
     fn fence_in(role: GenerationRole) -> GenerationFence {

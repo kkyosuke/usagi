@@ -1198,6 +1198,13 @@ output、argv、provider-native ID は含まない。
 daemon は connection ごとではなく一つの `SupervisorRuntime` を所有する。completion、failure、
 NoReport、起動時 reconcile、明示 wake は対象 run の有限な tick を起動し、idle 時に poll しない。
 
+supervisor の durable caller は socket の `ConnectionId` ではない。daemon 発行の live MCP credential から検証した
+root/session と Agent scope を、handshake の client incarnation と束縛した descriptor を semantic retry と全 ownership
+check が共用する。同じ client の再接続と process 内 generation rollover は authority を維持する。foreign incarnation、
+foreign scope、credential の欠落・偽造・失効は effect-zero の `ownership_unknown` となる。credential registry は
+process-local であるため daemon restart は明示的な失効境界であり、durable run と scheduler は継続する一方、control は
+新しい credential が同じ caller scope と client incarnation の組を証明するまで fail-closed になる。
+
 tick は dispatch run ID と supervisor provenance を照合して terminal fact を reducer event として保存する。
 child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、
 safe completion summary、DAG state、decision generation を含む wake reservation を durable に保存してから
