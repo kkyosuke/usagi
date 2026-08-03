@@ -1,13 +1,13 @@
 ---
 number: 638
 title: fix(tui): Switch の右ペインを cursor（hover）の session に追従させる
-status: in-progress
+status: done
 priority: high
 labels: [tui, ui, parity]
 dependson: []
 related: [308]
 created_at: 2026-08-03T21:14:53.518678+00:00
-updated_at: 2026-08-03T21:14:59.907589+00:00
+updated_at: 2026-08-03T21:21:32.600533+00:00
 ---
 
 ## 目的
