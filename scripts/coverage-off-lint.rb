@@ -74,7 +74,14 @@ def scan(root)
   errors = []
   records = source_files(root).flat_map do |file|
     relative = Pathname(file).relative_path_from(Pathname(root)).to_s
-    lines = File.readlines(file, chomp: true)
+    lines = File.readlines(file, encoding: Encoding::UTF_8, chomp: true).each_with_index.map do |line, index|
+      if line.valid_encoding?
+        line
+      else
+        errors << "#{relative}:#{index + 1}: invalid UTF-8"
+        line.scrub
+      end
+    end
     lines.each_index.map do |index|
       line = lines[index]
       next unless line.match?(ATTRIBUTE)
@@ -155,7 +162,15 @@ end
 def validate(options, records, scan_errors)
   errors = scan_errors.dup
   manifest_path = File.expand_path(options.manifest, options.root)
-  manifest = JSON.parse(File.read(manifest_path))
+  manifest_source = File.read(manifest_path, encoding: Encoding::UTF_8)
+  unless manifest_source.valid_encoding?
+    invalid_lines = []
+    manifest_source.each_line.with_index(1) do |line, line_number|
+      invalid_lines << "#{options.manifest}:#{line_number}: invalid UTF-8" unless line.valid_encoding?
+    end
+    return errors.concat(invalid_lines)
+  end
+  manifest = JSON.parse(manifest_source)
   errors << "#{options.manifest}: version must be 1" unless manifest["version"] == 1
   entries = manifest["entries"]
   unless entries.is_a?(Array)
