@@ -146,7 +146,7 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、daemon-owned worker PTY と dispatch store/inbox を操作する |
-| `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | IPC connection から daemon が導出した caller provenance の範囲で、durable supervisor aggregate を作成・観測・制御する |
+| `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
@@ -220,8 +220,13 @@ replay される。
 
 `supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
 `idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な
-projection である。cancel と escalation resolution は run 作成時に daemon が記録した caller provenance と
-一致する IPC connection からだけ受理する。daemon は起動時と Agent completion 時に共有
+projection である。caller provenance は daemon 発行の live MCP credential が解決する root/session と Agent、
+および handshake で検証済みの client incarnation の組である。socket の `ConnectionId` は含めないため、同じ MCP
+process の再接続と同一 daemon process 内の generation rollover は同じ operation/run と control authority へ収束する。
+client が宣言した incarnation 単独、別 incarnation、別 root/session/Agent、未知または失効した credential は
+`ownership_unknown` となり、run と event journal を変更しない。credential registry は process-local なので daemon
+restart で明示的に失効し、restart 後は新しい credential が同じ caller scope と client incarnation の組を再び証明するまで既存 run を制御できない。
+cancel と escalation resolution は run 作成時に daemon が記録したこの caller provenance と一致する request だけを受理する。daemon は起動時と Agent completion 時に共有
 `SupervisorRuntime` を tick し、dispatch の terminal fact を aggregate へ反映する。
 
 issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に cwd と実時計を

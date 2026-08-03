@@ -1,13 +1,13 @@
 ---
 number: 633
 title: fix(supervisor): reconnect-stable caller provenance で durable control を維持する
-status: todo
+status: in-progress
 priority: high
 labels: [review, security, daemon, mcp, ipc, supervisor, reliability]
 dependson: []
 related: [326, 328, 521]
 created_at: 2026-08-02T23:13:59.885570+00:00
-updated_at: 2026-08-02T23:13:59.885570+00:00
+updated_at: 2026-08-03T01:58:37.438425+00:00
 ---
 
 ## Finding（high / trust boundary）

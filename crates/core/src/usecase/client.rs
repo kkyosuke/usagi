@@ -125,6 +125,11 @@ pub enum DaemonRequest {
         action: SupervisorToolAction,
         operation_id: String,
         payload: Value,
+        /// Opaque daemon-minted capability used to authenticate the durable
+        /// caller scope. The daemon combines the resolved scope with the
+        /// handshake client incarnation; neither value is sufficient alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
     },
 }
 
@@ -2793,6 +2798,7 @@ mod deadline_and_retry_tests {
                 action: SupervisorToolAction::List,
                 operation_id: String::new(),
                 payload: session_payload(),
+                caller_context: None,
             },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::List,
@@ -2825,6 +2831,7 @@ mod deadline_and_retry_tests {
                 action: SupervisorToolAction::Start,
                 operation_id: "op".into(),
                 payload: session_payload(),
+                caller_context: None,
             },
             DaemonRequest::Agent {
                 operation_id: "op".into(),
@@ -2859,6 +2866,7 @@ mod deadline_and_retry_tests {
                 action: SupervisorToolAction::Cancel,
                 operation_id: "op".into(),
                 payload: session_payload(),
+                caller_context: None,
             },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::Resolve,
