@@ -368,14 +368,30 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     assert_eq!(actual, include_str!("fixtures/home_cjk.golden").trim_end());
 
     // Keep the golden layout stable while also fixing its ANSI brightness
-    // contract: the same inactive pane is dim in Switch and active in Closeup.
+    // contract: the pane is dim whenever it owns no input — in Switch, and in
+    // Closeup until a live terminal viewport is focused — and active once it does.
     let switch_frame = render_home(8, 40, &switch_projection);
     let switch_right = switch_frame[2].split_once('│').expect("pane divider").1;
     let closeup_right = lines[2].split_once('│').expect("pane divider").1;
     assert!(switch_right.contains("\u{1b}[2m"));
     assert!(switch_right.contains("\u{1b}[0m"));
-    assert!(closeup_right.contains("\u{1b}[1;36m"));
-    assert!(!closeup_right.starts_with("\u{1b}[2m"));
+    assert!(closeup_right.contains("\u{1b}[2m"));
+    let live_frame = render_home(
+        8,
+        40,
+        &projection
+            .clone()
+            .with_terminal_view(Some(TerminalViewProjection {
+                total_rows: 1,
+                rows: vec!["live row".to_owned()],
+                row_offset: 0,
+                scroll: 0,
+                feedback: None,
+            })),
+    );
+    let live_right = live_frame[2].split_once('│').expect("pane divider").1;
+    assert!(live_right.contains("\u{1b}[1;36m"));
+    assert!(!live_right.starts_with("\u{1b}[2m"));
 
     let tiny = render_home(1, 1, &projection);
     assert_eq!(tiny.len(), 1);
