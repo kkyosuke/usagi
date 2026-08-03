@@ -30,15 +30,20 @@ daemon に接続できなければ stdio serve ループを開始しない（[2.
 MCP 入口の文法・usage error・終了 status は
 [2. アーキテクチャの process argv contract](02-architecture.md#process-argv-contract) を正本とする。
 
-daemon-provisioned MCP child は private caller credential を IPC に forward する。dispatch/agent tool と `user_decision_*` は
-この credential を持つ live daemon Agent runtime だけが利用でき、手動の `usagi mcp` や credential の無い
-MCP caller は `ownership_unknown` で fail-closed となる。caller identity、session 名、cwd、path を
-tool payload や環境から補完して認可することはない。
+daemon-provisioned MCP child は起動直後の同じ IPC connection で一度だけ caller slot を claim する。daemon は
+Unix peer PID、親 PID、process group を kernel から取得し、live Agent provider の直系 child かつ同じ process group で、
+まだ別 PID に claim されていない場合だけ process-local credential を返す。credential は MCP child の memory と
+daemon の memory にだけ置き、Agent の environment / argv / terminal stream には渡さない。以後の
+dispatch/agent tool と `user_decision_*` は credential に加えて claim 済み peer PID、live runtime、generation、
+dispatch binding を照合する。手動の `usagi mcp`、sibling PID、偽造 token、exit/restart 後の caller は
+`ownership_unknown` で effect 0 のまま拒否する。caller identity、session 名、cwd、path を tool payload や
+environment から補完して認可することはない。
 
-Codex を daemon が起動するときは、注入した `usagi` stdio server だけにこの credential と `USAGI_HOME` を
-`env_vars` で forward し、server の tool approval mode を `approve` にして各 MCP call の対話確認を省略する。
+Codex を daemon が起動するときは、注入した `usagi` stdio server に `USAGI_HOME` / runtime mode / workspace root
+だけを `env_vars` で forward し、credential 名は含めない。server の tool approval mode は `approve` にして
+各 MCP call の対話確認を省略する。
 認可を省略するものではなく、daemon は credential、live runtime、dispatch
-binding を引き続き照合するため、credential の欠落・偽造・失効は state を変更せず拒否する。
+binding と claimed peer PID を引き続き照合するため、credential の欠落・偽造・失効は state を変更せず拒否する。
 daemon-provisioned MCP child には同時に daemon が解決した workspace root を一時的に渡す。session worktree の
 cwd から起動した server も、この trusted root にある Workspace 設定を Global 設定へ重ねて issue / memory の
 tool availability を解決する。同じ trusted root は daemon 接続時に申告する workspace にもなる

@@ -73,9 +73,10 @@ mod action_io {
     #![coverage(off)]
 
     use super::{
-        Action, AppInfo, ClientPolicy, DaemonClient, EntryScreen, ExitCode, LauncherPolicyInputs,
-        RunOutcome, TuiRequest, Write, claude_sandbox, daemon, execute_self_update, exit_code,
-        guard_workspace, tui, write_client_error, write_daemon_outcome,
+        Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
+        LauncherPolicyInputs, RunOutcome, TuiRequest, Write, claude_sandbox, daemon,
+        execute_self_update, exit_code, guard_workspace, tui, write_client_error,
+        write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)]
@@ -116,13 +117,37 @@ mod action_io {
             (Action::LaunchMcp, RunOutcome::LaunchMcp) => {
                 let stdin = std::io::stdin();
                 match daemon::policy_client(ClientPolicy::mcp()) {
-                    Ok(mut client) => usagi_cli::mcp::serve_with_client(
-                        stdin.lock(),
-                        out,
-                        info.version,
-                        &mut client,
-                    )
-                    .map(|()| ExitCode::SUCCESS),
+                    Ok(mut client) => {
+                        let credential = match client
+                            .request(usagi_core::usecase::client::DaemonRequest::McpChildClaim)
+                        {
+                            Ok(DaemonReply::Ok(body)) => body
+                                .get("credential")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned),
+                            _ => None,
+                        };
+                        if let Some(credential) = credential {
+                            usagi_cli::mcp::serve_with_client_and_caller(
+                                stdin.lock(),
+                                out,
+                                info.version,
+                                &mut client,
+                                &credential,
+                            )
+                        } else {
+                            // Manual MCP remains useful for unprivileged store and
+                            // observation tools; caller-scoped mutation stays absent.
+                            usagi_cli::mcp::serve_with_client(
+                                stdin.lock(),
+                                out,
+                                info.version,
+                                &mut client,
+                            )
+                        }
+                        .map(|()| ExitCode::SUCCESS)
+                    }
                     Err(error) => {
                         writeln!(err, "daemon unavailable: {error}")?;
                         Ok(ExitCode::FAILURE)
@@ -132,9 +157,8 @@ mod action_io {
             (Action::CaptureCodexSession, RunOutcome::CaptureCodexSession) => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
-                let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
                 let request = match usagi_cli::cli::hooks::codex_session_capture::request_from_hook(
-                    &mut input, credential,
+                    &mut input, None,
                 ) {
                     Ok(request) => request,
                     Err(error) => {
@@ -159,9 +183,8 @@ mod action_io {
             (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase }) => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
-                let credential = std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok();
                 let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
-                    &mut input, &phase, credential,
+                    &mut input, &phase, None,
                 ) {
                     Ok(request) => request,
                     Err(error) => {

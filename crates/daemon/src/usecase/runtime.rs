@@ -73,7 +73,7 @@ pub struct DurableRuntimeRecord {
     #[serde(default)]
     pub outcome: DurableOperationOutcome,
     /// Secret-free provenance only. The minted credential value exists solely
-    /// in the live Agent owner and spawn provision.
+    /// in the live Agent owner and claimed MCP child process.
     #[serde(default)]
     pub credential_provenance: Option<CredentialProvenance>,
 }
@@ -342,13 +342,16 @@ impl SpawnProvision {
                 .iter()
                 .map(|(name, value)| (name.as_str().to_owned(), value.clone())),
         );
+        // Reserved authentication material is never part of an Agent spawn.
+        // This also defeats stale public profile or adapter configuration that
+        // attempts to recreate the historical ambient bearer channel.
+        environment.remove("USAGI_MCP_CALLER_CREDENTIAL");
         environment
     }
 
     /// Adds a daemon-issued ephemeral environment value after adapter
-    /// provisioning. This is the highest-priority source: it replaces an
-    /// adapter value with the same name, while adapter values replace public
-    /// profile values when the process environment is composed.
+    /// provisioning. Caller credentials deliberately do not use this channel;
+    /// it remains for non-secret launcher policy selected by the daemon.
     pub fn insert_daemon_environment(
         &mut self,
         name: usagi_core::domain::agent::EnvironmentVariableName,
@@ -735,19 +738,13 @@ impl RuntimeCoordinator {
         self.retention
             .reserve(&runtime.terminal)
             .map_err(RuntimeError::RetentionExhausted)?;
-        let mut resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
+        let resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
         let credential_provenance = mcp_credential
             .as_ref()
             .map(|_| CredentialProvenance::DaemonMintedEphemeral);
-        if let Some(credential) = mcp_credential {
-            let name = usagi_core::domain::agent::EnvironmentVariableName::new(
-                "USAGI_MCP_CALLER_CREDENTIAL",
-            )
-            .expect("literal environment variable name is valid");
-            resolved
-                .provision
-                .insert_daemon_environment(name, credential);
-        }
+        // The bearer stays daemon-owned. The canonical MCP child claims it over
+        // its OS-authenticated IPC connection after the Agent process exists.
+        drop(mcp_credential);
         let launch = resolved.snapshot;
         let provider_resume = resolved.provider_resume;
         let mut durable_request = request.clone();

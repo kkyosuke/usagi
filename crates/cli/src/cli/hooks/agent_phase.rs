@@ -46,7 +46,6 @@ pub enum PhaseInputError {
     UnknownPhase,
     InvalidPayload,
     WrongEvent,
-    MissingCredential,
 }
 
 impl std::fmt::Display for PhaseInputError {
@@ -55,7 +54,6 @@ impl std::fmt::Display for PhaseInputError {
             Self::UnknownPhase => "unknown agent lifecycle phase",
             Self::InvalidPayload => "invalid agent lifecycle hook payload",
             Self::WrongEvent => "unexpected agent lifecycle hook event for this phase",
-            Self::MissingCredential => "agent runtime credential is unavailable",
         };
         formatter.write_str(message)
     }
@@ -71,7 +69,7 @@ impl std::error::Error for PhaseInputError {}
 ///
 /// Returns a non-sensitive error for an unknown phase token, malformed JSON, an
 /// event which usagi does not wire to that phase, or a missing daemon-issued
-/// runtime credential.
+/// runtime credential. Authentication is derived from the hook process at the daemon.
 pub fn request_from_hook(
     reader: &mut dyn Read,
     phase: &str,
@@ -85,12 +83,11 @@ pub fn request_from_hook(
     if ReportedPhase::for_hook_event(&input.hook_event_name) != Some(phase) {
         return Err(PhaseInputError::WrongEvent);
     }
-    let credential = credential
-        .filter(|value| !value.is_empty())
-        .ok_or(PhaseInputError::MissingCredential)?;
     Ok(DaemonRequest::AgentPhaseReport {
         phase,
-        caller_context: McpCallerContext { credential },
+        caller_context: credential
+            .filter(|value| !value.is_empty())
+            .map(|credential| McpCallerContext { credential }),
     })
 }
 
@@ -151,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_phase_malformed_wrong_event_and_missing_credential_fail_closed() {
+    fn unknown_phase_malformed_and_wrong_event_fail_closed() {
         for (payload, phase, credential, expected) in [
             (
                 br#"{"hook_event_name":"Stop"}"#.as_slice(),
@@ -190,23 +187,21 @@ mod tests {
                 Some("runtime-secret".to_owned()),
                 PhaseInputError::WrongEvent,
             ),
-            (
-                br#"{"hook_event_name":"Stop"}"#.as_slice(),
-                "ended",
-                None,
-                PhaseInputError::MissingCredential,
-            ),
-            (
-                br#"{"hook_event_name":"Stop"}"#.as_slice(),
-                "ended",
-                Some(String::new()),
-                PhaseInputError::MissingCredential,
-            ),
         ] {
             let error =
                 request_from_hook(&mut Cursor::new(payload), phase, credential).unwrap_err();
             assert_eq!(error, expected);
             assert!(!error.to_string().contains("runtime-secret"));
         }
+        let request = request_from_hook(
+            &mut Cursor::new(br#"{"hook_event_name":"Stop"}"#),
+            "ended",
+            None,
+        )
+        .unwrap();
+        assert!(
+            serde_json::to_value(request).unwrap()["caller_context"].is_null(),
+            "hook credentials must not be inherited through the Agent environment"
+        );
     }
 }

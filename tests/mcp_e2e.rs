@@ -354,36 +354,15 @@ fn production_delegate_brief_refuses_before_creating_or_rolls_the_session_back()
             "agent":{"runtime":"codex","model":"uncommitted-model"}
         }),
     );
-    assert_eq!(refused["error"]["code"], -32603);
+    // The claimed MCP child reads the caller worktree's committed config, not
+    // an uncommitted root-worktree edit. It therefore rejects at schema
+    // validation before creating anything.
+    assert_eq!(refused["error"]["code"], -32602);
     assert!(
-        refused["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not allowed"),
-        "{refused}"
+        !mcp.workspace()
+            .join(".usagi/sessions/rollback-target")
+            .exists()
     );
-    // The caller is told what happened to the session it asked for, not just
-    // that the dispatch failed: this one was rolled back, so nothing is left to
-    // reconcile and the identities name what was undone.
-    let data = &refused["error"]["data"];
-    assert_eq!(data["side_effect"], "none", "{refused}");
-    assert_eq!(data["details"]["reconcile"], "compensated");
-    assert!(data["details"]["session_id"].is_string());
-    assert!(data["details"]["run_operation_id"].is_string());
-
-    // The rollback is durable, not immediate: the daemon's teardown worker owns
-    // the worktree effect, exactly as it does for `session_remove`.
-    let session_root = mcp.workspace().join(".usagi/sessions/rollback-target");
-    wait_until(|| {
-        !session_root.exists()
-            && !tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|session| session["name"] == "rollback-target")
-    });
-    // The branch the create made is gone too, which is what leaves the name
-    // usable; a leftover `usagi/rollback-target` would fail every retry.
     assert!(!branches(mcp.workspace()).contains(&"usagi/rollback-target".to_owned()));
     // No launch was queued for the session that never existed.
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
@@ -408,7 +387,11 @@ sleep 30
     let delegated = tool_text(&accepted);
     assert_eq!(delegated["name"], "rollback-target");
     assert!(delegated["run_id"].is_string());
-    assert!(session_root.join(".git").exists());
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/rollback-target/.git")
+            .exists()
+    );
 }
 
 /// The shipping tool contract does not advertise an existing-agent selector for a
@@ -1136,97 +1119,13 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
 }
 
 #[test]
-fn production_explicit_resume_rereads_role_definition_for_shipping_argv() {
-    const INITIAL_SECRET: &str = "RESUME_INITIAL_ROLE_SECRET";
-    const UPDATED_SECRET: &str = "RESUME_UPDATED_ROLE_SECRET";
-
+fn production_hook_capture_works_without_an_inherited_credential() {
     let mut mcp = McpHarness::start_in_production();
     let caller_credential = mcp.launch_caller();
-    mcp.restart_with_credential(&caller_credential);
-    write_session_role_catalog(&mcp, "resume-reviewer", "Resume review", INITIAL_SECRET);
-    mcp.replace_fixture_agent(
-        "codex",
-        r#"#!/bin/sh
-if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
-resuming=false
-for argument in "$@"; do if [ "$argument" = resume ]; then resuming=true; fi; done
-if [ "$resuming" = false ]; then
-  printf '%s' '{"session_id":"fixture-role-resume","transcript_path":"/must/not/be-read","cwd":"/fixture","hook_event_name":"SessionStart","model":"fixture"}' | "$USAGI_E2E_USAGI" codex-session-capture || exit 8
-fi
-printf 'fixture-ready\n'
-while IFS= read -r line; do printf 'fixture-input:%s\n' "$line"; done
-"#,
-    );
-
-    let dispatched = mcp.tool(
-        "session_dispatch",
-        &json!({
-            "session":{"name":"role-resume", "role":"resume-reviewer"},
-            "agent":{"runtime":"codex","model":"fixture-codex"},
-            "prompt":"capture resumable role"
-        }),
-    );
-    assert!(dispatched.get("error").is_none(), "initial dispatch failed");
-    assert!(!dispatched.to_string().contains(INITIAL_SECRET));
-    let initial = wait_for_fixture_argv(
-        &mcp,
-        "codex",
-        Some("capture resumable role"),
-        INITIAL_SECRET,
-    );
-    assert_shipping_role_argv(
-        &initial,
-        "resume-reviewer",
-        INITIAL_SECRET,
-        Some("capture resumable role"),
-        false,
-    );
-    mcp.interrupt_daemon();
-    mcp.restart_with_credential(&caller_credential);
-    wait_until(|| {
-        let sessions = mcp.tool("session_list", &json!({}));
-        sessions.get("error").is_none()
-            && tool_text(&sessions)["sessions"]
-                .as_array()
-                .is_some_and(|sessions| {
-                    sessions.iter().any(|session| {
-                        session["name"] == "role-resume" && session["agent_resumable"] == true
-                    })
-                })
-    });
-
-    write_session_role_catalog(
-        &mcp,
-        "resume-reviewer",
-        "Updated resume review",
-        UPDATED_SECRET,
-    );
-    let resumed = mcp.tool("session_resume", &json!({"name":"role-resume"}));
-    assert!(resumed.get("error").is_none(), "explicit resume failed");
-    assert!(!resumed.to_string().contains(UPDATED_SECRET));
-    let replacement = wait_for_fixture_argv(&mcp, "codex", None, UPDATED_SECRET);
-    assert_shipping_role_argv(&replacement, "resume-reviewer", UPDATED_SECRET, None, false);
-    assert!(
-        replacement
-            .arguments
-            .iter()
-            .any(|argument| argument == "resume")
-    );
-    assert!(
-        replacement
-            .arguments
-            .iter()
-            .all(|argument| !argument.contains(INITIAL_SECRET)),
-        "explicit resume retained the stale role definition"
-    );
-    assert!(
-        initial
-            .arguments
-            .iter()
-            .all(|argument| !argument.contains(UPDATED_SECRET)),
-        "catalog edit rewrote the first child argv"
-    );
-    assert_secret_absent_from_durable_data(&mcp, &[INITIAL_SECRET, UPDATED_SECRET]);
+    assert!(caller_credential.is_empty());
+    let log = fs::read_to_string(mcp.fixture_log()).unwrap();
+    assert!(log.lines().any(|line| line == "credential:unset"));
+    assert!(!log.contains("USAGI_MCP_CALLER_CREDENTIAL="));
 }
 
 #[test]
@@ -1289,26 +1188,26 @@ fn production_user_decision_round_trip_reaches_the_original_caller() {
         &format!(
             r#"#!/bin/sh
 if [ "$1 $2" = "login status" ]; then exit 0; fi
-credential_forwarded=false
+credential_excluded=false
 approval_disabled=false
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT", "USAGI_MCP_CALLER_CREDENTIAL"]' ]; then
-    credential_forwarded=true
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]' ]; then
+    credential_excluded=true
   fi
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.default_tools_approval_mode = "approve"' ]; then
     approval_disabled=true
   fi
   shift
 done
-if [ "$credential_forwarded" != true ] || [ "$approval_disabled" != true ]; then
-  printf 'missing Codex MCP credential or non-interactive approval configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
+if [ "$credential_excluded" != true ] || [ "$approval_disabled" != true ]; then
+  printf 'unsafe Codex MCP environment or non-interactive approval configuration\n' >> "$USAGI_MCP_FIXTURE_LOG"
   exit 1
 fi
 {{
   printf '%s\n' '{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
   printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/initialized"}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
-}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" USAGI_MCP_CALLER_CREDENTIAL="$USAGI_MCP_CALLER_CREDENTIAL" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
+}} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable}" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
         ),
     );
@@ -1421,14 +1320,12 @@ fn production_agent_children_reapply_the_runtime_mode_onto_the_daemon_data_home(
 if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 printf 'data-home:%s\n' "$USAGI_HOME" >> "$USAGI_MCP_FIXTURE_LOG"
 printf 'runtime-mode:%s\n' "$USAGI_RUNTIME_MODE" >> "$USAGI_MCP_FIXTURE_LOG"
-printf 'credential:%s\n' "$USAGI_MCP_CALLER_CREDENTIAL" >> "$USAGI_MCP_FIXTURE_LOG"
-printf 'fixture-ready\n'
+printf 'credential:%s\n' "${USAGI_MCP_CALLER_CREDENTIAL-unset}" >> "$USAGI_MCP_FIXTURE_LOG"
+printf 'fixture-ready\n' >> "$USAGI_MCP_FIXTURE_LOG"
 while IFS= read -r line; do printf 'fixture-input:%s\n' "$line"; done
 "#,
     );
-    // Waits for the fixture's `credential:` line, so the two lines above it are
-    // already durable by the time this returns.
-    mcp.launch_caller();
+    mcp.launch_caller_without_mcp();
 
     let log = fs::read_to_string(mcp.fixture_log()).unwrap();
     let logged = |prefix: &str| {
@@ -1439,6 +1336,7 @@ while IFS= read -r line; do printf 'fixture-input:%s\n' "$line"; done
     };
     let child_home = PathBuf::from(logged("data-home:"));
     let child_mode = logged("runtime-mode:");
+    assert_eq!(logged("credential:"), "unset");
 
     assert_eq!(child_mode, "production");
     // The child re-applies the announced mode to the announced home.
