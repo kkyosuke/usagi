@@ -383,6 +383,11 @@ pending decision の notice badge、button は 1 つの header layout が表示�
 そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
 と hit-test は同じ terminal cell を指す。
 
+button の強調は mode toggle と同じ「前面にある面がアクセント」の対比に従う。drawer が閉じているときは
+選択されていない mode chip と同じ dim で描き、Switch / Closeup のどちらでも accent を持たない。drawer を開いた
+frame だけ accent + reverse になり、前面の面が一意に読める。狭幅で mode toggle を落として button だけを
+clip する場合も、この対比は変わらない。
+
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を

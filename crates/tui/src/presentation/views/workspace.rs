@@ -808,6 +808,11 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
         Style::new().dim().paint(" > "),
         Role::Success.style().bold().paint(&home.workspace_name),
     );
+    // The drawer button reads as one more entry in the same right-hand strip as
+    // the mode toggle, so it follows the toggle's active/inactive contrast: the
+    // accent belongs to whatever is currently in front. A closed drawer is dim
+    // like an unselected mode; an open one takes the accent plus reverse so the
+    // frontmost surface is unambiguous.
     let director = if home.director_drawer.is_some() {
         Role::Accent
             .style()
@@ -815,9 +820,8 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .reverse()
             .paint(&format!("[ {DIRECTOR_ICON} director ]"))
     } else {
-        Role::Accent
-            .style()
-            .bold()
+        Style::new()
+            .dim()
             .paint(&format!("[ {DIRECTOR_ICON} director ]"))
     };
     let notice = (!home.unread_decision_ids.is_empty())
@@ -2066,6 +2070,40 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn home_header_director_button_is_dim_until_its_drawer_is_frontmost() {
+        // The accent in the right-hand strip marks what is in front. A closed
+        // drawer must read like an unselected mode chip (dim) in both Home
+        // modes, so it cannot compete with the active mode for attention.
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let dim_button = Style::new()
+            .dim()
+            .paint(&format!("[ {DIRECTOR_ICON} director ]"));
+        let accent_button = Role::Accent
+            .style()
+            .bold()
+            .reverse()
+            .paint(&format!("[ {DIRECTOR_ICON} director ]"));
+
+        let mut closed = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[]);
+        assert!(home_header_layout(80, &closed).line.ends_with(&dim_button));
+        closed.mode = HomeMode::Closeup;
+        assert!(home_header_layout(80, &closed).line.ends_with(&dim_button));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let mut open = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[]);
+        assert!(home_header_layout(80, &open).line.ends_with(&accent_button));
+        open.mode = HomeMode::Closeup;
+        assert!(home_header_layout(80, &open).line.ends_with(&accent_button));
+
+        // The clipped narrow-width fallback drops the mode toggle but keeps the
+        // same closed-state dimming, so the button never brightens as it shrinks.
+        let clipped = home_header_layout(10, &closed).line;
+        assert!(clipped.starts_with("\u{1b}[2m"));
+        assert!(!clipped.contains("36"));
     }
 
     #[test]
