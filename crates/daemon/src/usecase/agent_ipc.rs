@@ -154,6 +154,7 @@ struct AgentOperation {
 struct McpCaller {
     runtime: AgentRuntimeRef,
     operation: OperationId,
+    child_pid: Option<u32>,
 }
 
 /// The routing decision for a terminal request that addresses a `TerminalRef`.
@@ -476,8 +477,82 @@ impl AgentRuntime {
             .map(|_| caller.operation)
     }
 
+    /// Claims the one MCP child slot whose OS parent and process group are the
+    /// live Agent process. The bearer crosses only this authenticated IPC
+    /// response and is thereafter fenced to the claiming PID.
+    pub fn claim_mcp_child(
+        &mut self,
+        child_pid: u32,
+        parent_pid: u32,
+        process_group: u32,
+    ) -> Result<String, ProtocolError> {
+        let mut matches = self.mcp_callers.iter_mut().filter(|(_, caller)| {
+            caller.child_pid.is_none()
+                && self
+                    .coordinator
+                    .record_for(&caller.runtime)
+                    .is_ok_and(|record| {
+                        record.state == super::runtime::RuntimeState::Running
+                            && record.process.as_ref().is_some_and(|process| {
+                                process.pid == parent_pid && process.process_group == process_group
+                            })
+                    })
+        });
+        let Some((credential, caller)) = matches.next() else {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "MCP child process does not belong to a live Agent runtime",
+            ));
+        };
+        if matches.next().is_some() {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "MCP child process ownership is ambiguous",
+            ));
+        }
+        caller.child_pid = Some(child_pid);
+        Ok(credential.clone())
+    }
+
+    #[must_use]
+    pub fn authenticates_mcp_child(&self, credential: &str, child_pid: u32) -> bool {
+        self.mcp_callers
+            .get(credential)
+            .is_some_and(|caller| caller.child_pid == Some(child_pid))
+            && self.mcp_caller(credential).is_some()
+    }
+
+    /// Releases only the credential slot owned by the disconnecting MCP PID.
+    /// A sibling cannot clear another live child's binding.
+    pub fn release_mcp_child(&mut self, child_pid: u32) {
+        for caller in self.mcp_callers.values_mut() {
+            if caller.child_pid == Some(child_pid) {
+                caller.child_pid = None;
+            }
+        }
+    }
+
+    /// Resolves a short-lived provider hook from its OS process group. Hooks
+    /// receive no bearer and cannot acquire the MCP child's dispatch scope.
+    #[must_use]
+    pub fn hook_credential(&self, process_group: u32) -> Option<&str> {
+        let mut matches = self.mcp_callers.iter().filter(|(_, caller)| {
+            self.coordinator
+                .record_for(&caller.runtime)
+                .is_ok_and(|record| {
+                    record.state == super::runtime::RuntimeState::Running
+                        && record
+                            .process
+                            .as_ref()
+                            .is_some_and(|process| process.process_group == process_group)
+                })
+        });
+        let (credential, _) = matches.next()?;
+        matches.next().is_none().then_some(credential.as_str())
+    }
+
     /// Resolves the durable dispatch identity authenticated by an MCP child.
-    /// The credential is daemon-minted process provision; no client supplied
+    /// The credential is daemon-minted after an OS-authenticated child claim; no client supplied
     /// agent or session name participates in this lookup.
     #[must_use]
     pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
@@ -531,7 +606,7 @@ impl AgentRuntime {
     }
 
     /// Accepts one agent lifecycle phase report bound to a live runtime by the
-    /// daemon-minted credential in that process's provision.
+    /// daemon-owned runtime identity resolved from the reporting process group.
     ///
     /// The caller names neither a runtime, session, worktree, nor path: the
     /// credential is the only selector, and an unknown or no longer live
@@ -1280,6 +1355,7 @@ impl AgentRuntime {
             McpCaller {
                 runtime: authorization.runtime.clone(),
                 operation,
+                child_pid: None,
             },
         );
         if let Err(error) = self.orchestrator.launch_with_semantic(
@@ -1496,6 +1572,7 @@ impl AgentRuntime {
             McpCaller {
                 runtime: authorization.runtime.clone(),
                 operation,
+                child_pid: None,
             },
         );
         if let Err(error) = self.orchestrator.resume_with_semantic(
@@ -1677,6 +1754,7 @@ impl AgentRuntime {
             McpCaller {
                 runtime: authorization.runtime.clone(),
                 operation,
+                child_pid: None,
             },
         );
         if let Err(error) = self.orchestrator.launch_with_semantic(
@@ -5115,6 +5193,7 @@ mod tests {
             McpCaller {
                 runtime: runtime_ref.clone(),
                 operation: fence.operation_id,
+                child_pid: None,
             },
         );
         assert_eq!(
@@ -5315,6 +5394,34 @@ mod tests {
             runtime.mcp_caller(&credential),
             Some(OperationId::parse(&operation).unwrap())
         );
+        assert!(!runtime.authenticates_mcp_child(&credential, 9001));
+        assert!(runtime.claim_mcp_child(9001, 9998, 4321).is_err());
+        let ambiguous = runtime.mcp_callers[&credential].clone();
+        runtime
+            .mcp_callers
+            .insert("ambiguous-runtime".into(), ambiguous);
+        assert_eq!(
+            runtime.claim_mcp_child(9001, 4321, 4321).unwrap_err().code,
+            ErrorCode::OwnershipUnknown
+        );
+        runtime.mcp_callers.remove("ambiguous-runtime");
+        assert_eq!(
+            runtime.claim_mcp_child(9001, 4321, 4321).unwrap(),
+            credential
+        );
+        assert!(runtime.authenticates_mcp_child(&credential, 9001));
+        assert!(!runtime.authenticates_mcp_child(&credential, 9002));
+        assert!(runtime.claim_mcp_child(9002, 4321, 4321).is_err());
+        assert!(runtime.claim_mcp_child(9001, 4321, 9999).is_err());
+        runtime.release_mcp_child(9002);
+        assert!(runtime.authenticates_mcp_child(&credential, 9001));
+        runtime.release_mcp_child(9001);
+        assert!(!runtime.authenticates_mcp_child(&credential, 9001));
+        assert_eq!(
+            runtime.claim_mcp_child(9003, 4321, 4321).unwrap(),
+            credential
+        );
+        assert!(runtime.authenticates_mcp_child(&credential, 9003));
         assert_eq!(runtime.mcp_caller("forged"), None);
         let run_id = OperationId::parse(&operation).unwrap();
         assert_eq!(
@@ -5340,6 +5447,7 @@ mod tests {
         );
         runtime.exit(&admission.terminal, 0).unwrap();
         assert_eq!(runtime.mcp_caller(&credential), None);
+        assert!(!runtime.authenticates_mcp_child(&credential, 9003));
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::NoReport);

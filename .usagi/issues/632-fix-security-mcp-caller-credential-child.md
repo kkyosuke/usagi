@@ -1,13 +1,13 @@
 ---
 number: 632
 title: fix(security): MCP caller credential を専用 child にだけ渡す
-status: todo
+status: done
 priority: high
 labels: [review, security, daemon, mcp, agent, credential]
 dependson: []
 related: [383, 457, 629, 630]
 created_at: 2026-08-02T23:13:59.797212+00:00
-updated_at: 2026-08-02T23:14:21.805625+00:00
+updated_at: 2026-08-03T02:38:52.453607+00:00
 ---
 
 ## Finding（P0 security）

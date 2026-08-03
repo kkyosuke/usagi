@@ -42,6 +42,7 @@ enum ServerState {
 struct ServerCapabilities<'a> {
     runtime_models: &'a RuntimeModelSnapshot,
     tools: ToolAvailability,
+    caller_credential: Option<&'a str>,
 }
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
@@ -92,7 +93,56 @@ pub fn serve_with_client(
     let locator = PathExecutableLocator;
     let config = WorkspaceAgentConfig::read(&workspace);
     let snapshot = RuntimeModelSnapshot::capture(&config, &locator);
-    serve_with_client_and_features(input, out, version, client, &snapshot, availability)
+    serve_with_client_and_features_and_caller(
+        input,
+        out,
+        version,
+        client,
+        &snapshot,
+        availability,
+        None,
+    )
+}
+
+/// Serves one daemon-claimed MCP child. The credential is held only in this
+/// process's memory and is never read from or copied into its environment.
+///
+/// # Errors
+///
+/// Returns an I/O error when settings cannot be loaded or the MCP stream
+/// cannot be served.
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
+pub fn serve_with_client_and_caller(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+    caller_credential: &str,
+) -> io::Result<()> {
+    let workspace = std::env::current_dir()?;
+    let settings_root = std::env::var_os(WORKSPACE_ROOT_ENV)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| workspace.clone(), PathBuf::from);
+    let global = Storage::open_default()
+        .and_then(|storage| storage.load_settings())
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let local = WorkspaceSettingsStore::new(settings_root)
+        .load()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let availability = ToolAvailability::from(&global.with_local(&local));
+    let snapshot = RuntimeModelSnapshot::capture(
+        &WorkspaceAgentConfig::read(&workspace),
+        &PathExecutableLocator,
+    );
+    serve_with_client_and_features_and_caller(
+        input,
+        out,
+        version,
+        client,
+        &snapshot,
+        availability,
+        Some(caller_credential),
+    )
 }
 
 /// As [`serve_with_client`], with a pre-captured runtime/model snapshot.
@@ -128,12 +178,32 @@ pub fn serve_with_client_and_snapshot(
 /// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
 /// responses so serving continues.
 pub fn serve_with_client_and_features(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
+    availability: ToolAvailability,
+) -> io::Result<()> {
+    serve_with_client_and_features_and_caller(
+        input,
+        out,
+        version,
+        client,
+        snapshot,
+        availability,
+        None,
+    )
+}
+
+fn serve_with_client_and_features_and_caller(
     mut input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
     availability: ToolAvailability,
+    caller_credential: Option<&str>,
 ) -> io::Result<()> {
     // Fail before accepting input if metadata, route, schema, or capability drifted.
     drop(tools::registry_with_availability(availability));
@@ -142,6 +212,7 @@ pub fn serve_with_client_and_features(
     let capabilities = ServerCapabilities {
         runtime_models: snapshot,
         tools: availability,
+        caller_credential,
     };
     loop {
         buf.clear();
@@ -205,6 +276,7 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
         ServerCapabilities {
             runtime_models: &RuntimeModelSnapshot::default(),
             tools: ToolAvailability::default(),
+            caller_credential: None,
         },
         &mut state,
     )
@@ -333,6 +405,7 @@ fn respond(
             client,
             capabilities.runtime_models,
             capabilities.tools,
+            capabilities.caller_credential,
         ),
         "resources/list" => protocol::success(id, resources::list_result()),
         "resources/read" => resources_read(id, params),
@@ -393,6 +466,7 @@ fn tools_call(
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
     availability: ToolAvailability,
+    caller_credential: Option<&str>,
 ) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
@@ -434,24 +508,17 @@ fn tools_call(
     if let Err(ToolError::InvalidParams(message)) = descriptor.validate(&arguments, &schema) {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    let caller_credential = caller_credential();
     apply_caller_policy(
         descriptor.caller_policy(),
         &mut arguments,
-        caller_credential.as_deref(),
+        caller_credential,
     );
     if matches!(name, "session_create" | "session_delegate_issue")
         && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    execute_tool(
-        id,
-        descriptor,
-        arguments,
-        client,
-        caller_credential.as_deref(),
-    )
+    execute_tool(id, descriptor, arguments, client, caller_credential)
 }
 
 fn execute_tool(
@@ -663,10 +730,7 @@ fn store_tool_call(id: Value, descriptor: &ToolDescriptor, arguments: &Value) ->
     }
 }
 
-fn caller_credential() -> Option<String> {
-    normalize_caller_credential(std::env::var("USAGI_MCP_CALLER_CREDENTIAL").ok())
-}
-
+#[cfg(test)]
 fn normalize_caller_credential(credential: Option<String>) -> Option<String> {
     match credential {
         Some(credential) if !credential.is_empty() => Some(credential),
@@ -841,6 +905,7 @@ mod tests {
                 ServerCapabilities {
                     runtime_models: &RuntimeModelSnapshot::default(),
                     tools: ToolAvailability::default(),
+                    caller_credential: None,
                 },
                 &mut state,
             )

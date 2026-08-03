@@ -36,7 +36,6 @@ struct SessionStartInput {
 pub enum CaptureInputError {
     InvalidPayload,
     WrongEvent,
-    MissingCredential,
 }
 
 impl std::fmt::Display for CaptureInputError {
@@ -44,7 +43,6 @@ impl std::fmt::Display for CaptureInputError {
         let message = match self {
             Self::InvalidPayload => "invalid Codex SessionStart hook payload",
             Self::WrongEvent => "unexpected Codex hook event",
-            Self::MissingCredential => "Codex runtime credential is unavailable",
         };
         formatter.write_str(message)
     }
@@ -58,7 +56,7 @@ impl std::error::Error for CaptureInputError {}
 /// # Errors
 ///
 /// Returns a non-sensitive error for malformed JSON, a non-`SessionStart`
-/// event, or a missing daemon-issued runtime credential.
+/// event. Authentication is derived from the hook process at the daemon.
 pub fn request_from_hook(
     reader: &mut dyn Read,
     credential: Option<String>,
@@ -68,12 +66,11 @@ pub fn request_from_hook(
     if input.hook_event_name != "SessionStart" {
         return Err(CaptureInputError::WrongEvent);
     }
-    let credential = credential
-        .filter(|value| !value.is_empty())
-        .ok_or(CaptureInputError::MissingCredential)?;
     Ok(DaemonRequest::CodexSessionCapture {
         native_session_id: input.session_id,
-        caller_context: McpCallerContext { credential },
+        caller_context: credential
+            .filter(|value| !value.is_empty())
+            .map(|credential| McpCallerContext { credential }),
     })
 }
 
@@ -114,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_wrong_event_and_missing_credential_fail_closed() {
+    fn malformed_and_wrong_event_fail_closed() {
         for (payload, credential, expected) in [
             (
                 br#"{"session_id":""}"#.as_slice(),
@@ -126,15 +123,19 @@ mod tests {
                 Some("credential".to_owned()),
                 CaptureInputError::WrongEvent,
             ),
-            (
-                br#"{"session_id":"secret-id","hook_event_name":"SessionStart"}"#.as_slice(),
-                None,
-                CaptureInputError::MissingCredential,
-            ),
         ] {
             let error = request_from_hook(&mut Cursor::new(payload), credential).unwrap_err();
             assert_eq!(error, expected);
             assert!(!error.to_string().contains("secret-id"));
         }
+        let request = request_from_hook(
+            &mut Cursor::new(br#"{"session_id":"secret-id","hook_event_name":"SessionStart"}"#),
+            None,
+        )
+        .unwrap();
+        assert!(
+            serde_json::to_value(request).unwrap()["caller_context"].is_null(),
+            "hook credentials must not be inherited through the Agent environment"
+        );
     }
 }

@@ -60,7 +60,8 @@ dispatch する。brief の `agent` は
  "agent":{"runtime":"codex","model":"gpt-5"}}}}
 ```
 
-dispatch/agent tool は daemon が Agent 起動時に注入した private caller credential を必要とする。手動で
+dispatch/agent tool は daemon が正規 MCP child の OS process identity を検証した後に発行する private caller
+credential を必要とする。手動で
 起動した credential の無い `usagi mcp` からは利用できない。
 
 ## worker を dispatch する

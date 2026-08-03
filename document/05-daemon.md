@@ -861,7 +861,7 @@ path・argv・environment・root worktree identity を指定することはで�
 |---|---|---|
 | 1 | public terminal profile | 上表の非 secret 変数。generic terminal と Agent の共通基底 |
 | 2 | validated Agent adapter provision | adapter が型検証済みの変数名で spawn 時だけ供給する private 値。generic terminal には存在しない |
-| 3 | daemon-issued ephemeral provision | live Agent runtime に結び付く caller credential。同名の adapter provision より優先する |
+| 3 | daemon-issued ephemeral provision | sandbox launcher policy など daemon が確定した非 secret の起動値。同名の adapter provision より優先する |
 
 generic terminal と Agent は同じ PTY spawn 境界を通る。空の environment を渡した場合も ambient environment へ
 fallback しない。environment の同名 key は上表の優先順で一つに畳み込んでから child に渡す。
@@ -916,7 +916,7 @@ validate
 | phase | durable state | process / credential |
 |---|---|---|
 | prepare | operation、`Preparing` run、binding、`Starting` agent、terminal/runtime fence、semantic key、credential provenance を保存する | process は存在しない。daemon-minted secret を in-memory caller registry に登録する |
-| spawn | prepare 済み operation だけが一度だけ PTY child を起動する | secret は spawn provision にだけ存在し、child の最初の MCP call より前に caller registry が利用可能である |
+| spawn | prepare 済み operation だけが一度だけ PTY child を起動する | adapter secret は spawn provision にだけ存在し、MCP caller credential は Agent spawn 後の child claim まで daemon memory に留まる |
 | commit | runtime process identity と `Running` run/agent を保存する | commit 完了後だけ admission success を返す |
 | compensate | post-spawn の runtime/dispatch 保存失敗を safe failure または reconcile-required として保存する | exact terminal owner が process を terminate して reap する。terminate/reap を証明できなければ orphan-running として fail closed する |
 
@@ -941,7 +941,7 @@ validation error である。
 
 各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Codex では [private structured capture request](04-ipc.md#codex-structured-capture-request) の入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は spawn 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
-Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、同じ process が継承した daemon-minted credential で exact live runtime に束縛し、structured capture 境界へ渡す。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
+Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook process group と exact live runtime の照合で structured capture 境界へ渡す。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
 
 この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および daemon が指定する hook trust bypass を CLI が提供することである。managed policy による hooks 無効化、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
 
@@ -1011,12 +1011,14 @@ public launch plan、durable snapshot、IPC response に残らない。注入し
 [7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)）。それ以外の MCP server・shell・ファイル編集・
 network の permission model は通常どおり維持され、無効化・緩和しない。
 
-daemon が起動した MCP child だけには、live Agent runtime に結び付く opaque な caller credential を
-private provision として渡す。`user_decision_*` はこの credential、daemon generation、terminal incarnation、
-dispatch binding を照合して owner を再構成し、workspace root は `session_id: None` の root scope として保存する。
+daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
+caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と
+未使用 caller slot を照合し、credential を Agent environment、provider argv、terminal output へ置かない。
+`user_decision_*` はこの credential、claim 済み PID、daemon generation、terminal incarnation、dispatch binding を
+照合して owner を再構成し、workspace root は `session_id: None` の root scope として保存する。
 手動起動した `usagi mcp`、credential の欠落・偽造・失効、または stale runtime は owner を推測せず
-`ownership_unknown` で拒否し、decision state を変更しない。credential と private provision は durable snapshot、
-IPC、TUI、log に保存・公開しない。
+`ownership_unknown` で拒否し、decision state を変更しない。credential は claim response と同じ MCP process の
+後続 request 以外へ公開せず、durable snapshot、TUI、terminal journal、argv、log、safe error に保存・公開しない。
 この事前許可も spawn 時 argv に限り、durable snapshot や IPC response には残らない。
 
 [`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late、duplicate、wrong-generation は state や inbox を変更しない。

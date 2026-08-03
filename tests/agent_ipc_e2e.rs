@@ -868,9 +868,9 @@ fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     );
 }
 
-/// An agent phase report is routed to the Agent owner over the real socket, and
-/// the credential is the only thing that can bind it to a runtime. A forged or
-/// malformed report is refused instead of silently answering `ok`.
+/// An agent phase report is routed to the Agent owner over the real socket.
+/// A process outside the live Agent process group is refused before its
+/// credential can bind the report to a runtime.
 #[test]
 fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
     let _serial = DAEMON_START_LOCK
@@ -886,25 +886,26 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
     let forged = client
         .request(DaemonRequest::AgentPhaseReport {
             phase: AgentPhase::Waiting,
-            caller_context: McpCallerContext {
+            caller_context: Some(McpCallerContext {
                 credential: "forged-credential".into(),
-            },
+            }),
         })
         .unwrap_err();
     assert_eq!(forged.code(), ErrorCode::OwnershipUnknown);
     assert!(!forged.is_transport_failure(), "{forged}");
     assert!(!forged.to_string().contains("forged-credential"));
 
-    // An empty credential is refused before the Agent owner is consulted.
+    // An empty credential from the same unrelated process is also refused
+    // before the Agent owner is consulted.
     let empty = client
         .request(DaemonRequest::AgentPhaseReport {
             phase: AgentPhase::Ready,
-            caller_context: McpCallerContext {
+            caller_context: Some(McpCallerContext {
                 credential: String::new(),
-            },
+            }),
         })
         .unwrap_err();
-    assert_eq!(empty.code(), ErrorCode::InvalidArgument);
+    assert_eq!(empty.code(), ErrorCode::OwnershipUnknown);
 }
 
 #[test]

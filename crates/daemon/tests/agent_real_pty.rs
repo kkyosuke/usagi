@@ -405,8 +405,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
                     "\"${USAGI_AGENT_PTY_SENTINEL-unset}\" ",
                     "\"$PATH\" \"$HOME\" \"$USAGI_ADAPTER_CREDENTIAL\" ",
                     "\"$USAGI_PRIORITY\" ",
-                    "\"$(test \"$USAGI_MCP_CALLER_CREDENTIAL\" = adapter-forged && ",
-                    "printf adapter-forged || printf daemon-present)\""
+                    "\"${USAGI_MCP_CALLER_CREDENTIAL-unset}\""
                 )
                 .to_owned(),
             }),
@@ -471,7 +470,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
         .collect();
     assert_eq!(
         bytes,
-        b"unset|/public/bin|/public/home|adapter-present|adapter|daemon-present"
+        b"unset|/public/bin|/public/home|adapter-present|adapter|unset"
     );
 
     // #525: after the real PTY exits, the tombstone is reachable through the

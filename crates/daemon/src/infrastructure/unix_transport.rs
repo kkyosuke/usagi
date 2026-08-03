@@ -2426,6 +2426,107 @@ pub fn peer_pid(_stream: &UnixStream) -> io::Result<u32> {
     ))
 }
 
+/// Returns the process group authenticated by the kernel for `pid`.
+/// Agent PTY leaders own a distinct process group, so a direct provider child
+/// can be related to the exact live runtime without trusting argv or env.
+///
+/// # Errors
+///
+/// Returns an error when the PID is invalid, no longer exists, or its process
+/// group cannot be observed.
+#[cfg(unix)]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+pub fn process_group(pid: u32) -> io::Result<u32> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "PID does not fit pid_t"))?;
+    // SAFETY: getpgid only observes kernel process metadata for the supplied PID.
+    let group = unsafe { libc::getpgid(pid) };
+    if group < 2 {
+        return Err(if group < 0 {
+            io::Error::last_os_error()
+        } else {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid process group")
+        });
+    }
+    u32::try_from(group)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative process group"))
+}
+
+/// Returns the parent PID authenticated by the kernel for `pid`.
+///
+/// # Errors
+///
+/// Returns an error when the PID is invalid, no longer exists, or its parent
+/// cannot be observed.
+#[cfg(target_os = "linux")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+pub fn parent_pid(pid: u32) -> io::Result<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid process stat"))?;
+    let parent = stat[close + 1..]
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing parent PID"))?;
+    let parent = parent
+        .parse::<u32>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    (parent >= 2)
+        .then_some(parent)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid parent PID"))
+}
+
+/// Returns the parent PID authenticated by the kernel for `pid`.
+///
+/// # Errors
+///
+/// Returns an error when the PID is invalid, no longer exists, or its parent
+/// cannot be observed.
+#[cfg(target_os = "macos")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+pub fn parent_pid(pid: u32) -> io::Result<u32> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "PID does not fit pid_t"))?;
+    // SAFETY: `info` is initialized and the pointer/length describe exactly
+    // one proc_bsdinfo value for the duration of proc_pidinfo.
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let size_arg = libc::c_int::try_from(size)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "proc_bsdinfo is too large"))?;
+    // SAFETY: see the initialized buffer argument above.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::from_mut(&mut info).cast(),
+            size_arg,
+        )
+    };
+    if read <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(read).unwrap_or(0) < size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short proc_bsdinfo read",
+        ));
+    }
+    (info.pbi_ppid >= 2)
+        .then_some(info.pbi_ppid)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid parent PID"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
+pub fn parent_pid(_pid: u32) -> io::Result<u32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "parent PID unavailable",
+    ))
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn validated_peer_pid(pid: libc::pid_t) -> io::Result<u32> {
     let pid = u32::try_from(pid)

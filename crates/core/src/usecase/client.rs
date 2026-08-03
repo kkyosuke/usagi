@@ -38,6 +38,10 @@ use crate::infrastructure::ipc::{OWNER_GENERATION_ROUTING_CAPABILITY, WORKSPACE_
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    /// Claim the single private MCP channel for the caller's live Agent process
+    /// group. The daemon derives the runtime from OS peer identity and returns
+    /// only the process-local bearer used on this already established channel.
+    McpChildClaim,
     /// Ask the currently active daemon to hand authority to its verified
     /// standby. The old active drives the process-local admission barrier;
     /// clients only supply the durable operation identity.
@@ -75,7 +79,8 @@ pub enum DaemonRequest {
     /// runtime, session, path, or provider themselves.
     CodexSessionCapture {
         native_session_id: ProviderSessionId,
-        caller_context: McpCallerContext,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
     },
     /// Private agent lifecycle phase report delivered by a documented provider
     /// hook. The opaque credential binds the report to one live daemon runtime;
@@ -83,7 +88,8 @@ pub enum DaemonRequest {
     /// and the phase itself is a closed non-sensitive vocabulary.
     AgentPhaseReport {
         phase: AgentPhase,
-        caller_context: McpCallerContext,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
     },
     /// Read the safe Agent runtime and interrupted-source inventory for one
     /// workspace. Root and managed-session records share this response.
@@ -106,8 +112,8 @@ pub enum DaemonRequest {
         action: DispatchToolAction,
         operation_id: String,
         payload: Value,
-        /// Opaque daemon-minted credential inherited only by a provisioned MCP
-        /// child. It is authentication material, never caller identity.
+        /// Opaque daemon-minted credential returned only to a claimed MCP child.
+        /// It is authentication material, never caller identity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
@@ -1454,7 +1460,8 @@ impl RetryEligibility {
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::Terminal { .. }
             | DaemonRequest::CodexSessionCapture { .. }
-            | DaemonRequest::AgentPhaseReport { .. } => Self::NoCrossConnectionEvidence,
+            | DaemonRequest::AgentPhaseReport { .. }
+            | DaemonRequest::McpChildClaim => Self::NoCrossConnectionEvidence,
         }
     }
 
@@ -2878,9 +2885,9 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::AgentPhaseReport {
                 phase: AgentPhase::Waiting,
-                caller_context: McpCallerContext {
+                caller_context: Some(McpCallerContext {
                     credential: "runtime-secret".into(),
-                },
+                }),
             },
         ];
         for request in &ineligible {

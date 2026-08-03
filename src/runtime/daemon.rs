@@ -56,7 +56,8 @@ use usagi_daemon::infrastructure::resource_store::{AllocatorFile, ShardArchiveFi
 use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointCleanup, EndpointLocator, SecureUnixListener, connect_generation, ensure_private_dir,
-    ensure_private_dir_all, peer_pid, read_locator, retire_stale_current_preserving,
+    ensure_private_dir_all, parent_pid, peer_pid, process_group, read_locator,
+    retire_stale_current_preserving,
 };
 use usagi_daemon::presentation::{
     DaemonCommand as PresentationDaemonCommand, DaemonEnv, ServeRole,
@@ -3101,6 +3102,15 @@ fn start_ipc_accept_loop(
                         if shutdown.is_requested() {
                             break;
                         }
+                        let Ok(peer_process) = peer_pid(&stream).and_then(|pid| {
+                            let parent = parent_pid(pid)?;
+                            process_group(pid).map(|process_group| (pid, parent, process_group))
+                        }) else {
+                            ErrorLog::record(
+                                "daemon connection refused: peer process identity unavailable",
+                            );
+                            continue;
+                        };
                         let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
                             // No hello has been read, so sending a framed protocol
                             // error here would invent a new wire state. Closing the
@@ -3214,15 +3224,31 @@ fn start_ipc_accept_loop(
                                     admitted,
                                     connection_fence.as_ref(),
                                     &mut owner,
-                                    &mut |request_id, body, hello, _connection, client| match body
-                                        .get("kind")
-                                        .and_then(serde_json::Value::as_str)
-                                    {
+                                    &mut |request_id, body, hello, _connection, client| {
+                                        if let Some(credential) = request_mcp_credential(&body)
+                                            && !agent_launch
+                                                .lock()
+                                                .is_ok_and(|runtime| runtime.authenticates_mcp_child(credential, peer_process.0))
+                                        {
+                                            return envelope(
+                                                hello,
+                                                request_id,
+                                                usagi_core::infrastructure::ipc::ResponseOutcome::Error(
+                                                    usagi_core::infrastructure::ipc::ProtocolError::new(
+                                                        usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown,
+                                                        "MCP caller is not the claimed child process",
+                                                    ),
+                                                ),
+                                                serde_json::Value::Null,
+                                            );
+                                        }
+                                        match body.get("kind").and_then(serde_json::Value::as_str) {
+                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("session") => dispatch_session(&session, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
-                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, request_id, &body, hello),
-                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, request_id, &body, hello),
+                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process.2, request_id, &body, hello),
+                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
@@ -3233,12 +3259,16 @@ fn start_ipc_accept_loop(
                                         },
                                         Some("user_decision") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
+                                        }
                                     },
                                 );
                                 if let Some(observer) = metrics_observer
                                     && let Ok(mut broker) = metrics.lock()
                                 {
                                     broker.unsubscribe(observer.subscription());
+                                }
+                                if let Ok(mut agent) = agent_launch.lock() {
+                                    agent.release_mcp_child(peer_process.0);
                                 }
                                 let _ = result;
                             })
@@ -4733,6 +4763,55 @@ fn dispatch_session(
     session_response_envelope(action, &payload, result, request_id, hello)
 }
 
+fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
+    body.get("caller_context")
+        .and_then(|context| context.get("credential"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            body.get("payload")
+                .and_then(|payload| payload.get("_caller_credential"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn dispatch_mcp_child_claim(
+    agent: &SharedAgentRuntime,
+    peer_process: (u32, u32, u32),
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::DaemonRequest;
+
+    let result = matches!(
+        serde_json::from_value::<DaemonRequest>(body.clone()),
+        Ok(DaemonRequest::McpChildClaim)
+    )
+    .then_some(())
+    .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidArgument, "invalid MCP child claim"))
+    .and_then(|()| {
+        agent
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
+            .claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)
+    });
+    match result {
+        Ok(credential) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Ok,
+            serde_json::json!({ "credential": credential }),
+        ),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
+        ),
+    }
+}
+
 fn session_response_envelope(
     action: usagi_core::usecase::client::SessionAction,
     payload: &serde_json::Value,
@@ -5550,6 +5629,7 @@ fn dispatch_agent(
 
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
+    process_group: u32,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5568,21 +5648,23 @@ fn dispatch_codex_session_capture(
     let Some((native_session_id, caller_context)) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let result = (!caller_context.credential.is_empty())
-        .then_some(())
-        .ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "Codex runtime credential is unknown",
-            )
-        })
-        .and_then(|()| {
-            agent
-                .lock()
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
-                })?
-                .capture_codex_session(&caller_context.credential, native_session_id)
+    let result = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|mut agent| {
+            let credential = caller_context
+                .as_ref()
+                .map(|context| context.credential.as_str())
+                .filter(|credential| !credential.is_empty())
+                .or_else(|| agent.hook_credential(process_group))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::OwnershipUnknown,
+                        "Codex hook process does not belong to a live Agent runtime",
+                    )
+                })?;
+            agent.capture_codex_session(&credential, native_session_id)
         });
     match result {
         Ok(()) => envelope(
@@ -5607,6 +5689,7 @@ fn dispatch_codex_session_capture(
 /// of being echoed back as a success.
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
+    process_group: u32,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5623,20 +5706,26 @@ fn dispatch_agent_phase_report(
             _ => None,
         });
     let result = request
-        .filter(|(_, caller_context)| !caller_context.credential.is_empty())
         .ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent phase report is not a valid credential-bound report",
-            )
+            ProtocolError::new(ErrorCode::InvalidArgument, "agent phase report is invalid")
         })
         .and_then(|(phase, caller_context)| {
-            agent
-                .lock()
-                .map_err(|_| {
-                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
-                })?
-                .report_agent_phase(&caller_context.credential, phase)
+            let mut agent = agent.lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+            })?;
+            let credential = caller_context
+                .as_ref()
+                .map(|context| context.credential.as_str())
+                .filter(|credential| !credential.is_empty())
+                .or_else(|| agent.hook_credential(process_group))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    ProtocolError::new(
+                        ErrorCode::OwnershipUnknown,
+                        "phase hook process does not belong to a live Agent runtime",
+                    )
+                })?;
+            agent.report_agent_phase(&credential, phase)
         });
     let outcome = match result {
         Ok(()) => ResponseOutcome::Ok,
@@ -12085,7 +12174,7 @@ mod tests {
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
-                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
                 "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
                 "-c",

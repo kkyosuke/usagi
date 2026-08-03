@@ -93,12 +93,7 @@ pub fn mcp_arguments(usagi_command: &str, local_llm_model: Option<&str>) -> Vec<
     arguments.extend(assignment("mcp_servers.usagi.args", &array(&["mcp"])));
     arguments.extend(assignment(
         "mcp_servers.usagi.env_vars",
-        &array(&[
-            "USAGI_HOME",
-            "USAGI_RUNTIME_MODE",
-            "USAGI_WORKSPACE_ROOT",
-            "USAGI_MCP_CALLER_CREDENTIAL",
-        ]),
+        &array(&["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]),
     ));
     arguments.extend(assignment(
         "mcp_servers.usagi.default_tools_approval_mode",
@@ -354,7 +349,7 @@ mod wiring_tests {
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
-                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\", \"USAGI_MCP_CALLER_CREDENTIAL\"]",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
                 "-c",
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
             ]

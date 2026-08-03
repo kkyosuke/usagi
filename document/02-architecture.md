@@ -666,8 +666,9 @@ terminator `--` の直後に単一の positional value として置く。これ�
 flag、subcommand に似た prompt も provider option として再解釈されない。
 
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
-credential、secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・
-error detail に載せない。
+secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・error detail に
+載せない。MCP caller credential は `SpawnProvision` にも Agent environment にも置かず、OS peer identity を検証した
+専用 MCP child の one-shot IPC claim 後にその process memory へだけ渡す。
 
 ### Daemon runtime ownership
 
