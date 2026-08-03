@@ -337,7 +337,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 |---|---|---|
 | `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy と full test（`--workspace`）を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
 | `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
-| `.github/workflows/v1-coverage.yml` | PR | v1 Rust / gate 差分では出荷元 `v1/Cargo.toml` の line/function coverage 100% を強制し、全差分で `v1-coverage` aggregate を報告 |
+| `.github/workflows/v1-coverage.yml` | PR | v1 Rust source / manifest 差分では出荷元 `v1/Cargo.toml` の line/function coverage 100% を強制し、全差分で `v1-coverage` aggregate を報告。gate 自体は `test.yml` の実 crate fixture で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 出荷物 v1 の実 PTY TUI E2E。PR / merge queue では `v1/Cargo.toml` の `[package].version` が base と異なる場合だけ実行し、通常 PR の重い test を回避する |
 | `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |

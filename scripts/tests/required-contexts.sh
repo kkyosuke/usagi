@@ -21,7 +21,7 @@ assert_classification $'rust=false\nv1_rust=true\nmarkdown=false' v1/src/lib.rs
 assert_classification $'rust=false\nv1_rust=false\nmarkdown=true' v1/document/06-conventions.md
 assert_classification $'rust=false\nv1_rust=false\nmarkdown=true' document/06-conventions.md
 assert_classification $'rust=false\nv1_rust=false\nmarkdown=false' document/assets/update-selector.svg
-assert_classification $'rust=true\nv1_rust=true\nmarkdown=false' scripts/coverage.sh scripts/v1-coverage.sh
+assert_classification $'rust=true\nv1_rust=false\nmarkdown=false' scripts/coverage.sh scripts/v1-coverage.sh
 assert_classification $'rust=true\nv1_rust=false\nmarkdown=true' README.md scripts/coverage.sh
 assert_classification $'rust=true\nv1_rust=false\nmarkdown=false' unknown/new-format.data
 

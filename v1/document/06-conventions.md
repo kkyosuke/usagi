@@ -183,7 +183,7 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 |---|---|---|
 | `.github/workflows/test.yml` | `main` への push / PR | ルート（v2 パッケージ）の fmt / clippy と full test を独立 job で並列実行（`ubuntu-latest`）。従来の `test` check 名は fmt / clippy gate として維持 |
 | `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
-| `.github/workflows/v1-coverage.yml` | PR | v1 Rust / gate 差分で出荷元 `v1/Cargo.toml` の line/function coverage 100% を強制し、対象外差分でも stable な `v1-coverage` aggregate を報告 |
+| `.github/workflows/v1-coverage.yml` | PR | v1 Rust source / manifest 差分で出荷元 `v1/Cargo.toml` の line/function coverage 100% を強制し、対象外差分でも stable な `v1-coverage` aggregate を報告。gate 自体は `test.yml` の実 crate fixture で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
 | `.github/workflows/coverage.yml` | PR | ルートの v2 workspace のカバレッジ計測・PR コメント・100% 未満で失敗（v1 は計測しない） |

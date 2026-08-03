@@ -1,7 +1,8 @@
 name: v1 Coverage
 
 # v1/Cargo.toml から build する出荷バイナリだけを計測する。全 PR で stable な
-# aggregate context を返し、v1 Rust / gate 差分だけ重い coverage job を実行する。
+# aggregate context を返し、v1 Rust source / manifest 差分だけ重い coverage job を実行する。
+# gate 自体の変更は test.yml の実 crate fixture が同じ SSoT を source して検証する。
 on:
   pull_request:
     branches: [ "main" ]

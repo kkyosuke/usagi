@@ -25,7 +25,7 @@ classify_paths() {
     esac
 
     case "$path" in
-      v1/*.rs|v1/Cargo.toml|v1/Cargo.lock|v1/build.rs|scripts/v1-coverage.sh|.github/workflows/v1-coverage.yml|.github/workflows/v1-test.yml)
+      v1/*.rs|v1/Cargo.toml|v1/Cargo.lock|v1/build.rs)
         v1_rust=true
         ;;
     esac
