@@ -1,13 +1,13 @@
 ---
 number: 628
 title: ci(v1): 出荷バイナリの coverage 100% gate を復旧する
-status: in-progress
+status: done
 priority: medium
 labels: [review, v1, ci, test, coverage, release]
 dependson: []
 related: [179, 380, 484]
 created_at: 2026-08-02T23:11:04.057216+00:00
-updated_at: 2026-08-03T01:17:43.718126+00:00
+updated_at: 2026-08-03T01:35:29.788856+00:00
 ---
 
 ## Finding（P2 / shipping gate と仕様の drift）
