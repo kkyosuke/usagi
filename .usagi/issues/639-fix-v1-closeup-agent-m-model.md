@@ -1,13 +1,13 @@
 ---
 number: 639
 title: fix(v1): Closeup の agent で -m / --model を受け付ける
-status: in-progress
+status: done
 priority: medium
 labels: []
 dependson: []
 related: [545]
 created_at: 2026-08-03T21:22:53.633018+00:00
-updated_at: 2026-08-03T21:23:17.287043+00:00
+updated_at: 2026-08-03T21:23:54.759131+00:00
 ---
 
 ## 背景
