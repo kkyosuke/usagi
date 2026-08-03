@@ -1,13 +1,13 @@
 ---
 number: 635
 title: fix(agent): Claude initial prompt を option として解釈させない
-status: todo
+status: in-progress
 priority: medium
 labels: [review, security, daemon, agent, claude, argv]
 dependson: []
 related: [253, 594]
 created_at: 2026-08-02T23:14:00.076228+00:00
-updated_at: 2026-08-02T23:14:00.076228+00:00
+updated_at: 2026-08-03T00:07:16.087360+00:00
 ---
 
 ## Finding（medium / argv trust boundary）

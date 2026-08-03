@@ -11914,8 +11914,16 @@ instructions = "{instructions}"
             prefix: vec!["claude-sandbox".to_owned(), "--".to_owned()],
         });
         claude.append_sensitive_arguments(["--resume".to_owned(), "provider-session".to_owned()]);
-        let (program, argv) =
-            provisioned_agent_command("claude", &["user prompt".to_owned()], &claude);
+        let (program, argv) = provisioned_agent_command(
+            "claude",
+            &[
+                "--model".to_owned(),
+                "sonnet".to_owned(),
+                "--".to_owned(),
+                "user prompt".to_owned(),
+            ],
+            &claude,
+        );
         assert_eq!(program, "/opt/usagi/bin/usagi");
         assert_eq!(
             argv,
@@ -11927,6 +11935,9 @@ instructions = "{instructions}"
                 prompt.as_str(),
                 "--resume",
                 "provider-session",
+                "--model",
+                "sonnet",
+                "--",
                 "user prompt",
             ]
         );
