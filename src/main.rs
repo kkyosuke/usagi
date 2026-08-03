@@ -13,7 +13,7 @@ use usagi_core::domain::AppInfo;
 mod runtime;
 mod tui_input;
 
-#[coverage(off)]
+#[coverage(off)] // Final process argv and stdio composition.
 fn main() -> std::io::Result<ExitCode> {
     let info = AppInfo {
         name: env!("CARGO_PKG_NAME"),
