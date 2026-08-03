@@ -920,8 +920,11 @@ response が失われた・timeout した場合は、その pane を安全な失
 checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
 feed する。screen は最小の VT screen（印字・
 `CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）で、
-その screen 行を右ペインへ clip して表示する。描画済み retained 行は output・resize・接続状態が変わったときだけ更新し、各 frame は現在の
-viewport に必要な行 window だけを右ペインへ投影するため、scrollback の増加は idle redraw や scroll 操作の描画量を増やさない。
+その screen 行を右ペインへ clip して表示する。PTY output の適用は parser state だけを更新し、retained scrollback 全体の
+描画 cache は作らない。各 frame は現在の viewport に必要な行 window だけを ANSI 付き表示へ投影し、URL 検出もその
+window に接する折返し logical line までに限定する。このため通常の output・idle redraw・scroll 操作は 10,000 行の
+scrollback 全体を文字列化・全走査せず、表示行数と必要な折返し範囲に比例する。selection / copy は利用者が明示的に
+開始したときだけ untrimmed な retained cells 全体を snapshot し、ドラッグ中の出力から選択対象を固定する。
 live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 

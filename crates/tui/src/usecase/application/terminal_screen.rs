@@ -81,31 +81,7 @@ impl TerminalScreen {
     /// Renders retained scrollback followed by the visible terminal grid.
     #[must_use]
     pub fn rows_with_scrollback(&self) -> Vec<String> {
-        let links = self.link_cells();
-        let scrollback_len = self.screen.scrollback().len();
-        let mut rows: Vec<_> = self
-            .screen
-            .scrollback()
-            .iter()
-            .enumerate()
-            .map(|(row, cells)| render_row_selected(cells, None, "", None, Some((row, &links))))
-            .chain(self.screen.grid().iter().enumerate().map(|(index, cells)| {
-                render_row_selected(
-                    cells,
-                    None,
-                    "",
-                    None,
-                    Some((scrollback_len + index, &links)),
-                )
-            }))
-            .collect();
-        // The visible grid is fixed-height, but its unused tail is not terminal
-        // content. Dropping it lets the live viewport stay anchored to the last
-        // meaningful output instead of a screenful of padding.
-        while matches!(rows.last(), Some(last) if last.is_empty()) {
-            rows.pop();
-        }
-        rows
+        self.rows_with_scrollback_window(0, usize::MAX, false)
     }
 
     /// Grid cells — retained scrollback then the visible grid, joined untrimmed so
@@ -132,31 +108,78 @@ impl TerminalScreen {
     /// cursor as an inverted cell.
     #[must_use]
     pub fn rows_with_scrollback_and_cursor(&self) -> Vec<String> {
-        let links = self.link_cells();
-        let scrollback_len = self.screen.scrollback().len();
-        let (cursor_row, cursor_col) = self.screen.cursor();
+        self.rows_with_scrollback_window(0, usize::MAX, true)
+    }
+
+    /// Number of retained rows that have visible content, including the cursor
+    /// row while the terminal is live.
+    ///
+    /// The fixed-height grid can end in blank padding. Walking backward finds
+    /// the visible tail without projecting or scanning the preceding
+    /// scrollback, so a viewport can be placed in constant time for the common
+    /// case where the cursor is live.
+    #[must_use]
+    pub fn rows_with_scrollback_count(&self, include_cursor: bool) -> usize {
+        let total = self.retained_row_count();
+        let content = (0..total)
+            .rev()
+            .find(|row| row_has_content(self.retained_row(*row)))
+            .map_or(0, |row| row + 1);
+        if include_cursor {
+            content.max(self.cursor_retained_row() + 1)
+        } else {
+            content
+        }
+    }
+
+    /// Renders only the requested retained-row window.
+    ///
+    /// Link detection expands the request to the logical lines which touch the
+    /// window, because a URL may wrap across its top or bottom boundary. Rows
+    /// outside those lines are neither converted to strings nor scanned. This
+    /// keeps steady terminal output proportional to the visible viewport rather
+    /// than the 10,000-row scrollback bound (#637).
+    #[must_use]
+    pub fn rows_with_scrollback_window(
+        &self,
+        start: usize,
+        end: usize,
+        include_cursor: bool,
+    ) -> Vec<String> {
+        let count = self.rows_with_scrollback_count(include_cursor);
+        let start = start.min(count);
+        let end = end.min(count);
+        if start >= end {
+            return Vec::new();
+        }
+
+        let (scan_start, scan_end) = self.logical_scan_range(start, end, count);
+        let plain = (scan_start..scan_end)
+            .map(|row| unstyled_row(self.retained_row(row)))
+            .collect::<Vec<_>>();
+        let links = scan_links(&plain)
+            .cells
+            .into_iter()
+            .map(|point| TerminalPoint {
+                row: point.row + scan_start,
+                column: point.column,
+            })
+            .collect::<HashSet<_>>();
+        let cursor_row = self.cursor_retained_row();
+        let (_, cursor_col) = self.screen.cursor();
         let cursor_style = self.screen.cursor_style();
-        let mut rows: Vec<_> = self
-            .screen
-            .scrollback()
-            .iter()
-            .enumerate()
-            .map(|(row, cells)| render_row_selected(cells, None, "", None, Some((row, &links))))
-            .chain(self.screen.grid().iter().enumerate().map(|(index, cells)| {
-                let cursor = (index == cursor_row).then_some(cursor_col);
+        (start..end)
+            .map(|row| {
+                let cursor = (include_cursor && row == cursor_row).then_some(cursor_col);
                 render_row_selected(
-                    cells,
+                    self.retained_row(row),
                     cursor,
                     cursor_style,
                     None,
-                    Some((scrollback_len + index, &links)),
+                    Some((row, &links)),
                 )
-            }))
-            .collect();
-        while rows.last().is_some_and(String::is_empty) {
-            rows.pop();
-        }
-        rows
+            })
+            .collect()
     }
 
     /// Renders scrollback and the visible grid with a cell-precise selection.
@@ -237,6 +260,55 @@ impl TerminalScreen {
     pub fn cells_with_scrollback(&self) -> Vec<String> {
         self.screen.cells_with_scrollback()
     }
+
+    fn retained_row_count(&self) -> usize {
+        self.screen.scrollback().len() + self.screen.grid().len()
+    }
+
+    fn retained_row(&self, row: usize) -> &[Cell] {
+        let scrollback = self.screen.scrollback();
+        if row < scrollback.len() {
+            &scrollback[row]
+        } else {
+            &self.screen.grid()[row - scrollback.len()]
+        }
+    }
+
+    fn cursor_retained_row(&self) -> usize {
+        self.screen.scrollback().len() + self.screen.cursor().0
+    }
+
+    fn logical_scan_range(&self, start: usize, end: usize, count: usize) -> (usize, usize) {
+        let mut scan_start = start;
+        while scan_start > 0 && row_wraps(self.retained_row(scan_start - 1)) {
+            scan_start -= 1;
+        }
+        let mut scan_end = end;
+        while scan_end < count && row_wraps(self.retained_row(scan_end - 1)) {
+            scan_end += 1;
+        }
+        (scan_start, scan_end)
+    }
+}
+
+fn unstyled_row(row: &[Cell]) -> String {
+    row.iter()
+        .filter(|cell| !cell.continuation())
+        .map(Cell::ch)
+        .collect()
+}
+
+fn row_has_content(row: &[Cell]) -> bool {
+    row.iter()
+        .any(|cell| !cell.continuation() && cell.ch() != ' ')
+}
+
+// Keep the ambiguity of terminal_link's wrap reconstruction exactly aligned:
+// a wide glyph whose continuation occupies the last cell is treated as blank
+// in the expanded ANSI-free grid and therefore does not imply wrapping.
+fn row_wraps(row: &[Cell]) -> bool {
+    row.last()
+        .is_some_and(|cell| !cell.continuation() && cell.ch() != ' ')
 }
 
 fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
@@ -413,6 +485,71 @@ mod tests {
                 "cd".to_owned(),
                 format!("ef\x1b[7m{TERMINAL_CURSOR_MARKER} \x1b[0m"),
             ]
+        );
+    }
+
+    #[test]
+    fn retained_window_matches_full_projection_across_a_wrapped_link() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"prefix\r\nhttps://example.com/path\r\ntail");
+        let full = screen.rows_with_scrollback_and_cursor();
+        // Begin inside the wrapped URL rather than at its first physical row.
+        // The window renderer must scan back to the logical-line boundary so
+        // underline cells and global row coordinates match the full reference.
+        let start = 2;
+        let end = full.len().saturating_sub(1);
+        assert_eq!(
+            screen.rows_with_scrollback_window(start, end, true),
+            full[start..end]
+        );
+        let count = screen.rows_with_scrollback_count(true);
+        let (scan_start, scan_end) = screen.logical_scan_range(start, end, count);
+        assert!(scan_start < start, "wrapped predecessor was not scanned");
+        assert!(scan_end >= end);
+    }
+
+    #[test]
+    fn long_history_window_scans_only_the_requested_unwrapped_rows() {
+        let mut screen = TerminalScreen::new(2, 80);
+        for row in 0..10_000 {
+            screen.advance(format!("row-{row:05}\r\n").as_bytes());
+        }
+        let count = screen.rows_with_scrollback_count(true);
+        assert!(count >= 9_999);
+        let start = count.saturating_sub(24);
+        let (scan_start, scan_end) = screen.logical_scan_range(start, count, count);
+        assert_eq!(scan_start, start);
+        assert_eq!(scan_end, count);
+        assert_eq!(
+            screen.rows_with_scrollback_window(start, count, true).len(),
+            count - start
+        );
+    }
+
+    #[test]
+    fn retained_window_is_empty_for_empty_reversed_or_out_of_bounds_ranges() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo");
+        assert!(screen.rows_with_scrollback_window(1, 1, true).is_empty());
+        assert!(screen.rows_with_scrollback_window(2, 1, true).is_empty());
+        assert!(
+            screen
+                .rows_with_scrollback_window(usize::MAX, usize::MAX, true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retained_row_count_includes_a_blank_live_cursor_but_not_blank_padding() {
+        let mut screen = TerminalScreen::new(4, 8);
+        assert_eq!(screen.rows_with_scrollback_count(false), 0);
+        assert_eq!(screen.rows_with_scrollback_count(true), 1);
+        screen.advance(b"one\r\n");
+        assert_eq!(screen.rows_with_scrollback_count(false), 1);
+        assert_eq!(screen.rows_with_scrollback_count(true), 2);
+        assert_eq!(
+            screen.rows_with_scrollback_window(1, 2, true),
+            vec![format!("\x1b[7m{TERMINAL_CURSOR_MARKER} \x1b[0m")]
         );
     }
 
