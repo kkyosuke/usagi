@@ -502,6 +502,25 @@ impl HomeProjection {
         rows
     }
 
+    /// Whether the right pane owns keyboard input on this frame.
+    ///
+    /// Only a Closeup route whose selected tab is a live terminal, with no
+    /// foreground surface over it, receives input. Every other frame leaves the
+    /// pane's scroll, tab, selection, and copy controls inert, so the pane is
+    /// drawn dim to say so: Switch (the sidebar navigates), a pending or
+    /// interrupted tab (no live terminal), an open overlay or action modal, and
+    /// an open Director drawer (its root conversation owns input).
+    fn right_pane_focused(&self) -> bool {
+        self.mode == HomeMode::Closeup
+            && self.terminal_view.is_some()
+            && self.director_drawer.is_none()
+            && !self.closeup_action_visible
+            && self.overview_modal.is_none()
+            && self.pr_overlay.is_none()
+            && self.preview_overlay.is_none()
+            && self.decision_overlay.is_none()
+    }
+
     fn active_label(&self) -> &str {
         self.session_label(self.active)
     }
@@ -1184,7 +1203,7 @@ pub fn render_home_at(
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
     let right = dim_inactive_right_pane(
-        home.mode == HomeMode::Switch,
+        !home.right_pane_focused(),
         home_right_pane(body_height, split.right, home),
     );
     frame.extend(panes::join(
@@ -1269,8 +1288,9 @@ fn render_preview_overlay(
     )
 }
 
-/// Apply the inactive treatment only while the left sidebar owns navigation.
-/// Modals are composed after this frame, preserving their foreground styles.
+/// Apply the inactive treatment whenever the right pane does not own input
+/// ([`HomeProjection::right_pane_focused`]). Modals are composed after this
+/// frame, preserving their foreground styles.
 fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
     if inactive {
         right
@@ -3522,12 +3542,17 @@ mod tests {
         assert!(frame.iter().any(|line| strip(line).contains("active pane")));
     }
 
+    /// The right pane is bright only while it owns input: a Closeup route whose
+    /// selected tab is a live terminal, with nothing in front of it. Switch, a
+    /// pending tab, and an open Director drawer all leave its controls inert, so
+    /// each keeps the pane dim.
     #[test]
-    fn home_right_pane_is_dim_in_switch_and_bright_in_closeup() {
+    fn home_right_pane_is_bright_only_while_a_live_tab_owns_input() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let operation = OperationId::new();
         let target = Target::Session(session);
+        let terminal = terminal_ref(workspace, session);
         let mut pane = PaneState::new(PaneSelection::Target(target));
         let _ = reduce(
             &mut pane,
@@ -3539,28 +3564,68 @@ mod tests {
         );
         let state = AppState::home(workspace, vec![session]);
         let sessions = [projected_session(session, "session", "/work/session")];
+        let right_pane_of = |home: &HomeProjection| {
+            render_home(18, 100, home)[CHROME_ROWS]
+                .split_once('│')
+                .expect("pane divider")
+                .1
+                .to_owned()
+        };
+        let live_view = || {
+            Some(TerminalViewProjection {
+                total_rows: 1,
+                rows: vec!["live row".to_owned()],
+                row_offset: 0,
+                scroll: 0,
+                feedback: None,
+            })
+        };
+
         let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
             .with_pane(&pane);
-        let switch_frame = render_home(18, 100, &switch);
-        let switch_right = switch_frame[CHROME_ROWS]
-            .split_once('│')
-            .expect("pane divider")
-            .1;
+        let switch_right = right_pane_of(&switch);
         assert!(switch_right.contains("\u{1b}[2m"));
         assert!(switch_right.contains("\u{1b}[2;36msession"));
         assert!(!switch_right.contains("\u{1b}[1;36m"));
 
         let mut state = state;
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
+        // The pending tab steps the auto-opened action launcher aside, so the
+        // pane surface itself is what the frame draws.
+        let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
+        // Closeup without a live viewport (the pending Agent tab) stays dim: the
+        // tab owns no PTY input yet.
+        let pending = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
             .with_pane(&pane);
-        let closeup_frame = render_home(18, 100, &closeup);
-        let closeup_right = closeup_frame[CHROME_ROWS]
-            .split_once('│')
-            .expect("pane divider")
-            .1;
+        assert!(right_pane_of(&pending).contains("\u{1b}[2;36msession"));
+
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Succeeded {
+                operation,
+                terminal: terminal.clone(),
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal))),
+        );
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
+            .with_pane(&pane)
+            .with_terminal_view(live_view());
+        let closeup_right = right_pane_of(&closeup);
         assert!(closeup_right.contains("\u{1b}[1;36msession"));
         assert!(!closeup_right.starts_with("\u{1b}[2m"));
+
+        // The Director drawer owns input while it is open, so the managed pane
+        // behind it is dim in its own right — not only through the drawer's
+        // background dimming.
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let drawer = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
+            .with_pane(&pane)
+            .with_terminal_view(live_view());
+        assert!(!drawer.right_pane_focused());
     }
 
     #[test]

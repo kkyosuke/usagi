@@ -746,14 +746,44 @@ fn handle_director_picker_input(runtime: &mut WorkspaceRuntime, key: &Key) -> Op
     // precede PTY forwarding and the Home reducer.
     if runtime.state().overlay().is_none()
         && runtime.state().director_drawer_open()
-        && matches!(
+        && (matches!(
             key,
-            Key::Escape | Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew)
-        )
+            Key::Live(LiveTerminalAction::Director | LiveTerminalAction::DirectorNew)
+        ) || (matches!(key, Key::Escape) && !drawer_agent_owns_escape(runtime)))
     {
         Some(runtime.handle_key(key.clone()))
     } else {
         None
+    }
+}
+
+/// Whether the drawer's selected root Agent, not the drawer itself, owns `Esc`.
+///
+/// An agent CLI reads `Esc` as its own interrupt / dismiss, so swallowing it to
+/// close the drawer made that key unreachable for every conversation. The
+/// drawer keeps `Esc` only when no live conversation can receive it — where
+/// closing is the only thing left for it to mean — and `Ctrl-O Ctrl-G` still
+/// closes the drawer with a live Agent attached.
+fn drawer_agent_owns_escape(runtime: &WorkspaceRuntime) -> bool {
+    runtime.wants_live_input() && runtime.focused_terminal().is_some()
+}
+
+/// Retarget the two `Ctrl-O` follow-ups whose meaning differs in Director mode.
+///
+/// In the drawer, New is the operation a control chord should reach — `Ctrl-O`
+/// `Ctrl-N` opens the CLI picker — and conversation cycling takes the plain
+/// follow-up `Ctrl-O` `n` in its place. Outside the drawer both chords keep
+/// their managed-pane meaning (`Ctrl-O Ctrl-N` cycles tabs, `Ctrl-O n` opens the
+/// drawer's New picker), so this swap is scoped to an open drawer and applied
+/// once, before any consumer of the key observes it.
+fn retarget_director_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
+    if !runtime.state().director_drawer_open() {
+        return key;
+    }
+    match key {
+        Key::Live(LiveTerminalAction::NextTab) => Key::Live(LiveTerminalAction::DirectorNew),
+        Key::Live(LiveTerminalAction::DirectorNew) => Key::Live(LiveTerminalAction::NextTab),
+        other => other,
     }
 }
 
@@ -5302,7 +5332,9 @@ fn drive_workspace_controller(
             );
         }
         drain_pane_launches(&mut ui, geometry);
-        let key = term.read_key()?;
+        // Director mode owns `Ctrl-O Ctrl-N` as New; the swap happens once here
+        // so PTY forwarding, pane controls, and the reducer all see one key.
+        let key = retarget_director_chords(&runtime, term.read_key()?);
         // Neither a tick nor a resize refreshes an inventory here any more. Both
         // used to dispatch `RefreshDecisions` + `RefreshSessions`, which ran the
         // daemon round trip on this thread at the 16ms frame cadence; the
@@ -6346,8 +6378,9 @@ mod tests {
         forward_live_terminal_input, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
         play_startup_splash, poll_and_project_terminals, render_controller_frame,
-        render_home_snapshot, restore_open_panes, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
+        render_home_snapshot, restore_open_panes, retarget_director_chords,
+        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -16306,6 +16339,154 @@ mod tests {
                 (root_agent, b"\r".to_vec()),
             ]
         );
+    }
+
+    /// `Esc` belongs to the drawer's selected root Agent — an agent CLI reads it
+    /// as its own interrupt — so the drawer keeps it only when no live
+    /// conversation can receive it. `Ctrl-O Ctrl-G` closes the drawer either way.
+    #[test]
+    fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root_agent = scoped_terminal_ref(workspace, None);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RestoreInventoryPort {
+                    entries: vec![TerminalInventoryEntry {
+                        terminal: root_agent.clone(),
+                        kind: TerminalKind::Agent,
+                        live: true,
+                    }],
+                    fail: false,
+                    inputs: Arc::clone(&inputs),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+
+        let open = Key::Live(LiveTerminalAction::Director);
+        assert!(runtime.handle_key(open).is_empty());
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
+
+        // The live conversation owns Esc: it reaches the PTY once and the drawer
+        // stays open.
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Escape,
+            ),
+            WorkspaceInputRoute::Forwarded
+        );
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![(root_agent.clone(), vec![0x1b])]
+        );
+
+        // Closing stays reachable through the drawer's own chord.
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &Key::Live(LiveTerminalAction::Director),
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(*inputs.lock().unwrap(), vec![(root_agent, vec![0x1b])]);
+
+        // With no conversation to receive it, Esc keeps its drawer meaning.
+        let empty_view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut empty_ui = WorkspaceUi::new(empty_view, Box::new(UnavailableSessionCommandPort));
+        let mut empty_runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        assert!(
+            empty_runtime
+                .handle_key(Key::Live(LiveTerminalAction::Director))
+                .is_empty()
+        );
+        assert!(empty_runtime.state().director_drawer_open());
+        assert_eq!(empty_runtime.focused_terminal(), None);
+        assert_eq!(
+            route_workspace_input_before_reducer(
+                &mut empty_ui,
+                &mut empty_runtime,
+                &mut controls,
+                &mut term,
+                &Key::Escape,
+            ),
+            WorkspaceInputRoute::Drawer(Vec::new())
+        );
+        assert!(!empty_runtime.state().director_drawer_open());
+    }
+
+    /// Director mode gives `Ctrl-O Ctrl-N` to New and moves conversation cycling
+    /// to the plain follow-up `Ctrl-O n`. Outside the drawer both chords keep
+    /// their managed-pane meaning.
+    #[test]
+    fn director_mode_retargets_the_new_and_next_tab_chords() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
+            DefaultModel::Claude,
+        );
+
+        // Closed drawer: every key passes through unchanged.
+        for key in [
+            Key::Live(LiveTerminalAction::NextTab),
+            Key::Live(LiveTerminalAction::DirectorNew),
+            Key::Live(LiveTerminalAction::PreviousTab),
+            Key::Escape,
+        ] {
+            assert_eq!(retarget_director_chords(&runtime, key.clone()), key);
+        }
+
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::Director))
+                .is_empty()
+        );
+        assert!(runtime.state().director_drawer_open());
+
+        // Open drawer: the two chords swap, and nothing else moves.
+        assert_eq!(
+            retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            Key::Live(LiveTerminalAction::DirectorNew)
+        );
+        assert_eq!(
+            retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            Key::Live(LiveTerminalAction::NextTab)
+        );
+        for key in [
+            Key::Live(LiveTerminalAction::PreviousTab),
+            Key::Live(LiveTerminalAction::Director),
+            Key::Escape,
+            Key::Char('n'),
+        ] {
+            assert_eq!(retarget_director_chords(&runtime, key.clone()), key);
+        }
+
+        // The retargeted chord reaches the reducer as New, exactly as the frame
+        // loop dispatches it.
+        let retargeted = retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::NextTab));
+        assert!(runtime.handle_key(retargeted).is_empty());
+        assert!(matches!(
+            runtime.state().director_new(),
+            DirectorNew::Choosing(DefaultModel::Claude)
+        ));
     }
 
     #[test]
