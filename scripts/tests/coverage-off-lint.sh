@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
+export LANG=C
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 lint="$root/scripts/coverage-off-lint.rb"
@@ -18,6 +20,11 @@ run_case() {
   set -e
   if [[ $status -ne $expected ]]; then
     echo "FAIL: $name returned $status, expected $expected" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+  if grep -Fq 'coverage-off-lint.rb:' <<<"$output"; then
+    echo "FAIL: $name emitted a Ruby stack trace" >&2
     echo "$output" >&2
     exit 1
   fi
@@ -70,6 +77,25 @@ expired() {
   printf '%s\n' '{"version":1,"entries":[]}' > "$dir/allowlist.json"
 }
 
+utf8_source() {
+  local dir=$1
+  printf '%s\n' '// 日本語のコメント' '#[coverage(off)]' 'fn read_pty() {}' > "$dir/src/lib.rs"
+  printf '%s\n' '{"version":1,"entries":[{"path":"src/lib.rs","symbol":"fn:read_pty","reason":"real_io","owner":"デーモン","expires":"2027-01-31","tests":"pty_integration"}]}' > "$dir/allowlist.json"
+}
+
+invalid_utf8_source() {
+  local dir=$1
+  printf '\xff invalid source\n' > "$dir/src/lib.rs"
+  printf '%s\n' '{"version":1,"entries":[]}' > "$dir/allowlist.json"
+}
+
+invalid_utf8_manifest() {
+  local dir=$1
+  printf '%s\n' 'fn main() {}' > "$dir/src/lib.rs"
+  printf '{"version":1,"entries":[],' > "$dir/allowlist.json"
+  printf '\xff}\n' >> "$dir/allowlist.json"
+}
+
 run_case allowed-io 0 'ok (1 exclusions)' allowed_io
 run_case forbidden-reducer 1 'forbidden reason "reducer"' forbidden_reducer
 run_case missing-reason 1 'missing reason' missing_reason
@@ -77,5 +103,8 @@ run_case stale-symbol 1 'stale symbol src/lib.rs:fn:old:1' stale_symbol
 run_case added-symbol 1 'unregistered coverage(off) for fn:added' added_symbol
 run_case deleted-symbol 1 'stale symbol src/lib.rs:fn:deleted:1' deleted_symbol
 run_case expired 1 'expired on 2026-07-20' expired
+run_case utf8-source 0 'ok (1 exclusions)' utf8_source
+run_case invalid-utf8-source 1 'src/lib.rs:1: invalid UTF-8' invalid_utf8_source
+run_case invalid-utf8-manifest 1 'allowlist.json:1: invalid UTF-8' invalid_utf8_manifest
 
 echo "coverage-off-lint: fixtures ok"
