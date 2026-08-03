@@ -354,7 +354,7 @@ snapshot を読み直す。slow subscriber は bounded queue で coalesce/drop �
 
 ## managed session request
 
-`session` kind の `create`、`remove`、`list`、`overview`、legacy `resume_agent` は daemon が所有する durable lifecycle / Agent runtime に届く。create / remove / resume_agent は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
+`session` kind の `create`、`remove`、`list`、`overview`、legacy `resume_agent` は daemon が所有する durable lifecycle / Agent runtime に届く。create / remove / resume_agent は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。remove の hook は受理を意味し、worktree 撤去の完了ではない（下表）。`OperationId` の再送は action と canonical intent が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。create intent は canonical session target と role、remove intent は canonical session target、request origin（client request / compensating teardown）、effective `force` を含む。
 
 create の durable outcome と wire response / hook の対応は次の表を正本とする。同じ semantic operation の再送は daemon restart の前後を問わず同じ行を replay し、filesystem / Git effect を再実行しない。
 
@@ -362,7 +362,9 @@ create の durable outcome と wire response / hook の対応は次の表を正�
 |---|---|---|
 | `succeeded` | `accepted`（同じ `operation_id` / final revision / snapshot） | `session.created` |
 | `failed`（effect failure または interrupted reconcile） | safe `error` | なし |
-| 同じ `OperationId`、異なる action / canonical target | `idempotency_conflict` | なし |
+| 同じ `OperationId`、異なる action / canonical intent（target / origin / `force`） | `idempotency_conflict` | なし |
+
+旧 daemon が書いた `remove:<name>` semantic key は origin と `force` を証明しない。対象 session が同じ operation と durable `DeletePlan` を保持し、その plan の `force` / `delete_branch` が現行 request と一致する間だけ互換 replay する。完了後など plan が残らない旧 journal は同一 intent と推測せず、同じ `OperationId` の再利用を `idempotency_conflict` で fail closed に拒否する。compensating teardown は常に `force: true` / branch delete の内部 intent であり、通常の client remove と相関しない。
 
 **remove の応答は durable outcome ではなく受理の時点で返る**（[5. daemon の session teardown
 worker](05-daemon.md#session-teardown-worker) が正本）。worktree 撤去は daemon 所有 worker が続けるため、応答が返った
@@ -372,9 +374,9 @@ worker](05-daemon.md#session-teardown-worker) が正本）。worktree 撤去は 
 |---|---|---|
 | 受理（`available` / `failed` な session を `deleting` へ遷移） | `accepted`（`operation_id` / 遷移後 revision / `deleting` を含む snapshot） | `session.removed`（＝受理。撤去完了ではない） |
 | すでに `deleting` な session への新しい `OperationId` | `accepted`（**進行中 operation の** `operation_id` と現在の revision / snapshot） | `session.removed` |
-| 受理済み operation の同一 `OperationId` 再送 | teardown 成功なら `accepted` の replay、失敗なら safe `error`（保存済み summary） | 成功時のみ |
+| 受理済み operation の同一 canonical intent 再送 | teardown 実行中または成功なら `accepted` の replay、失敗なら safe `error`（保存済み summary） | `accepted` 時 |
 | 未知の session、不正な `force`、非 canonical `OperationId` | safe `error` | なし |
-| 同じ `OperationId`、異なる action / canonical target | `idempotency_conflict` | なし |
+| 同じ `OperationId`、異なる action / canonical intent（target / origin / `force`） | `idempotency_conflict` | なし |
 
 teardown 自体の結果は、この応答ではなく後続の `list` / `overview` snapshot で観測する（`deleting` 行の消滅＝完了、
 `failed` 行＝失敗と理由）。

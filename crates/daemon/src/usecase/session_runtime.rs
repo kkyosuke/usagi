@@ -1133,14 +1133,21 @@ impl SessionRuntime {
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
-        let semantic_key = semantic_key(SessionAction::Remove, &name);
+        let semantic_key = remove_semantic_key(kind, &name, force);
         if let Some(existing) = before
             .operations
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
-            if existing.semantic_key != semantic_key {
+            if !remove_operation_matches(&before, existing, kind, &name, force, &semantic_key) {
                 return Err(SessionRuntimeError::IdempotencyConflict);
+            }
+            if existing.status == OperationStatus::Accepted {
+                return Ok(SessionRemoveStep::Settled(SessionReply {
+                    operation_id: existing.operation_id.to_string(),
+                    revision: before.state_revision,
+                    body: snapshot(&before, self.root_worktree_id),
+                }));
             }
             return self
                 .replay(&before, existing)
@@ -1754,11 +1761,58 @@ fn create_semantic_key(origin: CreateOrigin, name: &str, role_id: Option<&RoleId
     )
 }
 
+/// The journaled identity of one removal: its origin, session name, and every
+/// option that changes the worktree effect.
+///
+/// A requested removal keeps the branch while a compensation deletes it, so the
+/// origin is durable intent rather than implementation metadata. `force` is
+/// spelled out even when false so opposite destructive intents cannot share an
+/// operation id.
+fn remove_semantic_key(kind: RemoveKind, name: &str, force: bool) -> String {
+    let action = semantic_key(SessionAction::Remove, name);
+    let origin = match kind {
+        RemoveKind::Requested => "requested",
+        RemoveKind::Compensating => "compensating",
+    };
+    format!("{action}:origin={origin}:force={force}")
+}
+
+/// Whether an existing journal proves it represents this removal intent.
+///
+/// Current journals compare their complete canonical key. A legacy
+/// `remove:<name>` key did not record force or origin; it is replay-compatible
+/// only while the session still carries the matching operation and `DeletePlan`,
+/// which independently prove both effecting choices. Once that evidence is
+/// gone (notably after success), guessing would correlate an unknown old intent
+/// with a new request, so reuse fails closed.
+fn remove_operation_matches(
+    state: &WorkspaceLifecycleState,
+    operation: &OperationJournal,
+    kind: RemoveKind,
+    name: &str,
+    force: bool,
+    requested_key: &str,
+) -> bool {
+    if operation.semantic_key == requested_key {
+        return true;
+    }
+    if operation.semantic_key != semantic_key(SessionAction::Remove, name) {
+        return false;
+    }
+    state.sessions.iter().any(|session| {
+        session.name == name
+            && session.operation_id == Some(operation.operation_id)
+            && session.delete_plan.as_ref().is_some_and(|plan| {
+                plan.force == force && plan.delete_branch == (kind == RemoveKind::Compensating)
+            })
+    })
+}
+
 /// Whether one journaled semantic key names this action and session.
 ///
-/// A create key optionally carries the role it was admitted for, so the action
-/// and name are a prefix rather than the whole key. Session names cannot contain
-/// `:`, which is what makes the separator unambiguous.
+/// Create and remove keys may carry intent fields after the action and name, so
+/// those first two components are a prefix rather than the whole key. Session
+/// names cannot contain `:`, which is what makes the separator unambiguous.
 fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
     semantic_key == action_and_name
         || semantic_key
@@ -3120,15 +3174,27 @@ instructions = "direct"
         )
         .unwrap();
         let failed = first
-            .handle(SessionAction::Remove, &operation, &json!({"name":"one"}))
+            .handle(
+                SessionAction::Remove,
+                &operation,
+                &json!({"name":"one", "force":true}),
+            )
             .unwrap_err();
         let replayed = first
-            .handle(SessionAction::Remove, &operation, &json!({"name":"one"}))
+            .handle(
+                SessionAction::Remove,
+                &operation,
+                &json!({"name":"one", "force":true}),
+            )
             .unwrap_err();
         assert_eq!(replayed.safe_message(), failed.safe_message());
         assert_eq!(
             first
-                .handle(SessionAction::Remove, &operation, &json!({"name":"two"}))
+                .handle(
+                    SessionAction::Remove,
+                    &operation,
+                    &json!({"name":"one", "force":false}),
+                )
                 .unwrap_err(),
             SessionRuntimeError::IdempotencyConflict
         );
@@ -3152,9 +3218,23 @@ instructions = "direct"
         )
         .unwrap();
         let reopened = restarted
-            .handle(SessionAction::Remove, &operation, &json!({"name":"one"}))
+            .handle(
+                SessionAction::Remove,
+                &operation,
+                &json!({"name":"one", "force":true}),
+            )
             .unwrap_err();
         assert_eq!(reopened.safe_message(), failed.safe_message());
+        assert_eq!(
+            restarted
+                .handle(
+                    SessionAction::Remove,
+                    &operation,
+                    &json!({"name":"one", "force":false}),
+                )
+                .unwrap_err(),
+            SessionRuntimeError::IdempotencyConflict
+        );
         assert_eq!(restart_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -3915,6 +3995,248 @@ instructions = "code"
             1
         );
         assert_eq!(runtime.lock().unwrap().state().unwrap().operations.len(), 2);
+    }
+
+    /// Losing the accepted response does not widen the operation identity. The
+    /// exact force intent replays while the opposite intent conflicts, in both
+    /// directions, and the one admitted plan remains the only worktree effect.
+    #[test]
+    #[allow(clippy::too_many_lines)] // One scenario crosses accepted/restart/succeeded boundaries.
+    fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
+        for (first_force, conflicting_force) in [(false, true), (true, false)] {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(tmp.path().join(".git")).unwrap();
+            let state_dir = tmp.path().join("daemon");
+            let runtime = Arc::new(Mutex::new(
+                SessionRuntime::open(
+                    tmp.path().to_path_buf(),
+                    &state_dir,
+                    DaemonGeneration::new(),
+                    FakeGit::ok(),
+                    SystemSessionWorktreeIo,
+                )
+                .unwrap(),
+            ));
+            perform_create(
+                &runtime,
+                &FakeGit::ok(),
+                &operation(),
+                &json!({"name":"one"}),
+            )
+            .unwrap();
+            let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+            std::fs::create_dir_all(&session_root).unwrap();
+            std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+            let operation = operation();
+            let signal = TeardownSignal::new();
+            let request = json!({"name":"one", "force":first_force});
+
+            // Model response loss by discarding the first accepted reply.
+            perform_remove(&runtime, &signal, &operation, &request).unwrap();
+            let replayed = perform_remove(&runtime, &signal, &operation, &request).unwrap();
+            assert_eq!(replayed.operation_id, operation);
+            assert_eq!(replayed.body["sessions"][0]["lifecycle"], "deleting");
+            assert_eq!(
+                perform_remove(
+                    &runtime,
+                    &signal,
+                    &operation,
+                    &json!({"name":"one", "force":conflicting_force}),
+                ),
+                Err(SessionRuntimeError::IdempotencyConflict)
+            );
+            assert_eq!(
+                runtime.lock().unwrap().pending_teardowns().unwrap().len(),
+                1
+            );
+
+            // An accepted operation remains replayable after daemon restart;
+            // the durable plan is still the only queued effect.
+            drop(runtime);
+            let runtime = Arc::new(Mutex::new(
+                SessionRuntime::open(
+                    tmp.path().to_path_buf(),
+                    &state_dir,
+                    DaemonGeneration::new(),
+                    FakeGit::ok(),
+                    SystemSessionWorktreeIo,
+                )
+                .unwrap(),
+            ));
+            let after_accepted_restart =
+                perform_remove(&runtime, &signal, &operation, &request).unwrap();
+            assert_eq!(after_accepted_restart.operation_id, operation);
+            assert_eq!(
+                runtime.lock().unwrap().pending_teardowns().unwrap().len(),
+                1
+            );
+            assert_eq!(
+                perform_remove(
+                    &runtime,
+                    &signal,
+                    &operation,
+                    &json!({"name":"one", "force":conflicting_force}),
+                ),
+                Err(SessionRuntimeError::IdempotencyConflict)
+            );
+
+            let calls = Arc::new(AtomicUsize::new(0));
+            drain_pending_teardowns(
+                &SharedSessionTeardown::new(Arc::clone(&runtime)),
+                &WorktreeTeardown::new(
+                    CountingGit {
+                        calls: Arc::clone(&calls),
+                    },
+                    SystemSessionWorktreeIo,
+                ),
+                &|| false,
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let succeeded = perform_remove(&runtime, &signal, &operation, &request).unwrap();
+            assert_eq!(succeeded.operation_id, operation);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            drop(runtime);
+
+            // A terminal successful outcome also survives restart without a
+            // replacement worktree effect.
+            let restarted = Arc::new(Mutex::new(
+                SessionRuntime::open(
+                    tmp.path().to_path_buf(),
+                    &state_dir,
+                    DaemonGeneration::new(),
+                    CountingGit {
+                        calls: Arc::clone(&calls),
+                    },
+                    SystemSessionWorktreeIo,
+                )
+                .unwrap(),
+            ));
+            let after_restart = perform_remove(&restarted, &signal, &operation, &request).unwrap();
+            assert_eq!(after_restart.operation_id, operation);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                perform_remove(
+                    &restarted,
+                    &signal,
+                    &operation,
+                    &json!({"name":"one", "force":conflicting_force}),
+                ),
+                Err(SessionRuntimeError::IdempotencyConflict)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_remove_keys_replay_only_while_the_delete_plan_proves_the_intent() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let operation = operation();
+        let signal = TeardownSignal::new();
+        let request = json!({"name":"one", "force":true});
+        perform_remove(&runtime, &signal, &operation, &request).unwrap();
+
+        // Simulate a snapshot written before remove keys carried force/origin.
+        {
+            let runtime = runtime.lock().unwrap();
+            let mut legacy = runtime.state().unwrap();
+            let revision = legacy.state_revision;
+            legacy.operations.last_mut().unwrap().semantic_key =
+                semantic_key(SessionAction::Remove, "one");
+            runtime
+                .store
+                .replace_if_revision(revision, &legacy)
+                .unwrap();
+        }
+        assert!(perform_remove(&runtime, &signal, &operation, &request).is_ok());
+        assert_eq!(
+            perform_remove(
+                &runtime,
+                &signal,
+                &operation,
+                &json!({"name":"one", "force":false}),
+            ),
+            Err(SessionRuntimeError::IdempotencyConflict)
+        );
+
+        // The retained plan proves the same intent across restart too.
+        let state_dir = tmp.path().join("daemon");
+        drop(runtime);
+        let restarted = Arc::new(Mutex::new(
+            SessionRuntime::open(
+                tmp.path().to_path_buf(),
+                &state_dir,
+                DaemonGeneration::new(),
+                FakeGit::ok(),
+                SystemSessionWorktreeIo,
+            )
+            .unwrap(),
+        ));
+        assert!(perform_remove(&restarted, &signal, &operation, &request).is_ok());
+
+        drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&restarted)),
+            &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
+            &|| false,
+        );
+        // Success retires the session and its plan. The legacy key can no longer
+        // prove either force value, so both guesses fail closed.
+        for force in [false, true] {
+            assert_eq!(
+                perform_remove(
+                    &restarted,
+                    &signal,
+                    &operation,
+                    &json!({"name":"one", "force":force}),
+                ),
+                Err(SessionRuntimeError::IdempotencyConflict)
+            );
+        }
+    }
+
+    #[test]
+    fn compensating_and_requested_removes_are_distinct_durable_intents() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_delegated_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"triage"}),
+        )
+        .unwrap();
+        let operation = operation();
+        let signal = TeardownSignal::new();
+        perform_compensating_remove(&runtime, &signal, &operation, "triage").unwrap();
+
+        assert_eq!(
+            perform_remove(
+                &runtime,
+                &signal,
+                &operation,
+                &json!({"name":"triage", "force":true}),
+            ),
+            Err(SessionRuntimeError::IdempotencyConflict)
+        );
+        let state = runtime.lock().unwrap().state().unwrap();
+        assert_eq!(state.operations.len(), 2);
+        assert_eq!(
+            state.operations[1].semantic_key,
+            "remove:triage:origin=compensating:force=true"
+        );
+        assert!(
+            state.sessions[0]
+                .delete_plan
+                .as_ref()
+                .unwrap()
+                .delete_branch
+        );
     }
 
     #[test]
