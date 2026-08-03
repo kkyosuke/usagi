@@ -730,10 +730,54 @@ fn agent_with_a_name_overrides_which_cli_to_launch() {
 }
 
 #[test]
+fn agent_selects_a_cli_with_the_model_flag() {
+    use crate::domain::settings::AgentCli;
+    // `-m` and `--model` reach the same vocabulary as the bare name, so the
+    // flag form typed in Closeup launches instead of erroring.
+    for (input, expected) in [
+        ("agent -m claude", AgentCli::Claude),
+        ("agent --model codex", AgentCli::Codex),
+        ("agent -m sakana.ai", AgentCli::SakanaAi),
+        ("agent -m sakana_ai", AgentCli::SakanaAi),
+        ("agent -m codex-fugu", AgentCli::SakanaAi),
+        ("agent   -m   Claude  ", AgentCli::Claude),
+    ] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert!(result.lines.is_empty(), "{input}: {:?}", result.lines);
+        assert_eq!(result.effect, Effect::OpenAgent(Some(expected)), "{input}");
+    }
+}
+
+#[test]
 fn agent_with_an_unknown_name_is_rejected_without_launching() {
     let result = registry().dispatch("agent emacs", &[], &[]);
     assert_eq!(result.effect, Effect::None);
     assert!(result.lines[0].text.contains("unknown agent \"emacs\""));
+}
+
+#[test]
+fn agent_rejects_unusable_and_ambiguous_arguments_without_launching() {
+    for (input, message) in [
+        ("agent -m emacs", "unknown agent \"emacs\""),
+        ("agent -m", "-m requires an agent name"),
+        ("agent --model", "-m requires an agent name"),
+        ("agent -x claude", "unknown agent flag \"-x\""),
+        (
+            "agent -m claude -m codex",
+            "agent accepts one CLI selection",
+        ),
+        ("agent -m claude codex", "agent accepts one CLI selection"),
+        ("agent claude codex", "agent accepts one CLI selection"),
+    ] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert_eq!(result.effect, Effect::None, "{input}");
+        assert_eq!(result.lines[0].kind, LineKind::Error, "{input}");
+        assert!(
+            result.lines[0].text.contains(message),
+            "{input}: {}",
+            result.lines[0].text
+        );
+    }
 }
 
 #[test]
@@ -760,6 +804,26 @@ fn agent_completes_available_cli_names() {
     // After the first token, it returns nothing.
     let too_many = registry().complete("agent claude ", CommandScope::Session);
     assert!(too_many.candidates.is_empty());
+}
+
+#[test]
+fn agent_completes_the_model_flag_and_the_name_after_it() {
+    // The flags are offered alongside the bare names, so `-` narrows to them.
+    let flags = registry().complete("agent -", CommandScope::Session);
+    assert_eq!(flags.candidates, vec!["-m".to_string(), "--model".into()]);
+
+    // "agent -m " offers only the CLI names, and a prefix completes uniquely.
+    let names = registry().complete("agent -m ", CommandScope::Session);
+    assert!(names.candidates.contains(&"claude".to_string()));
+    assert!(names.candidates.contains(&"sakana.ai".to_string()));
+    assert!(!names.candidates.contains(&"-m".to_string()));
+    let unique = registry().complete("agent --model cl", CommandScope::Session);
+    assert_eq!(unique.input, "agent --model claude");
+    assert!(unique.candidates.is_empty());
+
+    // After the selection is complete, it returns nothing.
+    let done = registry().complete("agent -m claude ", CommandScope::Session);
+    assert!(done.candidates.is_empty());
 }
 
 #[test]

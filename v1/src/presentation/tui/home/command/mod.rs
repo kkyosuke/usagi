@@ -85,7 +85,7 @@ pub enum Effect {
     /// `terminal` with the agent CLI launched inside it; the directory and agent
     /// command are resolved by the event loop / wiring. The payload selects which
     /// CLI to launch: `None` uses the workspace's configured agent (the common
-    /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
+    /// fast path), `Some(cli)` overrides it for this launch (`agent -m <name>`).
     OpenAgent(Option<AgentCli>),
     /// Open the local-LLM chat screen (the user ran `chat` in 集中, or picked its
     /// menu row). Unlike [`OpenAgent`](Self::OpenAgent), which launches an external

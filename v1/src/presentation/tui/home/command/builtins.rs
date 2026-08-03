@@ -662,16 +662,78 @@ impl Command for TerminalCommand {
     }
 }
 
-/// `agent [name]`: open an AI agent in the selected worktree. This is a shortcut
-/// for running `terminal` and then launching the agent CLI inside it, so it
-/// produces the [`Effect::OpenAgent`] side effect the event loop turns into an
-/// embedded terminal with the agent command sent on start.
+/// The `-m` short flag and its long form, in completion order. Both select
+/// which agent CLI `agent` launches, matching the flag the v2 Closeup accepts so
+/// the same line works in either build.
+const AGENT_MODEL_FLAGS: [&str; 2] = ["-m", "--model"];
+
+/// The agent CLI names offered by completion, by user-facing display name (e.g.
+/// `sakana.ai`) rather than internal launch command (`codex-fugu`). `run` still
+/// resolves either form through `AgentCli::from_name`.
+fn agent_cli_names() -> Vec<String> {
+    crate::domain::settings::AgentCli::ALL
+        .iter()
+        .map(|cli| cli.display_name().to_lowercase())
+        .collect()
+}
+
+/// Parse `[[-m|--model] <name>]` into the CLI it selects.
+///
+/// `Ok(None)` is the flagless form: launch the workspace's configured agent. The
+/// positional form (`agent codex`) is kept because it is what this command has
+/// always taken; both forms resolve through the same vocabulary. The error is
+/// the user-facing line the caller logs.
+fn parse_agent_selection(
+    args: &str,
+    usage: &str,
+) -> Result<Option<crate::domain::settings::AgentCli>, String> {
+    let mut selected = None;
+    let mut expects_name = false;
+    for token in args.split_whitespace() {
+        if expects_name {
+            selected = Some(resolve_agent_name(token, usage)?);
+            expects_name = false;
+            continue;
+        }
+        match token {
+            flag if AGENT_MODEL_FLAGS.contains(&flag) && selected.is_some() => {
+                return Err(format!("agent accepts one CLI selection (try {usage})"));
+            }
+            flag if AGENT_MODEL_FLAGS.contains(&flag) => expects_name = true,
+            flag if flag.starts_with('-') => {
+                return Err(format!("unknown agent flag \"{flag}\" (try {usage})"));
+            }
+            _ if selected.is_some() => {
+                return Err(format!("agent accepts one CLI selection (try {usage})"));
+            }
+            positional => selected = Some(resolve_agent_name(positional, usage)?),
+        }
+    }
+    if expects_name {
+        return Err(format!("-m requires an agent name (try {usage})"));
+    }
+    Ok(selected)
+}
+
+fn resolve_agent_name(
+    name: &str,
+    usage: &str,
+) -> Result<crate::domain::settings::AgentCli, String> {
+    crate::domain::settings::AgentCli::from_name(name)
+        .ok_or_else(|| format!("unknown agent \"{name}\" (try {usage})"))
+}
+
+/// `agent [-m <name>]`: open an AI agent in the selected worktree. This is a
+/// shortcut for running `terminal` and then launching the agent CLI inside it,
+/// so it produces the [`Effect::OpenAgent`] side effect the event loop turns
+/// into an embedded terminal with the agent command sent on start.
 ///
 /// With no argument it launches the workspace's configured agent (the common
-/// fast path); a name (`agent codex`, `agent sakana.ai`) overrides which CLI to
-/// launch for this session. An unrecognised name is rejected with an error line;
-/// whether a recognised CLI is actually installed is checked by the event loop
-/// when it launches (it holds the PATH probe), so this command only parses.
+/// fast path); `-m` / `--model` (or a bare name, the form this command has
+/// always taken) overrides which CLI to launch for this session. An unrecognised
+/// name or flag is rejected with an error line; whether a recognised CLI is
+/// actually installed is checked by the event loop when it launches (it holds
+/// the PATH probe), so this command only parses.
 pub(super) struct AgentCommand;
 
 impl Command for AgentCommand {
@@ -684,11 +746,11 @@ impl Command for AgentCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "agent [name]"
+        "agent [-m <name>]"
     }
 
     fn examples(&self) -> &'static [&'static str] {
-        &["agent", "agent codex", "agent sakana.ai"]
+        &["agent", "agent -m claude", "agent codex", "agent sakana.ai"]
     }
 
     fn scope(&self) -> CommandScope {
@@ -697,38 +759,27 @@ impl Command for AgentCommand {
 
     fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
         let (head, _) = arg_tokens(args);
-        if head.is_empty() {
-            // Suggest each CLI by its user-facing display name (e.g. `sakana.ai`),
-            // not its internal launch command (`codex-fugu`). `run` still resolves
-            // either form through `AgentCli::from_name`.
-            crate::domain::settings::AgentCli::ALL
+        match head.as_slice() {
+            // `agent ` / `agent -<prefix>`: offer the flags, then the bare names
+            // so the flagless `agent codex` still completes.
+            [] => AGENT_MODEL_FLAGS
                 .iter()
-                .map(|cli| cli.display_name().to_lowercase())
-                .collect()
-        } else {
-            Vec::new()
+                .map(|flag| (*flag).to_string())
+                .chain(agent_cli_names())
+                .collect(),
+            // `agent -m <prefix>`: only the CLI names.
+            [flag] if AGENT_MODEL_FLAGS.contains(flag) => agent_cli_names(),
+            _ => Vec::new(),
         }
     }
 
     fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
-        let name = args.trim();
-        // No name: launch the configured agent (the fast path).
-        if name.is_empty() {
-            return CommandResult {
+        match parse_agent_selection(args, self.usage()) {
+            Ok(cli) => CommandResult {
                 lines: Vec::new(),
-                effect: Effect::OpenAgent(None),
-            };
-        }
-        // A name overrides which CLI to launch; reject anything unrecognised.
-        match crate::domain::settings::AgentCli::from_name(name) {
-            Some(cli) => CommandResult {
-                lines: Vec::new(),
-                effect: Effect::OpenAgent(Some(cli)),
+                effect: Effect::OpenAgent(cli),
             },
-            None => CommandResult::line(LogLine::error(format!(
-                "unknown agent \"{name}\" (try {})",
-                self.usage()
-            ))),
+            Err(message) => CommandResult::line(LogLine::error(message)),
         }
     }
 }

@@ -160,8 +160,8 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 どの Agent CLI を起動するかは、引数で**そのセッションだけ**上書きできます。
 
 - 引数なし（集中 Menu の `agent` 行 / `a`、Prompt の `agent`）: 設定中の**既定 CLI**（ローカル設定で `gemini` などに変更可）を起動。
-- 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または集中 Menu の[エージェントピッカー](../design/home/02-layout.md#集中のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini` / `agy`）と表示名（`sakana.ai` / `antigravity`）を大文字小文字を問わず受け付ける。
-- 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
+- 名前付き（Prompt の `agent -m claude` / `agent --model codex` / `agent sakana.ai`、または集中 Menu の[エージェントピッカー](../design/home/02-layout.md#集中のアクション-uimenu--prompt)）: 指定した CLI を起動。`-m` / `--model` と裸の名前は同じ語彙を通る。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini` / `agy`）と表示名（`sakana.ai` / `antigravity`）を大文字小文字を問わず受け付ける。Tab 補完は `agent ` で `-m` / `--model` と名前を、`agent -m ` で名前だけを出す。
+- 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前・未知のフラグ・`-m` の値欠落・2 つ以上の指定も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
 
 **1 セッションが持てる agent は CLI ごとに 1 つ**です。別々の CLI（例: Claude と Codex）は同じセッションで**並行して開けます**。ただし同じ CLI を 2 つは開かず、すでにその CLI の agent ペインがあるときは Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` のいずれから実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。`agent` 行は常に Menu に残ります（選択プレビューはアイドルなセッションでは選択肢を並べず、Menu ならマスコットを休ませます）。
 
