@@ -548,13 +548,18 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // sandbox の writable root に委ねる。
         let mode = sandbox_mode(context);
         let launch_roots =
-            claude_writable_roots(&working_directory, &workspace_root, &self.data_home);
+            claude_writable_roots(mode, &working_directory, &workspace_root, &self.data_home);
+        let (sandbox_tmpdir, sandbox_home) = if mode == SandboxMode::Session {
+            (None, None)
+        } else {
+            (self.sandbox_tmpdir.as_deref(), self.sandbox_home.as_deref())
+        };
         validate_claude_sandbox_policy(
             mode,
             &workspace_root,
             &launch_roots,
-            self.sandbox_tmpdir.as_deref(),
-            self.sandbox_home.as_deref(),
+            sandbox_tmpdir,
+            sandbox_home,
             self.sandbox_backend.as_deref(),
             self.sandbox_passthrough,
         )
@@ -572,8 +577,8 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             mode,
             &protected_root,
             self.sandbox_backend.as_deref(),
-            self.sandbox_tmpdir.as_deref(),
-            self.sandbox_home.as_deref(),
+            sandbox_tmpdir,
+            sandbox_home,
             &sandbox_roots,
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
@@ -611,6 +616,15 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             arguments,
         );
         spawn.set_sandbox_launcher(sandbox_launcher);
+        if mode == SandboxMode::Session {
+            // Public/configured values may point at shared host state. Session Claude receives
+            // daemon-owned overrides inside its own worktree, which is its sole writable root.
+            for (name, value) in session_claude_environment(&working_directory)
+                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
+            {
+                spawn.insert_daemon_environment(name, value);
+            }
+        }
         if self.sandbox_passthrough {
             spawn.insert_daemon_environment(
                 EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
@@ -637,26 +651,47 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 }
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.  The
-/// launcher adds the universal areas (`$TMPDIR`, `/tmp`, Claude state, …) itself.
-/// A session launch therefore writes into its own worktree plus the shared usagi
-/// state it must update (issue store, Git common dir, daemon data home), while a
-/// root launch writes into the project root because that *is* its cwd.
+/// launcher adds universal areas (`$TMPDIR`, `/tmp`, Claude state, …) only for a
+/// root coordinator. A session launch receives exactly its own worktree; its temp
+/// and Claude state environment is redirected below that worktree during provision.
 ///
 /// The data home is granted as the mode-neutral base rather than the daemon's
 /// selected directory: the child re-applies the runtime mode itself, so it may
 /// still have to create that child directory. Production's base is the selected
 /// directory, so this grants exactly the daemon's own tree — never its parent.
 fn claude_writable_roots(
+    mode: SandboxMode,
     working_directory: &Path,
     workspace_root: &Path,
     data_home: &paths::DataHome,
 ) -> Vec<PathBuf> {
-    vec![
-        working_directory.to_path_buf(),
-        workspace_root.join(".usagi"),
-        workspace_root.join(".git"),
-        data_home.base().to_path_buf(),
+    if mode == SandboxMode::Session {
+        vec![working_directory.to_path_buf()]
+    } else {
+        vec![
+            working_directory.to_path_buf(),
+            workspace_root.join(".usagi"),
+            workspace_root.join(".git"),
+            data_home.base().to_path_buf(),
+        ]
+    }
+}
+
+fn session_claude_environment(
+    working_directory: &Path,
+) -> Result<Vec<(EnvironmentVariableName, String)>, ()> {
+    [
+        ("TMPDIR", working_directory.to_path_buf()),
+        ("CLAUDE_CONFIG_DIR", working_directory.join(".usagi/claude")),
     ]
+    .into_iter()
+    .map(|(name, value)| {
+        Ok((
+            EnvironmentVariableName::new(name).expect("literal environment variable name is valid"),
+            value.to_str().ok_or(())?.to_owned(),
+        ))
+    })
+    .collect()
 }
 
 /// Policy paths are daemon-owned inputs.  Validate their identity before user
@@ -12211,6 +12246,7 @@ instructions = "{instructions}"
 
             // 3. Sandbox scope: the base, and never the directory above it.
             let roots = claude_writable_roots(
+                SandboxMode::Root,
                 Path::new("/repo/.usagi/sessions/work"),
                 Path::new("/repo"),
                 &data_home,
@@ -12229,21 +12265,12 @@ instructions = "{instructions}"
         assert_eq!(mode, SandboxMode::Session);
 
         let roots = claude_writable_roots(
+            mode,
             Path::new("/repo/.usagi/sessions/work"),
             Path::new("/repo"),
             &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),
         );
-        assert_eq!(
-            roots,
-            [
-                PathBuf::from("/repo/.usagi/sessions/work"),
-                PathBuf::from("/repo/.usagi"),
-                PathBuf::from("/repo/.git"),
-                PathBuf::from("/home/dev/.usagi"),
-            ]
-        );
-        // The workspace root itself is not writable for a session launch.
-        assert!(!roots.contains(&PathBuf::from("/repo")));
+        assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
 
         let launcher =
             claude_sandbox_launcher(usagi, mode, Path::new("/repo"), None, None, None, &roots)
@@ -12259,12 +12286,6 @@ instructions = "{instructions}"
                 "/repo",
                 "--writable-root",
                 "/repo/.usagi/sessions/work",
-                "--writable-root",
-                "/repo/.usagi",
-                "--writable-root",
-                "/repo/.git",
-                "--writable-root",
-                "/home/dev/.usagi",
                 "--",
             ]
         );
@@ -12282,6 +12303,28 @@ instructions = "{instructions}"
         assert_eq!(
             settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             serde_json::json!("'/opt/usagi/bin/usagi' agent-phase ready")
+        );
+
+        let environment = session_claude_environment(Path::new("/repo/.usagi/sessions/work"))
+            .unwrap()
+            .into_iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(environment["TMPDIR"], "/repo/.usagi/sessions/work");
+        assert_eq!(
+            environment["CLAUDE_CONFIG_DIR"],
+            "/repo/.usagi/sessions/work/.usagi/claude"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_claude_environment_rejects_non_utf8_worktrees() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        assert!(
+            session_claude_environment(Path::new(&std::ffi::OsString::from_vec(vec![0xff])))
+                .is_err()
         );
     }
 
@@ -12342,6 +12385,7 @@ instructions = "{instructions}"
 
         // A root launch's cwd *is* the project root, so that root is writable.
         let roots = claude_writable_roots(
+            mode,
             Path::new("/repo"),
             Path::new("/repo"),
             &paths::DataHome::new("/home/dev/.usagi", paths::RuntimeMode::Production),

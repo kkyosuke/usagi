@@ -879,9 +879,10 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。書き込みは起動固有 root（cwd・workspace の `.usagi`・Git common dir・usagi/Claude の state）と
-  普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`、macOS は加えて Keychain / MDS cache）だけに閉じ込め、読み取りは
-  許す。backend は macOS が `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
+  起動する。session の書き込みは own worktree だけに閉じ込め、root coordinator は起動固有 root（cwd・
+  workspace の `.usagi`・Git common dir・usagi state）と普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・Claude state、
+  macOS は加えて Keychain / MDS cache）へ書ける。読み取りは許す。backend は macOS が
+  `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
   `/var` `/tmp` `/etc` は `/private` 側も許可）、Linux が `bwrap`。backend 不在・未対応 platform では
   **無保護フォールバックせず起動を拒否する**（fail-closed）。sandbox 計画の純粋な決定部は `usagi-core` の
   [`usecase::claude_sandbox`] にあり、daemon bootstrap が backend を absolute canonical path として一度だけ
@@ -915,18 +916,19 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
-- **起動固有 writable root**: 起動 cwd（session は worktree、root は project root）・workspace の `.usagi`・
-  Git common dir（`<workspace root>/.git`）・usagi state（data home。runtime mode を適用する前の base で、
-  正本は [5. daemon#agent-child-の-data-home](05-daemon.md#agent-child-の-data-home)）。普遍領域（`$TMPDIR` / `/tmp` /
-  `/var/tmp`・Claude state・macOS の Keychain / MDS cache）は launcher が足す。session 起動では
-  workspace root 自体が writable root に入らないため、親リポジトリの作業ツリーへは書けない。
+- **起動固有 writable root**: session は own worktree だけであり、workspace の `.usagi`、Git common dir、
+  data home、普遍領域を追加しない。`TMPDIR` は worktree 自体、`CLAUDE_CONFIG_DIR` は
+  `<worktree>/.usagi/claude` へ daemon-issued environment で固定する。したがって sibling session、root の tracked
+  issue source、daemon durable state は path の表記や symlink alias にかかわらず read-only である。root coordinator
+  は project root・workspace の `.usagi`・Git common dir・usagi state（data home の base）を起動固有 root とし、
+  launcher が普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・Claude state・macOS の Keychain / MDS cache）を足す。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
   （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   は両 mode に配線し、`guard-workspace` は session 起動だけに足す（root の書き込み境界は sandbox が担う）。
-- **`TMPDIR` 伝播**: 拘束された子が自分の一時領域へ書けるよう、`TMPDIR` を公開 terminal 環境
-  （`TERMINAL_ENVIRONMENT_VARIABLES`）に含めて子へ渡す。writable-root policy には daemon bootstrap が
-  trusted environment から独立に確定・検証した canonical path を使う。
+- **`TMPDIR` 伝播**: root coordinator は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
+  root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証する。session は
+  shared temporary directory を launcher policy へ渡さず、daemon-issued environment で own worktree へ上書きする。
 - **テスト専用 seam**: `usagi_core::usecase::claude_sandbox::passthrough_requested` は、環境変数
   `USAGI_CLAUDE_SANDBOX_PASSTHROUGH=1` を見たときだけ launcher が拘束を省いて product をそのまま exec する
   ことを許す。`bwrap` を持たない Linux CI でも live 配線（launcher・`--settings`・PTY ライフサイクル）を

@@ -8,9 +8,9 @@
 //! **fail-closed**: sandbox backend が無い、または未対応 platform では [`SandboxPlan::Reject`] を
 //! 返し、Claude を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
 //!
-//! writable root は 2 系統を結合する。provisioner が起動 scope から渡す [`SandboxRequest::launch_roots`]
-//! （cwd・workspace の `.usagi`・Git common dir・usagi state）と、この module が platform / 環境から
-//! 補う普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・Claude state・macOS の Keychain / MDS cache）である。
+//! session の writable root は provisioner が渡す own worktree だけである。root coordinator では、
+//! その起動固有 root に platform / 環境由来の普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・Claude state・
+//! macOS の Keychain / MDS cache）を加える。
 //! sandbox は書き込みだけをこの root 集合に閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
 //!
@@ -189,6 +189,9 @@ fn reject_backend(backend: &str) -> SandboxPlan {
 /// 起動固有の root（provisioner 由来）と普遍領域を結合し、重複を除いた決定的な writable root 集合。
 fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut roots: BTreeSet<PathBuf> = request.launch_roots.iter().cloned().collect();
+    if request.mode == SandboxMode::Session {
+        return roots.into_iter().collect();
+    }
     roots.insert(PathBuf::from("/tmp"));
     roots.insert(PathBuf::from("/var/tmp"));
     if let Some(tmpdir) = &request.tmpdir {
@@ -383,7 +386,9 @@ mod tests {
 
     #[test]
     fn macos_wraps_claude_with_a_write_confining_profile() {
-        let launched = plan(&request(Platform::MacOs, Some("/usr/bin/sandbox-exec")));
+        let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+        request.mode = SandboxMode::Root;
+        let launched = plan(&request);
         // Launch を into_reject すると None（accessor の Launch 分岐を被覆）。
         assert!(launched.clone().into_reject().is_none());
         let (program, argv) = launched.into_launch().unwrap();
@@ -391,7 +396,7 @@ mod tests {
         assert_eq!(argv[0], "-p");
         let profile = &argv[1];
         assert!(profile.contains("(deny file-write*)"));
-        assert!(profile.contains("mode=session"));
+        assert!(profile.contains("mode=root"));
         // 起動固有 root と普遍領域の双方が subpath になる。
         assert!(profile.contains("(subpath \"/repo/.usagi/sessions/work\")"));
         assert!(profile.contains("(subpath \"/tmp\")"));
@@ -408,6 +413,7 @@ mod tests {
     #[test]
     fn macos_profile_strips_trailing_slashes_and_adds_private_firmlink_variants() {
         let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+        request.mode = SandboxMode::Root;
         // 末尾スラッシュ付きの macOS 一時ディレクトリ（$TMPDIR の実値に近い形）。
         request.tmpdir = Some(PathBuf::from("/var/folders/ab/T/"));
         request.home = None;
@@ -471,6 +477,7 @@ mod tests {
     #[test]
     fn universal_roots_omit_optional_environment_when_absent() {
         let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+        request.mode = SandboxMode::Root;
         request.launch_roots.clear();
         request.tmpdir = None;
         request.home = None;
@@ -496,6 +503,17 @@ mod tests {
         }
         let request = request(Platform::Linux, Some("relative/bwrap"));
         assert!(plan(&request).into_reject().unwrap().contains("backend"));
+    }
+
+    #[test]
+    fn session_roots_never_include_shared_environment_or_platform_state() {
+        for platform in [Platform::MacOs, Platform::Linux] {
+            let request = request(platform, Some("/sandbox"));
+            assert_eq!(
+                writable_roots(&request),
+                [PathBuf::from("/repo/.usagi/sessions/work")]
+            );
+        }
     }
 
     #[test]

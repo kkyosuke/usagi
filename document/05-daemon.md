@@ -493,7 +493,10 @@ daemon が起動する Agent child には、mode を適用する**前**の base�
 
 この 2 つは常に 1 つの組として扱い、片方から path 操作でもう片方を導かない。production は base と selected directory が同じ directory なので、「selected directory から 1 階層上が base」と仮定すると data home の**親**（既定では利用者のホームディレクトリ）を選んでしまい、それが child の data home・sandbox の writable root として渡ることになる。
 
-- child の `$USAGI_HOME` と Claude sandbox の writable root には **base** を渡す。child は自分で mode の子 directory を作る必要があるため、selected directory だけでは足りない。
+- child の `$USAGI_HOME` には **base** を渡す。root coordinator の Claude sandbox にも base を writable root として
+  渡すが、session sandbox は data home を read-only とし、mutation は credential-scoped MCP/daemon IPC を使う。
+  child は mode の子 directory を自分で作る必要があるため、root coordinator に selected directory だけを渡すことは
+  できない。
 - daemon 所有の global settings（local LLM の有効/無効とモデル名など）は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
 
 開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
