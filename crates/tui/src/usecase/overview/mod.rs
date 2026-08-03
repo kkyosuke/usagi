@@ -41,6 +41,7 @@ pub enum Command {
     Config { arguments: String },
     Env { arguments: String },
     Issue { arguments: String },
+    Roles { arguments: String },
     Session { arguments: String },
 }
 
@@ -49,6 +50,7 @@ pub enum Command {
 pub enum SessionCommand {
     Create {
         name: String,
+        role_id: Option<usagi_core::domain::role::RoleId>,
     },
     List,
     Overview,
@@ -102,6 +104,15 @@ const DEFINITIONS: &[CommandDefinition] = &[
             long_description: "List issues or inspect an issue, dependency graph, or gantt view.",
         },
         factory: |arguments| Command::Issue { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
+            name: "roles",
+            description: "Edit global or workspace session roles",
+            usage: "roles [workspace|global]",
+            long_description: "Edit the versioned role catalog without losing TOML formatting.",
+        },
+        factory: |arguments| Command::Roles { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -203,6 +214,7 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
     match verb {
         "create" if !rest.is_empty() => Ok(SessionCommand::Create {
             name: rest.to_owned(),
+            role_id: None,
         }),
         "list" if rest.is_empty() => Ok(SessionCommand::List),
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
@@ -259,6 +271,7 @@ impl Command {
             Self::Config { .. } => "config",
             Self::Env { .. } => "env",
             Self::Issue { .. } => "issue",
+            Self::Roles { .. } => "roles",
             Self::Session { .. } => "session",
         }
     }
@@ -271,6 +284,7 @@ impl Command {
             Self::Config { arguments } => Box::new(h::Config { arguments }),
             Self::Env { arguments } => Box::new(h::Env { arguments }),
             Self::Issue { arguments } => Box::new(h::Issue { arguments }),
+            Self::Roles { arguments } => Box::new(h::Roles { arguments }),
             Self::Session { arguments } => Box::new(h::Session { arguments }),
         }
     }
@@ -369,7 +383,7 @@ mod tests {
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
-        assert_eq!(names, ["config", "env", "issue", "session"]);
+        assert_eq!(names, ["config", "env", "issue", "roles", "session"]);
         assert!(
             definitions
                 .iter()
@@ -386,12 +400,15 @@ mod tests {
                 Command::Issue {
                     arguments: String::new()
                 },
+                Command::Roles {
+                    arguments: String::new()
+                },
                 Command::Session {
                     arguments: String::new()
                 },
             ]
             .map(|command| command.name()),
-            ["config", "env", "issue", "session"]
+            ["config", "env", "issue", "roles", "session"]
         );
     }
 
@@ -433,7 +450,8 @@ mod tests {
         assert_eq!(
             parse_session("create feature-x"),
             Ok(SessionCommand::Create {
-                name: "feature-x".into()
+                name: "feature-x".into(),
+                role_id: None,
             })
         );
         assert_eq!(parse_session("list"), Ok(SessionCommand::List));
@@ -539,6 +557,13 @@ mod tests {
 
     #[test]
     fn dispatches_through_the_handler_interface() {
+        assert_eq!(
+            dispatch("roles global").unwrap(),
+            CommandResult::NotImplemented {
+                command: "roles",
+                arguments: "global".to_owned(),
+            }
+        );
         assert_eq!(
             dispatch("session list").unwrap(),
             CommandResult::NotImplemented {

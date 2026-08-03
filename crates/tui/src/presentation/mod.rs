@@ -49,6 +49,7 @@ use crate::presentation::views::director_drawer::{
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::quit_modal;
+use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
@@ -66,7 +67,8 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, NewRequest, Notice, OperationResult, Overlay, PendingToken, Target,
+    Feedback, NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice,
+    SessionRoleCatalog, SessionRoleProjection, Target,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -1253,6 +1255,8 @@ pub struct SessionCommandResult {
     /// Carries each row's lifecycle (and a `Failed` row's failure summary) so the
     /// sidebar can show state and gate attach/remove by capability.
     pub session_lifecycles: Option<BTreeMap<SessionId, SessionLifecycleProjection>>,
+    /// Safe role projection keyed by stable daemon identity. Never persisted.
+    pub session_roles: Option<BTreeMap<SessionId, SessionRoleProjection>>,
     /// Monotonically increasing daemon lifecycle revision for this snapshot.
     /// The UI uses it to ignore a response that arrives after a newer command.
     pub revision: Option<u64>,
@@ -1267,6 +1271,7 @@ impl SessionCommandResult {
             session_ids: None,
             agent_resumes: None,
             session_lifecycles: None,
+            session_roles: None,
             revision: None,
         }
     }
@@ -2772,6 +2777,7 @@ fn apply_session_projection(
     session_ids: Option<Vec<SessionId>>,
     agent_resumes: Option<BTreeMap<SessionId, ProviderResumeProjection>>,
     session_lifecycles: Option<BTreeMap<SessionId, SessionLifecycleProjection>>,
+    session_roles: Option<BTreeMap<SessionId, SessionRoleProjection>>,
 ) {
     let Some(sessions) = sessions else {
         return;
@@ -2799,6 +2805,8 @@ fn apply_session_projection(
         ui.workspace.replace_sessions(sessions);
     }
     ui.workspace.set_session_lifecycles(lifecycles);
+    ui.workspace
+        .set_session_roles(session_roles.unwrap_or_default());
     if let Some(agent_resumes) = agent_resumes {
         ui.agent_resumes = agent_resumes;
     }
@@ -2856,6 +2864,7 @@ fn adopt_session_snapshot(ui: &mut WorkspaceUi, result: SessionCommandResult) {
             result.session_ids,
             result.agent_resumes,
             result.session_lifecycles,
+            result.session_roles,
         );
     }
 }
@@ -3376,6 +3385,11 @@ fn sync_runtime_sessions(
     if runtime.state().session_lifecycles() != &lifecycles {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
             lifecycles,
+        )));
+    }
+    if runtime.state().session_roles() != ui.workspace.session_roles() {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoles(
+            ui.workspace.session_roles().clone(),
         )));
     }
 }
@@ -4511,6 +4525,7 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    role_editor: Option<crate::usecase::application::controller::RoleEditor>,
     /// Whole-second wall clock behind the sidebar's relative session times.
     ///
     /// Truncating to the second is what makes time material without making
@@ -4562,6 +4577,7 @@ fn home_frame_material(
             .state()
             .create_session_error()
             .map(|error| error.message.clone()),
+        role_editor: runtime.state().role_editor().cloned(),
         now: now.with_nanosecond(0).unwrap_or(now),
     }
 }
@@ -4587,6 +4603,11 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
             &frame,
             message,
         );
+    }
+    if let Some(editor) = &material.role_editor {
+        let height = material.height;
+        let width = material.width;
+        return scratchpad_modal::render_roles_over(height, width, &frame, editor);
     }
     frame
 }
@@ -4635,10 +4656,14 @@ fn drain_controller_host_actions(
         match action {
             ControllerHostAction::Create(request, completions) => {
                 let name = request.intent.name;
+                let role_id = request.intent.role_id;
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
                     ui,
-                    SessionCommand::Create { name: name.clone() },
+                    SessionCommand::Create {
+                        name: name.clone(),
+                        role_id,
+                    },
                     SessionBackendCompletion::Create {
                         token: request.token,
                         before,
@@ -5109,6 +5134,11 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    let data_home = usagi_core::infrastructure::paths::data_dir().ok();
+    let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
+        role_catalog,
+    )));
     runtime.set_agent_models(agent_models.available, agent_models.default);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
@@ -5381,6 +5411,33 @@ fn drive_workspace_controller(
             }
         }
     }
+}
+
+fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> SessionRoleCatalog {
+    data_home
+        .and_then(|data_home| {
+            usagi_core::infrastructure::role_catalog::load_effective(data_home, workspace_root).ok()
+        })
+        .map(|catalog| {
+            let roles = catalog
+                .roles
+                .into_iter()
+                .filter(|(_, definition)| {
+                    definition
+                        .scopes
+                        .contains(&usagi_core::domain::role::RoleScope::Session)
+                })
+                .map(|(id, definition)| RoleChoice {
+                    id,
+                    summary: definition.summary,
+                })
+                .collect();
+            SessionRoleCatalog {
+                roles,
+                default: catalog.defaults.session,
+            }
+        })
+        .unwrap_or_default()
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
@@ -6308,7 +6365,8 @@ mod tests {
     };
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry, NewRequest, Overlay,
-        PendingToken, SessionCreateIntent, TabDirection, Target,
+        PendingToken, RoleEditorScope, SessionCreateIntent, SessionRoleCatalog, TabDirection,
+        Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -6637,6 +6695,7 @@ mod tests {
                     name: "feature".to_owned(),
                     profile: None,
                     model: None,
+                    role_id: None,
                 },
             },
             Effect::RefreshSessions { workspace },
@@ -6772,6 +6831,7 @@ mod tests {
                     name: "feature".into(),
                     profile: None,
                     model: None,
+                    role_id: None,
                 },
             },
             Effect::RefreshSessions { workspace },
@@ -6902,6 +6962,11 @@ mod tests {
                 failure_summary: Some("create failed".into()),
             },
         )]));
+        let role = crate::usecase::application::controller::SessionRoleProjection {
+            role_id: None,
+            role_summary: Some("Reviewer".into()),
+        };
+        view.set_session_roles(BTreeMap::from([(session, role.clone())]));
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         // The projected sidebar row carries the Failed lifecycle and its reason.
@@ -6912,8 +6977,10 @@ mod tests {
         assert!(!rows[0].removing);
 
         // The reducer receives the lifecycle so it can gate attach by capability.
-        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         super::sync_runtime_sessions(&mut runtime, &ui, &[]);
+        assert_eq!(runtime.state().sessions(), &[session]);
+        assert_eq!(runtime.state().session_roles().get(&session), Some(&role));
         assert_eq!(
             runtime.state().session_lifecycles().get(&session).copied(),
             Some(SessionLifecycle::Failed)
@@ -6967,9 +7034,16 @@ mod tests {
         assert_eq!(super::session_name_for(&ui, SessionId::new()), None);
 
         let records = ui.workspace.sessions().to_vec();
-        super::apply_session_projection(&mut ui, None, None, None, None);
-        super::apply_session_projection(&mut ui, Some(records.clone()), None, None, None);
-        super::apply_session_projection(&mut ui, Some(records), Some(vec![session]), None, None);
+        super::apply_session_projection(&mut ui, None, None, None, None, None);
+        super::apply_session_projection(&mut ui, Some(records.clone()), None, None, None, None);
+        super::apply_session_projection(
+            &mut ui,
+            Some(records),
+            Some(vec![session]),
+            None,
+            None,
+            None,
+        );
         let records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(
             &mut ui,
@@ -6977,6 +7051,7 @@ mod tests {
             Some(vec![session]),
             Some(std::collections::BTreeMap::new()),
             Some(std::collections::BTreeMap::new()),
+            None,
         );
         let mut mismatched_runtime = WorkspaceRuntime::new(workspace, Vec::new());
         ui.pane_completion_sender
@@ -7066,6 +7141,7 @@ mod tests {
                     failure_summary: None,
                 },
             )])),
+            None,
         );
 
         let operation = OperationId::new();
@@ -8523,7 +8599,7 @@ mod tests {
             command: SessionCommand,
         ) -> Result<SessionCommandResult, String> {
             let sessions = match &command {
-                SessionCommand::Create { name } => Some(vec![SessionRecord {
+                SessionCommand::Create { name, .. } => Some(vec![SessionRecord {
                     name: name.clone(),
                     display_name: None,
                     origin: SessionOrigin::Human,
@@ -8548,6 +8624,7 @@ mod tests {
                 session_ids: None,
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: None,
             })
         }
@@ -8604,6 +8681,7 @@ mod tests {
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
             failure_summary: None,
+            role_id: None,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
@@ -8663,6 +8741,18 @@ mod tests {
         );
         assert!(overview.join("\n").contains("Overview"));
 
+        let _ = palette.apply_event(AppEvent::Key(AppKey::SubmitOverview(
+            "roles workspace".to_owned(),
+        )));
+        let _ = palette.apply_event(AppEvent::Backend(BackendEvent::RolesLoaded {
+            scope: RoleEditorScope::Workspace,
+            source: "version = 1\n".to_owned(),
+        }));
+        let roles = render_controller_frame(
+            20, 80, &palette, "atlas", root, sessions, None, &git, None, None,
+        );
+        assert!(roles.join("\n").contains("workspace roles.toml"));
+
         // Create-failure dialog: a failed create OperationResult opens it, and
         // this path composites the safe message over Home.
         let mut failing = WorkspaceRuntime::new(workspace, Vec::new());
@@ -8685,6 +8775,60 @@ mod tests {
             render_controller_frame(20, 80, &failing, "atlas", root, &[], None, &git, None, None);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
+    }
+
+    #[test]
+    fn unavailable_backend_reports_role_editor_errors_for_load_and_save() {
+        use crate::usecase::application::daemon_backend::TargetStorePort as _;
+
+        let mut port = UnavailableBackendPort;
+        let (load, load_events) = Completions::channel();
+        port.load_roles(RoleEditorScope::Workspace, load);
+        assert!(matches!(
+            load_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Workspace,
+                ..
+            })
+        ));
+
+        let (save, save_events) = Completions::channel();
+        port.save_roles(RoleEditorScope::Global, "version = 1\n".to_owned(), save);
+        assert!(matches!(
+            save_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Global,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn session_role_catalog_filters_scope_and_falls_back_on_invalid_source() {
+        let root = tempdir().unwrap();
+        let data_home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&data_home).unwrap();
+        std::fs::write(
+            data_home.join("roles.toml"),
+            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n[roles.director]\nsummary = \"Direct\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n",
+        )
+        .unwrap();
+
+        let catalog = super::session_role_catalog(Some(&data_home), &workspace);
+        assert_eq!(catalog.default.unwrap().as_str(), "coder");
+        assert_eq!(catalog.roles.len(), 1);
+        assert_eq!(catalog.roles[0].id.as_str(), "coder");
+
+        std::fs::write(data_home.join("roles.toml"), "version = 99\n").unwrap();
+        assert_eq!(
+            super::session_role_catalog(Some(&data_home), &workspace),
+            SessionRoleCatalog::default()
+        );
+        assert_eq!(
+            super::session_role_catalog(None, &workspace),
+            SessionRoleCatalog::default()
+        );
     }
 
     #[test]
@@ -9741,6 +9885,7 @@ mod tests {
                 session_ids: Some(vec![published]),
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: Some(7),
             })]))),
         };
@@ -9789,6 +9934,7 @@ mod tests {
                 session_ids: None,
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: Some(8),
             }));
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
@@ -9822,8 +9968,10 @@ mod tests {
                     session_ids: Some(vec![stale]),
                     agent_resumes: None,
                     session_lifecycles: None,
+                    session_roles: None,
                     revision: Some(3),
                 }),
+                Err("later daemon failure".to_owned()),
             ]))),
         };
 
@@ -9839,6 +9987,11 @@ mod tests {
         super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
         assert_eq!(ui.workspace.session_ids(), &[session]);
         assert_eq!(ui.last_session_revision, 9);
+
+        // A lane error without a parked reducer completion is intentionally
+        // consumed without synthesizing an event.
+        super::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
@@ -9965,7 +10118,7 @@ mod tests {
                 _: Option<&SessionRecord>,
                 command: SessionCommand,
             ) -> Result<SessionCommandResult, String> {
-                let SessionCommand::Create { name } = command else {
+                let SessionCommand::Create { name, .. } = command else {
                     return Err("unexpected session command".to_owned());
                 };
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -10136,6 +10289,7 @@ mod tests {
                     session_ids: Some(vec![newer]),
                     agent_resumes: None,
                     session_lifecycles: None,
+                    session_roles: None,
                     revision: Some(2),
                 }),
                 completion: super::SessionBackendCompletion::Remove {
@@ -10157,6 +10311,7 @@ mod tests {
                     session_ids: Some(vec![original]),
                     agent_resumes: None,
                     session_lifecycles: None,
+                    session_roles: None,
                     revision: Some(1),
                 }),
                 completion: super::SessionBackendCompletion::Remove {
@@ -10196,6 +10351,7 @@ mod tests {
             session_ids: Some(vec![existing, created]),
             agent_resumes: None,
             session_lifecycles: None,
+            session_roles: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Create {
@@ -10285,7 +10441,9 @@ mod tests {
                 let _ = self.release.lock().unwrap().recv();
             }
             let session_ids = match command {
-                SessionCommand::Create { .. } => vec![self.existing, self.created],
+                SessionCommand::Create { .. } => {
+                    vec![self.existing, self.created]
+                }
                 SessionCommand::Remove { .. } => Vec::new(),
                 _ => vec![self.existing],
             };
@@ -10295,6 +10453,7 @@ mod tests {
                 session_ids: Some(session_ids),
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: None,
             })
         }
@@ -10320,6 +10479,7 @@ mod tests {
                         name: format!("session-{token}"),
                         profile: None,
                         model: None,
+                        role_id: None,
                     },
                 },
                 completions,
@@ -10460,6 +10620,7 @@ mod tests {
                 session_ids: Some(vec![self.existing, self.created]),
                 agent_resumes: None,
                 session_lifecycles: None,
+                session_roles: None,
                 revision: None,
             })
         }
@@ -10700,6 +10861,7 @@ mod tests {
             session_ids: Some(vec![session]),
             agent_resumes: None,
             session_lifecycles: None,
+            session_roles: None,
             revision: None,
         });
         let completion = super::SessionBackendCompletion::Remove {
@@ -14523,6 +14685,11 @@ mod tests {
                 live: true,
             },
             TerminalInventoryEntry {
+                terminal: session_generic.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            },
+            TerminalInventoryEntry {
                 terminal: stale_generic,
                 kind: TerminalKind::Terminal,
                 live: true,
@@ -14580,6 +14747,14 @@ mod tests {
                 .panes
                 .iter()
                 .any(|pane| pane.terminal.fences(&session_generic_second))
+        );
+        assert_eq!(
+            managed
+                .panes
+                .iter()
+                .filter(|pane| pane.terminal.fences(&session_generic))
+                .count(),
+            1
         );
     }
 
@@ -14817,6 +14992,22 @@ mod tests {
                 Box::new(UnavailableAgentCommandPort),
             );
         let geometry = terminal_geometry(20, 80);
+
+        // Embedders can lose their stream port before teardown. Closing the
+        // retained coordinator still removes and retains it without a detach.
+        let without_agent = scoped_terminal_ref(workspace, Some(session));
+        let mut embedded = WorkspaceUi::new(
+            WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]),
+            Box::new(UnavailableSessionCommandPort),
+        );
+        embedded.terminals.push(
+            crate::usecase::application::terminal_session::TerminalSession::new(
+                without_agent.clone(),
+                geometry,
+            ),
+        );
+        embedded.close_terminal(&without_agent);
+        assert_eq!(embedded.detached_terminals.len(), 1);
 
         for terminal in &terminals {
             ui.start_terminal_session(terminal.clone(), geometry);

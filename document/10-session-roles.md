@@ -101,6 +101,18 @@ adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral 
 `session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
+TUI は `role_id` / `role_summary` を stable session identity keyed の controller projection として保持し、
+legacy `SessionRecord` や `state.json` へコピーしない。sidebar は role ID だけを badge 表示し、role metadata を
+attach / remove などの lifecycle capability 判定には使わない。
+
+Create Session の inline form は effective catalog の session scope 候補を read-only に表示し、
+`defaults.session` を初期選択する。↑↓ / Tab で候補を切り替え、submit は role ID だけを daemon へ送る。
+catalog が不正な場合は picker を空に縮退させ、既存 session の lifecycle 操作を継続する。
+
+Overview の `roles [workspace|global]` は対象 layer の versioned `roles.toml` を source のまま編集する。
+保存時は effective two-layer catalog として検証し、error は draft を保持したまま inline 表示する。成功時は
+source を再 serialize せず、コメント・順序・空白を維持して durable temp file + atomic rename で置換する。
+
 次の場所へ role instruction を保存しない。
 
 - daemon wire response

@@ -2782,6 +2782,7 @@ mod tests {
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
             failure_summary: None,
+            role_id: None,
         };
         let frame = runtime.render(
             20,

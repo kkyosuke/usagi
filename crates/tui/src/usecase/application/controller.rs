@@ -14,6 +14,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::PrLink;
+use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, is_valid_env_name};
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
@@ -53,6 +54,8 @@ pub enum Overlay {
     Notes,
     /// workspace または session の environment editor。
     Environment,
+    /// Global/workspace versioned role catalog source editor.
+    Roles,
     /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
     CreateSession,
     /// Workspace-scoped pending user decisions and their answer editor.
@@ -78,6 +81,74 @@ pub struct CreateSessionForm {
     name: String,
     error: Option<Notice>,
     existing: Vec<String>,
+    roles: Vec<RoleChoice>,
+    selected_role: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleChoice {
+    pub id: RoleId,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRoleCatalog {
+    pub roles: Vec<RoleChoice>,
+    pub default: Option<RoleId>,
+}
+
+/// Safe daemon-owned role metadata, kept separate from persisted session annotations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRoleProjection {
+    pub role_id: Option<RoleId>,
+    pub role_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleEditorScope {
+    Global,
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleEditor {
+    scope: RoleEditorScope,
+    source: String,
+    error: Option<SafeError>,
+    loading: bool,
+    saving: bool,
+}
+
+impl RoleEditor {
+    fn loading(scope: RoleEditorScope) -> Self {
+        Self {
+            scope,
+            source: String::new(),
+            error: None,
+            loading: true,
+            saving: false,
+        }
+    }
+    #[must_use]
+    pub const fn scope(&self) -> RoleEditorScope {
+        self.scope
+    }
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    #[must_use]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
+    #[must_use]
+    pub const fn is_loading(&self) -> bool {
+        self.loading
+    }
+    #[must_use]
+    pub const fn is_saving(&self) -> bool {
+        self.saving
+    }
 }
 
 impl CreateSessionForm {
@@ -91,12 +162,49 @@ impl CreateSessionForm {
     }
 
     #[must_use]
+    pub fn with_catalog(existing: Vec<String>, catalog: &SessionRoleCatalog) -> Self {
+        let selected_role = catalog
+            .default
+            .as_ref()
+            .and_then(|default| catalog.roles.iter().position(|role| &role.id == default));
+        Self {
+            existing,
+            roles: catalog.roles.clone(),
+            selected_role,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
     #[must_use]
     pub fn error(&self) -> Option<&Notice> {
         self.error.as_ref()
+    }
+
+    #[must_use]
+    pub fn roles(&self) -> &[RoleChoice] {
+        &self.roles
+    }
+
+    #[must_use]
+    pub fn selected_role(&self) -> Option<&RoleChoice> {
+        self.selected_role.and_then(|index| self.roles.get(index))
+    }
+
+    fn move_role(&mut self, backwards: bool) {
+        if self.roles.is_empty() {
+            self.selected_role = None;
+            return;
+        }
+        let current = self.selected_role.unwrap_or(0);
+        self.selected_role = Some(if backwards {
+            (current + self.roles.len() - 1) % self.roles.len()
+        } else {
+            (current + 1) % self.roles.len()
+        });
     }
 
     fn push(&mut self, character: char) {
@@ -141,6 +249,7 @@ impl CreateSessionForm {
             name,
             profile: None,
             model: None,
+            role_id: self.selected_role().map(|role| role.id.clone()),
         })
     }
 }
@@ -182,6 +291,8 @@ pub struct SessionCreateIntent {
     pub name: String,
     pub profile: Option<AgentProfileId>,
     pub model: Option<ModelSelector>,
+    /// Only the selector crosses to the daemon; definitions stay in `roles.toml`.
+    pub role_id: Option<RoleId>,
 }
 
 fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
@@ -743,6 +854,7 @@ pub struct AppState {
     director_launching: Option<OperationId>,
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
+    role_editor: Option<RoleEditor>,
     decisions: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
@@ -759,6 +871,10 @@ pub struct AppState {
     /// capability (attach only when `can_use`). A session absent here is treated
     /// as `Available`, so pre-lifecycle callers keep their behaviour.
     session_lifecycles: BTreeMap<SessionId, SessionLifecycle>,
+    /// Non-persistent daemon role assignment projection by stable identity.
+    session_roles: BTreeMap<SessionId, SessionRoleProjection>,
+    /// Read-only effective session-scope catalog used by the create picker.
+    role_catalog: SessionRoleCatalog,
     selected: Selection,
     /// Managed session shown in Closeup. `None` means Home has no managed
     /// session target; workspace-root scope is deliberately not a fallback.
@@ -882,6 +998,7 @@ impl AppState {
             director_launching: None,
             note_editor: None,
             environment_editor: None,
+            role_editor: None,
             decisions: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
@@ -893,6 +1010,8 @@ impl AppState {
             sessions,
             session_names: Vec::new(),
             session_lifecycles: BTreeMap::new(),
+            session_roles: BTreeMap::new(),
+            role_catalog: SessionRoleCatalog::default(),
             selected,
             active,
             notice: None,
@@ -965,6 +1084,10 @@ impl AppState {
     pub fn environment_editor(&self) -> Option<&EnvironmentEditor> {
         self.environment_editor.as_ref()
     }
+    #[must_use]
+    pub fn role_editor(&self) -> Option<&RoleEditor> {
+        self.role_editor.as_ref()
+    }
     /// Pending decisions from the current workspace only.
     #[must_use]
     pub fn decisions(&self) -> &[UserDecision] {
@@ -1019,6 +1142,14 @@ impl AppState {
     #[must_use]
     pub fn session_lifecycles(&self) -> &BTreeMap<SessionId, SessionLifecycle> {
         &self.session_lifecycles
+    }
+    #[must_use]
+    pub fn session_roles(&self) -> &BTreeMap<SessionId, SessionRoleProjection> {
+        &self.session_roles
+    }
+    #[must_use]
+    pub fn role_catalog(&self) -> &SessionRoleCatalog {
+        &self.role_catalog
     }
     /// Whether the session at this stable identity is a usable (attachable)
     /// checkout. A session with no lifecycle projection — pre-lifecycle callers,
@@ -1420,9 +1551,14 @@ pub enum AppKey {
     /// Persist the current scratchpad through its owning port.
     SaveNotes,
     /// Insert or replace one environment variable in the local editor.
-    SetEnvironment { name: String, value: String },
+    SetEnvironment {
+        name: String,
+        value: String,
+    },
     /// Remove one environment variable from the local editor by name.
-    RemoveEnvironment { name: String },
+    RemoveEnvironment {
+        name: String,
+    },
     /// Replace the environment editor's `NAME=value` draft line.
     SetEnvironmentDraft(String),
     /// Apply the draft line to the edited scope: upsert a binding, or remove one
@@ -1432,6 +1568,9 @@ pub enum AppKey {
     ToggleEnvironmentScope,
     /// Persist the current environment through its owning port.
     SaveEnvironment,
+    /// Toggle and save the raw, lossless role catalog editor.
+    ToggleRoleScope,
+    SaveRoles,
     /// 将来の terminal input / command vocabulary 用の文字入力。
     Char(char),
     /// Overview modal の現在の入力を registry 経由で実行する。
@@ -1455,6 +1594,11 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
+        KeyCode::Char('s')
+            if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
+        {
+            Some(AppKey::SaveRoles)
+        }
         KeyCode::Char('\u{f}') if !key.modifiers.shift && !key.modifiers.alt => Some(AppKey::CtrlO),
         KeyCode::Char('o')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
@@ -1571,6 +1715,10 @@ pub enum BackendEvent {
     /// A session absent here is treated as `Available`, so it refluxes
     /// independently of [`Sessions`](Self::Sessions).
     SessionLifecycles(BTreeMap<SessionId, SessionLifecycle>),
+    /// Safe daemon role metadata, independent of persisted `SessionRecord` rows.
+    SessionRoles(BTreeMap<SessionId, SessionRoleProjection>),
+    /// Effective session-scope picker catalog. Role instructions are omitted.
+    SessionRoleCatalog(SessionRoleCatalog),
     /// backend が safe と保証した notice。
     Notice(Notice),
     /// A phase event for exactly one Agent runtime pane.
@@ -1598,6 +1746,14 @@ pub enum BackendEvent {
     },
     /// A safe environment read/save failure.
     EnvironmentError { scope: EnvScope, error: SafeError },
+    RolesLoaded {
+        scope: RoleEditorScope,
+        source: String,
+    },
+    RolesError {
+        scope: RoleEditorScope,
+        error: SafeError,
+    },
     /// Atomic daemon snapshot; records outside `workspace` are rejected by the reducer.
     Decisions {
         workspace: WorkspaceId,
@@ -1649,7 +1805,9 @@ pub enum TabDirection {
 pub enum Effect {
     /// Ask the pane owner to move its stable tab selection without exposing tab
     /// identities to this controller.
-    SelectTab { direction: TabDirection },
+    SelectTab {
+        direction: TabDirection,
+    },
     /// session create を backend に依頼する。
     CreateSession {
         workspace: WorkspaceId,
@@ -1658,28 +1816,43 @@ pub enum Effect {
         intent: SessionCreateIntent,
     },
     /// 次の snapshot を要求する。
-    RefreshSessions { workspace: WorkspaceId },
+    RefreshSessions {
+        workspace: WorkspaceId,
+    },
     /// workspace scope command を backend adapter に依頼する。
     WorkspaceCommand {
         workspace: WorkspaceId,
         command: overview::Command,
     },
     /// Read an active target's scratchpad through the existing persistence owner.
-    LoadNotes { target: Target },
+    LoadNotes {
+        target: Target,
+    },
     /// Save an edited scratchpad through the existing persistence owner.
     SaveNotes {
         target: Target,
         scratchpad: Scratchpad,
     },
     /// Read one scope's environment bindings through the settings owner.
-    LoadEnvironment { scope: EnvScope },
+    LoadEnvironment {
+        scope: EnvScope,
+    },
     /// Save one scope's environment bindings through the settings owner.
     SaveEnvironment {
         scope: EnvScope,
         entries: Vec<EnvironmentEntry>,
     },
+    LoadRoles {
+        scope: RoleEditorScope,
+    },
+    SaveRoles {
+        scope: RoleEditorScope,
+        source: String,
+    },
     /// Fetch the daemon-authoritative pending snapshot for one workspace.
-    RefreshDecisions { workspace: WorkspaceId },
+    RefreshDecisions {
+        workspace: WorkspaceId,
+    },
     /// Resolve one pending decision using only a locally validated answer.
     ResolveDecision {
         workspace: WorkspaceId,
@@ -1696,7 +1869,9 @@ pub enum Effect {
     },
     /// Open the selected target's worktree in the platform terminal. Unlike
     /// [`Self::OpenTerminal`], this does not create an embedded daemon pane.
-    OpenExternalTerminal { target: Target },
+    OpenExternalTerminal {
+        target: Target,
+    },
     /// Start an Agent through the daemon for the active scope. `session` is
     /// absent for a workspace-root Agent. The operation ID is generated by the
     /// TUI and survives acceptance/replay.
@@ -1729,7 +1904,9 @@ pub enum Effect {
     ///
     /// The identity is deliberately not a name or path: a delayed completion for
     /// a different workspace must never replace the Home currently being opened.
-    AttachWorkspace { workspace: WorkspaceId },
+    AttachWorkspace {
+        workspace: WorkspaceId,
+    },
     /// Clone a repository through the backend git port, then register the
     /// resulting project through its project/registry ports.
     CloneProject {
@@ -1758,13 +1935,19 @@ pub enum Effect {
     LeaveWorkspace,
     /// Read a target's Pull Request list through the daemon snapshot owner.
     /// The completion returns as [`BackendEvent::PullRequestsLoaded`] / `Error`.
-    LoadPullRequests { target: Target },
+    LoadPullRequests {
+        target: Target,
+    },
     /// Read a target's Markdown preview through the overlay data owner. The
     /// completion returns as [`BackendEvent::PreviewLoaded`] / `Error`.
-    LoadPreview { target: Target },
+    LoadPreview {
+        target: Target,
+    },
     /// Open one already-selected Pull Request URL through the browser opener.
     /// URL validation stays with the executor; the reducer forwards the raw URL.
-    OpenPullRequest { url: String },
+    OpenPullRequest {
+        url: String,
+    },
 }
 
 /// One selectable workspace in the entry surfaces.
@@ -2457,6 +2640,8 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             | BackendEvent::NotesError { .. }
             | BackendEvent::EnvironmentLoaded { .. }
             | BackendEvent::EnvironmentError { .. }
+            | BackendEvent::RolesLoaded { .. }
+            | BackendEvent::RolesError { .. }
             | BackendEvent::PullRequestsLoaded { .. }
             | BackendEvent::PullRequestsError { .. }
             | BackendEvent::PreviewLoaded { .. }
@@ -2567,6 +2752,14 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.reconcile_sessions(&sessions);
             Vec::new()
         }
+        AppEvent::Backend(BackendEvent::SessionRoles(roles)) => {
+            state.session_roles = roles;
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::SessionRoleCatalog(catalog)) => {
+            state.role_catalog = catalog;
+            Vec::new()
+        }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
             state.notice = Some(notice);
             Vec::new()
@@ -2646,6 +2839,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.
 fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     match event {
         BackendEvent::NotesLoaded { target, scratchpad } => {
@@ -2687,6 +2881,29 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
         BackendEvent::EnvironmentError { scope, error } => {
             if let Some(editor) = state
                 .environment_editor
+                .as_mut()
+                .filter(|editor| editor.scope == *scope)
+            {
+                editor.error = Some(error.clone());
+                editor.loading = false;
+                editor.saving = false;
+            }
+        }
+        BackendEvent::RolesLoaded { scope, source } => {
+            if let Some(editor) = state
+                .role_editor
+                .as_mut()
+                .filter(|editor| editor.scope == *scope)
+            {
+                editor.source.clone_from(source);
+                editor.error = None;
+                editor.loading = false;
+                editor.saving = false;
+            }
+        }
+        BackendEvent::RolesError { scope, error } => {
+            if let Some(editor) = state
+                .role_editor
                 .as_mut()
                 .filter(|editor| editor.scope == *scope)
             {
@@ -2970,6 +3187,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
                 update_editor_key(state, &key).unwrap_or_default()
             }
         }
+        Overlay::Roles => update_role_editor(state, &key),
         Overlay::CreateSession => update_create_session_form(state, &key),
         // Dismissal is handled by the early Enter/Escape/Ctrl-C branch above; any
         // other key is inert while the create-failure dialog owns input.
@@ -2981,6 +3199,51 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             Vec::new()
         }
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
+    }
+}
+
+fn update_role_editor(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    let Some(editor) = state.role_editor.as_mut() else {
+        state.overlay = None;
+        return Vec::new();
+    };
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.role_editor = None;
+            Vec::new()
+        }
+        AppKey::ToggleRoleScope | AppKey::Tab if !editor.loading && !editor.saving => {
+            let scope = match editor.scope {
+                RoleEditorScope::Global => RoleEditorScope::Workspace,
+                RoleEditorScope::Workspace => RoleEditorScope::Global,
+            };
+            *editor = RoleEditor::loading(scope);
+            vec![Effect::LoadRoles { scope }]
+        }
+        AppKey::SaveRoles if !editor.loading && !editor.saving => {
+            editor.saving = true;
+            vec![Effect::SaveRoles {
+                scope: editor.scope,
+                source: editor.source.clone(),
+            }]
+        }
+        AppKey::Enter if !editor.loading && !editor.saving => {
+            editor.source.push('\n');
+            editor.error = None;
+            Vec::new()
+        }
+        AppKey::Backspace if !editor.loading && !editor.saving => {
+            editor.source.pop();
+            editor.error = None;
+            Vec::new()
+        }
+        AppKey::Char(character) if !editor.loading && !editor.saving && !character.is_control() => {
+            editor.source.push(*character);
+            editor.error = None;
+            Vec::new()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -3152,6 +3415,7 @@ fn open_decisions(state: &mut AppState) -> Vec<Effect> {
     }]
 }
 
+#[allow(clippy::too_many_lines)] // Exhaustive Home command ownership remains visible in one reducer table.
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
         AppKey::OpenDecisions | AppKey::Char('d') => open_decisions(state),
@@ -3253,6 +3517,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CommitEnvironmentDraft
         | AppKey::ToggleEnvironmentScope
         | AppKey::SaveEnvironment
+        | AppKey::ToggleRoleScope
+        | AppKey::SaveRoles
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
         | AppKey::DecisionPagePrevious
@@ -3630,6 +3896,23 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
                 Vec::new()
             }
         }
+        Ok(overview::Command::Roles { arguments }) => {
+            let scope = match arguments.trim() {
+                "" | "workspace" => Some(RoleEditorScope::Workspace),
+                "global" => Some(RoleEditorScope::Global),
+                _ => None,
+            };
+            if let Some(scope) = scope {
+                state.overlay = Some(Overlay::Roles);
+                state.role_editor = Some(RoleEditor::loading(scope));
+                vec![Effect::LoadRoles { scope }]
+            } else {
+                state.notice = Some(Notice::new(
+                    "roles takes an optional scope (usage: roles [workspace|global])",
+                ));
+                Vec::new()
+            }
+        }
         Ok(overview::Command::Session { arguments }) => submit_overview_session(state, &arguments),
         Ok(command) => {
             state.overlay = None;
@@ -3655,7 +3938,7 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
         }
     };
     match command {
-        overview::SessionCommand::Create { name } => {
+        overview::SessionCommand::Create { name, role_id } => {
             state.overlay = None;
             request_create_session(
                 state,
@@ -3663,6 +3946,7 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
                     name,
                     profile: None,
                     model: None,
+                    role_id,
                 },
             )
         }
@@ -3937,7 +4221,10 @@ fn open_create_session(state: &mut AppState) -> Vec<Effect> {
     // cursor and the inline form on the same `+ new session` row. The active
     // target remains unchanged.
     state.selected = Selection::NewSession;
-    state.create_session = Some(CreateSessionForm::new(state.session_names.clone()));
+    state.create_session = Some(CreateSessionForm::with_catalog(
+        state.session_names.clone(),
+        &state.role_catalog,
+    ));
     state.overlay = Some(Overlay::CreateSession);
     Vec::new()
 }
@@ -3955,6 +4242,14 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
         }
         AppKey::Backspace => {
             form.backspace();
+            Vec::new()
+        }
+        AppKey::Up => {
+            form.move_role(true);
+            Vec::new()
+        }
+        AppKey::Down | AppKey::Tab => {
+            form.move_role(false);
             Vec::new()
         }
         AppKey::Char(character) if !character.is_control() => {
@@ -4347,6 +4642,91 @@ mod tests {
     }
 
     #[test]
+    fn role_catalog_defaults_picker_and_create_intent_to_role_id_only() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let coder = RoleId::new("coder").unwrap();
+        let reviewer = RoleId::new("reviewer").unwrap();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionRoleCatalog(SessionRoleCatalog {
+                roles: vec![
+                    RoleChoice {
+                        id: coder.clone(),
+                        summary: "Code".into(),
+                    },
+                    RoleChoice {
+                        id: reviewer.clone(),
+                        summary: "Review".into(),
+                    },
+                ],
+                default: Some(coder),
+            })),
+        );
+        assert_eq!(state.role_catalog().roles.len(), 2);
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        assert_eq!(state.create_session_form().unwrap().roles().len(), 2);
+        assert_eq!(
+            state
+                .create_session_form()
+                .unwrap()
+                .selected_role()
+                .unwrap()
+                .id
+                .as_str(),
+            "coder"
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        for character in "feature".chars() {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
+        }
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(
+            matches!(effects.as_slice(), [Effect::CreateSession { intent, .. }]
+            if intent.role_id.as_ref() == Some(&reviewer)
+                && intent.profile.is_none() && intent.model.is_none())
+        );
+
+        let mut empty = CreateSessionForm::new(Vec::new());
+        empty.move_role(true);
+        assert!(empty.selected_role().is_none());
+    }
+
+    #[test]
+    fn role_projection_does_not_change_lifecycle_capabilities() {
+        let (workspace, first, _) = ids();
+        let mut state = AppState::home(workspace, vec![first]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                first,
+                SessionLifecycle::Failed,
+            )]))),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
+                first,
+                SessionRoleProjection {
+                    role_id: Some(RoleId::new("reviewer").unwrap()),
+                    role_summary: None,
+                },
+            )]))),
+        );
+        assert_eq!(
+            state.session_roles()[&first]
+                .role_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "reviewer"
+        );
+        assert!(!state.session_can_use(first));
+    }
+
+    #[test]
     fn create_session_form_defers_the_empty_name_error_to_submit() {
         // While typing nothing, the empty name is "in progress", not an error.
         let mut form = CreateSessionForm::new(Vec::new());
@@ -4473,6 +4853,10 @@ mod tests {
                 KeyEventKind::Press,
             ))
         };
+        assert_eq!(
+            classify_management_input(ctrl_a(KeyCode::Char('s'))),
+            Some(AppKey::SaveRoles)
+        );
         assert_eq!(
             classify_management_input(ctrl_a(KeyCode::Char('\u{1}'))),
             Some(AppKey::CtrlA)
@@ -5292,6 +5676,7 @@ mod tests {
             Overlay::QuitConfirmation,
             Overlay::Notes,
             Overlay::Environment,
+            Overlay::Roles,
             Overlay::CreateSession,
             Overlay::Decisions,
             Overlay::Prs,
@@ -5319,6 +5704,9 @@ mod tests {
                 Overlay::Environment => {
                     state.environment_editor =
                         Some(EnvironmentEditor::loading(EnvScope::Workspace));
+                }
+                Overlay::Roles => {
+                    state.role_editor = Some(RoleEditor::loading(RoleEditorScope::Workspace));
                 }
                 Overlay::Decisions => {
                     state.decision_overlay = Some(DecisionOverlayState {
@@ -6996,6 +7384,103 @@ mod tests {
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).len(),
             1
+        );
+    }
+
+    #[test]
+    fn role_editor_reducer_keeps_invalid_source_and_switches_scopes() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("roles workspace".into())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LoadRoles {
+                scope: RoleEditorScope::Workspace
+            }]
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Workspace,
+                source: "version = 1\n# preserved".into(),
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
+        let saves = update(&mut state, AppEvent::Key(AppKey::SaveRoles));
+        assert!(
+            matches!(saves.as_slice(), [Effect::SaveRoles { scope: RoleEditorScope::Workspace, source }]
+            if source.ends_with('x'))
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesError {
+                scope: RoleEditorScope::Workspace,
+                error: SafeError {
+                    message: SafeMessage::new("invalid role catalog"),
+                    error_id: "roles-invalid".into(),
+                },
+            }),
+        );
+        assert!(state.role_editor().unwrap().source().ends_with('x'));
+        assert_eq!(
+            state
+                .role_editor()
+                .unwrap()
+                .error()
+                .unwrap()
+                .message
+                .as_str(),
+            "invalid role catalog"
+        );
+        let switched = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert_eq!(
+            switched,
+            vec![Effect::LoadRoles {
+                scope: RoleEditorScope::Global
+            }]
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Global,
+                source: "version = 1\n".into(),
+            }),
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::ToggleRoleScope)),
+            vec![Effect::LoadRoles {
+                scope: RoleEditorScope::Workspace
+            }]
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+
+        state.overlay = Some(Overlay::Roles);
+        state.role_editor = None;
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        state.overlay = Some(Overlay::Overview);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("roles invalid".into()))
+            )
+            .is_empty()
+        );
+        assert!(
+            state
+                .notice()
+                .unwrap()
+                .message
+                .as_str()
+                .contains("roles takes")
         );
     }
 

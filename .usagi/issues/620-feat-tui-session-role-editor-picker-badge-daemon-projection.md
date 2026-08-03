@@ -1,13 +1,13 @@
 ---
 number: 620
 title: feat(tui): session role editor・picker・badge を daemon projection で実装する
-status: todo
+status: done
 priority: medium
 labels: [tui, session, role]
 dependson: [619]
 related: []
 created_at: 2026-08-01T01:03:06.183171+00:00
-updated_at: 2026-08-01T01:03:06.183171+00:00
+updated_at: 2026-08-02T23:40:33+09:00
 ---
 
 ## 背景
