@@ -1,13 +1,13 @@
 ---
 number: 624
 title: test(role): shipping Agent argv で session role instruction を固定する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, test, role, daemon, mcp, pty, e2e]
 dependson: [619]
 related: [620]
 created_at: 2026-08-02T23:07:31.677514+00:00
-updated_at: 2026-08-02T23:07:31.677514+00:00
+updated_at: 2026-08-03T00:36:15.618573+00:00
 ---
 
 ## Finding（P2 / production 契約の未検証）
