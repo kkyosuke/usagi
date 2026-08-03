@@ -67,6 +67,8 @@ jobs:
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: llvm-tools-preview
 
     - name: Rust Cache
       uses: swatinem/rust-cache@v2
@@ -94,6 +96,12 @@ jobs:
 
     - name: Test coverage(off) policy linter
       run: bash scripts/tests/coverage-off-lint.sh
+
+    - name: Install cargo-llvm-cov for v1 coverage fixture
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Test v1 coverage gate
+      run: bash scripts/tests/v1-coverage.sh
 
     - name: Enforce coverage(off) registry
       run: ruby scripts/coverage-off-lint.rb

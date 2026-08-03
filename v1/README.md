@@ -20,7 +20,7 @@
 <br>
 
 [![Test](https://github.com/KKyosuke/usagi/actions/workflows/test.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/test.yml)
-[![Coverage](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml)
+[![Coverage](https://img.shields.io/github/actions/workflow/status/KKyosuke/usagi/v1-coverage.yml?label=coverage)](https://github.com/KKyosuke/usagi/actions/workflows/v1-coverage.yml)
 [![Release](https://github.com/KKyosuke/usagi/actions/workflows/release.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/release.yml)
 <br>
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)

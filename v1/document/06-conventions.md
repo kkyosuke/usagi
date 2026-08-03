@@ -118,15 +118,15 @@
 |---|---|---|
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 module・target と直接 consumer の test | `cargo fmt --all -- --check` / `cargo check --all-targets` / 変更箇所に対応する `cargo test --lib <module>::`、`cargo test --test <target>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
-| push / PR 前 | Rust full gate / Markdown link check | Rust 差分あり: `cargo clippy --all-targets -- -D warnings` と `cargo llvm-cov --workspace --no-clean --ignore-filename-regex "$COVERAGE_IGNORE" --fail-under-lines "$COVERAGE_MIN" --fail-under-functions "$COVERAGE_MIN"`。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
-| CI | PR gate | `.github/workflows/test.yml` が fmt / clippy / `cargo test --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
+| push / PR 前 | Rust full gate / Markdown link check | v1 Rust 差分あり: `cargo clippy --all-targets --manifest-path v1/Cargo.toml -- -D warnings` と `scripts/v1-coverage.sh` の v1 coverage gate。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
+| CI | PR gate | `.github/workflows/v1-test.yml` が v1 の fmt / clippy / full test、`.github/workflows/v1-coverage.yml` が v1 の line/function coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
 
 push / PR 前の coverage は次のローカル経路で実行してよい。`cargo llvm-cov` はテスト実行を兼ねるため、この経路では
 同じ差分に対して `cargo test --quiet` を重複実行しなくてよい。
 
 ```bash
-. ./scripts/coverage.sh
-coverage_enforce
+. ./scripts/v1-coverage.sh
+v1_coverage_enforce
 ```
 
 docs-only（Rust 差分なし）は Rust gate（`cargo check` / `cargo clippy` / `cargo test` / coverage）を省略できる。ただし
@@ -134,14 +134,14 @@ Markdown 差分を含むため、Markdown link check は必須である。
 
 full test / coverage gate を必須とする条件は次のとおり。
 
-- push / PR 前または CI で Rust 差分（`*.rs`、`Cargo.toml`、`Cargo.lock`、Rust の build / test / coverage に影響する `scripts/`・`.github/workflows/`・hook）を含む。**`v1/` 配下の差分は Rust 差分に数えない**（退避された旧実装で、独立した Cargo プロジェクトのためルートのビルド・テスト・カバレッジ計測の対象外）。
+- push / PR 前または CI で v1 Rust 差分（`v1/**/*.rs`、`v1/Cargo.toml`、`v1/Cargo.lock`、v1 の build / test / coverage gate に影響する script・workflow）を含む。v1 はルートの v2 workspace ではなく、独立した `v1/Cargo.toml` で検証する。
 - docs-only を除き、`scripts/recommend-tests.sh` が fail-safe として `cargo test --quiet` を推奨する（未知の path、空 diff、複数層にまたがる変更、共有基盤の変更など）。
 - 変更が層境界、永続化、process / PTY / terminal IO、設定解決、テスト基盤、coverage 除外、CI / hook の gate に影響する。
 - selected tests で対象リスクを説明できない、または直接 consumer を特定できない。
 
-- テストカバレッジ 100% を維持する（CI / lefthook でチェック）。
-  - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外（`scripts/coverage.sh` の `COVERAGE_IGNORE`）に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（`src/main.rs`）で束ねる。こうすると presentation/CLI のオーケストレーションはユニットテストで 100% を満たせる（例: `cli/agent_phase.rs` は `impl Read`、`cli/mcp.rs` は `impl BufRead`/`impl Write` と `Box<dyn AgentBackend>`、`cli/clean.rs` は spawn 関数を注入）。
-  - `COVERAGE_IGNORE` に残してよいのは、テスト可能なロジックを抜いたあとに残る「実 IO そのもの」の層だけ（`main.rs` と、live TTY / 実 PTY / 実ネットワーク / 実スレッドを束ねる薄いオーケストレータ）。理由は `scripts/coverage.sh` のコメントに列挙する。
+- line/function カバレッジ 100% を維持する（v1 専用 CI でチェック）。
+  - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（`src/main.rs`）で束ねる。こうすると presentation/CLI のオーケストレーションはユニットテストで 100% を満たせる（例: `cli/agent_phase.rs` は `impl Read`、`cli/mcp.rs` は `impl BufRead`/`impl Write` と `Box<dyn AgentBackend>`、`cli/clean.rs` は spawn 関数を注入）。
+  - filename exclusion は `scripts/v1-coverage.sh` を正本とし、テスト可能な判断を抜いたあとの real IO 境界だけを個別に列挙する。business logic、parser、error path の一括除外には使わない。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
 
 ## 変更箇所からの推奨テスト
@@ -164,7 +164,7 @@ scripts/recommend-tests.sh origin/main
 |---|---|
 | pre-commit | workspace root コミットの拒否（backstop） / ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
-| pre-push | `cargo clippy -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip。`v1/` 配下の差分は Rust 差分に数えず、v1 だけの push では clippy / coverage を skip する — v1 のテスト実行・カバレッジ強制は行わない） |
+| pre-push | 重い full gate は持たず、v1 の最終 full test / coverage gate は PR CI で実行する |
 
 ### workspace root コミットの拒否（backstop）
 
@@ -183,9 +183,10 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 |---|---|---|
 | `.github/workflows/test.yml` | `main` への push / PR | ルート（v2 パッケージ）の fmt / clippy と full test を独立 job で並列実行（`ubuntu-latest`）。従来の `test` check 名は fmt / clippy gate として維持 |
 | `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
+| `.github/workflows/v1-coverage.yml` | PR | v1 Rust source / manifest 差分で出荷元 `v1/Cargo.toml` の line/function coverage 100% を強制し、対象外差分でも stable な `v1-coverage` aggregate を報告。gate 自体は `test.yml` の実 crate fixture で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
-| `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
+| `.github/workflows/coverage.yml` | PR | ルートの v2 workspace のカバレッジ計測・PR コメント・100% 未満で失敗（v1 は計測しない） |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
 

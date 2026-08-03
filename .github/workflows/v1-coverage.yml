@@ -1,0 +1,78 @@
+name: v1 Coverage
+
+# v1/Cargo.toml から build する出荷バイナリだけを計測する。全 PR で stable な
+# aggregate context を返し、v1 Rust source / manifest 差分だけ重い coverage job を実行する。
+# gate 自体の変更は test.yml の実 crate fixture が同じ SSoT を source して検証する。
+on:
+  pull_request:
+    branches: [ "main" ]
+
+concurrency:
+  group: v1-coverage-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    name: Detect v1 coverage gate changes
+    runs-on: ubuntu-latest
+    outputs:
+      v1_rust: ${{ steps.classify.outputs.v1_rust }}
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+    - id: classify
+      name: Classify changed paths
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: scripts/ci/required-contexts.sh changed "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  v1-coverage-run:
+    name: v1 Rust coverage
+    needs: changes
+    if: needs.changes.outputs.v1_rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Rust Cache
+      uses: swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        shared-key: rust-v1-coverage
+        workspaces: v1
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Enforce v1 line/function coverage 100%
+      run: |
+        . ./scripts/v1-coverage.sh
+        v1_coverage_enforce
+
+  v1-coverage:
+    name: v1-coverage
+    if: always()
+    needs: [changes, v1-coverage-run]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Report v1 coverage result
+      env:
+        CHANGES_RESULT: ${{ needs.changes.result }}
+        REQUIRED: ${{ needs.changes.outputs.v1_rust }}
+        RUN_RESULT: ${{ needs.v1-coverage-run.result }}
+      run: |
+        scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT"

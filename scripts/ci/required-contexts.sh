@@ -18,13 +18,23 @@ EOF
 }
 
 classify_paths() {
-  local rust=false markdown=false path
+  local rust=false v1_rust=false markdown=false path
   for path in "$@"; do
     case "$path" in
       *.md|lychee.toml|.github/workflows/markdown-link-check.yml) markdown=true ;;
     esac
 
     case "$path" in
+      v1/*.rs|v1/Cargo.toml|v1/Cargo.lock|v1/build.rs)
+        v1_rust=true
+        ;;
+    esac
+
+    case "$path" in
+      v1/*)
+        # v1 is an independent Cargo project. Its shipping gate is classified
+        # separately so a v1-only PR never measures the v2 workspace.
+        ;;
       *.rs|Cargo.toml|Cargo.lock|*/Cargo.toml|*/Cargo.lock|build.rs|*/build.rs|rust-toolchain*|coverage-off-allowlist.json|scripts/*|.github/workflows/*|.github/actions/*)
         rust=true
         ;;
@@ -37,7 +47,7 @@ classify_paths() {
         ;;
     esac
   done
-  printf 'rust=%s\nmarkdown=%s\n' "$rust" "$markdown"
+  printf 'rust=%s\nv1_rust=%s\nmarkdown=%s\n' "$rust" "$v1_rust" "$markdown"
 }
 
 audit_workflows() {
