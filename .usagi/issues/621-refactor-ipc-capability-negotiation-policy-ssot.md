@@ -1,13 +1,13 @@
 ---
 number: 621
 title: refactor(ipc): capability 語彙と negotiation policy を SSoT 化する
-status: todo
+status: done
 priority: medium
 labels: [refactor, ipc, core, daemon, architecture, ssot, review]
 dependson: []
 related: [622]
 created_at: 2026-08-02T22:56:10.970379+00:00
-updated_at: 2026-08-02T22:56:46.640173+00:00
+updated_at: 2026-08-02T23:50:12.514347+00:00
 ---
 
 ## 問題 / 責務違反

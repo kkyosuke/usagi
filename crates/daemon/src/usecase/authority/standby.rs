@@ -36,6 +36,7 @@ use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::ipc::{
     BuildArtifactDecision, BuildIdentity, ServerHello, build_artifact_decision,
+    standby_readiness_required_capabilities,
 };
 
 use crate::usecase::authority::registry::{
@@ -43,15 +44,6 @@ use crate::usecase::authority::registry::{
     RegistrySnapshot,
 };
 use crate::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
-
-/// The capability a peer advertises when its `ServerHello` carries a canonical
-/// build artifact identity. Without it the peer is an older build that cannot
-/// be compared, which fails safe.
-pub const BUILD_ARTIFACT_CAPABILITY: &str = "build.artifact.v1";
-
-/// The capability a peer advertises when it participates in the cross-process
-/// generation registry and honours per-request role admission.
-pub const GENERATION_HANDOFF_CAPABILITY: &str = "daemon.generation-handoff.v1";
 
 /// Why a standby was not admitted to authority. Every variant keeps the old
 /// active generation and the current locator.
@@ -340,12 +332,8 @@ pub fn verify_readiness(
     if hello.daemon_generation.0 != generation.as_str() {
         return Err(ReadinessRefusal::GenerationMismatch);
     }
-    for required in [BUILD_ARTIFACT_CAPABILITY, GENERATION_HANDOFF_CAPABILITY] {
-        if !hello
-            .capabilities
-            .iter()
-            .any(|advertised| advertised == required)
-        {
+    for required in standby_readiness_required_capabilities() {
+        if !required.is_advertised_by(&hello.capabilities) {
             return Err(ReadinessRefusal::UnsupportedCapability);
         }
     }

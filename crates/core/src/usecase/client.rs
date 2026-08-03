@@ -22,13 +22,17 @@ use crate::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
 use crate::infrastructure::ipc::{
-    Bootstrap, BuildIdentity, ClientHello, ClientId, ClientWorkspace, DaemonGeneration, Envelope,
-    EnvelopeKind, ErrorCode, GenerationRole, OWNER_GENERATION_ROUTING_CAPABILITY, ProtocolError,
-    ProtocolRange, ProtocolVersion, ResponseOutcome, RetryMode, ServerHello, SideEffect,
+    Bootstrap, BuildIdentity, Capability, ClientHello, ClientId, ClientWorkspace, DaemonGeneration,
+    Envelope, EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange,
+    ProtocolVersion, ResponseOutcome, RetryMode, ServerHello, SideEffect,
     TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION, TerminalInputReplayMode,
-    TerminalSnapshotMode, WORKSPACE_FENCE_CAPABILITY, is_workspace_mismatch, read_json_frame,
-    terminal_input_replay_mode, terminal_snapshot_mode, write_json_frame,
+    TerminalSnapshotMode, client_advertised_capabilities, client_required_capabilities,
+    is_workspace_mismatch, read_json_frame, terminal_input_replay_mode, terminal_snapshot_mode,
+    write_json_frame,
 };
+
+#[cfg(test)]
+use crate::infrastructure::ipc::{OWNER_GENERATION_ROUTING_CAPABILITY, WORKSPACE_FENCE_CAPABILITY};
 
 /// A daemon request understood by every presentation surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -795,25 +799,8 @@ impl<S: Read + Write> IpcClient<S> {
         expected_owner: Option<ExpectedOwner<'_>>,
     ) -> Result<Self, ClientError> {
         let expected_nonce = connection_nonce.clone();
-        let mut required_capabilities = vec![
-            "request.correlation.v1".into(),
-            "pr.snapshot.v1".into(),
-            "build.artifact.v1".into(),
-        ];
-        if expected_owner.is_some() {
-            required_capabilities.push("daemon.owner-identity.v1".into());
-        }
-        // A client that names a workspace at all — the tree it runs in, or the
-        // workspace it opened — requires the fence itself: a daemon that does
-        // not enforce it would admit this connection and answer with another
-        // workspace's sessions, which is exactly the silent outcome the
-        // declaration exists to end.
-        if matches!(
-            workspace,
-            ClientWorkspace::Bound { .. } | ClientWorkspace::Selected { .. }
-        ) {
-            required_capabilities.push(WORKSPACE_FENCE_CAPABILITY.into());
-        }
+        let required_capabilities =
+            client_required_capabilities(expected_owner.is_some(), &workspace);
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
             connection_nonce,
@@ -832,7 +819,7 @@ impl<S: Read + Write> IpcClient<S> {
             // it is the daemon that needs it — a rollover may only leave a
             // draining generation behind while every connected client can
             // still address it (#508).
-            capabilities: vec![OWNER_GENERATION_ROUTING_CAPABILITY.into()],
+            capabilities: client_advertised_capabilities(),
             required_capabilities,
             build,
             workspace: Some(workspace),
@@ -944,10 +931,7 @@ fn verify_owner_binding(
         && owner.observation == DaemonProcessObservation::Exact
         && &hello.daemon_generation == owner.generation
         && hello.generation_role == GenerationRole::Active
-        && hello
-            .capabilities
-            .iter()
-            .any(|capability| capability == "daemon.owner-identity.v1")
+        && Capability::DaemonOwnerIdentity.is_advertised_by(&hello.capabilities)
         && hello.daemon_process.as_ref() == Some(owner.record);
     if valid {
         Ok(())
@@ -1642,7 +1626,7 @@ mod tests {
                 generation: 1,
                 revision: 1,
             },
-            capabilities: vec!["daemon.owner-identity.v1".into()],
+            capabilities: vec![Capability::DaemonOwnerIdentity.wire_name().into()],
             build: client_build(),
             limits: crate::infrastructure::ipc::ProtocolLimits::default(),
             daemon_process: Some(record.clone()),

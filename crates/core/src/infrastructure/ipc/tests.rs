@@ -63,6 +63,138 @@ fn server() -> ServerProtocol {
 }
 
 #[test]
+fn production_client_requirements_are_contextual_and_served_by_production_daemons() {
+    let unbound = ClientWorkspace::Unbound;
+    let bound = ClientWorkspace::Bound {
+        root: TRUSTED_ROOT.into(),
+    };
+    let selected = ClientWorkspace::Selected {
+        root: TRUSTED_ROOT.into(),
+    };
+    let base = capability_names(&BASE_CLIENT_REQUIRED_CAPABILITIES);
+    let owner = Capability::DaemonOwnerIdentity.wire_name().to_owned();
+    let fence = Capability::WorkspaceFence.wire_name().to_owned();
+
+    let cases = [
+        (false, &unbound, base.clone()),
+        (true, &unbound, [base.clone(), vec![owner.clone()]].concat()),
+        (false, &bound, [base.clone(), vec![fence.clone()]].concat()),
+        (
+            true,
+            &bound,
+            [base.clone(), vec![owner.clone(), fence.clone()]].concat(),
+        ),
+        (
+            false,
+            &selected,
+            [base.clone(), vec![fence.clone()]].concat(),
+        ),
+    ];
+    let active = server_advertised_capabilities(GenerationRole::Active);
+    for (expects_owner, workspace, expected) in cases {
+        let required = client_required_capabilities(expects_owner, workspace);
+        assert_eq!(required, expected, "{expects_owner} {workspace:?}");
+        assert!(
+            required
+                .iter()
+                .all(|capability| active.contains(capability)),
+            "production server does not advertise every client requirement: {required:?}"
+        );
+    }
+
+    assert_eq!(
+        client_advertised_capabilities(),
+        vec![Capability::OwnerGenerationRouting.wire_name().to_owned()]
+    );
+}
+
+#[test]
+fn server_and_readiness_policies_share_the_closed_capability_vocabulary() {
+    let descriptors = Capability::ALL.map(Capability::descriptor);
+    assert!(
+        descriptors
+            .iter()
+            .all(|descriptor| !descriptor.purpose.is_empty())
+    );
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        assert!(
+            descriptors[..index]
+                .iter()
+                .all(|seen| seen.wire_name != descriptor.wire_name),
+            "duplicate capability wire name: {}",
+            descriptor.wire_name
+        );
+    }
+
+    let active = server_advertised_capabilities(GenerationRole::Active);
+    let standby = server_advertised_capabilities(GenerationRole::Standby);
+    let handoff = Capability::GenerationHandoff.wire_name().to_owned();
+    assert_eq!(
+        standby,
+        [active.clone(), vec![handoff.clone()]].concat(),
+        "standby differs only by generation-handoff support"
+    );
+    assert!(!active.contains(&handoff));
+
+    let readiness = standby_readiness_required_capabilities();
+    assert!(readiness.contains(&Capability::BuildArtifact));
+    assert!(readiness.contains(&Capability::GenerationHandoff));
+    assert!(
+        client_required_capabilities(false, &ClientWorkspace::Unbound)
+            .contains(&Capability::BuildArtifact.wire_name().to_owned()),
+        "ordinary handshake and standby readiness use the same build descriptor"
+    );
+}
+
+#[test]
+fn production_capability_wire_names_are_defined_only_in_the_ipc_vocabulary() {
+    fn rust_sources(path: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap();
+    let mut sources = Vec::new();
+    rust_sources(&workspace.join("crates"), &mut sources);
+    let vocabulary = workspace.join("crates/core/src/infrastructure/ipc/mod.rs");
+    let mut duplicates = Vec::new();
+    for path in sources {
+        if path == vocabulary
+            || path.file_name().is_some_and(|name| name == "tests.rs")
+            || path.components().any(|part| part.as_os_str() == "tests")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source.as_str(), |(production, _)| production);
+        for capability in Capability::ALL {
+            if production.contains(capability.wire_name()) {
+                duplicates.push(format!(
+                    "{}: {}",
+                    path.strip_prefix(workspace).unwrap().display(),
+                    capability.wire_name()
+                ));
+            }
+        }
+    }
+    assert!(
+        duplicates.is_empty(),
+        "capability wire names must stay in the IPC vocabulary: {duplicates:?}"
+    );
+}
+
+#[test]
 fn frame_handles_split_and_concatenated_payloads() {
     struct Chunked(Cursor<Vec<u8>>);
     impl Read for Chunked {
@@ -607,10 +739,9 @@ fn legacy_wire_identity_without_artifact_deserializes_as_unknown() {
 fn negotiation_rejects_missing_capability_and_generation() {
     let mut bad = hello();
     bad.required_capabilities.push("missing".into());
-    assert_eq!(
-        negotiate(&bad, &server()).unwrap_err().code,
-        ErrorCode::CapabilityMissing
-    );
+    let missing = negotiate(&bad, &server()).unwrap_err();
+    assert_eq!(missing.code, ErrorCode::CapabilityMissing);
+    assert_eq!(missing.side_effect, SideEffect::None);
     let mut stale = hello();
     stale.expected_daemon_generation = Some(DaemonGeneration("old".into()));
     assert_eq!(

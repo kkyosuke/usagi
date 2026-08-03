@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use usagi_core::domain::id::DaemonGeneration;
 use usagi_core::infrastructure::ipc::{
-    Bootstrap, ClientHello, ClientWorkspace, ConnectionId, DaemonGeneration as WireGeneration,
-    Envelope, EnvelopeKind, ErrorCode, GenerationRole as WireRole, ProtocolLimits, ProtocolRange,
-    RequestId, ResponseOutcome, ServerHello, ServerProtocol, build_identity, read_json_frame,
-    write_json_frame,
+    Bootstrap, Capability, ClientHello, ClientWorkspace, ConnectionId,
+    DaemonGeneration as WireGeneration, Envelope, EnvelopeKind, ErrorCode,
+    GenerationRole as WireRole, ProtocolLimits, ProtocolRange, RequestId, ResponseOutcome,
+    ServerHello, ServerProtocol, build_identity, read_json_frame, write_json_frame,
 };
 use usagi_daemon::infrastructure::generation_registry::{
     CurrentLocatorFile, GenerationRegistryFile,
@@ -47,9 +47,7 @@ use usagi_daemon::usecase::authority::registry::{
 use usagi_daemon::usecase::authority::rollover::{
     CurrentLocator, HandoffStep, collect_retired, execute_rollover, execute_rollover_with, recover,
 };
-use usagi_daemon::usecase::authority::standby::{
-    BUILD_ARTIFACT_CAPABILITY, GENERATION_HANDOFF_CAPABILITY, StandbyProbe, prepare_standby,
-};
+use usagi_daemon::usecase::authority::standby::{StandbyProbe, prepare_standby};
 use usagi_daemon::usecase::authority::workers::{ClientWorkers, ConnectionShutdown};
 use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 
@@ -94,8 +92,8 @@ fn server_protocol(generation: DaemonGeneration, tag: &str) -> ServerProtocol {
             max_revision: 2,
         }],
         capabilities: vec![
-            BUILD_ARTIFACT_CAPABILITY.to_owned(),
-            GENERATION_HANDOFF_CAPABILITY.to_owned(),
+            Capability::BuildArtifact.wire_name().to_owned(),
+            Capability::GenerationHandoff.wire_name().to_owned(),
         ],
         build: artifact(tag),
         limits: ProtocolLimits::default(),
