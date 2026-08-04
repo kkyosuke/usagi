@@ -2358,6 +2358,14 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 #[allow(clippy::needless_pass_by_value)]
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     if config.is_editing_environment() {
+        if config.is_confirming_environment() {
+            match key {
+                Key::Enter => config.confirm_environment(),
+                Key::Escape => config.cancel_environment(),
+                _ => {}
+            }
+            return ConfigStep::Stay;
+        }
         match key {
             Key::Enter => {
                 if config.commit_environment_line() {
@@ -2368,7 +2376,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
             Key::Char(character) if !character.is_control() => {
                 config.type_environment(&character.to_string());
             }
-            Key::Paste(text) => config.type_environment(&text),
+            Key::Paste(text) => config.paste_environment(&text),
             Key::Escape => config.cancel_environment(),
             _ => {}
         }
@@ -2394,7 +2402,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
         // Enter begins the save flow (loading). `begin_save` is a no-op unless a
         // dirty Save row is focused with no save already in flight, so a rapid
         // second Enter cannot start a second save.
-        Key::Enter if config.open_environment() => ConfigStep::Stay,
+        Key::Enter if config.open_environment(settings) => ConfigStep::Stay,
         Key::Enter if config.begin_save() => ConfigStep::Save,
         Key::Escape => ConfigStep::Back,
         Key::Quit | Key::CtrlQ => ConfigStep::Quit,
@@ -18023,14 +18031,28 @@ mod tests {
         assert_eq!(config.field(), ConfigField::Environment);
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(config.is_editing_environment());
+        assert!(config.is_confirming_environment());
 
+        // The warning owns input until Enter confirms the freshly loaded
+        // snapshot; typing before confirmation is ignored.
         step_config(&mut config, Key::Char('A'), &mut settings);
-        step_config(&mut config, Key::Paste("=1x".to_owned()), &mut settings);
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(!config.is_confirming_environment());
+        step_config(&mut config, Key::Char('C'), &mut settings);
+        step_config(&mut config, Key::Paste("=3x".to_owned()), &mut settings);
         step_config(&mut config, Key::Backspace, &mut settings);
+        step_config(&mut config, Key::Enter, &mut settings);
+        step_config(
+            &mut config,
+            Key::Paste("A=1\r\nB=2\n".to_owned()),
+            &mut settings,
+        );
         step_config(&mut config, Key::Other, &mut settings);
         step_config(&mut config, Key::Enter, &mut settings);
-        step_config(&mut config, Key::Enter, &mut settings);
         assert!(!config.is_editing_environment());
+        assert_eq!(config.settings().env["A"], "1");
+        assert_eq!(config.settings().env["B"], "2");
+        assert_eq!(config.settings().env["C"], "3");
 
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(config.is_editing_environment());

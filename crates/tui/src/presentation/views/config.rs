@@ -99,6 +99,7 @@ struct ConfigEnvironmentEditor {
     bindings: EnvBindings,
     draft: String,
     error: Option<String>,
+    confirmed: bool,
 }
 
 impl Config {
@@ -312,30 +313,81 @@ impl Config {
         self.environment_editor.is_some()
     }
 
-    /// Open the global environment editor when its row is focused.
-    pub fn open_environment(&mut self) -> bool {
+    /// Read the latest global environment and open its overwrite warning.
+    pub fn open_environment(&mut self, port: &mut dyn SettingsPort) -> bool {
         if self.scope != SettingsScope::Global || self.field != Field::Environment {
             return false;
         }
-        self.environment_editor = Some(ConfigEnvironmentEditor {
-            bindings: self.settings.draft.env.clone(),
-            draft: String::new(),
-            error: None,
-        });
+        match port.read(SettingsScope::Global) {
+            Ok(settings) => {
+                self.environment_editor = Some(ConfigEnvironmentEditor {
+                    bindings: settings.env,
+                    draft: String::new(),
+                    error: None,
+                    confirmed: false,
+                });
+                self.notice = None;
+            }
+            Err(error) => self.notice = Some(format!("Load failed: {error}")),
+        }
         true
+    }
+
+    /// Whether the overwrite warning is waiting for confirmation.
+    #[must_use]
+    pub fn is_confirming_environment(&self) -> bool {
+        self.environment_editor
+            .as_ref()
+            .is_some_and(|editor| !editor.confirmed)
+    }
+
+    /// Accept the snapshot warning and begin editing.
+    pub fn confirm_environment(&mut self) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.confirmed = true;
+        }
     }
 
     /// Append text to the focused `NAME=value` input.
     pub fn type_environment(&mut self, text: &str) {
-        if let Some(editor) = self.environment_editor.as_mut() {
+        if let Some(editor) = self
+            .environment_editor
+            .as_mut()
+            .filter(|editor| editor.confirmed)
+        {
             editor.draft.push_str(text);
             editor.error = None;
         }
     }
 
+    /// Paste one or more bindings. Newlines submit each pasted line instead of
+    /// becoming part of an environment value.
+    pub fn paste_environment(&mut self, text: &str) {
+        if !text.contains(['\n', '\r']) {
+            self.type_environment(text);
+            return;
+        }
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        for line in normalized.split('\n') {
+            self.type_environment(line);
+            let _ = self.commit_environment_line();
+            if self
+                .environment_editor
+                .as_ref()
+                .is_some_and(|editor| editor.error.is_some())
+            {
+                break;
+            }
+        }
+    }
+
     /// Delete the final character from the focused environment input.
     pub fn backspace_environment(&mut self) {
-        if let Some(editor) = self.environment_editor.as_mut() {
+        if let Some(editor) = self
+            .environment_editor
+            .as_mut()
+            .filter(|editor| editor.confirmed)
+        {
             editor.draft.pop();
             editor.error = None;
         }
@@ -344,7 +396,11 @@ impl Config {
     /// Apply one `NAME=value` line. An empty value removes the binding.
     /// Returns `true` when an empty line requests persistence.
     pub fn commit_environment_line(&mut self) -> bool {
-        let Some(editor) = self.environment_editor.as_mut() else {
+        let Some(editor) = self
+            .environment_editor
+            .as_mut()
+            .filter(|editor| editor.confirmed)
+        else {
             return false;
         };
         let draft = editor.draft.trim().to_owned();
@@ -377,7 +433,11 @@ impl Config {
 
     /// Persist the global environment without saving the other Config fields.
     pub fn save_environment(&mut self, port: &mut dyn SettingsPort) -> bool {
-        let Some(editor) = self.environment_editor.as_ref() else {
+        let Some(editor) = self
+            .environment_editor
+            .as_ref()
+            .filter(|editor| editor.confirmed)
+        else {
             return false;
         };
         let bindings = editor.bindings.clone();
@@ -591,6 +651,33 @@ fn render_environment_over(
     base: &[String],
     editor: &ConfigEnvironmentEditor,
 ) -> Vec<String> {
+    if !editor.confirmed {
+        let lines = vec![
+            modal::caption("global environment snapshot"),
+            modal::content_line(
+                "The latest global environment was captured for editing.",
+                ENVIRONMENT_INNER_WIDTH,
+            ),
+            modal::content_line(
+                "Changes saved elsewhere while this editor is open may be overwritten.",
+                ENVIRONMENT_INNER_WIDTH,
+            ),
+            String::new(),
+            Role::Danger.style().paint(&modal::content_line(
+                "Continue with this snapshot?",
+                ENVIRONMENT_INNER_WIDTH,
+            )),
+            modal::footer("Enter: continue   Esc: cancel"),
+        ];
+        return modal::render_over(
+            height,
+            width,
+            base,
+            "Environment",
+            ENVIRONMENT_INNER_WIDTH,
+            &lines,
+        );
+    }
     let mut lines = vec![modal::caption("global environment · every workspace")];
     if editor.bindings.is_empty() {
         lines.push(modal::empty_notice("(no environment variables)"));
@@ -796,8 +883,16 @@ mod tests {
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::Environment);
-        assert!(config.open_environment());
+        assert!(config.open_environment(&mut port));
         assert!(config.is_editing_environment());
+        assert!(config.is_confirming_environment());
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("Continue with this snapshot?")
+        );
+        config.confirm_environment();
+        assert!(!config.is_confirming_environment());
         assert!(
             render(24, 80, &config)
                 .join("\n")
@@ -824,14 +919,16 @@ mod tests {
                 .contains("Environment (1 vars)")
         );
 
-        assert!(config.open_environment());
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
         config.type_environment("RUST_LOG=");
         assert!(!config.commit_environment_line());
         assert!(config.commit_environment_line());
         assert!(config.save_environment(&mut port));
         assert!(port.global.env.is_empty());
 
-        assert!(config.open_environment());
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
         config.type_environment("1BAD=value");
         assert!(!config.commit_environment_line());
         assert!(
@@ -848,9 +945,9 @@ mod tests {
 
         let mut workspace =
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
-        assert!(!workspace.open_environment());
+        assert!(!workspace.open_environment(&mut port));
         workspace.next_field();
-        assert!(!workspace.open_environment());
+        assert!(!workspace.open_environment(&mut port));
     }
 
     #[test]
@@ -862,7 +959,8 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
-        assert!(config.open_environment());
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
         config.type_environment("A=1");
         assert!(!config.commit_environment_line());
         assert!(!config.save_environment(&mut port));
@@ -871,7 +969,8 @@ mod tests {
 
         config.cancel_environment();
         port.fail_save = false;
-        assert!(config.open_environment());
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
         config.type_environment("NUL=a\0b");
         assert!(!config.commit_environment_line());
         assert!(
@@ -879,6 +978,49 @@ mod tests {
                 .join("\n")
                 .contains("cannot contain NUL")
         );
+    }
+
+    #[test]
+    fn global_environment_warning_uses_a_fresh_snapshot_and_reports_load_failure() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        port.global.env = [("FRESH".to_owned(), "value".to_owned())]
+            .into_iter()
+            .collect();
+
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
+        assert!(render(24, 80, &config).join("\n").contains("FRESH=value"));
+        config.cancel_environment();
+        config.confirm_environment();
+
+        port.fail_read = Some(SettingsScope::Global);
+        assert!(config.open_environment(&mut port));
+        assert!(!config.is_editing_environment());
+        assert_eq!(config.notice(), Some("Load failed: settings unavailable"));
+    }
+
+    #[test]
+    fn multiline_environment_paste_commits_each_binding_and_keeps_invalid_input() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
+
+        config.paste_environment("A=1\rB=2\nC=3");
+        assert!(render(24, 80, &config).join("\n").contains("A=1"));
+        assert!(render(24, 80, &config).join("\n").contains("B=2"));
+        assert!(render(24, 80, &config).join("\n").contains("C=3"));
+
+        config.paste_environment("D=4\nnot-a-binding\nE=5");
+        let frame = render(24, 80, &config).join("\n");
+        assert!(frame.contains("D=4"));
+        assert!(frame.contains("type NAME=value"));
+        assert!(!frame.contains("E=5"));
     }
 
     #[test]
@@ -895,7 +1037,8 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
-        assert!(config.open_environment());
+        assert!(config.open_environment(&mut port));
+        config.confirm_environment();
         assert!(render(24, 80, &config).join("\n").contains("… 1 more"));
     }
 

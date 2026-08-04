@@ -72,7 +72,8 @@ workspace の editor は、この継承関係を隠さない。編集中のス�
 （[3. TUI#env editor](03-tui.md#env-editor)）。
 
 global binding は Welcome の Config にある `Environment (N vars)` から編集できる。Overview の `env global` も同じ
-global settings を編集する。workspace binding は Overview または Closeup の `env` から編集する。
+global settings を編集する。Config は editor を開く直前に最新値をスナップショットとして読み、編集中の外部変更を
+全置換で失う可能性を確認してから編集を始める。workspace binding は Overview または Closeup の `env` から編集する。
 
 ## secret の解決
 

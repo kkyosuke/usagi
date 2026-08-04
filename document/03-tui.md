@@ -737,8 +737,11 @@ Closeup は**引数を取らず workspace スコープだけ**を編集し、`Ta
 操作だけを述べる。
 
 Welcome の Config では Global セクションの `Environment (N vars)` を選んで Enter を押すと global editor を開く。
-`NAME=value` を Enter で追加・更新し、`NAME=` で削除する。空の入力で Enter を押すと global `env` だけを保存して
-Config に戻り、Esc は未保存の environment draft を破棄して Config に戻る。
+開く直前に最新の global binding を読み、全置換用のスナップショットとして固定する。確認画面は、editor を開いている間に
+別画面が保存した global env はこのスナップショットの保存で失われ得ることを示し、Enter で続行、Esc で中止する。
+`NAME=value` を Enter で追加・更新し、`NAME=` で削除する。複数行Pasteは改行ごとに各行を binding として取り込む。
+空の入力で Enter を押すと global `env` だけを保存して Config に戻り、Esc は未保存の environment draft を破棄して
+Config に戻る。
 
 | 入力 | 動作 |
 |---|---|
