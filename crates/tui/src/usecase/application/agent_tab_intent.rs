@@ -178,15 +178,6 @@ impl AgentTabIntent {
                 self.dismiss(continuation);
                 None
             }
-            AgentTabIntentMutation::DismissAndSelect {
-                continuation,
-                session_id,
-                selected,
-            } => {
-                self.dismiss(continuation);
-                self.select(session_id, selected);
-                None
-            }
             AgentTabIntentMutation::DismissTerminal { terminal } => {
                 self.dismiss_terminal(&terminal);
                 None
@@ -689,13 +680,6 @@ pub enum AgentTabIntentMutation {
     },
     /// Hide one lineage without stopping its runtime or provider conversation.
     Dismiss { continuation: AgentContinuationRef },
-    /// Atomically hide one lineage and persist the successor chosen by the pane
-    /// reducer. `selected=None` means a generic or empty tab owns foreground.
-    DismissAndSelect {
-        continuation: AgentContinuationRef,
-        session_id: Option<SessionId>,
-        selected: Option<AgentContinuationRef>,
-    },
     /// Hide one exact live terminal whose lineage has not been observed yet.
     /// The next observation that binds it promotes the close to its lineage.
     DismissTerminal { terminal: TerminalRef },
@@ -979,36 +963,6 @@ mod tests {
             AgentTabIntent::safe_label(closed)
         );
         assert_eq!(AgentTabIntent::safe_label_or_fallback(None), "Agent");
-    }
-
-    #[test]
-    fn legacy_dismiss_and_select_applies_both_mutations_atomically() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let closed = AgentContinuationRef::new();
-        let surviving = AgentContinuationRef::new();
-        let mut intent = AgentTabIntent::empty(workspace);
-        intent.upsert(
-            Some(session),
-            closed,
-            terminal(workspace, Some(session), WorktreeId::new()),
-            true,
-        );
-        intent.upsert(
-            Some(session),
-            surviving,
-            terminal(workspace, Some(session), WorktreeId::new()),
-            false,
-        );
-
-        intent.apply(AgentTabIntentMutation::DismissAndSelect {
-            continuation: closed,
-            session_id: Some(session),
-            selected: Some(surviving),
-        });
-
-        assert_eq!(intent.dismissed, BTreeSet::from([closed]));
-        assert_eq!(intent.targets[0].selected, Some(surviving));
     }
 
     #[test]

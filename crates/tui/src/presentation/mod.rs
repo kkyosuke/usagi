@@ -12199,6 +12199,9 @@ mod tests {
             &mut ui,
             &mut runtime,
         ));
+        let selected_interrupted = super::director_drawer_projection(&ui, &runtime, None);
+        assert!(selected_interrupted.conversations[1].selected);
+        assert!(selected_interrupted.interrupted_detail.is_some());
         let pending = OperationId::new();
         let _ = runtime.request_pane(Target::Root(workspace), pending, PaneKind::Agent);
         runtime.inject_pane_event_for_test(
@@ -12864,8 +12867,7 @@ mod tests {
             self.mutations.lock().unwrap().push(mutation.clone());
             let before = state.clone();
             let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation }
-                | AgentTabIntentMutation::DismissAndSelect { continuation, .. } => {
+                AgentTabIntentMutation::Dismiss { continuation } => {
                     state.targets.iter().any(|target| {
                         target
                             .tabs
@@ -12916,8 +12918,7 @@ mod tests {
                         });
                         None
                     }
-                    AgentTabIntentMutation::DismissAndSelect { continuation, .. }
-                    | AgentTabIntentMutation::Dismiss { continuation } => {
+                    AgentTabIntentMutation::Dismiss { continuation } => {
                         state.apply(AgentTabIntentMutation::Dismiss { continuation })
                     }
                     AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. }

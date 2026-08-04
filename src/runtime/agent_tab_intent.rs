@@ -197,8 +197,7 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             // revision before this close could clear the newer user intent.
             // Unknown/authoritatively removed keys remain inert.
             let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation }
-                | AgentTabIntentMutation::DismissAndSelect { continuation, .. } => {
+                AgentTabIntentMutation::Dismiss { continuation } => {
                     current.targets.iter().any(|target| {
                         target
                             .tabs
@@ -268,12 +267,6 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                         });
                         mutation_applied = already_applied;
                         None
-                    }
-                    AgentTabIntentMutation::DismissAndSelect { continuation, .. } => {
-                        // The close itself is monotonic and safe to merge. Its
-                        // local successor preview is stale, so preserve the
-                        // latest writer's selection and only merge Dismiss.
-                        current.apply(AgentTabIntentMutation::Dismiss { continuation })
                     }
                     AgentTabIntentMutation::Select {
                         session_id,
@@ -886,10 +879,8 @@ mod tests {
             .mutate(
                 workspace,
                 second_commit.intent.revision,
-                AgentTabIntentMutation::DismissAndSelect {
+                AgentTabIntentMutation::Dismiss {
                     continuation: first.continuation,
-                    session_id: None,
-                    selected: Some(first.continuation),
                 },
             )
             .unwrap();
@@ -1504,10 +1495,8 @@ mod tests {
             .mutate(
                 workspace,
                 opened.intent.revision,
-                AgentTabIntentMutation::DismissAndSelect {
+                AgentTabIntentMutation::Dismiss {
                     continuation: observed.continuation,
-                    session_id: None,
-                    selected: None,
                 },
             )
             .unwrap();
