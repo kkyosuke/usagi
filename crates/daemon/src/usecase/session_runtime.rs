@@ -2753,6 +2753,54 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_failed_session_removal_records_a_branch_deletion_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            ScriptedGit::new([
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                ScriptedGitResult::Output {
+                    success: false,
+                    stdout: "",
+                    stderr: "branch is locked",
+                },
+            ]),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.sessions[0].lifecycle = SessionLifecycle::Failed;
+        state.sessions[0].failure = Some(Failure {
+            stage: FailureStage::Create,
+            summary: "create failed".into(),
+        });
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, SessionRuntimeError::DurableFailure(summary) if summary.contains("git branch delete failed: branch is locked")),
+            "{error:?}"
+        );
+        let failed = &runtime.state().unwrap().sessions[0];
+        assert_eq!(failed.lifecycle, SessionLifecycle::Failed);
+        assert_eq!(failed.failure.as_ref().unwrap().stage, FailureStage::Delete);
+    }
+
+    #[test]
     fn rejects_a_stale_workspace_before_reserving_or_invoking_git() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
