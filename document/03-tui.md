@@ -23,6 +23,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Sidebar mascot](#sidebar-mascot)
   - [daemon health indicator](#daemon-health-indicator)
   - [session 状態別件数](#session-状態別件数)
+  - [Agent concurrency](#agent-concurrency)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
@@ -865,7 +866,13 @@ mascot の右には最大 3 行の観測 status（sidecar）を並べる。sidec
 mascot block の予約行数を増やさず session viewport の容量を奪わない。各行は rabbit の幅に揃えた同じ列から
 始まり、sidebar 幅に合わせて clip する。現在の供給元は上から
 [daemon health indicator](#daemon-health-indicator)（異常時だけ）、[session 状態別件数](#session-状態別件数)、
-daemon metrics（CPU / resident memory）の 3 つで、mascot block ごと省略される狭幅ではいずれも表示しない。
+[Agent concurrency](#agent-concurrency)、daemon metrics（CPU / resident memory）の 4 つで、mascot block ごと
+省略される狭幅ではいずれも表示しない。後ろ 2 つは同じ metrics snapshot から来るため、snapshot が無ければ
+どちらも出ない。
+
+**供給元は 4 つだが枠は 3 行しかない**。4 つとも語ることがあるときは **Agent concurrency 行が譲る**
+（異常な daemon の方が急を要する報せであり、常設の件数・CPU/memory 行の位置も動かさないため）。この取捨は
+合成側で明示的に行う。widget の上限に任せると、代わりに最下段の CPU / memory 行が無言で消えるからである。
 
 ### daemon health indicator
 
@@ -937,6 +944,29 @@ projection から毎フレーム導出する派生値であり、[metrics](04-ip
 - **daemon metrics が無くても出る**。件数は metrics observation と独立に導出するため、metrics 未取得でも
   sidecar にこの行だけが載る。
 - 表示専用であり、click や絞り込みの操作は持たない。
+
+### Agent concurrency
+
+sidecar の常設行として、daemon が Agent launch を admit する際の **使用中/上限**を出す。値は daemon の admission
+権威が報告した [agent concurrency projection](04-ipc.md#agent-concurrency-projection) そのものであり、TUI は
+runtime を数え直さず、上限の定数も持たない。対象は Agent runtime の pool だけで、generic terminal capacity や
+supervisor run の同時実行数とは別物である（正本は
+[5. daemon](05-daemon.md#agent-concurrency-projection)）。
+
+| 状態 | 表示 | 色 |
+|---|---|---|
+| 使用中あり（上限未満） | `3/16` | 上限の 3/4 未満は dim、3/4 以上は Warning |
+| 上限到達（次の Agent launch は拒否される） | `16/16` | Danger |
+| idle と報告された | `0/16` | dim |
+| daemon が報告しない（metrics schema 3 より前の peer） | `—` | dim |
+
+- **`0/16` と `—` を描き分ける**。前者は「daemon が idle と報告した」であり、後者は「daemon が何も言っていない」
+  である。報告されない level を 0 と描くと、枠が空いているという誤った断定になる。
+- 表示専用であり、この行から launch の可否を判断しない。次の launch を拒否するかは daemon が admit の瞬間に決める。
+- 狭幅では他の mascot 行と同じ幅へ clip し、うさぎ自体が入らない幅では mascot block ごと省略される。
+- **sidecar の 3 行が埋まるときはこの行が譲る**。[daemon health indicator](#daemon-health-indicator) が点灯し、
+  かつ [session 状態別件数](#session-状態別件数)と daemon metrics も出ている場合、この行だけを落として
+  health / 件数 / CPU・memory の 3 行を残す。異常時の frame は indicator 導入時と同一に保たれる。
 
 ## Closeup pane
 

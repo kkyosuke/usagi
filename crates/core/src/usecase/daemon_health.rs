@@ -318,7 +318,7 @@ mod tests {
 
     fn sample(sampled_at_ms: u64) -> DaemonMetrics {
         DaemonMetrics {
-            schema_version: 2,
+            schema_version: 3,
             sampled_at_ms,
             cpu_percent_hundredths: 120,
             resident_memory_bytes: 32 * MIB,
@@ -330,6 +330,8 @@ mod tests {
             pr_projection_dropped_bytes: 0,
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
+            // health は Agent concurrency を読まない（診断は counter と freshness だけ）。
+            agent_concurrency: None,
         }
     }
 

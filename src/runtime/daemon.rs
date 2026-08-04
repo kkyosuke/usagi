@@ -101,7 +101,9 @@ use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity, Process
 use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
-use usagi_daemon::usecase::metrics::{MetricsBroker, MetricsObserver, MetricsSample};
+use usagi_daemon::usecase::metrics::{
+    AgentConcurrencyGauge, MetricsBroker, MetricsObserver, MetricsSample,
+};
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
 use usagi_daemon::usecase::pr_inventory::{
     GhProcessPort, OutputPrProjector, RefreshClock, RefreshWorker,
@@ -2276,6 +2278,10 @@ fn spawn_ipc_server(
         Arc::clone(&children),
     );
     let mcp_command = std::env::current_exe()?;
+    // The Agent runtime publishes the concurrency it admits from here, and the
+    // metrics broker below reads it without taking the runtime's lock: a
+    // display-only observation must never wait behind a launch (#644).
+    let agent_concurrency = AgentConcurrencyGauge::default();
     let agent = open_agent_runtime(
         data_dir,
         daemon_generation,
@@ -2284,6 +2290,7 @@ fn spawn_ipc_server(
         mcp_command,
         user_environment,
         retention.clone(),
+        agent_concurrency.clone(),
         &children,
         hydrate_retained,
     )?;
@@ -2364,7 +2371,9 @@ fn spawn_ipc_server(
         pr_inventory,
         projection,
         decisions,
-        Arc::new(Mutex::new(MetricsBroker::default())),
+        Arc::new(Mutex::new(MetricsBroker::with_agent_concurrency(
+            agent_concurrency,
+        ))),
         Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
         pipeline_metrics,
         supervisor,
@@ -2867,6 +2876,7 @@ fn open_agent_runtime(
     mcp_command: PathBuf,
     environment: Arc<SharedUserEnvironment>,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
+    concurrency: AgentConcurrencyGauge,
     children: &Arc<SpawnedChildren>,
     hydrate_retained: bool,
 ) -> std::io::Result<SharedAgentRuntime> {
@@ -2947,7 +2957,7 @@ fn open_agent_runtime(
             sandbox_passthrough,
         }),
     );
-    let runtime = AgentRuntime::hydrate_with_retention(
+    let mut runtime = AgentRuntime::hydrate_with_retention(
         generation,
         registry,
         store,
@@ -2966,6 +2976,9 @@ fn open_agent_runtime(
             format!("invalid agent runtime snapshot: {error:?}"),
         )
     })?;
+    // Bind before the runtime is shared, so the metrics broker never observes an
+    // unpublished level for a runtime that already hydrated interrupted records.
+    runtime.bind_concurrency_gauge(concurrency);
     Ok(Arc::new(Mutex::new(runtime)))
 }
 
@@ -12425,6 +12438,93 @@ mod tests {
         );
         assert_eq!(restarted_snapshot.active_subscribers, 0);
         assert_eq!(restarted_snapshot.dropped_updates, 0);
+    }
+
+    /// The metrics reply carries the Agent concurrency the daemon's own admission
+    /// authority published, and it reads that level **without** the Agent runtime
+    /// lock: a display-only tick may never wait behind a launch (#644).
+    #[test]
+    fn production_metrics_report_agent_concurrency_without_taking_the_agent_lock() {
+        use usagi_core::usecase::client::{AgentConcurrency, MetricsAction};
+
+        let gauge = AgentConcurrencyGauge::default();
+        let broker = Arc::new(Mutex::new(MetricsBroker::with_agent_concurrency(
+            gauge.clone(),
+        )));
+        let sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
+        let pipeline = TerminalPipelineMetrics::default();
+        let mut client = None;
+
+        // Before any authority publishes, the reply says "unknown" rather than an
+        // idle zero, and it declares the schema that carries the projection.
+        let unknown = metrics_response(
+            &broker,
+            &sampler,
+            &pipeline,
+            &mut client,
+            MetricsAction::Subscribe,
+        );
+        assert_eq!(unknown.agent_concurrency, None);
+        assert_eq!(unknown.schema_version, 3);
+
+        // What the authority publishes is what the reply reports, on the very next
+        // request and without another sample being pushed.
+        gauge.publish(2, AGENT_RUNTIME_LIMIT);
+        let reported = metrics_response(
+            &broker,
+            &sampler,
+            &pipeline,
+            &mut client,
+            MetricsAction::Snapshot,
+        );
+        assert_eq!(
+            reported.agent_concurrency,
+            Some(AgentConcurrency {
+                in_use: 2,
+                limit: u32::try_from(AGENT_RUNTIME_LIMIT).unwrap(),
+            })
+        );
+
+        // The reply is produced while another thread holds the Agent runtime's
+        // authority. `dispatch_metrics` has no access to that runtime by
+        // construction; this bounds the regression that would give it one, so a
+        // launch could no longer stall the mascot's metrics tick.
+        let authority = Arc::new(Mutex::new(()));
+        let held = Arc::clone(&authority);
+        let (holding, holds) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let guard = held.lock().expect("fresh mutex");
+            holding.send(()).expect("the test waits for the held lock");
+            released.recv().expect("the test releases the lock");
+            drop(guard);
+        });
+        holds.recv().expect("the authority is held");
+        let (answered, answer) = mpsc::channel();
+        let replying = std::thread::spawn(move || {
+            let mut isolated = None;
+            let reply = metrics_response(
+                &broker,
+                &sampler,
+                &TerminalPipelineMetrics::default(),
+                &mut isolated,
+                MetricsAction::Snapshot,
+            );
+            let _ = answered.send(reply);
+        });
+        let reply = answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a metrics reply never waits on the Agent authority");
+        assert_eq!(
+            reply.agent_concurrency,
+            Some(AgentConcurrency {
+                in_use: 2,
+                limit: u32::try_from(AGENT_RUNTIME_LIMIT).unwrap(),
+            })
+        );
+        replying.join().expect("the reply thread finished");
+        release.send(()).expect("the holder is still waiting");
+        holder.join().expect("the holder released the authority");
     }
 
     #[test]

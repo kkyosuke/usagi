@@ -21,6 +21,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
   - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
 - [managed session request](#managed-session-request)
 - [daemon metrics subscription](#daemon-metrics-subscription)
+  - [agent concurrency projection](#agent-concurrency-projection)
 - [PR inventory snapshot](#pr-inventory-snapshot)
 - [agent launch request](#agent-launch-request)
   - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
@@ -326,7 +327,7 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 
 | field | type | meaning |
 |---|---|---|
-| `schema_version` | `u16` | metrics payload schema version。現在は `2` |
+| `schema_version` | `u16` | metrics payload schema version。現在は `3` |
 | `sampled_at_ms` | `u64` | daemon が sample を作成した monotonic timestamp |
 | `cpu_percent_hundredths` | `u32` | 前回 sample からの daemon process CPU 使用率（百分率の 1/100 単位） |
 | `resident_memory_bytes` | `u64` | daemon process の peak resident memory（byte） |
@@ -335,10 +336,36 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 | `terminal_dropped_bytes` | `u64` | retention window から trim した terminal output byte 数 |
 | `terminal_coalesced_bytes` | `u64` | retained segment に連結した terminal output byte 数 |
 | `terminal_backpressured_bytes` | `u64` | bounded PTY observation queue の空きを待った terminal output byte 数 |
+| `pr_projection_dropped_bytes` | `u64` | deferred projection queue が満杯で PR 走査しなかった committed output byte 数 |
+| `pr_projection_coalesced_bytes` | `u64` | 既に queue 済みの projection chunk へ連結した committed output byte 数 |
+| `pr_projection_gaps` | `u64` | 落ちた byte を跨いで PR 走査を連結しないために記録した discontinuity 数 |
+| `agent_concurrency` | `object?` | Agent concurrency の使用中/上限。報告しない daemon では欠落する（下記） |
 
 各 subscriber は容量 1 の queue を持つ。daemon は tick で block せず、queue が埋まった
 observer の中間 sample を落として count する。切断された observer は次の publish で取り除く。
 このため遅い TUI や一つの接続の切断が daemon tick または他 TUI の配信を止めない。
+
+### agent concurrency projection
+
+`agent_concurrency` は daemon が Agent launch を admit する権威そのものの level である。
+対象は **Agent runtime の concurrency pool だけ**で、generic terminal capacity や supervisor run の
+`ExecutionPolicy.max_concurrency` とは別物であり、他 pool と合算しない。何を使用中と数えるかは
+[5. daemon の Agent concurrency projection](05-daemon.md#agent-concurrency-projection) が正本である。
+
+| field | type | meaning |
+|---|---|---|
+| `in_use` | `u32` | concurrency slot を保持している Agent runtime 数 |
+| `limit` | `u32` | daemon が同時に admit する slot 数 |
+
+- 2 つの値は**1 つの object として運ぶ**。別 sample の `in_use` と `limit` を組み合わせて読むことが
+  構造上できないため、client 側で「使用中 > 上限」のような矛盾した組を作れない。
+- **object 全体が optional** である。schema 3 より前の peer は field を送らないので client は
+  `null`（不明）として読む。これは `in_use: 0`（idle と報告された）とは別の状態であり、client は
+  不明を idle と読み替えない。
+- 未知の field を含む object は無視して読む。したがって planned restart 中に新旧 daemon が併存しても、
+  どちらの向きでも payload は解釈できる。
+- client はこの level を所有権や admission の判断に使わない（表示・診断専用）。次の launch が拒否されるか
+  は daemon が admit の瞬間に決める。
 
 ## PR inventory snapshot
 
