@@ -1671,6 +1671,11 @@ pub enum AppEvent {
         available: bool,
         error: Option<String>,
     },
+    /// Open the selected unusable session only to reach pane tabs the daemon
+    /// still owns. The runtime emits this event after proving that exact target
+    /// has a retained tab, so a failed/deleting checkout gains no launch or
+    /// filesystem capability while its Agent can still receive Ctrl-D.
+    RetainedPaneActivated(Target),
     /// キー入力。
     Key(AppKey),
     /// terminal size の変更。
@@ -2661,6 +2666,22 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Key(key) => {
             state.pending_session_click = None;
             update_key(state, key)
+        }
+        AppEvent::RetainedPaneActivated(target) => {
+            let Target::Session(session) = target else {
+                return Vec::new();
+            };
+            if state.selected != Selection::Target(target)
+                || !state.sessions.contains(&session)
+                || state.session_can_use(session)
+            {
+                return Vec::new();
+            }
+            state.active = Some(session);
+            state.route = Route::Home(HomeMode::Closeup);
+            state.closeup_action_forced = false;
+            state.overlay = None;
+            Vec::new()
         }
         AppEvent::LivePaneAvailability(has_live_pane) => {
             // The runtime samples this level on every event; only an actual edge
@@ -6571,7 +6592,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_session_is_not_attachable_but_stays_removable() {
+    fn failed_session_is_not_normally_attachable_but_retained_panes_are_reachable() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
         // The daemon reports the session as Failed.
@@ -6593,7 +6614,21 @@ mod tests {
         assert_eq!(state.active(), None);
         assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
 
+        // The presentation runtime emits this only after finding an existing
+        // pane tab for this exact failed target. It opens the retained terminal
+        // surface without making the failed checkout usable for new launches.
+        assert!(
+            update(
+                &mut state,
+                AppEvent::RetainedPaneActivated(Target::Session(session)),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.active(), Some(session));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
+
         // Removal is still offered (`can_remove=true`).
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('x'))),
             vec![Effect::RemoveSession {

@@ -425,6 +425,22 @@ impl WorkspaceRuntime {
                 _ => Vec::new(),
             };
         }
+        // Failed/deleting sessions are not usable launch scopes, but a daemon
+        // runtime they already own must remain reachable so the user can end it
+        // and release global Agent capacity. Normal Enter remains controller-
+        // gated when this exact target has no retained pane tab.
+        if matches!(self.state.route(), Route::Home(HomeMode::Switch))
+            && matches!(key, Key::Enter)
+            && let Selection::Target(target @ Target::Session(session)) = self.state.selected()
+            && !self
+                .state
+                .session_lifecycles()
+                .get(&session)
+                .is_none_or(|lifecycle| lifecycle.capabilities().can_use)
+            && self.panes.pane(target).is_some_and(PaneState::has_tabs)
+        {
+            return self.apply_event(AppEvent::RetainedPaneActivated(target));
+        }
         match app_event_from_key(key) {
             Some(event) => self.apply_event(event),
             None => Vec::new(),
@@ -1454,7 +1470,8 @@ mod tests {
     };
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, Effect, HomeMode, Overlay, Route, Selection, TabDirection, Target,
+        AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
+        Target,
     };
     use crate::usecase::application::pane::{
         LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane,
@@ -1467,6 +1484,7 @@ mod tests {
         AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
         WorkspaceId, WorktreeId,
     };
+    use usagi_core::domain::session_lifecycle::SessionLifecycle;
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
     #[test]
@@ -3210,6 +3228,34 @@ mod tests {
 
         assert_eq!(runtime.focused_terminal(), Some(existing));
         assert!(runtime.wants_live_input());
+    }
+
+    #[test]
+    fn failed_session_with_a_retained_agent_opens_for_ctrl_d_without_launch_access() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        let _ = runtime.focus_terminal(target, terminal.clone());
+
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+            BTreeMap::from([(session, SessionLifecycle::Failed)]),
+        )));
+        assert_eq!(runtime.state().active(), None);
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Switch)
+        ));
+
+        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert_eq!(runtime.state().active(), Some(session));
+        assert_eq!(runtime.focused_terminal(), Some(terminal));
+        assert!(runtime.wants_live_input());
+        assert_eq!(runtime.state().overlay(), None);
     }
 
     // ── R2: completion focus is gated on no later interaction ────────────────
