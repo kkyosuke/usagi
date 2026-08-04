@@ -24,6 +24,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::id::SessionId;
 use usagi_core::usecase::client::DaemonMetrics;
+use usagi_core::usecase::daemon_health::DaemonHealthTracker;
 
 use crate::presentation::MetricsPort;
 use crate::presentation::views::workspace::GitDiff;
@@ -55,15 +56,38 @@ pub enum MetricsUpdate {
 pub struct MetricsProjection {
     metrics: Option<DaemonMetrics>,
     git_diffs: BTreeMap<SessionId, GitDiff>,
+    /// Diagnostic-only daemon health, folded from the same drained samples.
+    ///
+    /// It lives beside the metrics cache because health is a projection *of*
+    /// those samples — nothing about it is state the reducer or an operation may
+    /// read. Sample deltas need the sample sequence, and this drain is the only
+    /// place that sees every observation exactly once.
+    health: DaemonHealthTracker,
 }
 
 impl MetricsProjection {
     /// Fold one drained observation into the cache.
     pub fn apply(&mut self, update: MetricsUpdate) {
         match update {
-            MetricsUpdate::Metrics(metrics) => self.metrics = metrics,
+            MetricsUpdate::Metrics(metrics) => {
+                // An absent observation is not evidence about the daemon: the
+                // production port replays its last sample while the lane fails,
+                // and a daemon-less workspace never observes at all. Folding
+                // only what we actually saw keeps freshness the sole authority
+                // on "we stopped hearing from it".
+                if let Some(metrics) = metrics.as_ref() {
+                    self.health.observe(metrics);
+                }
+                self.metrics = metrics;
+            }
             MetricsUpdate::GitDiffs(git_diffs) => self.git_diffs = git_diffs,
         }
+    }
+
+    /// The diagnostic health observed so far, for the Home frame material.
+    #[must_use]
+    pub const fn health(&self) -> DaemonHealthTracker {
+        self.health
     }
 
     /// The latest daemon metrics, for `HomeProjection::with_metrics`.
@@ -137,6 +161,7 @@ mod tests {
     use std::rc::Rc;
     use usagi_core::domain::id::SessionId;
     use usagi_core::usecase::client::DaemonMetrics;
+    use usagi_core::usecase::daemon_health::DaemonHealthTracker;
 
     /// A fake port that returns scripted metrics and records the session paths it
     /// was polled with, through a shared handle a test can inspect after boxing.
@@ -269,6 +294,29 @@ mod tests {
         }
         assert_eq!(projection.metrics(), Some(metrics()));
         assert_eq!(projection.git_diffs().get(&session), Some(&git_diff()));
+    }
+
+    #[test]
+    fn drained_samples_advance_the_diagnostic_health_tracker() {
+        let mut projection = MetricsProjection::default();
+        // 観測前は既定値（indicator を出さない状態）。
+        assert_eq!(projection.health(), DaemonHealthTracker::default());
+
+        let mut first = metrics();
+        first.sampled_at_ms = 1_000;
+        projection.apply(MetricsUpdate::Metrics(Some(first.clone())));
+        let mut expected = DaemonHealthTracker::default();
+        expected.observe(&first);
+        assert_eq!(projection.health(), expected);
+
+        // 観測できなかった poll は tracker を巻き戻さない。metrics cache だけが空になる。
+        projection.apply(MetricsUpdate::Metrics(None));
+        assert_eq!(projection.metrics(), None);
+        assert_eq!(projection.health(), expected);
+
+        // git diff だけの update も health を動かさない。
+        projection.apply(MetricsUpdate::GitDiffs(BTreeMap::new()));
+        assert_eq!(projection.health(), expected);
     }
 
     #[test]

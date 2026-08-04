@@ -24,6 +24,8 @@
 //!   並存する間、request を owner generation の endpoint へ配送する client 側の
 //!   routing（trusted endpoint 解決・inventory merge・generation 別 connection）。
 //! - [`agent_phase`] — daemon と TUI が共有する Agent phase の集約分類・順位。
+//! - [`daemon_health`] — 表示専用 [`client::DaemonMetrics`] の sample 列から診断専用の
+//!   health（level と閉じた理由 enum）を作る純粋な観測器。操作・ownership の権威ではない。
 //! - [`session_state`] — session lifecycle と Agent phase 集約を running / waiting /
 //!   failed の表示クラスへ畳む純粋な分類と、その件数集計。
 
@@ -31,6 +33,7 @@ pub mod agent;
 pub mod agent_phase;
 pub mod claude_sandbox;
 pub mod client;
+pub mod daemon_health;
 pub mod env;
 pub mod issue;
 pub mod memory;
