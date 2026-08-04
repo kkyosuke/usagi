@@ -3592,7 +3592,13 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         // The pending tab steps the auto-opened action launcher aside, so the
         // pane surface itself is what the frame draws.
-        let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
         // Closeup without a live viewport (the pending Agent tab) stays dim: the
         // tab owns no PTY input yet.
         let pending = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)

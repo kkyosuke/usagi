@@ -1382,7 +1382,10 @@ impl WorkspaceRuntime {
         // a surviving history tab's strip in front.
         let _ = update(
             &mut self.state,
-            AppEvent::PaneTabAvailability(self.panes.active_pane().has_tabs()),
+            AppEvent::PaneTabAvailability {
+                available: self.panes.active_pane().has_tabs(),
+                error: self.panes.active_pane().error().map(str::to_owned),
+            },
         );
         // Any active target with a live tab — a session or the workspace root —
         // carries the live signal; the pane registry is keyed uniformly.
@@ -3151,6 +3154,16 @@ mod tests {
         assert!(
             joined_frame(&runtime).contains("Closeup:"),
             "the launcher returns once the pane is empty again"
+        );
+        // The safe failure reason travels with the reopened launcher instead of
+        // being silently dropped: a bare bounce back to Closeup is
+        // indistinguishable from Enter doing nothing.
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("boom")
         );
     }
 

@@ -1249,7 +1249,7 @@ runtime bridge を確認する手順である。profile の install 状態、認
 | Agent が stdout を出力する | 選択中 Agent tab の pane に出力が表示される |
 | 選択中 Agent tab で入力し、端末を resize する | 入力は一度だけ daemon に届き、geometry 変更時の resize は成功するまで再試行される |
 | daemon を切断して再接続する | process を作り直さず、inventory で検証済みの選択 tab だけが attach/resync される |
-| profile 未準備・daemon 不通・Agent exit を発生させる | pending/tab state は収束し、安全な error modal が表示され、日次 error log に記録される |
+| profile 未準備・daemon 不通・Agent exit を発生させる | pending tab は消え、Closeup の action launcher が再度開く。起動が失敗した場合（Agent の正常終了と異なり）は、その safe reason が再度開いた launcher の notice として表示される |
 
 ## workspace open 時の pane 復元
 

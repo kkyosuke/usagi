@@ -1662,7 +1662,15 @@ pub enum AppEvent {
     /// aside so a non-live tab — an interrupted Agent history above all — can be
     /// selected and acted on; losing the last tab restores the launcher. A
     /// forced action modal and every other overlay are left untouched.
-    PaneTabAvailability(bool),
+    ///
+    /// `error` is the pane's safe failure message (set when a launch failed
+    /// rather than the pane exiting cleanly). When the edge restores the
+    /// launcher, a `Some` value becomes the reopened Closeup's notice so the
+    /// user sees why the pane never came up instead of a silent bounce back.
+    PaneTabAvailability {
+        available: bool,
+        error: Option<String>,
+    },
     /// キー入力。
     Key(AppKey),
     /// terminal size の変更。
@@ -2682,7 +2690,10 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        AppEvent::PaneTabAvailability(has_pane_tab) => {
+        AppEvent::PaneTabAvailability {
+            available: has_pane_tab,
+            error,
+        } => {
             if has_pane_tab == state.has_pane_tab {
                 return Vec::new();
             }
@@ -2701,6 +2712,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 }
             } else if !state.has_live_pane && state.overlay.is_none() {
                 state.overlay = Some(Overlay::Closeup);
+                // A pane that failed to launch (rather than exiting cleanly)
+                // carries a safe reason; surface it so reopening the launcher
+                // is not indistinguishable from a no-op Enter.
+                if let Some(message) = error {
+                    state.notice = Some(Notice::new(message));
+                }
             }
             Vec::new()
         }
@@ -5282,7 +5299,13 @@ mod tests {
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
         // A tab-owning Closeup has no launcher modal, leaving the drawer entry
         // available without changing the active managed-session surface.
-        let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
         assert_eq!(state.overlay(), None);
         let background = (
             state.route(),
@@ -6001,6 +6024,71 @@ mod tests {
             let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
             assert_eq!(state.overlay(), None, "{exit_key:?}");
         }
+    }
+
+    /// A pane that never went live and loses its only (pending) tab restores
+    /// the Closeup launcher, matching a clean exit. Unlike a clean exit, a
+    /// failed launch carries a safe reason: it must surface as the reopened
+    /// launcher's notice instead of bouncing back silently.
+    #[test]
+    fn failed_pane_launch_restores_the_launcher_with_a_notice() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+
+        // The pending tab appears: the launcher steps aside.
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        assert_eq!(state.overlay(), None);
+
+        // The launch failed: the pending tab is gone again, this time with a
+        // safe reason attached.
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: false,
+                error: Some("that agent CLI is not installed".to_owned()),
+            },
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("that agent CLI is not installed")
+        );
+    }
+
+    /// A clean pane exit (no safe reason attached) restores the launcher
+    /// exactly as before: silently, with no synthesized notice.
+    #[test]
+    fn clean_pane_exit_restores_the_launcher_without_a_notice() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.notice().is_none());
+
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: false,
+                error: None,
+            },
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert!(state.notice().is_none());
     }
 
     #[test]
@@ -8527,7 +8615,13 @@ mod tests {
         state.overlay = Some(Overlay::Closeup);
         state.closeup_action_forced = false;
         state.has_live_pane = false;
-        let _ = update(&mut state, AppEvent::PaneTabAvailability(true));
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         assert!(!update_management_key(&mut state, AppKey::CtrlN).is_empty());
         assert!(!update_management_key(&mut state, AppKey::CtrlP).is_empty());
