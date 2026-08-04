@@ -599,6 +599,16 @@ impl TerminalSession {
             .rows_with_scrollback_count(self.state == SessionState::Live)
     }
 
+    /// Number of retained rows needed to display live content and the complete
+    /// selection highlight, including selected blank grid padding.
+    #[must_use]
+    pub fn display_row_count_selection(&self, selection: &TerminalSelection) -> usize {
+        self.screen.rows_with_scrollback_selection_count(
+            (selection.anchor().row, selection.anchor().column),
+            (selection.focus().row, selection.focus().column),
+        )
+    }
+
     /// Render only the retained rows needed by the current viewport.
     #[must_use]
     pub fn display_row_window(&self, start: usize, end: usize) -> Vec<String> {
@@ -612,7 +622,21 @@ impl TerminalSession {
         &self,
         selection: &TerminalSelection,
     ) -> Vec<String> {
-        self.screen.rows_with_scrollback_and_cursor_selection(
+        self.display_row_window_selection(0, usize::MAX, selection)
+    }
+
+    /// Render only the retained rows needed by the current viewport, including
+    /// a cell-precise selection highlight.
+    #[must_use]
+    pub fn display_row_window_selection(
+        &self,
+        start: usize,
+        end: usize,
+        selection: &TerminalSelection,
+    ) -> Vec<String> {
+        self.screen.rows_with_scrollback_window_selection(
+            start,
+            end,
             (selection.anchor().row, selection.anchor().column),
             (selection.focus().row, selection.focus().column),
         )

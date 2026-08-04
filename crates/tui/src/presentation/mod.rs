@@ -2291,6 +2291,7 @@ impl WorkspaceUi {
 
     /// Project the already-polled rows for `terminal`, optionally highlighting an
     /// in-progress selection. Returns `None` when no attached session matches.
+    #[cfg(test)]
     fn terminal_rows(
         &self,
         terminal: &TerminalRef,
@@ -2306,11 +2307,18 @@ impl WorkspaceUi {
         })
     }
 
-    fn terminal_row_count(&self, terminal: &TerminalRef) -> Option<usize> {
+    fn terminal_row_count(
+        &self,
+        terminal: &TerminalRef,
+        selection: Option<&TerminalSelection>,
+    ) -> Option<usize> {
         self.terminals
             .iter()
             .find(|session| session.terminal().fences(terminal))
-            .map(TerminalSession::display_row_count)
+            .map(|session| match selection {
+                Some(selection) => session.display_row_count_selection(selection),
+                None => session.display_row_count(),
+            })
     }
 
     fn terminal_row_window(
@@ -2318,11 +2326,15 @@ impl WorkspaceUi {
         terminal: &TerminalRef,
         start: usize,
         end: usize,
+        selection: Option<&TerminalSelection>,
     ) -> Option<Vec<String>> {
         self.terminals
             .iter()
             .find(|session| session.terminal().fences(terminal))
-            .map(|session| session.display_row_window(start, end))
+            .map(|session| match selection {
+                Some(selection) => session.display_row_window_selection(start, end, selection),
+                None => session.display_row_window(start, end),
+            })
     }
 
     /// The stable visible cells for `terminal`, snapshotted so a drag selection
@@ -3513,14 +3525,10 @@ fn controller_terminal_view(
     controls.retain_terminals(&live_terminals);
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
-    let mut projection = if let Some(selection) = controls.selection() {
-        controls.project(ui.terminal_rows(&terminal, Some(selection))?, viewport_rows)
-    } else {
-        let total_rows = ui.terminal_row_count(&terminal)?;
-        let range = controls.visible_range(total_rows, viewport_rows);
-        let rows = ui.terminal_row_window(&terminal, range.start, range.end)?;
-        controls.project_window(rows, range.start, total_rows)
-    };
+    let total_rows = ui.terminal_row_count(&terminal, controls.selection())?;
+    let range = controls.visible_range(total_rows, viewport_rows);
+    let rows = ui.terminal_row_window(&terminal, range.start, range.end, controls.selection())?;
+    let mut projection = controls.project_window(rows, range.start, total_rows);
     if let Some(error) = ui.terminal_error(&terminal) {
         projection.feedback = Some(error.to_owned());
     }
@@ -17483,6 +17491,61 @@ mod tests {
             rows[1].contains("\u{1b}[7m"),
             "blank row 1 not highlighted: {:?}",
             rows[1]
+        );
+    }
+
+    #[test]
+    fn a_selection_over_long_history_keeps_the_projection_viewport_bounded() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let replay = (0..1_000)
+            .flat_map(|line| format!("line {line}\r\n").into_bytes())
+            .collect();
+        let (ui, runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal: terminal.clone(),
+                subscription: 10,
+                replay,
+                poll_error: None,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let cells = ui.terminal_cells(&terminal).expect("attached cells");
+        let last_row = cells.len().saturating_sub(1);
+        let mut selection = TerminalSelection::begin(
+            cells,
+            TerminalPoint {
+                row: last_row.saturating_sub(100),
+                column: 0,
+            },
+        );
+        selection.extend(TerminalPoint {
+            row: last_row,
+            column: 2,
+        });
+        let mut controls = LiveTerminalControls::default();
+        controls.sync_focus(Some(&terminal));
+        controls.begin_selection(selection);
+
+        let viewport_rows = 20;
+        let view = controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
+            .expect("selection view");
+        assert!(view.total_rows > viewport_rows);
+        assert_eq!(view.rows.len(), viewport_rows);
+        assert_eq!(view.row_offset + view.rows.len(), view.total_rows);
+
+        controls.scroll_up();
+        let scrolled = controller_terminal_view(&ui, &runtime, &mut controls, viewport_rows)
+            .expect("scrolled selection view");
+        assert_eq!(scrolled.rows.len(), viewport_rows);
+        assert_eq!(scrolled.scroll, 1);
+        assert_eq!(
+            scrolled.row_offset + scrolled.rows.len() + scrolled.scroll,
+            scrolled.total_rows
         );
     }
 

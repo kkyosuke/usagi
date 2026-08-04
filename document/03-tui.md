@@ -1092,7 +1092,8 @@ feed する。screen は最小の VT screen（印字・
 描画 cache は作らない。各 frame は現在の viewport に必要な行 window だけを ANSI 付き表示へ投影し、URL 検出もその
 window に接する折返し logical line までに限定する。このため通常の output・idle redraw・scroll 操作は 10,000 行の
 scrollback 全体を文字列化・全走査せず、表示行数と必要な折返し範囲に比例する。selection / copy は利用者が明示的に
-開始したときだけ untrimmed な retained cells 全体を snapshot し、ドラッグ中の出力から選択対象を固定する。
+開始したときだけ untrimmed な retained cells 全体を snapshot し、ドラッグ中の出力から選択対象を固定する。選択 highlight が
+残っている frame も全 snapshot を再投影せず、通常表示と同じ viewport window だけを ANSI 付き表示へ投影する。
 live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
