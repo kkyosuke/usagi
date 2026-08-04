@@ -224,9 +224,29 @@ pub fn handle_connection_with(
         &ServerHello,
     ) -> Envelope,
 ) -> io::Result<()> {
-    let Some(hello) = handshake(reader, writer, server)? else {
+    let Some(admitted) = handshake_admitted(reader, writer, server)? else {
         return Ok(());
     };
+    handle_admitted_connection_with(reader, writer, admitted, dispatch_request)
+}
+
+/// Serve a non-terminal connection whose complete hello has already been read
+/// and answered.
+///
+/// Unix accept loops use this boundary to apply one bounded admission permit and
+/// deadline to the handshake without turning either into an idle-connection
+/// policy after admission.
+pub fn handle_admitted_connection_with(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    admitted: AdmittedConnection,
+    dispatch_request: &mut dyn FnMut(
+        usagi_core::infrastructure::ipc::RequestId,
+        serde_json::Value,
+        &ServerHello,
+    ) -> Envelope,
+) -> io::Result<()> {
+    let AdmittedConnection { hello, .. } = admitted;
     while let Some(envelope) =
         read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
     {
@@ -840,6 +860,44 @@ mod tests {
             read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
             Some(Bootstrap::ServerHello(result))
         );
+    }
+
+    #[test]
+    fn admitted_non_terminal_connection_continues_after_the_handshake_boundary() {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        write_json_frame(&mut input, &request(), 1024).unwrap();
+        let mut reader = Cursor::new(input);
+        let mut output = Vec::new();
+        let admitted = handshake_admitted(&mut reader, &mut output, &server())
+            .unwrap()
+            .unwrap();
+        let mut dispatched = 0;
+
+        handle_admitted_connection_with(
+            &mut reader,
+            &mut output,
+            admitted,
+            &mut |request_id, body, hello| {
+                dispatched += 1;
+                dispatch(request_id, body, hello)
+            },
+        )
+        .unwrap();
+
+        let mut replies = Cursor::new(output);
+        assert!(matches!(
+            read_json_frame::<Bootstrap>(&mut replies, 1024).unwrap(),
+            Some(Bootstrap::ServerHello(_))
+        ));
+        assert!(matches!(
+            read_json_frame::<Envelope>(&mut replies, 1024)
+                .unwrap()
+                .unwrap()
+                .kind,
+            EnvelopeKind::Response { .. }
+        ));
+        assert_eq!(dispatched, 1);
     }
     /// A fence that refuses everything, and counts what it was asked.
     ///
