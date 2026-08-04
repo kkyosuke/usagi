@@ -1687,7 +1687,7 @@ fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
 /// the shipping composition rather than their reducer seams.
 #[test]
 #[allow(clippy::too_many_lines)] // One chronological multi-open PTY lifecycle is easier to audit intact.
-fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_respawn() {
+fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respawn() {
     let _serial = serial();
     let home = short_home();
     let workspace_root = tempfile::tempdir().unwrap();
@@ -1869,7 +1869,7 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
 
     // Fresh open #1 restores saved Codex first, then appends both inventory-only
-    // Claude runtimes. All order, selection, and dismissal mutations below go
+    // Claude runtimes. All order and selection mutations below go
     // through shipping TUI key handling; the fixture never mutates intent files.
     let reopened_baseline = capture_len(&captured);
     let mut reopened = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
@@ -1962,8 +1962,8 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     });
 
     // Close the drawer to restore Switch, then enter the managed session. Only
-    // its selected Claude attaches; closing
-    // the tab writes a continuation-scoped dismissal and leaves its PTY alive.
+    // its selected Claude attaches. Closing an Agent tab keeps it visible and
+    // attached so the user can terminate the CLI with Ctrl-D when needed.
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "[switch]");
     send(&mut master, b"\r");
@@ -1977,14 +1977,14 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
 
     send(&mut master, b"\x0fx");
-    let dismissed = wait_for_agent_intent(home.path(), |intent| {
-        intent.dismissed.contains(&session_claude)
-    });
-    assert_eq!(dismissed.dismissed.len(), 1);
-    wait_for_screen_since(&captured, reopened_baseline, "Type a command:");
-    send(&mut master, b"\x1b");
-    wait_for_screen_since(&captured, reopened_baseline, "[switch]");
-    let status = quit_from_switch(&mut master, &mut reopened, &captured, reopened_baseline);
+    assert!(read_agent_intent(home.path()).dismissed.is_empty());
+    send(&mut master, b"claude-session-still-visible\r");
+    wait_for_screen_since(
+        &captured,
+        reopened_baseline,
+        "claude-input:claude-session-still-visible",
+    );
+    let status = quit_workspace(&mut master, &mut reopened, &captured, reopened_baseline);
     assert!(
         status.success(),
         "normal reopen quit {status}: {}",
@@ -1992,8 +1992,8 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
 
     // Fresh open #2 proves persisted root order/selection by replaying Codex
-    // from the second slot. Entering the empty managed-session Closeup and submitting
-    // `reopen` clears its dismissal without a launch or resume request.
+    // from the second slot. The managed-session Agent remains directly visible
+    // without a reopen command, launch, or resume request.
     let reopened_for_kill_baseline = capture_len(&captured);
     let mut reopened_for_kill =
         spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
@@ -2036,16 +2036,10 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_for_kill_baseline, "[switch]");
     send(&mut master, b"\r");
-    wait_for_screen_since(&captured, reopened_for_kill_baseline, "Type a command:");
-    send(
-        &mut master,
-        format!("reopen {}\r", session_claude.as_str()).as_bytes(),
-    );
-    wait_for_screen_absent_since(&captured, reopened_for_kill_baseline, "Type a command:");
     wait_for_screen_since(
         &captured,
         reopened_for_kill_baseline,
-        "claude-input:claude-session-one",
+        "claude-input:claude-session-still-visible",
     );
     send(&mut master, b"claude-session-reopened\r");
     wait_for_screen_since(
@@ -2060,9 +2054,6 @@ fn real_pty_mixed_agents_restore_intent_dismissal_and_second_reopen_without_resp
     );
     assert_eq!(
         target_state(&reopened_intent, Some(session_id)),
-        // Reopen clears only the dismissal. The close-time empty/generic
-        // selection remains durable instead of manufacturing a background
-        // Agent selection that could steal focus on another target.
         (vec![session_claude], None)
     );
     let reopened_refs = reopened_intent
@@ -2193,12 +2184,12 @@ fn agent_process_for(processes: &[(TerminalRef, u64)], terminal: &TerminalRef) -
 /// resume する product E2E。
 ///
 /// `tests/agent_ipc_e2e.rs` の cold-restart flow は shipping TUI の reducer を直接呼ぶ。ここは
-/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O x` / `reopen` の実キー入力だけで操作して、
+/// TUI binary を実 PTY で起動し、`Ctrl-O r` / `Ctrl-O x` の実キー入力だけで操作して、
 /// 次を process 境界で押さえる。
 ///
 /// * root と managed session の history が distinct な tab として描画され、label は closed
 ///   vocabulary（`Claude (interrupted)` / `Codex (interrupted)` / `Agent (interrupted)`）だけである。
-/// * fresh start・TUI open・inventory・dismissal・reopen・reconnect は provider を 1 度も起動しない。
+/// * fresh start・TUI open・inventory・Agent tab close・reconnect は provider を 1 度も起動しない。
 ///   provider を起動するのは `Ctrl-O r` の実キー入力だけである。
 /// * `Ctrl-O r` の 2 連打（double click）が daemon operation 1 件・child spawn 1 件・live tab 1 枚へ
 ///   収束し、resume argv が exact な provider session ID を運ぶ。選ばなかった lineage は変わらない。
@@ -2493,8 +2484,8 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     );
 
     // ── 6. The managed session resumes through the same UX and fencing. Its
-    // history is closed with `Ctrl-O x` (a continuation-scoped dismissal) and
-    // brought back with `reopen`; neither starts a provider.
+    // history remains visible when `Ctrl-O x` is pressed; the close attempt does
+    // not start a provider or require a reopen command.
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, cold_baseline, "[switch]");
     send(&mut master, b"\r");
@@ -2506,22 +2497,12 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
         "Claude (interrupted)",
     );
     send(&mut master, b"\x0fx");
-    let dismissed = wait_for_agent_intent(home.path(), |intent| {
-        intent.dismissed.contains(&session_claude)
-    });
-    assert_eq!(dismissed.dismissed.len(), 1);
-    wait_for_screen_since(&captured, cold_baseline, "Type a command:");
+    assert!(read_agent_intent(home.path()).dismissed.is_empty());
     assert_eq!(
         fixtures.claude_spawns(),
         3,
         "closing a history tab must not spawn a provider"
     );
-    send(
-        &mut master,
-        format!("reopen {}\r", session_claude.as_str()).as_bytes(),
-    );
-    wait_for_screen_absent_since(&captured, cold_baseline, "Type a command:");
-    let _ = wait_for_agent_intent(home.path(), |intent| intent.dismissed.is_empty());
     select_tab_by_label(
         &mut master,
         &captured,
@@ -2531,7 +2512,7 @@ fn real_pty_cold_restart_resumes_only_the_selected_interrupted_tab_from_real_key
     assert_eq!(
         fixtures.claude_spawns(),
         3,
-        "reopen restores the tab without resuming the conversation"
+        "the visible tab remains interrupted until explicit resume"
     );
 
     send(&mut master, b"\x0fr");
