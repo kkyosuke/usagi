@@ -19,6 +19,9 @@ use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecyclePr
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::usecase::client::DaemonMetrics;
+use usagi_core::usecase::daemon_health::{
+    DaemonHealth, DaemonHealthTracker, HealthLevel, HealthReason,
+};
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
@@ -52,6 +55,12 @@ const _: () = assert!(CHROME_ROWS == crate::usecase::application::controller::SI
 /// v1 と同じ Nerd Font glyph: processor and resident-memory server.
 const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
+/// health indicator の警告記号。**Nerd Font ではなく** BMP の U+26A0 で、mascot の
+/// speech bubble（[`abnormal_daemon_speech`]）と同じ語彙を使う。
+const HEALTH_GLYPH: char = '\u{26a0}';
+/// sidecar が始まるまでに mascot block が使う桁数（indent 1 + うさぎ 10 + 間隔 4）。
+/// health badge はこれを引いた残りにだけ書き、狭幅では段階的に縮退する。
+const SIDECAR_GUTTER: usize = 15;
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
 
@@ -179,6 +188,10 @@ pub struct HomeProjection {
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,
+    /// daemon health の観測器。**診断専用の描画素材**で、reducer state にも操作の
+    /// 権威にもならない。既定値（一度も観測していない）は indicator を出さないため、
+    /// 正常時の frame は health 導入前と同一である。
+    health: DaemonHealthTracker,
     /// sidebar の git 差分列。stable `SessionId` で session 行に結合する非永続の描画素材で、
     /// controller state には持たせない。空なら差分列を描かず metrics 導入前の frame を保つ。
     git_diffs: BTreeMap<SessionId, GitDiff>,
@@ -316,6 +329,7 @@ impl HomeProjection {
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
             metrics: None,
+            health: DaemonHealthTracker::default(),
             git_diffs: BTreeMap::new(),
             terminal_view: None,
             pane_tabs: Vec::new(),
@@ -425,6 +439,17 @@ impl HomeProjection {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Attach the diagnostic daemon-health observer for the sidecar indicator.
+    ///
+    /// It is draw material only: no operation, ownership decision, or reducer
+    /// event reads it. The default (nothing observed) draws no indicator, so a
+    /// healthy or daemon-less workspace keeps the frame it has today.
+    #[must_use]
+    pub const fn with_health(mut self, health: DaemonHealthTracker) -> Self {
+        self.health = health;
         self
     }
 
@@ -1094,6 +1119,62 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
     )
 }
 
+/// mascot の sidecar に出す行。health が `Ok` なら metrics 行だけを返す。
+///
+/// sidecar はうさぎの 3 行に対して最大 3 行を許すため、行を 1 本足しても mascot の
+/// 予約行数（[`widgets::mascot::MascotBlock::reserved_rows`]）は変わらない。
+/// **health が `Ok` のときの戻り値は health 導入前と同一である。**
+fn sidecar_labels(
+    width: usize,
+    metrics: Option<&DaemonMetrics>,
+    health: DaemonHealth,
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    labels.extend(health_badge(health, width));
+    // 観測が無いときは CPU / メモリ行を出さない（metrics 導入前と同じ静けさ）。
+    // health だけが非 Ok なら badge 行だけが出る。
+    if let Some(metrics) = metrics {
+        labels.extend(mascot_metrics(Some(metrics), 0));
+    }
+    labels
+}
+
+/// daemon health の 1 行。診断だけを短く伝え、raw な出力・path・secret は載せない。
+///
+/// 幅が足りなければ記号 1 文字へ縮退し、記号すら置けない幅では行を出さない。
+fn health_badge(health: DaemonHealth, width: usize) -> Option<String> {
+    let reason = health.reason()?;
+    let budget = width.saturating_sub(SIDECAR_GUTTER);
+    let glyph = HEALTH_GLYPH.to_string();
+    if budget < widgets::display_width(&glyph) {
+        return None;
+    }
+    let text = format!("{HEALTH_GLYPH} {}", health_reason_label(reason));
+    let label = if widgets::display_width(&text) <= budget {
+        text
+    } else {
+        glyph
+    };
+    let style = if health.level() == HealthLevel::Danger {
+        Role::Danger.style().bold()
+    } else {
+        Role::Warning.style().bold()
+    };
+    Some(style.paint(&label))
+}
+
+/// 閉じた理由 enum から表示文言へ。free text を通さないため、raw output は載り得ない。
+const fn health_reason_label(reason: HealthReason) -> &'static str {
+    match reason {
+        HealthReason::DaemonUnresponsive => "daemon 無応答",
+        HealthReason::MetricsStalled => "metrics 停滞",
+        HealthReason::TerminalOutputDropped => "端末出力の欠落",
+        HealthReason::TerminalBackpressure => "端末出力の滞留",
+        HealthReason::PrScanIncomplete => "PR 検出の欠落",
+        HealthReason::MetricsUpdatesDropped => "更新の取りこぼし",
+    }
+}
+
 fn load_style(value: u64, busy: u64, hot: u64) -> Style {
     if value >= hot {
         Role::Danger.style()
@@ -1355,12 +1436,14 @@ fn home_left_pane(
     let body_capacity = height - 1;
     // Reuse the legacy metric projection so both render paths draw an identical
     // sidecar. An absent observation yields no sidecar rows, which keeps the
-    // pre-metrics home frame byte-for-byte unchanged.
-    let metric_labels = home
-        .metrics
-        .as_ref()
-        .map(|metrics| mascot_metrics(Some(metrics), 0))
-        .unwrap_or_default();
+    // pre-metrics home frame byte-for-byte unchanged. The diagnostic health
+    // badge is evaluated against the frame's own clock — the renderer stays the
+    // only place that reads time, so `now` remains the whole time input.
+    let metric_labels = sidecar_labels(
+        width,
+        home.metrics.as_ref(),
+        home.health.evaluate(now.timestamp_millis()),
+    );
     // 明示された mascot speech を優先し、無ければ正常系以外の daemon 状態を吹き出しへ落とす。
     let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
     let speech = home.mascot_speech.as_ref().or(daemon_speech.as_ref());
@@ -1973,12 +2056,13 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeHeaderAction,
-        HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession, SidebarDiffColumns,
-        TerminalViewProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, home_header_action_at, home_header_layout, home_left_pane,
-        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
-        pane_tab_label, pane_tab_selected, phase_label, render_home, resume_label,
+        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HEALTH_GLYPH,
+        HomeHeaderAction, HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession, SIDECAR_GUTTER,
+        SidebarDiffColumns, TerminalViewProjection, Workspace, abnormal_daemon_speech,
+        create_skeleton_lines, feedback_label, format_memory, health_badge, health_reason_label,
+        home_header_action_at, home_header_layout, home_left_pane, home_row_lines_at,
+        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
+        pane_tab_selected, phase_label, render_home, render_home_at, resume_label, sidecar_labels,
         terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
@@ -2015,6 +2099,7 @@ mod tests {
 
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
+    use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -3331,6 +3416,188 @@ mod tests {
             "no daemon metric row without an observation"
         );
         assert!(strip(&baseline.join("\n")).contains("(o.o)?"));
+    }
+
+    // ── daemon health indicator ─────────────────────────────────────────────
+    //
+    // 判定そのものは `usagi_core::usecase::daemon_health` の単体テストが固定する。
+    // ここで固定するのは「正常時は何も足さない」「異常時は短い安全な理由を出す」
+    // 「狭幅で溢れない」という描画側の契約である。
+
+    fn epoch_ms(clock: DateTime<Utc>) -> u64 {
+        u64::try_from(clock.timestamp_millis()).expect("test clock is after the epoch")
+    }
+
+    fn health_metrics(sampled_at_ms: u64) -> usagi_core::usecase::client::DaemonMetrics {
+        usagi_core::usecase::client::DaemonMetrics {
+            schema_version: 2,
+            sampled_at_ms,
+            cpu_percent_hundredths: 120,
+            resident_memory_bytes: 45 * MEBIBYTE,
+            active_subscribers: 1,
+            dropped_updates: 0,
+            terminal_dropped_bytes: 0,
+            terminal_coalesced_bytes: 0,
+            terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
+        }
+    }
+
+    fn observed_at(sampled_at_ms: u64) -> DaemonHealthTracker {
+        let mut tracker = DaemonHealthTracker::default();
+        tracker.observe(&health_metrics(sampled_at_ms));
+        tracker
+    }
+
+    fn health_home(clock: DateTime<Utc>) -> HomeProjection {
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_metrics(Some(health_metrics(epoch_ms(clock))))
+    }
+
+    #[test]
+    fn a_healthy_daemon_leaves_the_home_frame_untouched() {
+        let clock = now();
+        let home = health_home(clock);
+        let baseline = render_home_at(30, 100, &home, clock);
+
+        // 観測はあるが劣化していない = indicator を出さない。
+        let healthy = home.clone().with_health(observed_at(epoch_ms(clock)));
+        assert_eq!(render_home_at(30, 100, &healthy, clock), baseline);
+        // 一度も観測していない既定値も同じ（daemon 不在の workspace は正常）。
+        assert_eq!(
+            render_home_at(
+                30,
+                100,
+                &home.with_health(DaemonHealthTracker::default()),
+                clock
+            ),
+            baseline
+        );
+        assert!(
+            !baseline.iter().any(|line| line.contains(HEALTH_GLYPH)),
+            "healthy home shows no health indicator"
+        );
+    }
+
+    #[test]
+    fn a_stalled_lane_warns_and_a_silent_daemon_is_danger() {
+        let clock = now();
+        let home = health_home(clock);
+        let baseline = render_home_at(30, 100, &home, clock);
+
+        let stalled = render_home_at(
+            30,
+            100,
+            &home
+                .clone()
+                .with_health(observed_at(epoch_ms(clock) - 10_000)),
+            clock,
+        );
+        let warned = stalled
+            .iter()
+            .find(|line| line.contains(HEALTH_GLYPH))
+            .expect("stalled metrics draw the indicator");
+        assert!(strip(warned).contains("metrics 停滞"));
+        assert!(warned.contains(&Role::Warning.style().bold().paint("⚠ metrics 停滞")));
+
+        // 30s 以上無音なら danger。理由も style も入れ替わる。
+        let silent = render_home_at(
+            30,
+            100,
+            &home.with_health(observed_at(epoch_ms(clock) - 40_000)),
+            clock,
+        );
+        let danger = silent
+            .iter()
+            .find(|line| line.contains(HEALTH_GLYPH))
+            .expect("an unresponsive daemon draws the indicator");
+        assert!(strip(danger).contains("daemon 無応答"));
+        assert!(danger.contains(&Role::Danger.style().bold().paint("⚠ daemon 無応答")));
+
+        // sidecar は mascot の予約行を増やさないため、書き換わる行は 1 行だけである
+        // （session 行・viewport・footer は動かない）。
+        let rewritten = baseline
+            .iter()
+            .zip(&stalled)
+            .filter(|(quiet, warned)| quiet != warned)
+            .count();
+        assert_eq!(
+            rewritten, 1,
+            "the indicator rewrote more than the sidecar row"
+        );
+        assert_eq!(baseline.len(), stalled.len());
+    }
+
+    #[test]
+    fn the_indicator_degrades_on_a_narrow_sidebar() {
+        let health = DaemonHealth::Warning(HealthReason::MetricsStalled);
+        let full = health_badge(health, LEFT_WIDTH).expect("the label fits the sidebar");
+        assert!(strip(&full).contains("metrics 停滞"));
+
+        // 文言が入らない幅では記号だけに縮退する。
+        let narrow = health_badge(health, SIDECAR_GUTTER + 3).expect("the glyph still fits");
+        assert_eq!(strip(&narrow), HEALTH_GLYPH.to_string());
+        // 記号すら置けない幅では行を出さない（溢れさせない）。
+        assert_eq!(health_badge(health, SIDECAR_GUTTER), None);
+        assert_eq!(health_badge(health, 0), None);
+        // 正常時は行そのものが無い。
+        assert_eq!(health_badge(DaemonHealth::Ok, LEFT_WIDTH), None);
+    }
+
+    #[test]
+    fn the_indicator_appears_without_a_metrics_observation() {
+        let unresponsive = DaemonHealth::Danger(HealthReason::DaemonUnresponsive);
+        // metrics unavailable でも indicator だけは出す。
+        let alone = sidecar_labels(LEFT_WIDTH, None, unresponsive);
+        assert_eq!(alone.len(), 1);
+        assert!(strip(&alone[0]).contains("daemon 無応答"));
+
+        // 観測があれば badge の下に CPU / メモリ行が続く。
+        let metrics = health_metrics(1);
+        let both = sidecar_labels(
+            LEFT_WIDTH,
+            Some(&metrics),
+            DaemonHealth::Warning(HealthReason::PrScanIncomplete),
+        );
+        assert_eq!(both.len(), 2);
+        assert!(strip(&both[0]).contains("PR 検出の欠落"));
+        assert!(strip(&both[1]).contains("45MB"));
+
+        // 正常時の sidecar は health 導入前とバイト単位で同じ 1 行である。
+        assert_eq!(
+            sidecar_labels(LEFT_WIDTH, Some(&metrics), DaemonHealth::Ok),
+            super::mascot_metrics(Some(&metrics), 0)
+        );
+        assert!(sidecar_labels(LEFT_WIDTH, None, DaemonHealth::Ok).is_empty());
+    }
+
+    #[test]
+    fn every_health_reason_has_a_short_label_without_raw_detail() {
+        for reason in [
+            HealthReason::DaemonUnresponsive,
+            HealthReason::MetricsStalled,
+            HealthReason::TerminalOutputDropped,
+            HealthReason::TerminalBackpressure,
+            HealthReason::PrScanIncomplete,
+            HealthReason::MetricsUpdatesDropped,
+        ] {
+            let label = health_reason_label(reason);
+            let badge = health_badge(DaemonHealth::Warning(reason), LEFT_WIDTH)
+                .expect("every reason fits the sidebar at its intended width");
+            assert!(strip(&badge).contains(label));
+            // 既定幅では縮退しない（= 予算に収まる）。
+            assert!(
+                display_width(&format!("{HEALTH_GLYPH} {label}")) <= LEFT_WIDTH - SIDECAR_GUTTER,
+                "{label} does not fit the sidecar budget"
+            );
+            // path・改行・ANSI・生の出力を含まない短い語である。
+            assert!(!label.contains('/'));
+            assert!(!label.contains('\u{1b}'));
+            assert!(!label.contains('\n'));
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
+- [daemon health indicator](#daemon-health-indicator)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
@@ -858,6 +859,47 @@ message の既定の供給元は**正常系以外の daemon 状態**である。
 操作エラー・端末エラーのいずれかのとき、その安全な要約を 2 行の bubble にして bottom-left のうさぎに出し、一目で
 異常に気づけるようにする。健全な正常系（feedback 無し・進行中 progress・再接続完了）はうさぎを無言に保つ。error ID を
 含む詳細は footer の feedback 行に委ね、bubble には載せない。呼び出し側が明示 message を与えた場合はそちらを優先する。
+
+## daemon health indicator
+
+mascot の右の sidecar は、CPU / 常駐メモリの行に加えて **daemon health の 1 行**を出す。sidecar はうさぎの
+3 行に対して最大 3 行を使えるため、この行は mascot の予約行数を増やさない。**health が正常なら行を出さない**ので、
+正常時の Home frame は indicator 導入前と同一である。
+
+health は**診断専用の projection** である。reducer state に載らず、Effect を生まず、command の可否・resource
+ownership・fence の判定には一切参加しない。材料は表示専用の daemon metrics
+（[4. daemon IPC](04-ipc.md)）だけで、永続化もしない。daemon 切断・再同期要求は
+[feedback](#feedback-と終了) と [mascot bubble](#sidebar-mascot) が正本であり、health はそれを二重に報告しない。
+health が担うのは「観測できているか」と counter 由来の劣化だけである。
+
+| 判定 | 条件 | 表示 |
+|---|---|---|
+| （静か） | 一度も観測していない（daemon 不在・lane 未起動）、または劣化していない | 行を出さない |
+| daemon 無応答 | 観測済みで、最新 sample が 30s 以上古い | danger |
+| metrics 停滞 | 観測済みで、最新 sample が 6s 以上古い | warning |
+| 端末出力の欠落 | retention window から捨てた量が 1MiB/s 以上を 3 sample 連続 | warning |
+| 端末出力の滞留 | PTY reader が queue 待ちした量が 256KiB/s 以上を 3 sample 連続 | warning |
+| PR 検出の欠落 | PR projection queue の満杯で確定済み出力を scan せず捨てた | warning |
+| 更新の取りこぼし | metrics tick の取りこぼしが毎秒 1 件以上を 3 sample 連続 | warning |
+
+daemon metrics の counter は process の生存期間で単調増加するため、値や「一度でも増えたか」で判定すると
+**一度警告したら消えない indicator** になる。加えて端末出力の欠落は bounded retention window の通常動作で、
+忙しい agent では常時増える。そのため判定は次の 4 つを守る。
+
+- **rate で見る**。sample 間の差分を経過時間で割った毎秒レートを閾値と比べる。単発のバーストは通らない。
+- **連続で見る**。閾値超えが規定 sample 数続いて初めて点灯する（PR 検出の欠落は通常動作でないため 1 回で点灯する）。
+- **減衰する**。点灯は最後の該当 sample から 10s で消えるため、事象が止まれば indicator も消える。
+- **再 baseline する**。counter の後退（daemon 再起動）、sample 時刻の後退、schema の変化、5s を超える観測の
+  空白（再接続直後）では差分を取らない。したがって再接続の 1 発目が警告になることはない。
+
+観測の停滞（freshness）は counter 由来の理由より優先する。停滞した snapshot から計算したレートを表示しない。
+metrics lane の失敗中も直前 sample が保持されるため（[背景観測 lane](#home-frame-loop-と背景観測-lane)）、
+「観測が止まった」ことは sample の時刻でしか判定できない。判定は sample 列と現在時刻だけの純関数であり、
+現在時刻は renderer の入力（[frame material](#frame-material-と再描画の判定)）として渡す。
+
+表示は `⚠` と短い理由だけで、raw な端末出力・path・secret・error ID を載せない。理由は閉じた語彙から選ぶため、
+自由文が indicator に流れ込む経路そのものが無い。**Nerd Font glyph は使わない**（`⚠` は mascot bubble と同じ
+BMP 記号）。狭い sidebar では文言を落として記号だけに縮退し、記号も置けない幅では行を出さない。
 
 ## Closeup pane
 
