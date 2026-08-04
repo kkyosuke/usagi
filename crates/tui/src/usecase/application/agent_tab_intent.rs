@@ -973,6 +973,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_dismiss_and_select_applies_both_mutations_atomically() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let closed = AgentContinuationRef::new();
+        let surviving = AgentContinuationRef::new();
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.upsert(
+            Some(session),
+            closed,
+            terminal(workspace, Some(session), WorktreeId::new()),
+            true,
+        );
+        intent.upsert(
+            Some(session),
+            surviving,
+            terminal(workspace, Some(session), WorktreeId::new()),
+            false,
+        );
+
+        intent.apply(AgentTabIntentMutation::DismissAndSelect {
+            continuation: closed,
+            session_id: Some(session),
+            selected: Some(surviving),
+        });
+
+        assert_eq!(intent.dismissed, BTreeSet::from([closed]));
+        assert_eq!(intent.targets[0].selected, Some(surviving));
+    }
+
+    #[test]
     fn a_close_before_observation_is_promoted_to_its_lineage_and_never_reappears() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();

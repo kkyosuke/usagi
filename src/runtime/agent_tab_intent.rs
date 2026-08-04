@@ -1143,7 +1143,7 @@ mod tests {
             .mutate(
                 workspace,
                 first.intent.revision,
-                AgentTabIntentMutation::Observe {
+                AgentTabIntentMutation::ObserveAll {
                     terminals: vec![TerminalInventoryEntry {
                         terminal: old.terminal.clone(),
                         kind: TerminalKind::Agent,

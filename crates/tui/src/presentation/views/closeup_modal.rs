@@ -859,6 +859,13 @@ mod tests {
     }
 
     #[test]
+    fn an_out_of_range_selection_has_no_subcommands() {
+        let mut modal = CloseupModal::new("s");
+        modal.selected = usize::MAX;
+        assert!(modal.subcommands().is_empty());
+    }
+
+    #[test]
     fn expanded_action_cycles_subcommands_and_renders_them() {
         let mut modal = CloseupModal::new("s");
         modal.select_next(); // close

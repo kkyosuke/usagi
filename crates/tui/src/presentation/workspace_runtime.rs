@@ -2862,6 +2862,11 @@ mod tests {
         let second_terminal = terminal_ref(workspace, session);
         let _ = single.request_pane(target, second_operation, PaneKind::Agent);
         let _ = single.complete_pane(target, second_operation, second_terminal.clone());
+        let _ = single.focus_terminal(target, only_terminal.clone());
+        assert_eq!(
+            single.selection_after_close(),
+            Some(Some(TabSelection::Live(second_terminal.clone())))
+        );
         let _ = single.focus_terminal(target, second_terminal);
         assert_eq!(
             single.selection_after_close(),
