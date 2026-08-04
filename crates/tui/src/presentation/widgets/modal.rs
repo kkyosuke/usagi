@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthChar;
 /// 背景の ANSI スタイルを modal へ滲ませないための SGR reset。
 const RESET: &str = "\u{1b}[0m";
 
-/// `lines` を角丸の枠に収め、`title` を上辺に埋め込んだ行を返す。各行は左右 1 桁の余白を
-/// 付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_modal`] が中央寄せする）。
+/// `lines` を角丸の枠に収め、`title` を上辺に埋め込んだ行を返す。本文の上下左右に 1 桁分の
+/// 余白を付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_modal`] が中央寄せする）。
 #[must_use]
 pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     // 両角の間の桁数: 内容領域 + 左右 1 桁ずつの余白。
@@ -28,8 +28,10 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     let top = format!("┌{label}{}┐", "─".repeat(span.saturating_sub(label_width)));
     let bottom = format!("└{}┘", "─".repeat(span));
 
-    let mut out = Vec::with_capacity(lines.len() + 2);
+    let blank = format!("│ {} │", " ".repeat(inner_width));
+    let mut out = Vec::with_capacity(lines.len() + 4);
     out.push(top);
+    out.push(blank.clone());
     for line in lines {
         // 先に切って枠より広い行が右辺を押し出せないようにし、短い行は詰めて
         // 各行をちょうど `inner_width` にする。
@@ -37,6 +39,7 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
         let pad = inner_width.saturating_sub(display_width(&line));
         out.push(format!("│ {line}{} │", " ".repeat(pad)));
     }
+    out.push(blank);
     out.push(bottom);
     out
 }
@@ -855,9 +858,11 @@ mod tests {
     fn boxed_without_title_has_plain_top_border() {
         let out = boxed("", 4, &["ab".to_string()]);
         assert_eq!(out[0], "┌──────┐"); // span = inner+2 = 6
-        assert_eq!(out[2], "└──────┘");
-        // 本文行は inner_width=4 に詰められ、左右に余白と枠線。
-        assert_eq!(out[1], "│ ab   │");
+        assert_eq!(out[4], "└──────┘");
+        // 本文行の上下左右に 1 桁分の余白を置く。
+        assert_eq!(out[1], "│      │");
+        assert_eq!(out[2], "│ ab   │");
+        assert_eq!(out[3], "│      │");
     }
 
     #[test]
@@ -873,8 +878,8 @@ mod tests {
     fn boxed_clips_a_line_wider_than_the_box() {
         let out = boxed("", 4, &["abcdefgh".to_string()]);
         // 内容部は inner_width=4 に切られ `…` が付く。
-        assert!(out[1].contains('…'));
-        assert_eq!(display_width(&out[1]), 8); // │ + 空白 + 4 + 空白 + │
+        assert!(out[2].contains('…'));
+        assert_eq!(display_width(&out[2]), 8); // │ + 空白 + 4 + 空白 + │
     }
 
     #[test]
@@ -1078,9 +1083,9 @@ mod tests {
     fn render_modal_centers_the_box_over_a_blank_frame() {
         let lines = render_modal(10, 40, "T", 10, &["hi".to_string()]);
         assert_eq!(lines.len(), 10);
-        // 枠は 3 行（上辺・本文・下辺）。上下に空行が入る。
+        // 枠は本文の上下に 1 行ずつ内側余白を持ち、画面中央へ配置される。
         let non_blank = lines.iter().filter(|l| !l.trim().is_empty()).count();
-        assert_eq!(non_blank, 3);
+        assert_eq!(non_blank, 5);
         assert!(lines.iter().any(|l| l.contains("hi")));
         assert!(lines.iter().any(|l| l.contains('T')));
     }
@@ -1111,13 +1116,13 @@ mod tests {
 
         assert_eq!(lines.len(), 9);
         assert!(lines.iter().all(|line| display_width(line) == 40));
-        // 3 行の box は row 3..=5 に置かれ、その外は背景のまま。
+        // 5 行の box は row 2..=6 に置かれ、その外は背景のまま。
         assert!(lines[0].starts_with("row-0-"));
         assert!(lines[8].starts_with("row-8-"));
         // box の左右にも背景が残る。
-        assert!(lines[3].starts_with("row-3-"));
-        assert!(lines[3].contains("┌─ T "));
-        assert!(lines[3].trim_end().ends_with("...."));
+        assert!(lines[2].starts_with("row-2-"));
+        assert!(lines[2].contains("┌─ T "));
+        assert!(lines[2].trim_end().ends_with("...."));
         assert!(lines[4].contains("body"));
     }
 
@@ -1130,7 +1135,7 @@ mod tests {
 
         assert_eq!(lines.len(), 5);
         assert!(lines.iter().all(|line| display_width(line) == 20));
-        let top = &lines[1];
+        let top = &lines[0];
         assert!(top.contains("\u{1b}[31m"));
         // prefix の色は modal 枠前で閉じ、suffix で再現される。
         assert!(top.contains("\u{1b}[0m┌"));

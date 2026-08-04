@@ -483,10 +483,10 @@ mod tests {
 
     #[test]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
-        let base = vec![format!("\u{1b}[36m{}\u{1b}[0m", "背景".repeat(8)); 16];
-        let frame = render_over(16, 9, &base, &PrModal::new(Vec::new()));
+        let base = vec![format!("\u{1b}[36m{}\u{1b}[0m", "背景".repeat(8)); 20];
+        let frame = render_over(20, 9, &base, &PrModal::new(Vec::new()));
 
-        assert_eq!(frame.len(), 16);
+        assert_eq!(frame.len(), 20);
         assert!(frame.iter().all(|line| display_width(line) == 9));
         assert!(frame.iter().any(|line| line.contains('┌')));
         assert!(frame.iter().any(|line| line.contains("\u{1b}[36m")));

@@ -1032,10 +1032,10 @@ mod tests {
 
     #[test]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
-        let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 14];
-        let frame = render_over(14, 9, &base, &CloseupModal::new("会話"));
+        let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 16];
+        let frame = render_over(16, 9, &base, &CloseupModal::new("会話"));
 
-        assert_eq!(frame.len(), 14);
+        assert_eq!(frame.len(), 16);
         assert!(frame.iter().all(|line| display_width(line) == 9));
         assert!(frame.iter().any(|line| line.contains('┌')));
         assert!(frame.iter().any(|line| line.contains("\u{1b}[35m")));

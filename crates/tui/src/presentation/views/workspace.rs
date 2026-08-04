@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+use usagi_core::domain::agent::{AgentInventory, ProviderResumeProjection, ProviderResumeReason};
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
@@ -170,6 +170,10 @@ fn pr_summary(prs: &[PrLink]) -> Option<String> {
     })
 }
 
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 /// controller の Home state を描画可能な session / action row へ投影した値。
 ///
 /// session の順番は controller snapshot の `SessionId` 順を使い、表示情報は ID で結合する。
@@ -237,6 +241,8 @@ pub struct HomeProjection {
     overview_modal: Option<OverviewModal>,
     /// Overview の `daemon` command が開く読み取り専用 status surface。
     daemon_overlay: bool,
+    /// Latest coherent daemon Agent inventory projected to safe display rows.
+    daemon_runtimes: Option<Vec<daemon_modal::AgentRuntimeRow>>,
     /// Persisted Closeup action-modal input, when its overlay is open.
     closeup_modal: Option<CloseupModal>,
     /// Inline `+ new session` name draft, present exactly when the create form
@@ -373,6 +379,7 @@ impl HomeProjection {
             overview_modal: None,
             daemon_overlay: state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
+            daemon_runtimes: None,
             closeup_modal: None,
             create_draft,
             create_role,
@@ -458,6 +465,39 @@ impl HomeProjection {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Attach the latest coherent daemon Agent inventory to the status modal.
+    /// Runtime identity is shortened for display only; scope joins use stable
+    /// `SessionId`, never the visible session label.
+    #[must_use]
+    pub fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
+        self.daemon_runtimes = inventory.map(|inventory| {
+            inventory
+                .runtimes
+                .iter()
+                .map(|item| {
+                    let scope = item.runtime.session_id.map_or_else(
+                        || "root".to_owned(),
+                        |session_id| {
+                            self.sessions
+                                .iter()
+                                .find(|session| session.id == session_id)
+                                .map_or_else(
+                                    || format!("session #{}", short_id(&session_id.to_string())),
+                                    |session| session.label.clone(),
+                                )
+                        },
+                    );
+                    daemon_modal::AgentRuntimeRow {
+                        scope,
+                        runtime_id: short_id(&item.runtime.agent_runtime_id.to_string()),
+                        state: item.state,
+                    }
+                })
+                .collect()
+        });
         self
     }
 
@@ -1429,10 +1469,13 @@ pub fn render_home_at(
             height,
             width,
             &frame,
-            home.metrics.as_ref(),
-            home.health.evaluate(now.timestamp_millis()),
-            home.session_states,
-            home.sessions.len(),
+            daemon_modal::DaemonProjection {
+                metrics: home.metrics.as_ref(),
+                health: home.health.evaluate(now.timestamp_millis()),
+                sessions: home.session_states,
+                session_total: home.sessions.len(),
+                runtimes: home.daemon_runtimes.as_deref(),
+            },
         )
     } else if let Some(overlay) = &home.pr_overlay {
         render_pr_overlay(height, width, &frame, overlay)
@@ -2193,7 +2236,7 @@ mod tests {
         feedback_label, format_memory, health_badge, health_reason_label, home_header_action_at,
         home_header_layout, home_left_pane, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, sidecar_labels, terminal_point_at, with_footer_gap,
+        render_home_at, resume_label, short_id, sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -2215,10 +2258,13 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
+    use usagi_core::domain::agent::{
+        AgentInventory, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
+        ProviderResumeProjection, ProviderResumeReason,
+    };
     use usagi_core::domain::id::{
-        AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId, SessionId, TerminalId,
-        TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
+        AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
+        SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
@@ -3209,7 +3255,9 @@ mod tests {
     #[test]
     fn render_home_composes_the_daemon_status_opened_from_overview() {
         let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
+        let known_session = SessionId::new();
+        let missing_session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![known_session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         let _ = update(
             &mut state,
@@ -3233,11 +3281,53 @@ mod tests {
                 limit: 16,
             }),
         };
-        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
-            .with_metrics(Some(metrics));
+        let runtime_item = |session_id| {
+            let runtime_id = AgentRuntimeId::new();
+            let terminal = TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id,
+                worktree_id: WorktreeId::new(),
+            };
+            (
+                runtime_id,
+                AgentRuntimeInventoryItem {
+                    runtime: AgentRuntimeRef::new(runtime_id, terminal, session_id).unwrap(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                },
+            )
+        };
+        let (runtime_id, root_runtime) = runtime_item(None);
+        let (_, known_runtime) = runtime_item(Some(known_session));
+        let (_, missing_runtime) = runtime_item(Some(missing_session));
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![root_runtime, known_runtime, missing_runtime],
+            resumable: Vec::new(),
+        };
+        let sessions = [projected_session(
+            known_session,
+            "known-session",
+            "/work/known-session",
+        )];
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions)
+            .with_metrics(Some(metrics))
+            .with_agent_inventory(Some(&inventory));
         let frame = strip(&render_home_at(24, 100, &home, now()).join("\n"));
         assert!(frame.contains("Daemon"));
         assert!(frame.contains("16/16  saturated"));
+        assert!(frame.contains(&format!(
+            "root  live  #{}",
+            short_id(&runtime_id.to_string())
+        )));
+        assert!(frame.contains("known-session  live"));
+        assert!(frame.contains(&format!(
+            "session #{}  live",
+            short_id(&missing_session.to_string())
+        )));
         assert!(frame.contains("Ctrl-D"));
     }
 
@@ -4359,7 +4449,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         assert_eq!(state.active(), Some(second));
         let closeup = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions);
-        let frame = render_home(18, 100, &closeup);
+        let frame = render_home(26, 100, &closeup);
         assert!(right(&frame, CHROME_ROWS).contains("second"));
         assert!(frame.iter().any(|line| strip(line).contains("active pane")));
     }

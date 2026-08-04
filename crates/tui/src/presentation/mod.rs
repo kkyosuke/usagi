@@ -1509,6 +1509,9 @@ struct WorkspaceUi {
     last_session_revision: u64,
     /// Non-sensitive interrupted/resume state received from the daemon.
     agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
+    /// Latest coherent workspace-wide Agent inventory received by the restore
+    /// lane. Kept as draw material for the read-only daemon status modal.
+    agent_inventory: Option<AgentInventory>,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     /// Monotonic fence for the one admitted session command. A delayed or
@@ -1897,6 +1900,7 @@ impl WorkspaceUi {
             session_commands: std::sync::Arc::from(session_commands),
             last_session_revision: 0,
             agent_resumes: BTreeMap::new(),
+            agent_inventory: None,
             session_completions,
             session_completion_sender,
             next_session_command: 1,
@@ -2236,6 +2240,10 @@ impl WorkspaceUi {
 
     fn take_agent_observation_request(&mut self) -> bool {
         std::mem::take(&mut self.agent_observation_requested)
+    }
+
+    fn agent_inventory(&self) -> Option<&AgentInventory> {
+        self.agent_inventory.as_ref()
     }
 
     /// The saved Agent slot order of the whole workspace, flattened across
@@ -4019,6 +4027,7 @@ fn apply_restore_completion(
     }
     let terminals = terminals.expect("coherent restore checked terminal transport");
     let agents = agents.expect("coherent restore checked Agent transport");
+    ui.agent_inventory = Some(agents.clone());
     // The interrupted projection reads the same coherent observation as the live
     // one, before the intent mutation consumes it.
     let interrupted = crate::usecase::application::interrupted_tab::project(
@@ -4492,6 +4501,13 @@ struct HomeFrameMaterial {
     /// changes at minute granularity, so a one-second resolution can never be
     /// late, and an idle Home redraws at most once per second because of it.
     now: DateTime<Utc>,
+}
+
+impl HomeFrameMaterial {
+    fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
+        self.projection = self.projection.with_agent_inventory(inventory);
+        self
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5241,7 +5257,8 @@ fn drive_workspace_controller(
                 .as_ref()
                 .map(|create| create.name.as_str()),
             Utc::now(),
-        );
+        )
+        .with_agent_inventory(ui.agent_inventory());
         // Skip only the drawing. A skipped tick has already run every drain
         // above and still runs restore admission, pane launches, and input
         // below, so nothing that makes progress depends on the redraw.
@@ -12647,6 +12664,10 @@ mod tests {
             &BTreeSet::new(),
         );
         assert_eq!(applied.outcome, super::RestoreJobOutcome::Applied);
+        assert_eq!(
+            ui.agent_inventory().map(|inventory| inventory.workspace_id),
+            Some(workspace)
+        );
         assert!(runtime.active_pane().tabs().is_empty());
     }
 
