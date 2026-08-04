@@ -18,7 +18,7 @@ use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
-use usagi_core::usecase::client::DaemonMetrics;
+use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
@@ -52,6 +52,11 @@ const _: () = assert!(CHROME_ROWS == crate::usecase::application::controller::SI
 /// v1 と同じ Nerd Font glyph: processor and resident-memory server.
 const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
+/// Nerd Font cogs: the Agent concurrency slots the daemon admits from.
+const AGENT_ICON: char = '\u{f085}';
+/// daemon が Agent concurrency を報告しない場合の表示。`0` と読み違えられない
+/// 1 文字にするため em dash を使う。
+const UNREPORTED: char = '—';
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
 
@@ -1089,9 +1094,46 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                     "{MEMORY_ICON} {}",
                     format_memory(metrics.resident_memory_bytes)
                 ));
-            vec![format!("{cpu}  {memory}")]
+            vec![
+                format!("{cpu}  {memory}"),
+                agent_concurrency_row(metrics.agent_concurrency),
+            ]
         },
     )
+}
+
+/// The sidecar's Agent concurrency row: how many of the daemon's Agent
+/// concurrency slots are in use, over the limit it admits from.
+///
+/// Both numbers come from the daemon's own admission authority
+/// ([`DaemonMetrics::agent_concurrency`]); this view never counts runtimes itself
+/// and never restates the daemon's limit. It is the **Agent** pool, not the
+/// generic terminal capacity and not a supervisor run's concurrency.
+///
+/// `None` means the daemon reported nothing (a peer older than metrics schema 3),
+/// which is drawn as a dash so it cannot be read as an idle `0`.
+fn agent_concurrency_row(concurrency: Option<AgentConcurrency>) -> String {
+    // The mascot row is pink, so a calm value sets white explicitly for the same
+    // reason `load_style` does.
+    let calm = Style::new().fg(Color::White).dim();
+    match concurrency {
+        None => calm.paint(&format!("{AGENT_ICON} {UNREPORTED}")),
+        Some(concurrency) => {
+            let style = if concurrency.is_saturated() {
+                // The next Agent launch is refused, which is worth the strongest
+                // colour the sidecar has.
+                Role::Danger.style()
+            } else if concurrency.reaches_fraction(3, 4) {
+                Role::Warning.style()
+            } else {
+                calm
+            };
+            style.paint(&format!(
+                "{AGENT_ICON} {}/{}",
+                concurrency.in_use, concurrency.limit
+            ))
+        }
+    }
 }
 
 fn load_style(value: u64, busy: u64, hot: u64) -> Style {
@@ -1973,13 +2015,13 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HomeHeaderAction,
-        HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession, SidebarDiffColumns,
-        TerminalViewProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, home_header_action_at, home_header_layout, home_left_pane,
-        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
-        pane_tab_label, pane_tab_selected, phase_label, render_home, resume_label,
-        terminal_point_at, with_footer_gap,
+        AGENT_ICON, AgentConcurrency, CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE,
+        GitDiff, HomeHeaderAction, HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession,
+        SidebarDiffColumns, TerminalViewProjection, Workspace, abnormal_daemon_speech,
+        create_skeleton_lines, feedback_label, format_memory, home_header_action_at,
+        home_header_layout, home_left_pane, home_row_lines_at, home_viewport_start, load_style,
+        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
+        resume_label, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -2931,9 +2973,10 @@ mod tests {
             .expect("the rabbit fits the sidebar width");
         assert_eq!(block.reserved_rows(), SIDEBAR_MASCOT_ROWS);
         // Daemon metrics feed the sidecar beside the rabbit without adding rows, so
-        // the reservation the hit-test assumes stays constant.
+        // the reservation the hit-test assumes stays constant — including the
+        // second row the Agent concurrency projection occupies.
         let metrics = usagi_core::usecase::client::DaemonMetrics {
-            schema_version: 1,
+            schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
             resident_memory_bytes: 45 * 1_048_576,
@@ -2945,6 +2988,10 @@ mod tests {
             pr_projection_dropped_bytes: 0,
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
+            agent_concurrency: Some(AgentConcurrency {
+                in_use: 1,
+                limit: 16,
+            }),
         };
         let sidecar = super::mascot_metrics(Some(&metrics), 0);
         let with_metrics = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &sidecar)
@@ -3256,7 +3303,7 @@ mod tests {
         assert!(ws.git_diffs().is_empty());
 
         let metrics = usagi_core::usecase::client::DaemonMetrics {
-            schema_version: 1,
+            schema_version: 3,
             sampled_at_ms: 1,
             cpu_percent_hundredths: 0,
             resident_memory_bytes: 0,
@@ -3268,6 +3315,10 @@ mod tests {
             pr_projection_dropped_bytes: 0,
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
+            agent_concurrency: Some(AgentConcurrency {
+                in_use: 0,
+                limit: 16,
+            }),
         };
         ws.set_metrics(Some(metrics.clone()));
         assert_eq!(ws.metrics(), Some(metrics));
@@ -3287,7 +3338,7 @@ mod tests {
     #[test]
     fn home_metrics_sidecar_renders_the_daemon_metrics_row() {
         let metrics = usagi_core::usecase::client::DaemonMetrics {
-            schema_version: 1,
+            schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
             resident_memory_bytes: 45 * 1_048_576,
@@ -3299,6 +3350,10 @@ mod tests {
             pr_projection_dropped_bytes: 0,
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
+            agent_concurrency: Some(AgentConcurrency {
+                in_use: 3,
+                limit: 16,
+            }),
         };
 
         // The daemon observation flows through `with_metrics` into the sidecar row
@@ -3315,6 +3370,144 @@ mod tests {
 
         // The row carries both glyphs and the v1 CPU/memory summary text.
         assert!(strip(controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
+
+        // The Agent concurrency the daemon admits from sits on its own row below,
+        // as `in use / limit`.
+        let concurrency_row = controller
+            .iter()
+            .find(|line| line.contains(AGENT_ICON))
+            .expect("agent concurrency row beside usagi");
+        assert!(strip(concurrency_row).contains("\u{f085} 3/16"));
+    }
+
+    /// The concurrency row reports the daemon's own admission level, so the three
+    /// things a viewer must be able to tell apart — idle, saturated, and "the
+    /// daemon did not say" — are visibly different.
+    #[test]
+    fn agent_concurrency_row_separates_idle_saturated_and_unreported() {
+        let row = |concurrency| strip(&super::agent_concurrency_row(concurrency));
+
+        // Zero is a reported level, not an absence.
+        assert_eq!(
+            row(Some(AgentConcurrency {
+                in_use: 0,
+                limit: 16
+            })),
+            "\u{f085} 0/16"
+        );
+        // A daemon that reports nothing is a dash, which cannot be read as zero.
+        assert_eq!(row(None), "\u{f085} —");
+
+        // Colour escalates with the level and is strongest once the next launch
+        // would be refused.
+        let calm = super::agent_concurrency_row(Some(AgentConcurrency {
+            in_use: 1,
+            limit: 16,
+        }));
+        let busy = super::agent_concurrency_row(Some(AgentConcurrency {
+            in_use: 12,
+            limit: 16,
+        }));
+        let full = super::agent_concurrency_row(Some(AgentConcurrency {
+            in_use: 16,
+            limit: 16,
+        }));
+        assert_eq!(strip(&full), "\u{f085} 16/16");
+        assert_ne!(calm, busy);
+        assert_ne!(busy, full);
+        assert!(full.contains(&Role::Danger.style().paint("\u{f085} 16/16")));
+        assert!(busy.contains(&Role::Warning.style().paint("\u{f085} 12/16")));
+        // The unreported dash stays as quiet as a calm level.
+        assert_eq!(
+            super::agent_concurrency_row(None).contains("\u{1b}[2m"),
+            calm.contains("\u{1b}[2m")
+        );
+    }
+
+    /// A daemon older than the projection keeps the frame it drew before: the
+    /// concurrency row degrades to a dash instead of blanking the sidecar or
+    /// inventing a count.
+    #[test]
+    fn home_sidecar_degrades_when_the_daemon_omits_agent_concurrency() {
+        let mut metrics = usagi_core::usecase::client::DaemonMetrics {
+            schema_version: 3,
+            sampled_at_ms: 42,
+            cpu_percent_hundredths: 123,
+            resident_memory_bytes: 45 * 1_048_576,
+            active_subscribers: 3,
+            dropped_updates: 5,
+            terminal_dropped_bytes: 0,
+            terminal_coalesced_bytes: 0,
+            terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
+            agent_concurrency: None,
+        };
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let render = |metrics: &usagi_core::usecase::client::DaemonMetrics| {
+            render_home(
+                30,
+                100,
+                &HomeProjection::from_state(&state, "actual", Path::new("/tmp/actual"), &[])
+                    .with_metrics(Some(metrics.clone())),
+            )
+        };
+        let unreported = render(&metrics);
+        let row = unreported
+            .iter()
+            .find(|line| line.contains(AGENT_ICON))
+            .expect("agent concurrency row is still drawn");
+        assert!(strip(row).contains("\u{f085} —"));
+        // The CPU/memory row is unaffected by the missing projection.
+        assert!(
+            unreported
+                .iter()
+                .any(|line| strip(line).contains("\u{f2db} 1%    \u{f233} 45MB"))
+        );
+
+        // Reporting a level changes only that row's content, not the frame's shape.
+        metrics.agent_concurrency = Some(AgentConcurrency {
+            in_use: 2,
+            limit: 16,
+        });
+        let reported = render(&metrics);
+        assert_eq!(reported.len(), unreported.len());
+        assert!(
+            reported
+                .iter()
+                .any(|line| strip(line).contains("\u{f085} 2/16"))
+        );
+    }
+
+    /// A sidebar too narrow for the numbers clips them with the rest of the row
+    /// rather than overflowing into the right pane.
+    #[test]
+    fn narrow_sidebar_clips_the_agent_concurrency_row() {
+        use crate::presentation::widgets::mascot::sidebar_block_with_sidecar;
+        use crate::usecase::application::controller::{
+            SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
+        };
+        let sidecar = vec![
+            "\u{f2db} 1%    \u{f233} 45MB".to_owned(),
+            super::agent_concurrency_row(Some(AgentConcurrency {
+                in_use: 16,
+                limit: 16,
+            })),
+        ];
+        let block = sidebar_block_with_sidecar(SIDEBAR_MASCOT_MIN_LEFT, 0, None, &sidecar)
+            .expect("the rabbit fits its minimum width");
+        for row in block.rows() {
+            assert_eq!(
+                crate::presentation::widgets::display_width(&strip(row)),
+                SIDEBAR_MASCOT_MIN_LEFT,
+                "every mascot row is clipped to the sidebar width"
+            );
+        }
+        // At the minimum width the numbers do not fit beside the rabbit at all,
+        // so the row is clipped rather than wrapped into an extra line.
+        assert_eq!(block.reserved_rows(), SIDEBAR_MASCOT_ROWS);
+        assert!(!strip(&block.rows().join("\n")).contains("16/16"));
     }
 
     #[test]

@@ -2158,6 +2158,24 @@ impl AgentRuntime {
             .map(|record| record.runtime.terminal.terminal_id.as_str())
             .collect()
     }
+
+    /// Publishes this owner's Agent concurrency level into `gauge`.
+    ///
+    /// The composition root binds the gauge the metrics broker reads, so a
+    /// display-only observer never takes this runtime's lock to learn how much of
+    /// the [`AGENT_RUNTIME_LIMIT`] pool is in use.
+    pub fn bind_concurrency_gauge(
+        &mut self,
+        gauge: crate::usecase::metrics::AgentConcurrencyGauge,
+    ) {
+        self.coordinator.bind_concurrency_gauge(gauge);
+    }
+
+    /// The Agent concurrency this owner admits from, for tests and diagnostics.
+    #[must_use]
+    pub fn concurrency(&self) -> usagi_core::usecase::client::AgentConcurrency {
+        self.coordinator.concurrency()
+    }
 }
 
 impl AgentTerminalActor for AgentRuntime {
@@ -3155,6 +3173,37 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    /// The Agent runtime is the authority a metrics observer reads through: the
+    /// level it publishes is `AGENT_RUNTIME_LIMIT` wide and moves with the
+    /// admissions it grants, so nobody has to count runtimes or restate the limit.
+    #[test]
+    fn a_bound_gauge_reports_this_owners_agent_concurrency() {
+        use crate::usecase::metrics::AgentConcurrencyGauge;
+
+        let mut runtime = runtime();
+        let gauge = AgentConcurrencyGauge::default();
+        runtime.bind_concurrency_gauge(gauge.clone());
+        assert_eq!(
+            gauge.observe(),
+            Some(usagi_core::usecase::client::AgentConcurrency {
+                in_use: 0,
+                limit: u32::try_from(AGENT_RUNTIME_LIMIT).unwrap(),
+            })
+        );
+
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &intent(None),
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+
+        assert_eq!(gauge.observe(), Some(runtime.concurrency()));
+        assert_eq!(gauge.observe().unwrap().in_use, 1);
+        assert!(!gauge.observe().unwrap().is_saturated());
+    }
 
     #[test]
     fn retained_resources_lists_live_agent_terminals() {

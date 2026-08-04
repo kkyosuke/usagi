@@ -29,6 +29,7 @@ use super::{
         GenerationRole, GenerationSnapshot, ProcessIdentity, ProcessObservation, TerminalOwnership,
         TerminalState,
     },
+    metrics::AgentConcurrencyGauge,
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         TerminalRegistry,
@@ -442,6 +443,10 @@ pub struct RuntimeCoordinator {
     terminals: TerminalRegistry,
     generation: GenerationCoordinator,
     retention: SharedTerminalRetention,
+    /// Where this coordinator publishes the concurrency level it admits from, so
+    /// an observer never has to take the owner's lock to read it. Unbound by
+    /// default: a coordinator nobody observes publishes into its own gauge.
+    concurrency: AgentConcurrencyGauge,
 }
 
 impl RuntimeCoordinator {
@@ -470,6 +475,7 @@ impl RuntimeCoordinator {
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             generation: GenerationCoordinator::new(DEFAULT_GENERATION_LIMIT),
             retention,
+            concurrency: AgentConcurrencyGauge::default(),
         }
     }
 
@@ -523,6 +529,7 @@ impl RuntimeCoordinator {
             terminals: TerminalRegistry::new(journal_limit, input_cache_limit),
             generation,
             retention,
+            concurrency: AgentConcurrencyGauge::default(),
         })
     }
 
@@ -1378,7 +1385,48 @@ impl RuntimeCoordinator {
             })
             .count()
     }
+    /// How many Agent runtimes this coordinator admits at a time.
+    ///
+    /// The limit is injected at construction; this accessor exists so an
+    /// observer reads the policy the admission check itself uses instead of
+    /// re-reading the constant that supplied it.
+    #[must_use]
+    pub fn concurrency_limit(&self) -> usize {
+        self.limit
+    }
+
+    /// The concurrency level as [`admission`](Self::occupied_slots) counts it.
+    #[must_use]
+    pub fn concurrency(&self) -> usagi_core::usecase::client::AgentConcurrency {
+        usagi_core::usecase::client::AgentConcurrency {
+            in_use: u32::try_from(self.occupied_slots()).unwrap_or(u32::MAX),
+            limit: u32::try_from(self.limit).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// Publishes this coordinator's concurrency level into `gauge` from now on,
+    /// starting with the level it holds right now.
+    ///
+    /// Composition binds the gauge the metrics broker reads. Binding publishes
+    /// immediately so a daemon that hydrated interrupted records reports them
+    /// before its first mutation, rather than reading as an idle pool.
+    pub fn bind_concurrency_gauge(&mut self, gauge: AgentConcurrencyGauge) {
+        self.concurrency = gauge;
+        self.publish_concurrency();
+    }
+
+    /// Republishes the level. Called from [`persist`](Self::persist), the single
+    /// choke point every record mutation passes through, so the published level
+    /// cannot drift from the records admission counts.
+    fn publish_concurrency(&self) {
+        self.concurrency.publish(self.occupied_slots(), self.limit);
+    }
+
     fn persist(&self, store: &mut dyn RuntimeStore) -> Result<(), RuntimeError> {
+        // Before the store result: the in-memory records are what admission
+        // consults, and they already changed. A failed write must not leave the
+        // observed level behind the level that refuses the next launch.
+        self.publish_concurrency();
         store
             .save(self.snapshot())
             .map_err(|()| RuntimeError::Store)
@@ -1532,6 +1580,7 @@ mod tests {
             TerminalId, WorkspaceId, WorktreeId,
         },
     };
+    use usagi_core::usecase::client::AgentConcurrency;
     #[test]
     fn spawn_provision_carries_an_optional_ephemeral_sandbox_launcher() {
         let mut provision = SpawnProvision::new([], Vec::new());
@@ -2457,6 +2506,140 @@ mod tests {
             .unwrap();
         assert_eq!(c.occupied_slots(), 1);
     }
+    /// The published level is the level admission decides from, at every step of
+    /// a runtime's life. An observer therefore never has to count records or know
+    /// the limit constant, and never sees a level the coordinator would refuse to
+    /// act on.
+    #[test]
+    fn the_bound_gauge_tracks_the_level_admission_admits_from() {
+        let gauge = AgentConcurrencyGauge::default();
+        // Nothing is published before an authority binds it.
+        assert_eq!(gauge.observe(), None);
+
+        let mut c = RuntimeCoordinator::new(1, 1024, 2);
+        c.bind_concurrency_gauge(gauge.clone());
+        // Binding publishes the current level, so an idle pool is reported as an
+        // explicit zero rather than as "unknown".
+        assert_eq!(
+            gauge.observe(),
+            Some(AgentConcurrency {
+                in_use: 0,
+                limit: 1
+            })
+        );
+        assert_eq!(c.concurrency_limit(), 1);
+
+        let first = request();
+        let (runtime, fence) = refs(&first);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut c,
+            &first,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        assert_eq!(gauge.observe(), Some(c.concurrency()));
+        assert_eq!(
+            gauge.observe(),
+            Some(AgentConcurrency {
+                in_use: 1,
+                limit: 1
+            })
+        );
+        // At the limit the next launch is refused, and the published level says so
+        // before the refusal happens.
+        assert!(gauge.observe().unwrap().is_saturated());
+        let second = request();
+        let (blocked, blocked_fence) = refs(&second);
+        assert_eq!(
+            launch(
+                &mut c,
+                &second,
+                blocked,
+                blocked_fence,
+                &mut spawner,
+                &mut store
+            ),
+            Err(RuntimeError::ConcurrencyExhausted)
+        );
+        // A refusal is effect free, including on the published level.
+        assert_eq!(
+            gauge.observe(),
+            Some(AgentConcurrency {
+                in_use: 1,
+                limit: 1
+            })
+        );
+
+        // An exit releases the slot, and the observer sees the release.
+        c.exit(&runtime, 0, &mut store).unwrap();
+        assert_eq!(
+            gauge.observe(),
+            Some(AgentConcurrency {
+                in_use: 0,
+                limit: 1
+            })
+        );
+        assert!(!gauge.observe().unwrap().is_saturated());
+    }
+
+    /// A reservation whose durable write failed is kept in memory on purpose, so
+    /// the published level must follow the records — not the write. Otherwise an
+    /// observer would report room in a pool that refuses the next launch.
+    #[test]
+    fn a_failed_persist_publishes_the_reservation_it_kept() {
+        let gauge = AgentConcurrencyGauge::default();
+        let mut c = RuntimeCoordinator::new(1, 1024, 2);
+        c.bind_concurrency_gauge(gauge.clone());
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut store = ConditionalStore {
+            saves: 0,
+            fail_after: Some(0),
+        };
+        let mut spawner = Spawner(Ok(process()));
+        assert_eq!(
+            launch(&mut c, &request, runtime, fence, &mut spawner, &mut store),
+            Err(RuntimeError::Store)
+        );
+        assert_eq!(c.occupied_slots(), 1);
+        assert_eq!(
+            gauge.observe(),
+            Some(AgentConcurrency {
+                in_use: 1,
+                limit: 1
+            })
+        );
+    }
+
+    /// A definite spawn failure means no child exists, so the slot is free again
+    /// and the observer must see that without waiting for another mutation.
+    #[test]
+    fn a_definite_spawn_failure_publishes_the_released_slot() {
+        let gauge = AgentConcurrencyGauge::default();
+        let mut c = RuntimeCoordinator::new(2, 1024, 2);
+        c.bind_concurrency_gauge(gauge.clone());
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Err(SpawnFailure::Definite));
+        assert_eq!(
+            launch(&mut c, &request, runtime, fence, &mut spawner, &mut store),
+            Err(RuntimeError::SpawnFailed)
+        );
+        assert_eq!(
+            gauge.observe(),
+            Some(AgentConcurrency {
+                in_use: 0,
+                limit: 2
+            })
+        );
+    }
+
     #[test]
     fn verified_exit_or_disappearance_releases_slot() {
         let first_request = request();

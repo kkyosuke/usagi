@@ -1244,6 +1244,34 @@ terminal output、argv、environment、secret を含めない。
 TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の足元の右へ表示する。
 この観測値は操作対象ではないため、狭い terminal では session 一覧と footer を優先して mascot ごと省略される。
 
+### agent concurrency projection
+
+snapshot は **Agent concurrency の使用中/上限**も返す。値の正本は Agent launch を admit する権威
+（in-process の Agent runtime owner）そのものであり、observer は件数を数え直さず、上限の定数を複製しない。
+wire 表現は [4. daemon IPC](04-ipc.md#agent-concurrency-projection) が正本である。
+
+対象と非対象を混同しない。
+
+| 語 | 意味 | この projection の対象 |
+|---|---|---|
+| Agent concurrency | 同時に admit する Agent runtime 数の上限と、その使用中 slot | **これ** |
+| generic terminal capacity | generic terminal の pool。Agent pool とは独立で合算しない | 対象外 |
+| supervisor `max_concurrency` | supervisor run の `ExecutionPolicy` が持つ dispatch の同時実行数 | 対象外 |
+
+**使用中（`in_use`）の定義は admission が数えるものと同一**である。すなわち reserved（spawn 前の予約）、
+running、reconcile 待ちの Agent runtime record を数え、exited / reclaimed / spawn 失敗の record は数えない。
+したがって `in_use == limit` の snapshot は「次の Agent launch は concurrency で拒否される」と同義である。
+
+publish は権威側から行う。Agent runtime は record を変更する durable mutation の choke point で、自分の
+使用中 slot 数と上限を lock-free な gauge へ書き、broker はそれを読むだけである。この方向にする理由は
+**metrics 経路が Agent runtime の lock を待ってはならない**ことにある。owner の lock は PTY spawn を跨いで
+保持されるため、metrics tick がそれを待つと表示専用の観測が daemon と他 observer を遅らせる（本節冒頭の
+non-blocking 契約に反する）。durable write が失敗した場合も、memory 上の予約は保持されて次の admission を
+拒否するため、publish は write の成否ではなく record に従う。
+
+gauge へ誰も publish していない間は「不明」を返し、`in_use: 0` には落とさない。上限も使用中も報告しない
+daemon と、idle と報告した daemon を client が区別できるようにするためである。
+
 ## cross-process generation authority
 
 2 つの daemon process が一時的に共存する planned restart の前提となる authority である。本節がその契約の正本で、

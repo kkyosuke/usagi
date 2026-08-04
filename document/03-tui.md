@@ -21,6 +21,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
+  - [mascot sidecar](#mascot-sidecar)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
@@ -858,6 +859,32 @@ message の既定の供給元は**正常系以外の daemon 状態**である。
 操作エラー・端末エラーのいずれかのとき、その安全な要約を 2 行の bubble にして bottom-left のうさぎに出し、一目で
 異常に気づけるようにする。健全な正常系（feedback 無し・進行中 progress・再接続完了）はうさぎを無言に保つ。error ID を
 含む詳細は footer の feedback 行に委ね、bubble には載せない。呼び出し側が明示 message を与えた場合はそちらを優先する。
+
+### mascot sidecar
+
+うさぎの右には daemon の観測値を最大 3 行の sidecar として並べる。sidecar はうさぎの 3 行に下揃えで重ねるだけで、
+mascot block の予約行数を増やさないため、session viewport と footer の配置は sidecar の有無で変わらない。
+現在の内容は次の 2 行である。
+
+| 行 | 内容 | 出典 |
+|---|---|---|
+| 1 | daemon process の CPU 使用率と resident memory | metrics snapshot の process counter |
+| 2 | **Agent concurrency の使用中/上限**（`使用中/上限`） | metrics snapshot の [agent concurrency projection](04-ipc.md#agent-concurrency-projection) |
+
+Agent concurrency 行は daemon の admission 権威が報告した値をそのまま描く。TUI は runtime を数え直さず、
+上限の定数も持たない。表示は次の 4 状態を区別する。
+
+| 状態 | 表示 | 色 |
+|---|---|---|
+| 使用中あり（上限未満） | `3/16` | 上限の 3/4 未満は dim、3/4 以上は warning |
+| 上限到達（次の launch は拒否される） | `16/16` | danger |
+| idle と報告された | `0/16` | dim |
+| daemon が報告しない（schema 3 より前の peer） | `—` | dim |
+
+`0/16` と `—` は別の状態として描き分ける。前者は「daemon が idle と報告した」であり、後者は
+「daemon が何も言っていない」である。metrics snapshot 自体が無いときは sidecar を出さず、従来どおり
+`waiting daemon` の shimmer だけを表示する（[Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)）。sidebar が狭い場合は
+sidecar 行も他の mascot 行と同じ幅へ clip し、うさぎ自体が入らない幅では mascot block ごと省略される。
 
 ## Closeup pane
 

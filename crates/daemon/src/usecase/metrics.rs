@@ -3,9 +3,66 @@
 //! observer.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 
-use usagi_core::usecase::client::DaemonMetrics;
+use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
+
+/// The Agent concurrency level, published by the authority that admits Agent
+/// launches and read by the metrics broker.
+///
+/// It exists because the two sides must not share a lock. The admission
+/// authority is the Agent runtime, whose mutex is held across a PTY spawn; a
+/// metrics tick that waited for it would make a display-only observation delay
+/// the daemon, which is exactly what the metrics contract forbids. So the
+/// authority *pushes* its own `occupied_slots` / limit here after every durable
+/// mutation, and the broker reads it without blocking. No number is duplicated:
+/// both come from the coordinator's own accessors.
+///
+/// A gauge nobody has published to reads as unknown rather than as `0 / 0`, so a
+/// composition that never bound one cannot be mistaken for an idle daemon.
+#[derive(Debug, Clone, Default)]
+pub struct AgentConcurrencyGauge(Arc<GaugeCell>);
+
+/// The pair travels in one `u64` so a reader can never see an `in_use` from one
+/// publication beside a `limit` from another.
+#[derive(Debug, Default)]
+struct GaugeCell {
+    published: AtomicBool,
+    pair: AtomicU64,
+}
+
+impl AgentConcurrencyGauge {
+    /// Records the authority's current level. Counts above `u32::MAX` saturate,
+    /// which cannot happen for a bounded pool but keeps the encoding total.
+    pub fn publish(&self, in_use: usize, limit: usize) {
+        let in_use = u32::try_from(in_use).unwrap_or(u32::MAX);
+        let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+        self.0.pair.store(
+            (u64::from(limit) << 32) | u64::from(in_use),
+            Ordering::Release,
+        );
+        self.0.published.store(true, Ordering::Release);
+    }
+
+    /// The last published level, or `None` while no authority has published one.
+    ///
+    /// This never blocks, so a metrics tick observes it while the Agent runtime
+    /// is busy spawning. Reading a level one publication stale is acceptable for
+    /// a display-only projection; reporting a torn pair would not be.
+    #[must_use]
+    pub fn observe(&self) -> Option<AgentConcurrency> {
+        if !self.0.published.load(Ordering::Acquire) {
+            return None;
+        }
+        let pair = self.0.pair.load(Ordering::Acquire);
+        Some(AgentConcurrency {
+            in_use: u32::try_from(pair & u64::from(u32::MAX)).unwrap_or(u32::MAX),
+            limit: u32::try_from(pair >> 32).unwrap_or(u32::MAX),
+        })
+    }
+}
 
 /// A daemon-local subscription token. It is intentionally not a durable
 /// resource identity: reconnecting creates a fresh observer.
@@ -61,9 +118,25 @@ pub struct MetricsBroker {
     subscribers: BTreeMap<MetricsSubscription, SyncSender<DaemonMetrics>>,
     dropped_updates: u64,
     latest: MetricsSample,
+    agent_concurrency: AgentConcurrencyGauge,
 }
 
 impl MetricsBroker {
+    /// Builds a broker that reports the Agent concurrency this gauge carries.
+    ///
+    /// Concurrency is not part of [`MetricsSample`] for the same reason the
+    /// subscriber and drop counters are not: the broker is where a wire snapshot
+    /// is assembled from the authorities that own each number. The gauge is read
+    /// on every snapshot, so `subscribe` / `unsubscribe` replies carry the same
+    /// live level a published tick does.
+    #[must_use]
+    pub fn with_agent_concurrency(agent_concurrency: AgentConcurrencyGauge) -> Self {
+        Self {
+            agent_concurrency,
+            ..Self::default()
+        }
+    }
+
     #[must_use]
     pub fn subscribe(&mut self) -> MetricsObserver {
         self.next = self.next.saturating_add(1);
@@ -89,7 +162,7 @@ impl MetricsBroker {
     #[must_use]
     pub fn snapshot(&self) -> DaemonMetrics {
         DaemonMetrics {
-            schema_version: 2,
+            schema_version: 3,
             sampled_at_ms: self.latest.sampled_at_ms,
             cpu_percent_hundredths: self.latest.cpu_percent_hundredths,
             resident_memory_bytes: self.latest.resident_memory_bytes,
@@ -101,6 +174,7 @@ impl MetricsBroker {
             pr_projection_dropped_bytes: self.latest.pr_projection_dropped_bytes,
             pr_projection_coalesced_bytes: self.latest.pr_projection_coalesced_bytes,
             pr_projection_gaps: self.latest.pr_projection_gaps,
+            agent_concurrency: self.agent_concurrency.observe(),
         }
     }
 
@@ -186,6 +260,84 @@ mod tests {
         let snapshot = broker.publish(sample(1));
         assert_eq!(broker.subscriber_count(), 0);
         assert_eq!(snapshot.active_subscribers, 0);
+    }
+
+    #[test]
+    fn an_unbound_broker_reports_agent_concurrency_as_unknown() {
+        let mut broker = MetricsBroker::default();
+        assert_eq!(broker.snapshot().agent_concurrency, None);
+        assert_eq!(broker.publish(sample(1)).agent_concurrency, None);
+        // Schema 3 is what a snapshot carrying the projection declares.
+        assert_eq!(broker.snapshot().schema_version, 3);
+    }
+
+    #[test]
+    fn a_bound_gauge_reports_the_authority_level_on_every_snapshot() {
+        let gauge = AgentConcurrencyGauge::default();
+        let mut broker = MetricsBroker::with_agent_concurrency(gauge.clone());
+        // Bound but not yet published: still unknown, not an implied zero.
+        assert_eq!(broker.snapshot().agent_concurrency, None);
+
+        gauge.publish(3, 16);
+        let observer = broker.subscribe();
+        assert_eq!(
+            broker.snapshot().agent_concurrency,
+            Some(AgentConcurrency {
+                in_use: 3,
+                limit: 16
+            })
+        );
+        // A published tick fans out the same level the snapshot reports.
+        assert_eq!(
+            broker.publish(sample(2)).agent_concurrency,
+            Some(AgentConcurrency {
+                in_use: 3,
+                limit: 16
+            })
+        );
+        assert_eq!(
+            observer.try_recv().unwrap().agent_concurrency,
+            Some(AgentConcurrency {
+                in_use: 3,
+                limit: 16
+            })
+        );
+
+        // A later publication is picked up without another sample: the level is
+        // read from the authority, not cached beside the process counters.
+        gauge.publish(16, 16);
+        assert_eq!(
+            broker.snapshot().agent_concurrency,
+            Some(AgentConcurrency {
+                in_use: 16,
+                limit: 16
+            })
+        );
+    }
+
+    #[test]
+    fn a_gauge_clone_is_the_same_authority_and_saturates_at_the_encoding_bound() {
+        let gauge = AgentConcurrencyGauge::default();
+        let reader = gauge.clone();
+        gauge.publish(1, 16);
+        assert_eq!(
+            reader.observe(),
+            Some(AgentConcurrency {
+                in_use: 1,
+                limit: 16
+            })
+        );
+
+        // A count wider than the wire field saturates instead of wrapping into a
+        // smaller, plausible-looking number.
+        gauge.publish(usize::MAX, usize::MAX);
+        assert_eq!(
+            reader.observe(),
+            Some(AgentConcurrency {
+                in_use: u32::MAX,
+                limit: u32::MAX
+            })
+        );
     }
 
     #[test]

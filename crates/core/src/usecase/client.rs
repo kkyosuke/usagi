@@ -279,6 +279,46 @@ pub enum MetricsAction {
     Snapshot,
 }
 
+/// How much of the daemon's Agent concurrency is in use, as the authority that
+/// admits Agent launches sees it.
+///
+/// This is the **Agent runtime** pool only. It is neither the generic terminal
+/// capacity nor a supervisor run's `ExecutionPolicy.max_concurrency`, and the two
+/// numbers are never summed with another pool's. `in_use` counts exactly what
+/// admission counts, so a client can tell "the next launch is refused" from
+/// "there is room" without re-deriving the daemon's rule.
+///
+/// The pair travels as one object on purpose: a reader can never combine an
+/// `in_use` from one sample with a `limit` from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentConcurrency {
+    /// Agent runtimes currently holding a concurrency slot.
+    pub in_use: u32,
+    /// Slots the daemon admits at a time.
+    pub limit: u32,
+}
+
+impl AgentConcurrency {
+    /// Whether the next Agent launch would be refused for concurrency.
+    ///
+    /// A `limit` of zero is saturated at any usage, which keeps a degenerate
+    /// policy from reading as "there is room".
+    #[must_use]
+    pub const fn is_saturated(self) -> bool {
+        self.in_use >= self.limit
+    }
+
+    /// Whether usage has reached `numerator / denominator` of the limit.
+    ///
+    /// The comparison is a cross-multiplication in `u64`, so it neither divides
+    /// by a zero limit nor loses the last slot to integer truncation.
+    #[must_use]
+    pub fn reaches_fraction(self, numerator: u32, denominator: u32) -> bool {
+        u64::from(self.in_use) * u64::from(denominator)
+            >= u64::from(self.limit) * u64::from(numerator)
+    }
+}
+
 /// A deliberately small, versioned snapshot emitted by the daemon.  Counters
 /// are process-local observations, not durable state or a control surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +352,13 @@ pub struct DaemonMetrics {
     /// Discontinuities recorded so a PR scan never joins across dropped bytes.
     #[serde(default)]
     pub pr_projection_gaps: u64,
+    /// Agent concurrency as the daemon's admission authority sees it, or `None`
+    /// when this daemon does not report it (a peer older than schema 3, or an
+    /// authority that has not published a level yet). `None` is deliberately
+    /// distinct from `in_use: 0`: a client must not draw "no Agent is running"
+    /// from a daemon that simply said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_concurrency: Option<AgentConcurrency>,
 }
 
 /// Product-neutral Agent launch intent sent by a TUI client.
@@ -1014,7 +1061,7 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
 
 #[cfg(test)]
 mod metrics_schema_tests {
-    use super::{DaemonMetrics, DaemonRequest, MetricsAction};
+    use super::{AgentConcurrency, DaemonMetrics, DaemonRequest, MetricsAction};
 
     #[test]
     fn rollover_request_round_trips_with_its_durable_operation() {
@@ -1075,6 +1122,95 @@ mod metrics_schema_tests {
         assert_eq!(legacy_snapshot.terminal_dropped_bytes, 0);
         assert_eq!(legacy_snapshot.terminal_coalesced_bytes, 0);
         assert_eq!(legacy_snapshot.terminal_backpressured_bytes, 0);
+        // Absent Agent concurrency is unknown, never an implied zero.
+        assert_eq!(legacy_snapshot.agent_concurrency, None);
+        assert_eq!(snapshot.agent_concurrency, None);
+    }
+
+    /// The Agent concurrency projection is additive in both directions: a peer
+    /// that predates it omits the object, and a peer newer than this build may
+    /// add fields beside it.
+    #[test]
+    fn agent_concurrency_is_a_compatible_paired_projection() {
+        let reported: DaemonMetrics = serde_json::from_value(serde_json::json!({
+            "schema_version": 3,
+            "sampled_at_ms": 42,
+            "active_subscribers": 1,
+            "dropped_updates": 0,
+            "agent_concurrency": {"in_use": 3, "limit": 16, "queued_launches": 7},
+        }))
+        .unwrap();
+        let concurrency = reported.agent_concurrency.unwrap();
+        assert_eq!((concurrency.in_use, concurrency.limit), (3, 16));
+
+        // Round-tripping keeps the pair one object, and omits it when unknown.
+        let encoded = serde_json::to_value(&reported).unwrap();
+        assert_eq!(
+            encoded.get("agent_concurrency"),
+            Some(&serde_json::json!({"in_use": 3, "limit": 16}))
+        );
+        assert_eq!(
+            serde_json::from_value::<DaemonMetrics>(encoded).unwrap(),
+            reported
+        );
+        let mut unknown = reported.clone();
+        unknown.agent_concurrency = None;
+        assert!(
+            serde_json::to_value(&unknown)
+                .unwrap()
+                .get("agent_concurrency")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn saturation_and_fraction_read_the_reported_pair() {
+        let room = AgentConcurrency {
+            in_use: 3,
+            limit: 16,
+        };
+        assert!(!room.is_saturated());
+        assert!(!room.reaches_fraction(3, 4));
+
+        let busy = AgentConcurrency {
+            in_use: 12,
+            limit: 16,
+        };
+        assert!(!busy.is_saturated());
+        assert!(busy.reaches_fraction(3, 4));
+
+        let full = AgentConcurrency {
+            in_use: 16,
+            limit: 16,
+        };
+        assert!(full.is_saturated());
+        assert!(full.reaches_fraction(3, 4));
+
+        // A degenerate policy admits nothing, so it is saturated at zero usage
+        // instead of reading as room. The fraction never divides by the limit.
+        let refuses_everything = AgentConcurrency {
+            in_use: 0,
+            limit: 0,
+        };
+        assert!(refuses_everything.is_saturated());
+        assert!(refuses_everything.reaches_fraction(3, 4));
+
+        // Cross-multiplying keeps a truncated `limit * 3 / 4` from reporting a
+        // half-used small pool as nearly full.
+        let half_of_two = AgentConcurrency {
+            in_use: 1,
+            limit: 2,
+        };
+        assert!(!half_of_two.is_saturated());
+        assert!(!half_of_two.reaches_fraction(3, 4));
+        // The threshold itself is inclusive.
+        assert!(
+            AgentConcurrency {
+                in_use: 3,
+                limit: 4
+            }
+            .reaches_fraction(3, 4)
+        );
     }
 }
 
