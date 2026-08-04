@@ -652,6 +652,13 @@ mod tests {
 
         assert!(dimmed.contains("\u{1b}[2;38;2;0;1;2m"));
         assert!(dimmed.contains("\u{1b}[2;38;5;2m"));
+
+        // A truncated extended-colour introducer occupies only its own
+        // parameter: preserve foreground vocabulary, but still suppress a
+        // background introducer whose payload is absent.
+        let truncated = dim_ansi("\u{1b}[38mforeground\u{1b}[48mbackground");
+        assert!(truncated.contains("\u{1b}[2;38mforeground"));
+        assert!(truncated.contains("\u{1b}[2mbackground"));
     }
 
     #[test]
