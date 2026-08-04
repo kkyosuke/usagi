@@ -391,8 +391,9 @@ pub fn perform_remove(
 
 /// Undoes a delegated create completely: the worktree and the branch it made.
 ///
-/// The removal is forced and deletes the branch, which a requested removal never
-/// does. That is safe only because it is reached exclusively for a session whose
+/// The removal is forced and deletes the branch. A requested removal normally
+/// preserves the branch, but also deletes it when retiring a failed session.
+/// Compensation is safe because it is reached exclusively for a session whose
 /// dispatch definitively never started, so nothing on the branch is anybody's
 /// work. Undoing the branch too is what lets the caller retry the same session
 /// name instead of hitting a branch conflict.
@@ -1110,6 +1111,16 @@ impl SessionRuntime {
                 let outcome = self
                     .io
                     .remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
+                    .and_then(|()| {
+                        if pending.delete_branch {
+                            delete_branch(
+                                self.git.as_ref(),
+                                &pending.repository_root,
+                                &session_branch(&pending.name),
+                            )?;
+                        }
+                        Ok(())
+                    })
                     .map_err(|error| error.to_string());
                 self.finish_teardown(&pending, outcome)
             }
@@ -1128,6 +1139,8 @@ impl SessionRuntime {
         let name = session_name(payload)?;
         // A compensation is not a client request: it forces the removal and
         // deletes the branch, and neither is negotiable through a payload.
+        // A failed session is also fully retired so its stale branch cannot
+        // block recreating the same session name.
         let compensating = kind == RemoveKind::Compensating;
         let force = compensating || force(payload)?;
         let operation_id =
@@ -1171,6 +1184,8 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
+        let delete_branch = compensating
+            || session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Failed;
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
         let removing = self
@@ -1183,7 +1198,7 @@ impl SessionRuntime {
                     delete_plan: DeletePlan {
                         targets: vec![name.clone()],
                         force,
-                        delete_branch: compensating,
+                        delete_branch,
                     },
                 },
                 Utc::now(),
@@ -1207,7 +1222,7 @@ impl SessionRuntime {
                 session_root: self.session_root(&name),
                 name,
                 force,
-                delete_branch: compensating,
+                delete_branch,
             },
         })
     }
@@ -1761,13 +1776,14 @@ fn create_semantic_key(origin: CreateOrigin, name: &str, role_id: Option<&RoleId
     )
 }
 
-/// The journaled identity of one removal: its origin, session name, and every
-/// option that changes the worktree effect.
+/// The journaled identity of one removal: its origin, session name, and request
+/// options.
 ///
-/// A requested removal keeps the branch while a compensation deletes it, so the
-/// origin is durable intent rather than implementation metadata. `force` is
-/// spelled out even when false so opposite destructive intents cannot share an
-/// operation id.
+/// A compensation always deletes the branch, so the origin is durable intent
+/// rather than implementation metadata. A requested removal's branch choice is
+/// derived from the session lifecycle and captured in its `DeletePlan`. `force`
+/// is spelled out even when false so opposite destructive intents cannot share
+/// an operation id.
 fn remove_semantic_key(kind: RemoveKind, name: &str, force: bool) -> String {
     let action = semantic_key(SessionAction::Remove, name);
     let origin = match kind {
@@ -2734,6 +2750,54 @@ mod tests {
             .unwrap();
         assert_eq!(recreated.body["sessions"][0]["name"], "one");
         assert_eq!(recreated.body["sessions"][0]["lifecycle"], "available");
+    }
+
+    #[test]
+    fn synchronous_failed_session_removal_records_a_branch_deletion_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            ScriptedGit::new([
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                ScriptedGitResult::Output {
+                    success: false,
+                    stdout: "",
+                    stderr: "branch is locked",
+                },
+            ]),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        let mut state = runtime.state().unwrap();
+        let revision = state.state_revision;
+        state.sessions[0].lifecycle = SessionLifecycle::Failed;
+        state.sessions[0].failure = Some(Failure {
+            stage: FailureStage::Create,
+            summary: "create failed".into(),
+        });
+        runtime.store.replace_if_revision(revision, &state).unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, SessionRuntimeError::DurableFailure(summary) if summary.contains("git branch delete failed: branch is locked")),
+            "{error:?}"
+        );
+        let failed = &runtime.state().unwrap().sessions[0];
+        assert_eq!(failed.lifecycle, SessionLifecycle::Failed);
+        assert_eq!(failed.failure.as_ref().unwrap().stage, FailureStage::Delete);
     }
 
     #[test]
@@ -3834,9 +3898,9 @@ instructions = "code"
         assert_eq!(candidates(), 0);
     }
 
-    /// A removal the user asked for keeps the branch: it holds the work.
+    /// Removing an available session keeps the branch: it holds the work.
     #[test]
-    fn a_requested_removal_leaves_the_session_branch_alone() {
+    fn removing_an_available_session_leaves_its_branch_alone() {
         let (tmp, rt) = runtime(FakeGit::ok());
         let runtime = Arc::new(Mutex::new(rt));
         perform_create(
@@ -3867,6 +3931,52 @@ instructions = "code"
                 .iter()
                 .all(|(_, args)| args[0] != "branch")
         );
+    }
+
+    #[test]
+    fn removing_a_failed_session_deletes_its_branch() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        {
+            let runtime = runtime.lock().unwrap();
+            let mut state = runtime.state().unwrap();
+            let revision = state.state_revision;
+            state.sessions[0].lifecycle = SessionLifecycle::Failed;
+            state.sessions[0].failure = Some(Failure {
+                stage: FailureStage::Create,
+                summary: "create failed".into(),
+            });
+            runtime.store.replace_if_revision(revision, &state).unwrap();
+        }
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+
+        let signal = TeardownSignal::new();
+        perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+        assert!(runtime.lock().unwrap().pending_teardowns().unwrap()[0].delete_branch);
+
+        let git = RecordingGit::new();
+        let calls = Arc::clone(&git.calls);
+        let reports = drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(git, SystemSessionWorktreeIo),
+            &|| false,
+        );
+
+        assert_eq!(reports[0].effect_error, None);
+        assert!(!session_root.exists());
+        assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
+        assert!(calls.lock().unwrap().iter().any(|(repo, args)| {
+            repo == tmp.path() && args == &["branch", "-D", "--", "usagi/one"]
+        }));
     }
 
     /// The branch deletion is part of the compensation, so its failure is a
