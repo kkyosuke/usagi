@@ -13056,6 +13056,40 @@ mod tests {
     }
 
     #[test]
+    fn memory_intent_port_projects_both_stale_observation_variants() {
+        let workspace = WorkspaceId::new();
+        let mut durable = AgentTabIntent::empty(workspace);
+        durable.revision = 1;
+        let mut port = MemoryIntentPort {
+            state: Arc::new(Mutex::new(durable)),
+            mutations: Arc::new(Mutex::new(Vec::new())),
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: Vec::new(),
+            resumable: Vec::new(),
+        };
+
+        for mutation in [
+            AgentTabIntentMutation::Observe {
+                terminals: Vec::new(),
+                agents: inventory.clone(),
+                allowed_sessions: BTreeSet::new(),
+            },
+            AgentTabIntentMutation::ObserveAll {
+                terminals: Vec::new(),
+                agents: inventory.clone(),
+                allowed_sessions: BTreeSet::new(),
+            },
+        ] {
+            let commit = port.mutate(workspace, 0, mutation).unwrap();
+            assert!(commit.cas_conflict);
+            assert!(!commit.mutation_applied);
+            assert_eq!(commit.projection, Some(AgentTabProjection::default()));
+        }
+    }
+
+    #[test]
     fn unavailable_and_load_failing_intent_ports_keep_typed_fallback_state() {
         let workspace = WorkspaceId::new();
         let continuation = AgentContinuationRef::new();

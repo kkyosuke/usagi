@@ -171,32 +171,11 @@ impl AgentTabIntent {
                 session_id,
                 continuation,
             } => {
-                if let Some(target) = self
-                    .targets
-                    .iter_mut()
-                    .find(|target| target.session_id == session_id)
-                    && continuation.is_none_or(|candidate| {
-                        !self.dismissed.contains(&candidate)
-                            && target
-                                .tabs
-                                .iter()
-                                .any(|slot| slot.continuation == candidate)
-                    })
-                {
-                    target.selected = continuation;
-                }
+                self.select(session_id, continuation);
                 None
             }
             AgentTabIntentMutation::Dismiss { continuation } => {
-                if self.targets.iter().any(|target| {
-                    target
-                        .tabs
-                        .iter()
-                        .any(|slot| slot.continuation == continuation)
-                }) {
-                    self.dismissed.insert(continuation);
-                    self.repair_selections();
-                }
+                self.dismiss(continuation);
                 None
             }
             AgentTabIntentMutation::DismissAndSelect {
@@ -204,11 +183,8 @@ impl AgentTabIntent {
                 session_id,
                 selected,
             } => {
-                let _ = self.apply(AgentTabIntentMutation::Dismiss { continuation });
-                let _ = self.apply(AgentTabIntentMutation::Select {
-                    session_id,
-                    continuation: selected,
-                });
+                self.dismiss(continuation);
+                self.select(session_id, selected);
                 None
             }
             AgentTabIntentMutation::DismissTerminal { terminal } => {
@@ -238,6 +214,39 @@ impl AgentTabIntent {
                 self.reorder(session_id, &continuations);
                 None
             }
+        }
+    }
+
+    fn select(
+        &mut self,
+        session_id: Option<SessionId>,
+        continuation: Option<AgentContinuationRef>,
+    ) {
+        if let Some(target) = self
+            .targets
+            .iter_mut()
+            .find(|target| target.session_id == session_id)
+            && continuation.is_none_or(|candidate| {
+                !self.dismissed.contains(&candidate)
+                    && target
+                        .tabs
+                        .iter()
+                        .any(|slot| slot.continuation == candidate)
+            })
+        {
+            target.selected = continuation;
+        }
+    }
+
+    fn dismiss(&mut self, continuation: AgentContinuationRef) {
+        if self.targets.iter().any(|target| {
+            target
+                .tabs
+                .iter()
+                .any(|slot| slot.continuation == continuation)
+        }) {
+            self.dismissed.insert(continuation);
+            self.repair_selections();
         }
     }
 
