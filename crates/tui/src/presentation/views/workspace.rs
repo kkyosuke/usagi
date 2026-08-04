@@ -1094,9 +1094,12 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                     "{MEMORY_ICON} {}",
                     format_memory(metrics.resident_memory_bytes)
                 ));
+            // The sidecar is bottom-aligned beside the rabbit, so the Agent
+            // concurrency row goes *above* the process row: the CPU/memory line
+            // keeps the position it has drawn at since it was introduced.
             vec![
-                format!("{cpu}  {memory}"),
                 agent_concurrency_row(metrics.agent_concurrency),
+                format!("{cpu}  {memory}"),
             ]
         },
     )
@@ -3489,11 +3492,11 @@ mod tests {
             SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
         };
         let sidecar = vec![
-            "\u{f2db} 1%    \u{f233} 45MB".to_owned(),
             super::agent_concurrency_row(Some(AgentConcurrency {
                 in_use: 16,
                 limit: 16,
             })),
+            "\u{f2db} 1%    \u{f233} 45MB".to_owned(),
         ];
         let block = sidebar_block_with_sidecar(SIDEBAR_MASCOT_MIN_LEFT, 0, None, &sidecar)
             .expect("the rabbit fits its minimum width");
