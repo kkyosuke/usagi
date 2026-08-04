@@ -110,6 +110,13 @@ fn a_fixed_token_is_recorded_as_unverifiable_and_can_never_be_authority() {
         "a live pid whose token was never observed proves nothing"
     );
     assert!(!ChildIdentity::unverifiable(11, String::new()).is_verifiable());
+
+    let gone = FakeProbe::new().with(11, ProbeAnswer::Gone);
+    assert_eq!(
+        observe_child(&gone, &legacy),
+        ChildObservation::Gone,
+        "PID absence proves the legacy child is gone without granting authority over a live PID"
+    );
 }
 
 #[test]
