@@ -236,4 +236,52 @@ mod tests {
         assert_eq!(tiny.len(), 4);
         assert!(tiny.iter().all(|line| display_width(line) <= 5));
     }
+
+    #[test]
+    fn warning_reasons_and_non_saturated_capacity_levels_are_rendered() {
+        let base = vec!["background".to_owned(); 24];
+        for (reason, label) in [
+            (HealthReason::MetricsStalled, "metrics stalled"),
+            (
+                HealthReason::TerminalOutputDropped,
+                "terminal output dropping",
+            ),
+            (HealthReason::TerminalBackpressure, "terminal backpressure"),
+            (HealthReason::PrScanIncomplete, "PR scan incomplete"),
+            (
+                HealthReason::MetricsUpdatesDropped,
+                "metrics updates dropping",
+            ),
+        ] {
+            let frame = strip(
+                &render_over(
+                    24,
+                    100,
+                    &base,
+                    Some(&metrics(1)),
+                    DaemonHealth::Warning(reason),
+                    SessionStateCounts::default(),
+                    0,
+                )
+                .join("\n"),
+            );
+            assert!(frame.contains(label));
+            assert!(frame.contains("1/16"));
+        }
+
+        let busy = strip(
+            &render_over(
+                24,
+                100,
+                &base,
+                Some(&metrics(12)),
+                DaemonHealth::Ok,
+                SessionStateCounts::default(),
+                0,
+            )
+            .join("\n"),
+        );
+        assert!(busy.contains("12/16"));
+        assert!(!busy.contains("saturated"));
+    }
 }
