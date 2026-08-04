@@ -177,6 +177,43 @@ fn terminal_record(
     }
 }
 
+fn append_unknown_exited(
+    world: &World,
+    owner: DaemonGeneration,
+    resource: &TerminalRef,
+    kind: ResourceKind,
+    pid: u32,
+) {
+    let operation = OperationId::new();
+    let start = format!("start-{pid}");
+    let payload = match kind {
+        ResourceKind::Agent => serde_json::to_string(&agent_record(
+            resource,
+            operation,
+            RuntimeState::Exited,
+            Some(process(pid, &start)),
+        )),
+        ResourceKind::Terminal => serde_json::to_string(&terminal_record(
+            resource,
+            operation,
+            TerminalRuntimeState::Exited,
+            Some(process(pid, &start)),
+        )),
+    }
+    .unwrap();
+    let mut shard = world.shard(owner);
+    shard.reserve(&operation, "exited", kind, resource).unwrap();
+    shard
+        .record_spawn(resource, &verified(pid, &start))
+        .unwrap();
+    shard.mark_ownership_unknown(resource).unwrap();
+    shard.set_payload(resource, &payload).unwrap();
+    world
+        .archive
+        .bytes(owner)
+        .set(&serde_json::to_string(&shard).unwrap());
+}
+
 fn agent_snapshot(records: Vec<DurableRuntimeRecord>) -> RuntimeStoreSnapshot {
     RuntimeStoreSnapshot {
         records,
@@ -833,6 +870,8 @@ fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
     let new = DaemonGeneration::new();
     let resource = terminal(old);
     let generic = terminal(old);
+    let exited_agent = terminal(old);
+    let exited_terminal = terminal(old);
     let operation = OperationId::new();
     let mut old_store =
         ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(31, "start-31")));
@@ -874,8 +913,18 @@ fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
         )]))
         .unwrap();
 
+    append_unknown_exited(&world, old, &exited_agent, ResourceKind::Agent, 33);
+    append_unknown_exited(&world, old, &exited_terminal, ResourceKind::Terminal, 34);
+
     let hydrated = world
-        .state(new, ObservedChildren::new().with_gone(31).with_gone(32))
+        .state(
+            new,
+            ObservedChildren::new()
+                .with_gone(31)
+                .with_gone(32)
+                .with_gone(33)
+                .with_gone(34),
+        )
         .hydrate()
         .unwrap();
 
@@ -885,6 +934,22 @@ fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
         hydrated.terminals.records[0].state,
         TerminalRuntimeState::Interrupted
     );
+    assert!(
+        hydrated
+            .agents
+            .records
+            .iter()
+            .any(|record| record.runtime.terminal == exited_agent
+                && record.state == RuntimeState::Exited)
+    );
+    assert!(
+        hydrated
+            .terminals
+            .records
+            .iter()
+            .any(|record| record.terminal == exited_terminal
+                && record.state == TerminalRuntimeState::Exited)
+    );
     assert_eq!(
         world.allocator().claim(&resource).unwrap().state,
         ClaimState::Released,
@@ -893,6 +958,52 @@ fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
     assert_eq!(
         world.allocator().claim(&generic).unwrap().state,
         ClaimState::Released
+    );
+}
+
+#[test]
+fn hydrate_keeps_a_gone_child_claim_when_releasing_it_cannot_be_saved() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    let operation = OperationId::new();
+    let mut old_store =
+        ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(35, "start-35")));
+    old_store
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            operation,
+            RuntimeState::Running,
+            Some(process(35, "start-35")),
+        )]))
+        .unwrap();
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new()))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            operation,
+            RuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            Some(process(35, "start-35")),
+        )]))
+        .unwrap();
+    let state = ShardedRuntimeState::new(
+        new,
+        GenerationRole::Active,
+        ResourceAllocator::new(
+            MemoryFile::faulty(&world.allocator, FileFault::WriteFails),
+            policy(2, 2),
+        ),
+        Box::new(world.archive.clone()),
+        Box::new(ObservedChildren::new().with_gone(35)),
+        Box::new(FakeClock::at(10)),
+    )
+    .unwrap();
+
+    assert!(state.hydrate().unwrap_err().refusal().is_none());
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Live,
+        "failed persistence must not publish capacity as released"
     );
 }
 

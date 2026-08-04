@@ -456,29 +456,15 @@ impl ShardedRuntimeState {
                 match entry.kind {
                     ResourceKind::Agent => {
                         let mut record = agent_payload(payload)?;
-                        if gone.contains(&entry.resource)
-                            && matches!(
-                                record.state,
-                                TerminalRuntimeState::Reserved
-                                    | TerminalRuntimeState::Running
-                                    | TerminalRuntimeState::ReconcileRequired(_)
-                            )
-                        {
-                            record.state = TerminalRuntimeState::Interrupted;
+                        if gone.contains(&entry.resource) {
+                            record.state = interrupt_if_unfinished(record.state);
                         }
                         agents.push(record);
                     }
                     ResourceKind::Terminal => {
                         let mut record = terminal_payload(payload)?;
-                        if gone.contains(&entry.resource)
-                            && matches!(
-                                record.state,
-                                TerminalRuntimeState::Reserved
-                                    | TerminalRuntimeState::Running
-                                    | TerminalRuntimeState::ReconcileRequired(_)
-                            )
-                        {
-                            record.state = TerminalRuntimeState::Interrupted;
+                        if gone.contains(&entry.resource) {
+                            record.state = interrupt_if_unfinished(record.state);
                         }
                         terminals.push(record);
                     }
@@ -773,6 +759,15 @@ fn agent_payload(payload: &str) -> Result<DurableRuntimeRecord, ResourceError> {
 
 fn terminal_payload(payload: &str) -> Result<DurableTerminalRecord, ResourceError> {
     serde_json::from_str(payload).map_err(|_| ResourceError::Corrupt)
+}
+
+fn interrupt_if_unfinished(state: TerminalRuntimeState) -> TerminalRuntimeState {
+    match state {
+        TerminalRuntimeState::Reserved
+        | TerminalRuntimeState::Running
+        | TerminalRuntimeState::ReconcileRequired(_) => TerminalRuntimeState::Interrupted,
+        terminal => terminal,
+    }
 }
 
 fn shard_document(raw: &str) -> Result<ShardDocument, ResourceError> {
