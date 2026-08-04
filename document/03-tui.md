@@ -21,7 +21,8 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
-- [daemon health indicator](#daemon-health-indicator)
+  - [daemon health indicator](#daemon-health-indicator)
+  - [session 状態別件数](#session-状態別件数)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
@@ -860,16 +861,21 @@ message の既定の供給元は**正常系以外の daemon 状態**である。
 異常に気づけるようにする。健全な正常系（feedback 無し・進行中 progress・再接続完了）はうさぎを無言に保つ。error ID を
 含む詳細は footer の feedback 行に委ね、bubble には載せない。呼び出し側が明示 message を与えた場合はそちらを優先する。
 
-## daemon health indicator
+mascot の右には最大 3 行の観測 status（sidecar）を並べる。sidecar は rabbit 自身の行に重ねて描くため、
+mascot block の予約行数を増やさず session viewport の容量を奪わない。各行は rabbit の幅に揃えた同じ列から
+始まり、sidebar 幅に合わせて clip する。現在の供給元は上から
+[daemon health indicator](#daemon-health-indicator)（異常時だけ）、[session 状態別件数](#session-状態別件数)、
+daemon metrics（CPU / resident memory）の 3 つで、mascot block ごと省略される狭幅ではいずれも表示しない。
 
-mascot の右の sidecar は、CPU / 常駐メモリの行に加えて **daemon health の 1 行**を出す。sidecar はうさぎの
-3 行に対して最大 3 行を使えるため、この行は mascot の予約行数を増やさない。**health が正常なら行を出さない**ので、
-正常時の Home frame は indicator 導入前と同一である。
+### daemon health indicator
+
+sidecar の最上段に、**異常または要注意のときだけ** daemon health の 1 行を出す。**正常なら行を出さない**ので、
+正常時の Home frame は indicator 導入前と同一である。3 行が揃っても mascot の予約行数は変わらない。
 
 health は**診断専用の projection** である。reducer state に載らず、Effect を生まず、command の可否・resource
 ownership・fence の判定には一切参加しない。材料は表示専用の daemon metrics
 （[4. daemon IPC](04-ipc.md)）だけで、永続化もしない。daemon 切断・再同期要求は
-[feedback](#feedback-と終了) と [mascot bubble](#sidebar-mascot) が正本であり、health はそれを二重に報告しない。
+[feedback](#feedback-と終了) と mascot の speech bubble が正本であり、health はそれを二重に報告しない。
 health が担うのは「観測できているか」と counter 由来の劣化だけである。
 
 | 判定 | 条件 | 表示 |
@@ -898,8 +904,39 @@ metrics lane の失敗中も直前 sample が保持されるため（[背景観�
 現在時刻は renderer の入力（[frame material](#frame-material-と再描画の判定)）として渡す。
 
 表示は `⚠` と短い理由だけで、raw な端末出力・path・secret・error ID を載せない。理由は閉じた語彙から選ぶため、
-自由文が indicator に流れ込む経路そのものが無い。**Nerd Font glyph は使わない**（`⚠` は mascot bubble と同じ
+自由文が indicator に流れ込む経路そのものが無い。**Nerd Font glyph は使わない**（`⚠` は speech bubble と同じ
 BMP 記号）。狭い sidebar では文言を落として記号だけに縮退し、記号も置けない幅では行を出さない。
+
+### session 状態別件数
+
+sidecar の常設行として、表示中 session の **running / waiting / failed 件数**を出す。件数は daemon 権威の
+projection から毎フレーム導出する派生値であり、[metrics](04-ipc.md) schema にも TUI の reducer state にも
+別の情報源を作らない。導出の入力は 2 つとも既に Home へ届いているものを使う。
+
+| 入力 | 権威 |
+|---|---|
+| session ごとの lifecycle | daemon の session lifecycle snapshot |
+| session scope の Agent phase 集約 | daemon の Agent phase 報告（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)と同じ projection） |
+
+分類は既存語彙だけで決め、新しい状態語彙を増やさない。1 session はちょうど 1 クラスに属するため、3 つの
+件数の合計が session 数を超えない。
+
+| クラス | 条件 | 色 |
+|---|---|---|
+| `fail` | lifecycle が `failed` | Danger |
+| `wait` | `fail` でなく、phase 集約が `waiting` | Warning |
+| `run` | `fail` でなく、phase 集約が `running` | Success |
+| （非計上） | 上記以外（`absent` / `ready` / `done`） | — |
+
+- 優先順位は `fail` > `wait` > `run` である。`failed` 行に古い phase 報告が残っている 1 フレームでも二重計上しない。
+- **`failed` は lifecycle だけが権威**である。`ended` / `exited` / `interrupted` は phase 集約の `done` へ畳まれて
+  非計上となり、失敗としては数えない。`interrupted` は daemon 再起動後に runtime identity を証明できなかった
+  daemon 所有の projection 状態で、resume 可能な履歴であるため（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)）、
+  使用不能な checkout を意味する `failed` とは別の事実である。
+- **0 件のクラスは描かない**。3 つとも 0（session が 0 件の場合を含む）なら行自体を出さない。
+- **daemon metrics が無くても出る**。件数は metrics observation と独立に導出するため、metrics 未取得でも
+  sidecar にこの行だけが載る。
+- 表示専用であり、click や絞り込みの操作は持たない。
 
 ## Closeup pane
 

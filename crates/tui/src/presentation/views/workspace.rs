@@ -22,6 +22,7 @@ use usagi_core::usecase::client::DaemonMetrics;
 use usagi_core::usecase::daemon_health::{
     DaemonHealth, DaemonHealthTracker, HealthLevel, HealthReason,
 };
+use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
@@ -180,6 +181,10 @@ pub struct HomeProjection {
     /// Phase line of the previewed session, not of the command target: the right
     /// pane is one surface and must not mix two sessions' material.
     preview_phase: TargetPhase,
+    /// 表示中 session の running / waiting / failed 件数。daemon 権威の lifecycle と
+    /// Agent phase 集約から [`SessionStateCounts::tally`] で毎フレーム導出する派生値で、
+    /// `DaemonMetrics` にも controller state にも別の情報源を作らない。
+    session_states: SessionStateCounts,
     feedback: Option<Feedback>,
     mascot_tick: u64,
     /// Presentation-only message. Runtime state currently supplies `None`; this
@@ -313,6 +318,9 @@ impl HomeProjection {
             .and_then(CreateSessionForm::selected_role)
             .map(|role| role.id.to_string());
         let preview = preview_session(state);
+        // Derived before the sessions move into the projection: the counts are a
+        // fold of the same daemon-authoritative rows, not a second source.
+        let session_states = session_state_counts(state, &sessions);
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
@@ -325,6 +333,7 @@ impl HomeProjection {
             preview_phase: preview.map_or(TargetPhase::Absent, |session| {
                 state.phase_for(Target::Session(session))
             }),
+            session_states,
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
@@ -1086,6 +1095,54 @@ fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> Stri
     }
 }
 
+/// Fold the joined Home rows into the workspace's running / waiting / failed
+/// counts.
+///
+/// Both inputs are daemon-authoritative and already on this frame: the
+/// per-session lifecycle joined onto [`ProjectedSession`] from the lifecycle
+/// snapshot, and the session-scope Agent phase the controller aggregates from the
+/// daemon's phase reports. The classification itself lives in
+/// [`usagi_core::usecase::session_state`], beside the phase aggregation it reuses,
+/// so the rule is stated once instead of in a view.
+fn session_state_counts(state: &AppState, sessions: &[ProjectedSession]) -> SessionStateCounts {
+    let classified = sessions
+        .iter()
+        .map(|session| {
+            (
+                session.lifecycle,
+                state.phase_for(Target::Session(session.id)).aggregation(),
+            )
+        })
+        .collect::<Vec<_>>();
+    SessionStateCounts::tally(&classified)
+}
+
+/// The mascot sidecar line summarising session state, or `None` when there is
+/// nothing to summarise.
+///
+/// A class with no session is omitted rather than drawn as `0`, and an entirely
+/// quiet workspace (no session at all included) yields no line, so the sidecar
+/// stays as short as the news it carries. The line is independent of
+/// [`DaemonMetrics`]: it is drawn even while the daemon observation is
+/// unavailable.
+fn session_state_sidecar(counts: SessionStateCounts) -> Option<String> {
+    if counts.is_empty() {
+        return None;
+    }
+    // Role vocabulary is the theme's own: running is Success, waiting is
+    // Warning, a failed checkout is Danger.
+    let segments = [
+        (counts.running, "run", Role::Success),
+        (counts.waiting, "wait", Role::Warning),
+        (counts.failed, "fail", Role::Danger),
+    ]
+    .into_iter()
+    .filter(|(count, _, _)| *count > 0)
+    .map(|(count, label, role)| role.style().paint(&format!("{label} {count}")))
+    .collect::<Vec<_>>();
+    Some(segments.join(" "))
+}
+
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
         || {
@@ -1119,18 +1176,23 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
     )
 }
 
-/// mascot の sidecar に出す行。health が `Ok` なら metrics 行だけを返す。
+/// mascot の sidecar に出す行を上から順に組む。
 ///
-/// sidecar はうさぎの 3 行に対して最大 3 行を許すため、行を 1 本足しても mascot の
-/// 予約行数（[`widgets::mascot::MascotBlock::reserved_rows`]）は変わらない。
-/// **health が `Ok` のときの戻り値は health 導入前と同一である。**
+/// sidecar はうさぎの 3 行に対して最大 3 行を許すため、health・session 件数・metrics の
+/// 3 行が揃っても mascot の予約行数（[`widgets::mascot::MascotBlock::reserved_rows`]）は
+/// 変わらない。health の badge は「異常時だけ」の行なので最上段に置き、常設の
+/// 件数・metrics 行の上へ載せる。**health が `Ok` のときの戻り値は health 導入前と同一である。**
 fn sidecar_labels(
     width: usize,
     metrics: Option<&DaemonMetrics>,
     health: DaemonHealth,
+    session_states: SessionStateCounts,
 ) -> Vec<String> {
     let mut labels = Vec::new();
     labels.extend(health_badge(health, width));
+    // session 件数は lifecycle / phase projection だけから決まるので、daemon の観測が
+    // 無くても出る。
+    labels.extend(session_state_sidecar(session_states));
     // 観測が無いときは CPU / メモリ行を出さない（metrics 導入前と同じ静けさ）。
     // health だけが非 Ok なら badge 行だけが出る。
     if let Some(metrics) = metrics {
@@ -1435,24 +1497,21 @@ fn home_left_pane(
     }
     let body_capacity = height - 1;
     // Reuse the legacy metric projection so both render paths draw an identical
-    // sidecar. An absent observation yields no sidecar rows, which keeps the
+    // sidecar. An absent observation yields no metrics row, which keeps the
     // pre-metrics home frame byte-for-byte unchanged. The diagnostic health
     // badge is evaluated against the frame's own clock — the renderer stays the
     // only place that reads time, so `now` remains the whole time input.
-    let metric_labels = sidecar_labels(
+    let sidecar = sidecar_labels(
         width,
         home.metrics.as_ref(),
         home.health.evaluate(now.timestamp_millis()),
+        home.session_states,
     );
     // 明示された mascot speech を優先し、無ければ正常系以外の daemon 状態を吹き出しへ落とす。
     let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
     let speech = home.mascot_speech.as_ref().or(daemon_speech.as_ref());
-    let mascot = widgets::mascot::sidebar_block_with_sidecar(
-        width,
-        home.mascot_tick,
-        speech,
-        &metric_labels,
-    );
+    let mascot =
+        widgets::mascot::sidebar_block_with_sidecar(width, home.mascot_tick, speech, &sidecar);
     let show_mascot = mascot
         .as_ref()
         .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
@@ -2056,14 +2115,14 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, CREATE_SKELETON_ROWS, CreateDraft, GIBIBYTE, GitDiff, HEALTH_GLYPH,
-        HomeHeaderAction, HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession, SIDECAR_GUTTER,
-        SidebarDiffColumns, TerminalViewProjection, Workspace, abnormal_daemon_speech,
-        create_skeleton_lines, feedback_label, format_memory, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_row_lines_at,
-        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
-        pane_tab_selected, phase_label, render_home, render_home_at, resume_label, sidecar_labels,
-        terminal_point_at, with_footer_gap,
+        CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft, DaemonMetrics, GIBIBYTE, GitDiff,
+        HEALTH_GLYPH, HomeHeaderAction, HomeProjection, LEFT_WIDTH, MEBIBYTE, ProjectedSession,
+        SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, Workspace,
+        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory, health_badge,
+        health_reason_label, home_header_action_at, home_header_layout, home_left_pane,
+        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
+        pane_tab_label, pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
+        sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -2087,19 +2146,20 @@ mod tests {
     use std::path::PathBuf;
     use usagi_core::domain::agent::{ProviderResumeProjection, ProviderResumeReason};
     use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, UserDecisionId,
-        WorkspaceId, WorktreeId,
+        AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId, SessionId, TerminalId,
+        TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::role::RoleId;
-    use usagi_core::domain::session_lifecycle::SessionLifecycle;
+    use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
+    use usagi_core::usecase::session_state::SessionStateCounts;
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -2207,6 +2267,169 @@ mod tests {
             failure_summary: None,
             role_id: None,
         }
+    }
+
+    fn runtime_ref(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
+        AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: WorktreeId::new(),
+            },
+            Some(session),
+        )
+        .expect("a session owns its own terminal")
+    }
+
+    /// Build a Home projection whose rows carry the given daemon-authoritative
+    /// lifecycle and, when present, one Agent runtime reporting that phase.
+    fn home_with_session_states(rows: &[(SessionLifecycle, Option<AgentPhase>)]) -> HomeProjection {
+        let workspace = WorkspaceId::new();
+        let ids = rows.iter().map(|_| SessionId::new()).collect::<Vec<_>>();
+        let mut state = AppState::home(workspace, ids.clone());
+        let mut projected = Vec::new();
+        for (index, (lifecycle, phase)) in rows.iter().enumerate() {
+            let id = ids[index];
+            if let Some(phase) = *phase {
+                let _ = update(
+                    &mut state,
+                    AppEvent::Backend(BackendEvent::RuntimePhase {
+                        runtime: runtime_ref(workspace, id),
+                        phase,
+                    }),
+                );
+            }
+            let mut session = projected_session(id, &format!("s{index}"), "/work");
+            session.lifecycle = *lifecycle;
+            projected.push(session);
+        }
+        HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected)
+    }
+
+    fn daemon_metrics() -> DaemonMetrics {
+        DaemonMetrics {
+            schema_version: 1,
+            sampled_at_ms: 42,
+            cpu_percent_hundredths: 123,
+            resident_memory_bytes: 45 * MEBIBYTE,
+            active_subscribers: 1,
+            dropped_updates: 0,
+            terminal_dropped_bytes: 0,
+            terminal_coalesced_bytes: 0,
+            terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
+        }
+    }
+
+    /// The summary counts each session exactly once under the documented
+    /// precedence, and never reports a finished or interrupted runtime as a
+    /// failure — only a `Failed` lifecycle is a failure.
+    #[test]
+    fn home_sidebar_summarises_running_waiting_and_failed_sessions() {
+        let home = home_with_session_states(&[
+            (SessionLifecycle::Available, Some(AgentPhase::Running)),
+            (SessionLifecycle::Available, Some(AgentPhase::Running)),
+            (SessionLifecycle::Available, Some(AgentPhase::Waiting)),
+            (SessionLifecycle::Failed, None),
+            (SessionLifecycle::Available, Some(AgentPhase::Interrupted)),
+            (SessionLifecycle::Available, Some(AgentPhase::Exited)),
+            (SessionLifecycle::Available, Some(AgentPhase::Ended)),
+            (SessionLifecycle::Initializing, None),
+        ]);
+
+        let frame = joined_home(&home);
+        assert!(frame.contains("run 2 wait 1 fail 1"), "{frame}");
+    }
+
+    /// A failed row and a still-live phase report can overlap for a frame while
+    /// the snapshot catches up. `Failed` wins, so the session is not counted twice.
+    #[test]
+    fn a_failed_session_outranks_a_runtime_that_still_reports_running() {
+        let home =
+            home_with_session_states(&[(SessionLifecycle::Failed, Some(AgentPhase::Running))]);
+        let frame = joined_home(&home);
+        assert!(frame.contains("fail 1"), "{frame}");
+        assert!(!frame.contains("run "), "{frame}");
+    }
+
+    #[test]
+    fn the_session_state_summary_omits_the_classes_with_no_session() {
+        let home =
+            home_with_session_states(&[(SessionLifecycle::Available, Some(AgentPhase::Waiting))]);
+        let frame = joined_home(&home);
+        assert!(frame.contains("wait 1"), "{frame}");
+        assert!(!frame.contains("run "), "{frame}");
+        assert!(!frame.contains("fail "), "{frame}");
+    }
+
+    /// An empty workspace and a workspace with nothing to report both leave the
+    /// sidecar as it was before the summary existed, rather than drawing zeros.
+    #[test]
+    fn a_quiet_workspace_draws_no_session_state_row() {
+        let baseline = joined_home(&home_with_session_states(&[]));
+        let quiet = joined_home(&home_with_session_states(&[
+            (SessionLifecycle::Available, Some(AgentPhase::Ready)),
+            (SessionLifecycle::Deleting, None),
+        ]));
+        for frame in [&baseline, &quiet] {
+            for label in ["run ", "wait ", "fail "] {
+                assert!(!frame.contains(label), "{label} in {frame}");
+            }
+        }
+    }
+
+    /// The counts are derived from the lifecycle / phase projection, not from the
+    /// daemon metrics schema, so they are drawn even while no observation has
+    /// arrived — and they never displace the metrics row.
+    #[test]
+    fn the_state_row_needs_no_metrics_and_sits_above_the_metrics_row() {
+        let home =
+            home_with_session_states(&[(SessionLifecycle::Available, Some(AgentPhase::Running))]);
+
+        let without = home_left_pane(30, LEFT_WIDTH, &home, now());
+        assert!(without.iter().any(|line| strip(line).contains("run 1")));
+        assert!(without.iter().all(|line| !strip(line).contains(CPU_ICON)));
+
+        let with_metrics = home_left_pane(
+            30,
+            LEFT_WIDTH,
+            &home.clone().with_metrics(Some(daemon_metrics())),
+            now(),
+        );
+        let state_row = with_metrics
+            .iter()
+            .position(|line| strip(line).contains("run 1"))
+            .expect("session state row");
+        let metrics_row = with_metrics
+            .iter()
+            .position(|line| strip(line).contains(CPU_ICON))
+            .expect("daemon metrics row");
+        assert_eq!(metrics_row, state_row + 1);
+        // Both statuses begin in the same column beside the rabbit.
+        assert_eq!(
+            strip(&with_metrics[state_row]).find("run 1"),
+            strip(&with_metrics[metrics_row]).find(CPU_ICON)
+        );
+    }
+
+    /// Narrow sidebars keep the existing degradation: too narrow for the rabbit
+    /// drops the whole mascot block, and a middling width clips the status text
+    /// instead of overflowing the pane.
+    #[test]
+    fn a_narrow_sidebar_drops_or_clips_the_state_row_without_overflowing() {
+        let home = home_with_session_states(&[(SessionLifecycle::Failed, None)]);
+
+        let dropped = home_left_pane(20, 8, &home, now());
+        assert!(dropped.iter().all(|line| !strip(line).contains("fail 1")));
+        assert!(dropped.iter().all(|line| display_width(line) <= 8));
+
+        let clipped = home_left_pane(20, 14, &home, now());
+        assert!(clipped.iter().all(|line| display_width(line) <= 14));
     }
 
     fn joined_home(home: &HomeProjection) -> String {
@@ -3551,7 +3774,12 @@ mod tests {
     fn the_indicator_appears_without_a_metrics_observation() {
         let unresponsive = DaemonHealth::Danger(HealthReason::DaemonUnresponsive);
         // metrics unavailable でも indicator だけは出す。
-        let alone = sidecar_labels(LEFT_WIDTH, None, unresponsive);
+        let alone = sidecar_labels(
+            LEFT_WIDTH,
+            None,
+            unresponsive,
+            SessionStateCounts::default(),
+        );
         assert_eq!(alone.len(), 1);
         assert!(strip(&alone[0]).contains("daemon 無応答"));
 
@@ -3561,17 +3789,48 @@ mod tests {
             LEFT_WIDTH,
             Some(&metrics),
             DaemonHealth::Warning(HealthReason::PrScanIncomplete),
+            SessionStateCounts::default(),
         );
         assert_eq!(both.len(), 2);
         assert!(strip(&both[0]).contains("PR 検出の欠落"));
         assert!(strip(&both[1]).contains("45MB"));
 
+        // 3 行そろっても sidecar の上限（うさぎの 3 行）に収まり、順序は
+        // health → session 件数 → metrics である。
+        let full = sidecar_labels(
+            LEFT_WIDTH,
+            Some(&metrics),
+            DaemonHealth::Warning(HealthReason::TerminalBackpressure),
+            SessionStateCounts {
+                running: 2,
+                waiting: 1,
+                failed: 0,
+            },
+        );
+        assert_eq!(full.len(), 3);
+        assert!(strip(&full[0]).contains("端末出力の滞留"));
+        assert!(strip(&full[1]).contains("run 2"));
+        assert!(strip(&full[2]).contains("45MB"));
+
         // 正常時の sidecar は health 導入前とバイト単位で同じ 1 行である。
         assert_eq!(
-            sidecar_labels(LEFT_WIDTH, Some(&metrics), DaemonHealth::Ok),
+            sidecar_labels(
+                LEFT_WIDTH,
+                Some(&metrics),
+                DaemonHealth::Ok,
+                SessionStateCounts::default()
+            ),
             super::mascot_metrics(Some(&metrics), 0)
         );
-        assert!(sidecar_labels(LEFT_WIDTH, None, DaemonHealth::Ok).is_empty());
+        assert!(
+            sidecar_labels(
+                LEFT_WIDTH,
+                None,
+                DaemonHealth::Ok,
+                SessionStateCounts::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]

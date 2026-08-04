@@ -26,6 +26,8 @@
 //! - [`agent_phase`] — daemon と TUI が共有する Agent phase の集約分類・順位。
 //! - [`daemon_health`] — 表示専用 [`client::DaemonMetrics`] の sample 列から診断専用の
 //!   health（level と閉じた理由 enum）を作る純粋な観測器。操作・ownership の権威ではない。
+//! - [`session_state`] — session lifecycle と Agent phase 集約を running / waiting /
+//!   failed の表示クラスへ畳む純粋な分類と、その件数集計。
 
 pub mod agent;
 pub mod agent_phase;
@@ -39,6 +41,7 @@ pub mod note;
 pub mod owner_routing;
 pub mod pr_inventory;
 pub mod session;
+pub mod session_state;
 pub mod settings;
 pub mod vt_screen;
 pub mod workspace;
