@@ -42,7 +42,10 @@ pub(crate) fn render_over(
     projection: DaemonProjection<'_>,
 ) -> Vec<String> {
     let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    let body_height = height.saturating_sub(4).min(MAX_BODY_HEIGHT);
+    // Four modal rows belong to border + internal vertical padding. Keep one
+    // Home row visible above and below on short terminals as the shared modal
+    // overlay contract requires.
+    let body_height = height.saturating_sub(6).min(MAX_BODY_HEIGHT);
     modal::render_over(
         raw_height,
         raw_width,

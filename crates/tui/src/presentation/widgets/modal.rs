@@ -304,9 +304,10 @@ pub fn render_body(
 
 /// Reserve `body_height` rows for `lines` and composite the modal over `base`.
 ///
-/// On a short terminal the reserve is clamped to `height - 4` so a sliver of the
-/// background stays visible above and below the box; normal terminals keep the
-/// full reserve. The twin of [`render_body`].
+/// On a short terminal the reserve is clamped to `height - 6`: border and
+/// internal vertical padding consume four rows, leaving one background row
+/// above and below the box. Normal terminals keep the full reserve. The twin of
+/// [`render_body`].
 #[must_use]
 pub fn render_body_over(
     raw_height: usize,
@@ -318,7 +319,7 @@ pub fn render_body_over(
     lines: Vec<String>,
 ) -> Vec<String> {
     let (height, _) = normalize_size(raw_height, raw_width);
-    let reserved = body_height.min(height.saturating_sub(4));
+    let reserved = body_height.min(height.saturating_sub(6));
     render_over(
         raw_height,
         raw_width,
@@ -1066,11 +1067,11 @@ mod tests {
             render_modal(24, 80, "T", 20, &fixed_body(lines.clone(), 6))
         );
 
-        // Over a background: the reserve clamps to height - 4 on a short
-        // terminal so a sliver of the base survives above and below the box.
+        // Over a background: the reserve leaves room for border + internal
+        // padding and one base row above and below the box.
         let base = vec!["background".to_string(); 8];
         let over = render_body_over(8, 80, &base, "T", 20, 6, lines.clone());
-        let reserved = 6usize.min(8usize.saturating_sub(4));
+        let reserved = 6usize.min(8usize.saturating_sub(6));
         assert_eq!(
             over,
             render_over(8, 80, &base, "T", 20, &fixed_body(lines, reserved))

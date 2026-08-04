@@ -499,7 +499,7 @@ pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<
 }
 
 /// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
-/// サイズ 0 は 80×24 にフォールバックする。
+/// 小端末では [`modal::render_body_over`] が背景の帯を残す。サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
 pub fn render_over(
     raw_height: usize,
@@ -507,13 +507,14 @@ pub fn render_over(
     base: &[String],
     state: &CloseupModal,
 ) -> Vec<String> {
-    modal::render_over(
+    modal::render_body_over(
         raw_height,
         raw_width,
         base,
         &format!("Closeup: {}", state.session()),
         INNER_WIDTH,
-        &body(state),
+        BODY_HEIGHT,
+        body(state),
     )
 }
 
@@ -1032,10 +1033,10 @@ mod tests {
 
     #[test]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
-        let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 16];
-        let frame = render_over(16, 9, &base, &CloseupModal::new("会話"));
+        let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 14];
+        let frame = render_over(14, 9, &base, &CloseupModal::new("会話"));
 
-        assert_eq!(frame.len(), 16);
+        assert_eq!(frame.len(), 14);
         assert!(frame.iter().all(|line| display_width(line) == 9));
         assert!(frame.iter().any(|line| line.contains('┌')));
         assert!(frame.iter().any(|line| line.contains("\u{1b}[35m")));

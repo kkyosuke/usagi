@@ -2246,6 +2246,13 @@ impl WorkspaceUi {
         self.agent_inventory.as_ref()
     }
 
+    /// Opening the daemon modal starts from an explicit loading projection and
+    /// asks the existing coalesced restore lane for one fresh coherent snapshot.
+    fn refresh_agent_inventory(&mut self) {
+        self.agent_inventory = None;
+        self.request_agent_observation();
+    }
+
     /// The saved Agent slot order of the whole workspace, flattened across
     /// targets. It gives a restored interrupted tab the position the user last
     /// saw it in (#506 slots keyed by lineage).
@@ -5317,6 +5324,7 @@ fn drive_workspace_controller(
         {
             continue;
         }
+        let daemon_overlay_was_open = runtime.state().overlay() == Some(Overlay::Daemon);
         let effects = if let WorkspaceInputRoute::Drawer(effects) = input_route {
             effects
         } else if is_director_new_click(&key, &runtime, height, width) {
@@ -5342,6 +5350,9 @@ fn drive_workspace_controller(
         } else {
             runtime.handle_key(key)
         };
+        if !daemon_overlay_was_open && runtime.state().overlay() == Some(Overlay::Daemon) {
+            ui.refresh_agent_inventory();
+        }
         for effect in effects {
             let opens_workspace_config = matches!(
                 &effect,
@@ -12638,7 +12649,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_without_agent_intent_keeps_saved_selection_map_empty() {
+    fn restore_without_agent_intent_caches_inventory_and_refresh_clears_it() {
         let workspace = WorkspaceId::new();
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
@@ -12668,6 +12679,9 @@ mod tests {
             ui.agent_inventory().map(|inventory| inventory.workspace_id),
             Some(workspace)
         );
+        ui.refresh_agent_inventory();
+        assert!(ui.agent_inventory().is_none());
+        assert!(ui.take_agent_observation_request());
         assert!(runtime.active_pane().tabs().is_empty());
     }
 

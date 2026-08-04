@@ -699,6 +699,7 @@ Overview の `daemon` は workspace の daemon status modal を開く。modal �
 daemon-authoritative な session projection を使い、health、CPU / memory、接続 client 数、managed session の
 running / waiting / failed 件数、Agent concurrency の使用中 / 上限、workspace 全体の Agent runtime inventory を
 一画面に表示する。runtime は root または stable `SessionId` で結合した session label、状態、表示専用の短縮 runtime ID を持つ。
+modal を開くたびに既存の coalesced restore lane へ新しい coherent inventory を要求し、取得までは待機表示にする。
 一覧が表示域を超える場合は収まる先頭行と残件数を表示する。値は診断専用であり、
 launch admission や ownership の判断には使わない。metrics 未取得と Agent concurrency 未報告はそれぞれ
 `waiting for daemon observation` / `unreported` と表示し、Agent inventory の初回取得前も待機表示にして idle と読み替えない。
@@ -782,7 +783,8 @@ Enter、modal 表示中の背景入力は安全な no-op であり、追加の�
 `name`、`root`、`created_at` を entry の incarnation fence として保持する。refresh により一致しない entry は
 request 前に除外するため、同名再作成や一覧更新で別の session を削除しない。
 
-modal の共通枠は本文の上下左右に 1 セル分の内側余白を持つ。modal は view ごとに予約した body 行数で描画する。候補数、empty state、result、error、loading、editor の
+modal の共通枠は本文の上下左右に 1 セル分の内側余白を持つ。短い端末でも overlay は上下に Home 背景を1行ずつ残す。
+modal は view ごとに予約した body 行数で描画する。候補数、empty state、result、error、loading、editor の
 内容が変化しても、開いている modal の枠高さは変わらない。端末が短い場合は予約領域を安全に clip し、
 Home 背景との合成範囲を越えない。
 
