@@ -157,6 +157,20 @@ struct McpCaller {
     child_pid: Option<u32>,
 }
 
+/// Accepts both provider-inherited and provider-isolated MCP process groups.
+///
+/// Codex starts each managed child as its own process-group leader. The direct
+/// parent fence and the one-shot caller slot still distinguish that child from
+/// an unrelated process; requiring only the provider's process group would
+/// reject the production MCP child before it can receive its credential.
+fn mcp_child_process_group_matches(
+    provider_process_group: u32,
+    child_pid: u32,
+    child_process_group: u32,
+) -> bool {
+    child_process_group == provider_process_group || child_process_group == child_pid
+}
+
 /// The routing decision for a terminal request that addresses a `TerminalRef`.
 pub enum TerminalOutcome<T = TerminalResponse> {
     /// The Agent owner recognizes the terminal and produced this result.
@@ -477,9 +491,10 @@ impl AgentRuntime {
             .map(|_| caller.operation)
     }
 
-    /// Claims the one MCP child slot whose OS parent and process group are the
-    /// live Agent process. The bearer crosses only this authenticated IPC
-    /// response and is thereafter fenced to the claiming PID.
+    /// Claims the one MCP child slot whose OS parent is the live Agent process
+    /// and whose process group is inherited or self-led. The bearer crosses
+    /// only this authenticated IPC response and is thereafter fenced to the
+    /// claiming PID.
     pub fn claim_mcp_child(
         &mut self,
         child_pid: u32,
@@ -494,7 +509,12 @@ impl AgentRuntime {
                     .is_ok_and(|record| {
                         record.state == super::runtime::RuntimeState::Running
                             && record.process.as_ref().is_some_and(|process| {
-                                process.pid == parent_pid && process.process_group == process_group
+                                process.pid == parent_pid
+                                    && mcp_child_process_group_matches(
+                                        process.process_group,
+                                        child_pid,
+                                        process_group,
+                                    )
                             })
                     })
         });
@@ -5407,6 +5427,20 @@ mod tests {
                 provider_matches_profile(provider, &AgentProfileId::new(profile).unwrap()),
                 expected,
                 "{provider:?} {profile}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_child_accepts_inherited_or_isolated_process_groups_only() {
+        for (provider_group, child_pid, child_group, expected) in [
+            (4321, 9001, 4321, true),
+            (4321, 9001, 9001, true),
+            (4321, 9001, 9999, false),
+        ] {
+            assert_eq!(
+                mcp_child_process_group_matches(provider_group, child_pid, child_group),
+                expected
             );
         }
     }
