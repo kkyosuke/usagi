@@ -1,13 +1,13 @@
 ---
 number: 645
 title: feat(tui): Home に診断専用の daemon health indicator を出す
-status: in-progress
+status: done
 priority: medium
 labels: [v2, tui, core, metrics, diagnostics]
 dependson: []
 related: []
 created_at: 2026-08-04T12:57:36.226819+00:00
-updated_at: 2026-08-04T12:57:46.589155+00:00
+updated_at: 2026-08-04T13:33:30.340517+00:00
 ---
 
 ## 目的
@@ -57,8 +57,9 @@ health は**診断専用の projection** である。`AppState` にも reducer �
 
 - `DaemonHealthTracker::observe(&DaemonMetrics)` が sample 間の差分を畳む。時計は sample 自身の
   `sampled_at_ms` だけを使い、IO も実時計も触らない。
-- `DaemonHealthState`（`Clone + PartialEq + Eq`）が frame material に載る値で、
-  `state.evaluate(now_ms) -> DaemonHealth` が freshness と合成して level / 理由を返す純関数。
+- `DaemonHealthTracker` は `Clone + Copy + PartialEq + Eq` で frame material に載る値であり、
+  `tracker.evaluate(now_ms) -> DaemonHealth` が freshness と合成して level / 理由を返す純関数である
+  （実時計は renderer が受け取る `now` から渡す）。
 - 理由は**閉じた enum**（`HealthReason`）で、free text を持たない。したがって secret / raw PTY 出力 / path が
   indicator に載ることが構造的に起こり得ない。表示文言は presentation 側の対応表で決める。
 
