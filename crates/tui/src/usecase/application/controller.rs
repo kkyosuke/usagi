@@ -45,6 +45,8 @@ pub enum Route {
 pub enum Overlay {
     /// workspace scope の command surface。
     Overview,
+    /// daemon health / Agent capacity の読み取り専用 status surface。
+    Daemon,
     /// active target scope の action surface。
     Closeup,
     /// Detach confirmation. This is TUI-local: confirming it never stops a
@@ -3233,13 +3235,13 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         Overlay::CreateSession => update_create_session_form(state, &key),
         // Dismissal is handled by the early Enter/Escape/Ctrl-C branch above; any
         // other key is inert while the create-failure dialog owns input.
-        Overlay::CreateSessionError => Vec::new(),
         Overlay::Prs => update_prs_overlay(state, &key),
         Overlay::Preview => update_preview_overlay(state, &key),
-        Overlay::Overview if matches!(key, AppKey::Escape) => {
+        Overlay::Daemon | Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
         }
+        Overlay::CreateSessionError | Overlay::Daemon => Vec::new(),
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
 }
@@ -3927,6 +3929,15 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
                 state.notice = Some(Notice::new("config takes no arguments (usage: config)"));
                 Vec::new()
             }
+        }
+        Ok(overview::Command::Daemon { arguments }) => {
+            if arguments.trim().is_empty() {
+                state.overlay = Some(Overlay::Daemon);
+                state.notice = None;
+            } else {
+                state.notice = Some(Notice::new("daemon takes no arguments (usage: daemon)"));
+            }
+            Vec::new()
         }
         Ok(overview::Command::Env { arguments }) => {
             if let Some(scope) = environment_scope(&arguments) {
@@ -5707,6 +5718,7 @@ mod tests {
         let (workspace, first, _) = ids();
         for overlay in [
             Overlay::Overview,
+            Overlay::Daemon,
             Overlay::Closeup,
             Overlay::QuitConfirmation,
             Overlay::Notes,
@@ -5750,6 +5762,7 @@ mod tests {
                     });
                 }
                 Overlay::Overview
+                | Overlay::Daemon
                 | Overlay::Closeup
                 | Overlay::QuitConfirmation
                 | Overlay::CreateSessionError => {}
@@ -5958,6 +5971,7 @@ mod tests {
         // owns both keys; only the documented Ctrl-C close contracts dismiss.
         for (overlay, ctrl_c_stays_open, ctrl_q_stays_open) in [
             (Overlay::Overview, true, true),
+            (Overlay::Daemon, true, true),
             (Overlay::Closeup, false, true),
             (Overlay::QuitConfirmation, true, true),
             (Overlay::Notes, true, true),
@@ -7487,6 +7501,40 @@ mod tests {
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).len(),
             1
+        );
+    }
+
+    #[test]
+    fn overview_daemon_opens_the_status_surface_without_an_effect() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("daemon".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Daemon));
+        assert!(state.notice().is_none());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        state.overlay = Some(Overlay::Overview);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("daemon extra".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
         );
     }
 

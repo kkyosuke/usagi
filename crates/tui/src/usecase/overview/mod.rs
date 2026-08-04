@@ -39,6 +39,7 @@ pub struct CommandInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Config { arguments: String },
+    Daemon { arguments: String },
     Env { arguments: String },
     Issue { arguments: String },
     Roles { arguments: String },
@@ -86,6 +87,15 @@ const DEFINITIONS: &[CommandDefinition] = &[
             long_description: "Open the local settings surface for this workspace.",
         },
         factory: |arguments| Command::Config { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
+            name: "daemon",
+            description: "Inspect daemon health and Agent capacity",
+            usage: "daemon",
+            long_description: "Open the daemon status surface for this workspace.",
+        },
+        factory: |arguments| Command::Daemon { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -269,6 +279,7 @@ impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Config { .. } => "config",
+            Self::Daemon { .. } => "daemon",
             Self::Env { .. } => "env",
             Self::Issue { .. } => "issue",
             Self::Roles { .. } => "roles",
@@ -282,6 +293,7 @@ impl Command {
 
         match self {
             Self::Config { arguments } => Box::new(h::Config { arguments }),
+            Self::Daemon { arguments } => Box::new(h::Daemon { arguments }),
             Self::Env { arguments } => Box::new(h::Env { arguments }),
             Self::Issue { arguments } => Box::new(h::Issue { arguments }),
             Self::Roles { arguments } => Box::new(h::Roles { arguments }),
@@ -383,7 +395,10 @@ mod tests {
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
-        assert_eq!(names, ["config", "env", "issue", "roles", "session"]);
+        assert_eq!(
+            names,
+            ["config", "daemon", "env", "issue", "roles", "session"]
+        );
         assert!(
             definitions
                 .iter()
@@ -392,6 +407,9 @@ mod tests {
         assert_eq!(
             [
                 Command::Config {
+                    arguments: String::new()
+                },
+                Command::Daemon {
                     arguments: String::new()
                 },
                 Command::Env {
@@ -408,7 +426,7 @@ mod tests {
                 },
             ]
             .map(|command| command.name()),
-            ["config", "env", "issue", "roles", "session"]
+            ["config", "daemon", "env", "issue", "roles", "session"]
         );
     }
 
@@ -516,6 +534,12 @@ mod tests {
             (
                 "config",
                 Command::Config {
+                    arguments: String::new(),
+                },
+            ),
+            (
+                "daemon",
+                Command::Daemon {
                     arguments: String::new(),
                 },
             ),

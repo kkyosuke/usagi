@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(modal.input(), "");
         assert_eq!(modal.cursor(), 0);
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.matches().len(), 5);
+        assert_eq!(modal.matches().len(), 6);
         // derive された Clone / Debug / Eq も触れる。
         assert!(format!("{:?}", modal.clone()).contains("OverviewModal"));
         assert_eq!(modal.clone(), modal);
@@ -516,14 +516,14 @@ mod tests {
             vec!["config"]
         );
         modal.backspace();
-        assert_eq!(modal.matches().len(), 5);
+        assert_eq!(modal.matches().len(), 6);
     }
 
     #[test]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
-        modal.select_prev(); // wrap to last (4)
-        assert_eq!(modal.selected(), 4);
+        modal.select_prev(); // wrap to last (5)
+        assert_eq!(modal.selected(), 5);
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
     }
