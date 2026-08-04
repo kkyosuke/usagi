@@ -929,7 +929,10 @@ fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<P
         &state.selected,
         PaneSelection::Tab(TabSelection::Pending(selected)) if *selected == operation
     ) {
-        state.selected = PaneSelection::Target(target);
+        state.selected = state
+            .tabs
+            .get(index.min(state.tabs.len().saturating_sub(1)))
+            .map_or(PaneSelection::Target(target), selection_for);
     }
     state.error = Some(message);
     Vec::new()
@@ -1270,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_removes_placeholder_keeps_other_tabs_and_records_safe_error() {
+    fn failure_removes_placeholder_selects_a_retained_tab_and_records_safe_error() {
         let target = target();
         let mut state = PaneState::new(PaneSelection::Target(target));
         let retained = terminal(target);
@@ -1299,6 +1302,33 @@ mod tests {
         );
         assert_eq!(state.tabs().len(), 1);
         assert_eq!(state.error(), Some("agent failed safely"));
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Live(retained))
+        );
+    }
+
+    #[test]
+    fn failure_of_the_only_placeholder_returns_selection_to_its_target() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let operation = request(&mut state, target, PaneKind::Agent);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
+        );
+
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::Failed {
+                    operation,
+                    message: "agent failed safely".to_owned(),
+                },
+            )
+            .is_empty()
+        );
+        assert!(state.tabs().is_empty());
         assert_eq!(state.selected(), &PaneSelection::Target(target));
     }
 

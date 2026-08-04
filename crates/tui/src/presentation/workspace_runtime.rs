@@ -3184,6 +3184,34 @@ mod tests {
         assert!(joined_frame(&runtime).contains(super::AGENT_CAPACITY_RECOVERY));
     }
 
+    #[test]
+    fn agent_capacity_failure_keeps_an_existing_live_agent_focused_for_ctrl_d() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let existing_operation = submit_agent(&mut runtime);
+        let existing = terminal_ref(workspace, session);
+        let _ = runtime.complete_pane_focus_if_uninterrupted(
+            target,
+            existing_operation,
+            existing.clone(),
+        );
+
+        let pending_operation = OperationId::new();
+        let _ = runtime.request_pane(target, pending_operation, PaneKind::Agent);
+        let _ = runtime.select_tab(TabDirection::Next);
+
+        let _ = runtime.fail_pane(
+            target,
+            pending_operation,
+            super::AGENT_CAPACITY_EXHAUSTED.to_owned(),
+        );
+
+        assert_eq!(runtime.focused_terminal(), Some(existing));
+        assert!(runtime.wants_live_input());
+    }
+
     // ── R2: completion focus is gated on no later interaction ────────────────
 
     #[test]
