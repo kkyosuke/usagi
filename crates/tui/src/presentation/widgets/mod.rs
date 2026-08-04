@@ -321,13 +321,39 @@ pub fn dim_ansi(text: &str) -> String {
             continue;
         }
 
-        let mut params = sequence
-            .split(';')
-            // `0` resets every attribute, including the dim attribute we add
-            // below. Drop it together with bold/dim so a nested span reset
-            // becomes a fresh dim style rather than `2;0` (which is bright).
-            .filter(|param| *param != "0" && *param != "1" && *param != "2")
-            .collect::<Vec<_>>();
+        let raw_params = sequence.split(';').collect::<Vec<_>>();
+        let mut params = Vec::with_capacity(raw_params.len() + 1);
+        let mut index = 0;
+        while index < raw_params.len() {
+            let param = raw_params[index];
+            let code = if param.is_empty() {
+                // An omitted SGR parameter is the reset parameter (`0`).
+                Some(0)
+            } else {
+                param.parse::<u16>().ok()
+            };
+            match code {
+                // Reset, bold/faint, blink, reverse and normal intensity can
+                // cancel or visually overpower an inactive pane's treatment.
+                // Background colours are included because SGR faint does not
+                // affect them on common terminals, leaving focused rows bright.
+                Some(0 | 1 | 2 | 5 | 6 | 7 | 22 | 40..=47 | 100..=107) => index += 1,
+                Some(48) => index += extended_colour_param_count(&raw_params[index..]),
+                // Preserve complete foreground and underline-colour groups.
+                // Treating their numeric payload as standalone SGR codes would
+                // corrupt RGB values containing 0, 1 or 2.
+                Some(38 | 58) => {
+                    let count = extended_colour_param_count(&raw_params[index..]);
+                    params.extend_from_slice(&raw_params[index..index + count]);
+                    index += count;
+                }
+                _ if param.starts_with("48:") => index += 1,
+                _ => {
+                    params.push(param);
+                    index += 1;
+                }
+            }
+        }
         params.insert(0, "2");
         output.push(ESC);
         output.push('[');
@@ -336,6 +362,18 @@ pub fn dim_ansi(text: &str) -> String {
     }
     output.push_str(RESET);
     output
+}
+
+/// Number of semicolon-separated parameters occupied by an extended SGR colour.
+///
+/// `38/48/58;5;n` occupies three parameters and `38/48/58;2;r;g;b` occupies
+/// five. Malformed or colon-form colours stay a single opaque parameter.
+fn extended_colour_param_count(params: &[&str]) -> usize {
+    match params.get(1).and_then(|param| param.parse::<u16>().ok()) {
+        Some(5) => params.len().min(3),
+        Some(2) => params.len().min(5),
+        _ => 1,
+    }
 }
 
 /// フォールバックの行数。controller の launch gate も同じ行数で正規化する。
@@ -434,7 +472,7 @@ mod tests {
     use super::{
         Shimmer, block_caret, block_caret_with_selection, centered_padding, clip_to_width,
         dim_ansi, display_width, normalize_size, relative_session_time, relative_time,
-        shimmer_text, shimmer_text_with, wrap_to_width,
+        shimmer_text, shimmer_text_with, strip_ansi, wrap_to_width,
     };
     use crate::presentation::theme::{Role, Style};
     use chrono::{DateTime, Duration, Utc};
@@ -588,6 +626,32 @@ mod tests {
         assert!(!dimmed.contains("[1;36m"));
         assert!(!dimmed.contains("[2;0m"));
         assert!(dimmed.ends_with("\u{1b}[0m"));
+    }
+
+    #[test]
+    fn dim_ansi_keeps_terminal_focus_resets_backgrounds_and_reverse_inactive() {
+        let focused = concat!(
+            "plain ",
+            "\u{1b}[7;48;5;240mfocused",
+            "\u{1b}[22m normal ",
+            "\u{1b}[mreset"
+        );
+        let dimmed = dim_ansi(focused);
+
+        assert_eq!(strip_ansi(&dimmed), "plain focused normal reset");
+        assert!(!dimmed.contains("[7"));
+        assert!(!dimmed.contains("48;5;240"));
+        assert!(!dimmed.contains("[2;22m"));
+        assert!(!dimmed.contains("[2;m"));
+        assert!(dimmed.matches("\u{1b}[2m").count() >= 3);
+    }
+
+    #[test]
+    fn dim_ansi_preserves_complete_extended_foreground_colours() {
+        let dimmed = dim_ansi("\u{1b}[38;2;0;1;2mrgb\u{1b}[38;5;2mindexed");
+
+        assert!(dimmed.contains("\u{1b}[2;38;2;0;1;2m"));
+        assert!(dimmed.contains("\u{1b}[2;38;5;2m"));
     }
 
     #[test]
