@@ -5,7 +5,7 @@
 //! and only the first commit wins.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,9 @@ use crate::usecase::generation::ProcessIdentity;
 use crate::usecase::resources::CasFile;
 use crate::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator, ResourceKind};
 use crate::usecase::resources::durable::{IdentityAuthority, LegacySnapshots, ShardArchive};
-use crate::usecase::resources::identity::{ChildIdentity, ChildProcessProbe, IDENTITY_SOURCE_OS};
+use crate::usecase::resources::identity::{
+    ChildIdentity, ChildObservation, ChildProcessProbe, IDENTITY_SOURCE_OS,
+};
 use crate::usecase::resources::launch::{LaunchIntent, ResourceSpawner, SpawnRefusal};
 use crate::usecase::resources::retention::{LogicalClock, RetentionLimits};
 use crate::usecase::resources::shard::OwnerShard;
@@ -181,7 +183,10 @@ impl ShardArchive for MemoryArchive {
 
 /// An identity authority that only vouches for the children it was told about.
 #[derive(Debug, Default)]
-pub struct ObservedChildren(BTreeMap<u32, String>);
+pub struct ObservedChildren {
+    live: BTreeMap<u32, String>,
+    gone: BTreeSet<u32>,
+}
 
 impl ObservedChildren {
     /// An authority that proves nothing.
@@ -191,17 +196,31 @@ impl ObservedChildren {
 
     /// Record that this process observed `pid` starting with `start`.
     pub fn with(mut self, pid: u32, start: &str) -> Self {
-        self.0.insert(pid, start.to_owned());
+        self.live.insert(pid, start.to_owned());
+        self
+    }
+
+    /// Record that the platform proves `pid` is absent.
+    pub fn with_gone(mut self, pid: u32) -> Self {
+        self.gone.insert(pid);
         self
     }
 }
 
 impl IdentityAuthority for ObservedChildren {
     fn verified(&self, process: &ProcessIdentity) -> Option<ChildIdentity> {
-        self.0
+        self.live
             .get(&process.pid)
             .filter(|start| *start == &process.start_identity)
             .map(|start| verified(process.pid, start))
+    }
+
+    fn observe(&self, identity: &ChildIdentity) -> ChildObservation {
+        if self.gone.contains(&identity.pid) {
+            ChildObservation::Gone
+        } else {
+            ChildObservation::Unknown
+        }
     }
 }
 

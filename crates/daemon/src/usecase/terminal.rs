@@ -86,6 +86,9 @@ pub fn output_pipeline_counters() -> OutputPipelineCounters {
 pub enum TerminalRuntimeState {
     Reserved,
     Running,
+    /// The previous owner and child are proved gone. History remains available
+    /// for Agent resume, but this state holds no runtime capacity.
+    Interrupted,
     Exited,
     Reclaimed,
     ReconcileRequired(TerminalReconcileState),

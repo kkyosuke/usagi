@@ -2366,7 +2366,8 @@ const fn runtime_inventory_state(
         super::runtime::RuntimeState::Running => AgentRuntimeInventoryState::Live,
         super::runtime::RuntimeState::ReconcileRequired(
             super::runtime::ReconcileState::IdentityUnknown,
-        ) => AgentRuntimeInventoryState::Interrupted,
+        )
+        | super::runtime::RuntimeState::Interrupted => AgentRuntimeInventoryState::Interrupted,
         super::runtime::RuntimeState::Exited => AgentRuntimeInventoryState::Exited,
         super::runtime::RuntimeState::Reclaimed => AgentRuntimeInventoryState::Reclaimed,
         super::runtime::RuntimeState::SpawnFailed
@@ -2409,6 +2410,7 @@ fn is_resume_source_state(state: super::runtime::RuntimeState) -> bool {
         state,
         super::runtime::RuntimeState::Exited
             | super::runtime::RuntimeState::Reclaimed
+            | super::runtime::RuntimeState::Interrupted
             | super::runtime::RuntimeState::ReconcileRequired(
                 super::runtime::ReconcileState::IdentityUnknown
             )
@@ -2556,7 +2558,8 @@ const fn runtime_phase(state: super::runtime::RuntimeState) -> (u8, AgentPhase) 
     match state {
         RuntimeState::Running => (4, AgentPhase::Running),
         RuntimeState::Reserved => (3, AgentPhase::Ready),
-        RuntimeState::ReconcileRequired(super::runtime::ReconcileState::IdentityUnknown) => {
+        RuntimeState::Interrupted
+        | RuntimeState::ReconcileRequired(super::runtime::ReconcileState::IdentityUnknown) => {
             (3, AgentPhase::Interrupted)
         }
         RuntimeState::SpawnFailed | RuntimeState::ReconcileRequired(_) => (2, AgentPhase::Exited),
@@ -4124,6 +4127,10 @@ mod tests {
             (RuntimeState::Running, AgentRuntimeInventoryState::Live),
             (
                 RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
+                AgentRuntimeInventoryState::Interrupted,
+            ),
+            (
+                RuntimeState::Interrupted,
                 AgentRuntimeInventoryState::Interrupted,
             ),
             (RuntimeState::Exited, AgentRuntimeInventoryState::Exited),

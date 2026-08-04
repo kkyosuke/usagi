@@ -704,6 +704,7 @@ impl RuntimeCoordinator {
                 record.state,
                 RuntimeState::Exited
                     | RuntimeState::Reclaimed
+                    | RuntimeState::Interrupted
                     | RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
             ) {
                 return Err(RuntimeError::ProviderResumeMismatch);
@@ -764,7 +765,11 @@ impl RuntimeCoordinator {
             // A replaced source is the least valuable history in its lineage:
             // it keeps its minimum TTL but is collected before anything else.
             let source_terminal = record.runtime.terminal.clone();
-            if record.state == RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown) {
+            if matches!(
+                record.state,
+                RuntimeState::Interrupted
+                    | RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
+            ) {
                 record.state = RuntimeState::Reclaimed;
                 if let Some(provider) = &mut record.provider_resume {
                     provider.last_known_status = ProviderResumeStatus::Exited;
@@ -1427,7 +1432,7 @@ impl RuntimeCoordinator {
                 .generation
                 .require_terminal(&runtime.terminal)
                 .map_err(RuntimeError::Generation),
-            RuntimeState::Exited | RuntimeState::Reclaimed => {
+            RuntimeState::Interrupted | RuntimeState::Exited | RuntimeState::Reclaimed => {
                 Err(RuntimeError::Terminal(RegistryError::Exited))
             }
             _ => Err(RuntimeError::ReconcileRequired(
@@ -1443,7 +1448,8 @@ fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
         RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning) => {
             TerminalState::OrphanRunning
         }
-        RuntimeState::Reserved
+        RuntimeState::Interrupted
+        | RuntimeState::Reserved
         | RuntimeState::ReconcileRequired(
             ReconcileState::SpawnAmbiguous
             | ReconcileState::PersistAfterSpawn

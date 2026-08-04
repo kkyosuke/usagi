@@ -580,7 +580,12 @@ child を spawn した process は、その直後に OS へ問い合わせた pr
 証明は **spawn した process の process-local な観測**であり、durable な bytes ではない。したがって restart 後に
 読み直した record は、token が残っていても `identity_unknown` として扱い、attach・input・kill・capacity release・
 replacement spawn を行わない。observation が失敗した platform では、固定文字列を identity に昇格させず
-`unverified` の record として残す。この record も同じく非 spawnable な safe failure である。
+`unverified` の record として残す。この record も同じく非 spawnable な safe failure である。ただし startup 時の
+read-only OS observation が child の消滅を確定できた retired record は例外で、attach や signal の authority を得る
+ことなく capacity を占有しない `interrupted` に移し、resume 用の履歴を保ったまま claim を解放する。OS token が
+ある record は PID 不在または PID 再利用、
+legacy `unverified` record は PID 不在だけを消滅の証明として採用する。PID が生存する場合、権限不足、platform read
+failure はすべて unknown のまま予約を保持する。
 
 旧 snapshot は次の launch による保存でも削除しない。snapshot の JSON 破損、未知 schema、重複 operation、
 scope / generation / operation fence の不整合、または reconcile write failure は daemon startup を fail closed

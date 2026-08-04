@@ -160,7 +160,10 @@ pub fn record_child(
 #[must_use]
 pub fn observe_child(probe: &dyn ChildProcessProbe, recorded: &ChildIdentity) -> ChildObservation {
     if !recorded.is_verifiable() {
-        return ChildObservation::Unknown;
+        return match probe.start_identity(recorded.pid) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => ChildObservation::Gone,
+            Ok(_) | Err(_) => ChildObservation::Unknown,
+        };
     }
     let actual = match probe.start_identity(recorded.pid) {
         Ok(actual) => actual,

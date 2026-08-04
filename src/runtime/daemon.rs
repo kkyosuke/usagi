@@ -327,6 +327,13 @@ impl IdentityAuthority for ObservedChildren {
             })
             .cloned()
     }
+
+    fn observe(
+        &self,
+        identity: &ChildIdentity,
+    ) -> usagi_daemon::usecase::resources::identity::ChildObservation {
+        usagi_daemon::usecase::resources::identity::observe_child(&UnixChildProbe, identity)
+    }
 }
 
 /// Logical time for the operation ledger, in whole seconds of wall clock.

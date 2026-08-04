@@ -31,7 +31,8 @@
 //! child ([`IdentityAuthority`]). Everything else — a legacy fixed identity, a
 //! record recovered after a restart, an ambiguous spawn — becomes
 //! [`ResourceState::OwnershipUnknown`], which holds its capacity and is never
-//! spawned, signalled, or released.
+//! spawned or signalled. A retired record releases capacity only when an OS
+//! observation independently proves its recorded child is already gone.
 //!
 //! The record itself travels as an opaque
 //! [`payload`](super::shard::ShardResource::payload) on the shard resource, so one
@@ -54,7 +55,7 @@ use crate::usecase::resources::allocator::{
     AllocatorDocument, CapacityPolicy, LaunchFailure, ResourceAllocator, ResourceKind,
 };
 use crate::usecase::resources::drain::ActiveConsumer;
-use crate::usecase::resources::identity::ChildIdentity;
+use crate::usecase::resources::identity::{ChildIdentity, ChildObservation};
 use crate::usecase::resources::migration::{LegacyRuntimeRecord, UnknownRecord, adopt_legacy};
 use crate::usecase::resources::retention::{
     GcReport, LogicalClock, RetentionLimits, collect_garbage,
@@ -89,11 +90,19 @@ pub fn shipping_retention_limits() -> RetentionLimits {
 /// just bytes, and a legacy build stored a fixed string. So the only process that
 /// may call a child its own is the one that observed the OS while spawning it,
 /// and that knowledge deliberately does not survive a restart — a recovered
-/// record is `identity_unknown`, exactly as the shipping reconcile already
-/// reports it.
+/// record is `identity_unknown` unless a separate observation proves the child
+/// gone, exactly as the shipping reconcile reports it.
 pub trait IdentityAuthority {
     /// The OS-verified identity of `process`, when this process observed it.
     fn verified(&self, process: &ProcessIdentity) -> Option<ChildIdentity>;
+
+    /// Observe a retained child without acquiring authority over it.
+    ///
+    /// This is used only to prove that a retired child is definitely gone. An
+    /// exact or unknown observation never permits attach, signal, or release.
+    fn observe(&self, _identity: &ChildIdentity) -> ChildObservation {
+        ChildObservation::Unknown
+    }
 }
 
 /// An authority that can prove nothing, for a process that spawned no child yet.
@@ -214,9 +223,12 @@ fn projected_state(state: TerminalRuntimeState, observed: Option<ChildIdentity>)
         (TerminalRuntimeState::Running | TerminalRuntimeState::ReconcileRequired(_), _) => {
             ProjectedState::Unproven
         }
-        (TerminalRuntimeState::Exited | TerminalRuntimeState::Reclaimed, _) => {
-            ProjectedState::Exited
-        }
+        (
+            TerminalRuntimeState::Interrupted
+            | TerminalRuntimeState::Exited
+            | TerminalRuntimeState::Reclaimed,
+            _,
+        ) => ProjectedState::Exited,
         (TerminalRuntimeState::SpawnFailed, _) => ProjectedState::SpawnFailed,
     }
 }
@@ -399,8 +411,8 @@ impl ShardedRuntimeState {
     /// when they have not been migrated yet.
     ///
     /// The returned snapshots are the shipping ones, reconciled exactly as a
-    /// restart reconciles them today: a record whose child this process never
-    /// observed comes back as `identity_unknown`, visible and non-spawnable.
+    /// restart reconciles them today: an unowned child is `identity_unknown`;
+    /// one proved gone is `interrupted`. Both remain visible and non-spawnable.
     ///
     /// # Errors
     /// Returns [`ResourceError::Corrupt`] or [`ResourceError::UnknownSchema`] for
@@ -409,6 +421,31 @@ impl ShardedRuntimeState {
     pub fn hydrate(&self) -> Result<HydratedState, ResourceFailure> {
         let migration = self.migrate_legacy()?;
         let shards = self.retained()?;
+        let gone = shards
+            .iter()
+            .filter(|document| document.owner != self.owner)
+            .flat_map(|document| &document.resources)
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    crate::usecase::resources::shard::ResourceState::Running
+                        | crate::usecase::resources::shard::ResourceState::OwnershipUnknown
+                )
+            })
+            .filter(|entry| {
+                entry
+                    .process
+                    .as_ref()
+                    .is_some_and(|identity| self.identity.observe(identity).is_definitely_gone())
+            })
+            .map(|entry| entry.resource.clone())
+            .collect::<BTreeSet<_>>();
+        if !gone.is_empty() {
+            self.allocator.update(|document| {
+                release_each(document, self.owner, &gone.iter().collect::<Vec<_>>());
+                Ok(())
+            })?;
+        }
         let mut agents = Vec::new();
         let mut terminals = Vec::new();
         for document in &shards {
@@ -417,8 +454,34 @@ impl ShardedRuntimeState {
                     continue;
                 };
                 match entry.kind {
-                    ResourceKind::Agent => agents.push(agent_payload(payload)?),
-                    ResourceKind::Terminal => terminals.push(terminal_payload(payload)?),
+                    ResourceKind::Agent => {
+                        let mut record = agent_payload(payload)?;
+                        if gone.contains(&entry.resource)
+                            && matches!(
+                                record.state,
+                                TerminalRuntimeState::Reserved
+                                    | TerminalRuntimeState::Running
+                                    | TerminalRuntimeState::ReconcileRequired(_)
+                            )
+                        {
+                            record.state = TerminalRuntimeState::Interrupted;
+                        }
+                        agents.push(record);
+                    }
+                    ResourceKind::Terminal => {
+                        let mut record = terminal_payload(payload)?;
+                        if gone.contains(&entry.resource)
+                            && matches!(
+                                record.state,
+                                TerminalRuntimeState::Reserved
+                                    | TerminalRuntimeState::Running
+                                    | TerminalRuntimeState::ReconcileRequired(_)
+                            )
+                        {
+                            record.state = TerminalRuntimeState::Interrupted;
+                        }
+                        terminals.push(record);
+                    }
                 }
             }
         }

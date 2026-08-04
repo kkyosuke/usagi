@@ -827,6 +827,50 @@ fn hydrate_returns_the_records_every_retained_shard_holds() {
 }
 
 #[test]
+fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let resource = terminal(old);
+    let operation = OperationId::new();
+    let mut old_store =
+        ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(31, "start-31")));
+    old_store
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            operation,
+            RuntimeState::Running,
+            Some(process(31, "start-31")),
+        )]))
+        .unwrap();
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new()))
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            operation,
+            RuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            Some(process(31, "start-31")),
+        )]))
+        .unwrap();
+    assert_eq!(
+        world.shard(old).resources[0].state,
+        ResourceState::OwnershipUnknown
+    );
+
+    let hydrated = world
+        .state(new, ObservedChildren::new().with_gone(31))
+        .hydrate()
+        .unwrap();
+
+    assert_eq!(hydrated.interrupted, 0);
+    assert_eq!(hydrated.agents.records[0].state, RuntimeState::Interrupted);
+    assert_eq!(
+        world.allocator().claim(&resource).unwrap().state,
+        ClaimState::Released,
+        "definite OS absence frees the retired generation's capacity"
+    );
+}
+
+#[test]
 fn hydrate_fails_closed_on_state_this_build_must_not_act_on() {
     let world = World::new();
     let owner = DaemonGeneration::new();
