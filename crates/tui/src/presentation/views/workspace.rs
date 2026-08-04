@@ -24,6 +24,7 @@ use usagi_core::usecase::daemon_health::{
 };
 use usagi_core::usecase::session_state::SessionStateCounts;
 
+use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
@@ -1509,7 +1510,11 @@ fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
     if inactive {
         right
             .into_iter()
-            .map(|line| widgets::dim_ansi(&line))
+            // An inactive preview does not own text input. Drop the live PTY's
+            // renderer-only cursor marker as well as dimming its visual cell,
+            // otherwise the host cursor (and IME candidate window) still says
+            // that the terminal has focus in Switch or behind an overlay.
+            .map(|line| widgets::dim_ansi(&line.replace(TERMINAL_CURSOR_MARKER, "")))
             .collect()
     } else {
         right
@@ -4454,6 +4459,21 @@ mod tests {
             .with_pane(&pane)
             .with_terminal_view(live_view());
         assert!(!drawer.right_pane_focused());
+    }
+
+    #[test]
+    fn inactive_right_pane_removes_terminal_focus_emphasis_and_cursor() {
+        use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
+
+        let focused = format!("\u{1b}[7;48;5;240m{TERMINAL_CURSOR_MARKER}focused\u{1b}[22m tail");
+        let dimmed = super::dim_inactive_right_pane(true, vec![focused]);
+
+        assert_eq!(strip(&dimmed[0]), "focused tail");
+        assert!(!dimmed[0].contains(TERMINAL_CURSOR_MARKER));
+        assert!(!dimmed[0].contains("[7"));
+        assert!(!dimmed[0].contains("48;5;240"));
+        assert!(!dimmed[0].contains("[2;22m"));
+        assert!(dimmed[0].contains("\u{1b}[2m"));
     }
 
     #[test]

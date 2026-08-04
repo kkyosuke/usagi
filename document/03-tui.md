@@ -323,8 +323,10 @@ session identity と title のみで、prompt・option・freeform answer は OS 
 実行ファイルと引数ベクトルで spawn する。その他の OS、実行ファイル不在、headless notification service の失敗は
 非対応として no-op である。
 
-Home 背景の dim は各 ANSI span の reset 後にも維持し、行末で必ず reset する。overlay は dim 済みの背景へ
-後から合成するため、modal 自身の style と可読性を優先する。
+Home 背景の dim は各 ANSI span の reset（`0` / 省略形）と通常輝度指定（`22`）の後にも維持し、行末で必ず
+reset する。入力を所有しない右ペインでは terminal 内 UI の focus 表現である bold、blink、reverse、背景色と
+物理カーソル位置を抑止する。SGR の faint は背景色へ効かない terminal があるため、focus 行だけが明るく残る状態を
+許さない。overlay は dim 済みの背景へ後から合成するため、modal 自身の style と可読性を優先する。
 
 左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor と current
 target を別々に stable identity から照合し、同じ行なら cursor を優先する。Switch の cursor ではない
