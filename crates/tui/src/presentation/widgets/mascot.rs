@@ -102,6 +102,11 @@ pub fn sidebar_block_with_sidecar(
     let sidecar_start = 3usize.saturating_sub(sidecar.len());
     for (index, status) in sidecar.into_iter().enumerate() {
         let row = &mut plain_rows[rabbit_start + sidecar_start + index];
+        // The rabbit's rows are narrower at the top, so pad each one to the
+        // mascot's own width before appending its status. Two sidecar lines then
+        // start in the same column instead of stepping right row by row, and a
+        // single line — which lands on the widest, bottom row — is unaffected.
+        *row = pad_to_width(row, rabbit_width);
         row.push_str("    ");
         row.push_str(status);
     }
@@ -280,5 +285,23 @@ mod tests {
         let block = sidebar_block_with_sidecar(40, 0, None, &sidecar).expect("mascot fits");
         assert!(block.rows()[2].contains("CPU 7% · MEM 3.3GB"));
         assert!(!block.rows()[0].contains("CPU 7%"));
+    }
+
+    /// The rabbit narrows toward its ears, so a second status line must not start
+    /// two columns to the left of the first. Padding each row to the mascot's own
+    /// width aligns them without moving the single-line placement.
+    #[test]
+    fn stacked_sidecar_lines_start_in_the_same_column_and_keep_the_footprint() {
+        let one = sidebar_block_with_sidecar(40, 0, None, &["feet".to_owned()]).expect("fits");
+        let two = sidebar_block_with_sidecar(40, 0, None, &["face".to_owned(), "feet".to_owned()])
+            .expect("fits");
+
+        // The sidecar rides the rabbit's own rows, so the reserved footprint is
+        // unchanged and the bottom row is byte-for-byte what one line drew.
+        assert_eq!(one.reserved_rows(), two.reserved_rows());
+        assert_eq!(one.rows()[2], two.rows()[2]);
+        // Both rows carry the same style prefix, so equal byte offsets are equal
+        // columns.
+        assert_eq!(two.rows()[1].find("face"), two.rows()[2].find("feet"));
     }
 }

@@ -21,6 +21,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
+  - [session 状態別件数](#session-状態別件数)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
@@ -858,6 +859,43 @@ message の既定の供給元は**正常系以外の daemon 状態**である。
 操作エラー・端末エラーのいずれかのとき、その安全な要約を 2 行の bubble にして bottom-left のうさぎに出し、一目で
 異常に気づけるようにする。健全な正常系（feedback 無し・進行中 progress・再接続完了）はうさぎを無言に保つ。error ID を
 含む詳細は footer の feedback 行に委ね、bubble には載せない。呼び出し側が明示 message を与えた場合はそちらを優先する。
+
+mascot の右には最大 3 行の観測 status（sidecar）を並べる。sidecar は rabbit 自身の行に重ねて描くため、
+mascot block の予約行数を増やさず session viewport の容量を奪わない。各行は rabbit の幅に揃えた同じ列から
+始まり、sidebar 幅に合わせて clip する。現在の供給元は上から
+[session 状態別件数](#session-状態別件数)、daemon metrics（CPU / resident memory）の 2 つで、mascot block ごと
+省略される狭幅ではどちらも表示しない。
+
+### session 状態別件数
+
+sidecar の 1 行目に、表示中 session の **running / waiting / failed 件数**を出す。件数は daemon 権威の
+projection から毎フレーム導出する派生値であり、[metrics](04-ipc.md) schema にも TUI の reducer state にも
+別の情報源を作らない。導出の入力は 2 つとも既に Home へ届いているものを使う。
+
+| 入力 | 権威 |
+|---|---|
+| session ごとの lifecycle | daemon の session lifecycle snapshot |
+| session scope の Agent phase 集約 | daemon の Agent phase 報告（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)と同じ projection） |
+
+分類は既存語彙だけで決め、新しい状態語彙を増やさない。1 session はちょうど 1 クラスに属するため、3 つの
+件数の合計が session 数を超えない。
+
+| クラス | 条件 | 色 |
+|---|---|---|
+| `fail` | lifecycle が `failed` | Danger |
+| `wait` | `fail` でなく、phase 集約が `waiting` | Warning |
+| `run` | `fail` でなく、phase 集約が `running` | Success |
+| （非計上） | 上記以外（`absent` / `ready` / `done`） | — |
+
+- 優先順位は `fail` > `wait` > `run` である。`failed` 行に古い phase 報告が残っている 1 フレームでも二重計上しない。
+- **`failed` は lifecycle だけが権威**である。`ended` / `exited` / `interrupted` は phase 集約の `done` へ畳まれて
+  非計上となり、失敗としては数えない。`interrupted` は daemon 再起動後に runtime identity を証明できなかった
+  daemon 所有の projection 状態で、resume 可能な履歴であるため（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)）、
+  使用不能な checkout を意味する `failed` とは別の事実である。
+- **0 件のクラスは描かない**。3 つとも 0（session が 0 件の場合を含む）なら行自体を出さない。
+- **daemon metrics が無くても出る**。件数は metrics observation と独立に導出するため、metrics 未取得でも
+  sidecar にこの行だけが載る。
+- 表示専用であり、click や絞り込みの操作は持たない。
 
 ## Closeup pane
 
