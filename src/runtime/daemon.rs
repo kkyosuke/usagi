@@ -7,11 +7,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -76,7 +77,7 @@ use usagi_daemon::usecase::authority::handoff::{
     LocatorObservation, PublishedLocator, RecoveryOutcome,
 };
 use usagi_daemon::usecase::authority::pre_handshake::{
-    PRE_HANDSHAKE_CONNECTION_LIMIT, PreHandshakeAdmission,
+    PRE_HANDSHAKE_CONNECTION_LIMIT, PreHandshakeAdmission, PreHandshakePermit,
 };
 use usagi_daemon::usecase::authority::registry::{
     DEFAULT_GENERATION_LIMIT, GenerationRegistry, RegistryDocument,
@@ -1475,7 +1476,7 @@ impl DecisionWaker for DeferredDecisionWaker {
 /// safe unavailable error rather than a client-side fallback.
 struct SharedAgent {
     runtime: SharedAgentRuntime,
-    disconnected: Sender<ConnectionId>,
+    disconnected: SyncSender<ConnectionId>,
 }
 impl AgentTerminalActor for SharedAgent {
     fn handle(
@@ -1982,6 +1983,13 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
 /// subject to this deadline.
 const PRE_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Maximum accepted connections retained by one active or standby generation.
+///
+/// Each worker owns a reader, writer, and shutdown descriptor. Thirty-two keeps
+/// that set below 96 socket descriptors, leaving the rest of a 256-fd process
+/// budget for the bounded Agent/generic PTYs, stores, wake pipes, and children.
+const CLIENT_CONNECTION_LIMIT: usize = 32;
+
 /// How often the decision maintenance worker makes due expiries durable and
 /// drains the resolved-decision outbox.
 ///
@@ -2296,7 +2304,7 @@ fn spawn_ipc_server(
     // Socket workers only enqueue connection-local ledger cleanup. The single
     // consumer prevents a disconnect storm from retaining one accepted socket
     // triplet per worker while all of them contend on the terminal owners.
-    let (disconnected, disconnects) = mpsc::channel();
+    let (disconnected, disconnects) = mpsc::sync_channel(CLIENT_CONNECTION_LIMIT);
     let connection_cleanup =
         start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
     start_pr_projection_worker(Arc::clone(&pr_inventory), Arc::clone(&projection))?;
@@ -2372,9 +2380,8 @@ fn spawn_ipc_server(
 ///
 /// A worker whose shutdown half could not be duplicated is deliberately *not*
 /// retained: a collection could never unblock it, so pretending it is joinable
-/// would park the retirement instead of reporting it. The connection itself still
-/// serves — only the descriptor duplication failed — and the peer's own
-/// disconnect is what ends it.
+/// would park retirement. Production accept loops fail closed before spawning
+/// in that case; the error branch remains defensive for injected callers.
 fn retain_client_worker(
     workers: &ClientWorkers,
     unblock: std::io::Result<AcceptedStream>,
@@ -2394,6 +2401,18 @@ fn retain_client_worker(
              the accepted stream could not be duplicated: {error}"
         )),
     }
+}
+
+/// Reap completed workers before deciding whether another accepted connection
+/// can acquire daemon-owned descriptors and a thread.
+fn client_connection_capacity_available(workers: &ClientWorkers, limit: usize) -> bool {
+    let report = workers.reap_finished();
+    if !report.is_clean() {
+        ErrorLog::record(&format!(
+            "daemon completed client worker reaped with failures: {report:?}"
+        ));
+    }
+    workers.outstanding() < limit
 }
 
 fn bind_ipc_listener(
@@ -3173,7 +3192,7 @@ fn start_ipc_accept_loop(
     supervisor: SharedSupervisorRuntime,
     fence: Arc<GenerationFence>,
     workers: Arc<ClientWorkers>,
-    disconnected: Sender<ConnectionId>,
+    disconnected: SyncSender<ConnectionId>,
     connection_cleanup: std::thread::JoinHandle<()>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
@@ -3219,6 +3238,16 @@ fn start_ipc_accept_loop(
                         if shutdown.is_requested() {
                             break;
                         }
+                        if !client_connection_capacity_available(
+                            &workers,
+                            CLIENT_CONNECTION_LIMIT,
+                        ) {
+                            ErrorLog::record(
+                                "daemon connection refused: client capacity exhausted",
+                            );
+                            drop(stream);
+                            continue;
+                        }
                         let Ok(peer_process) = peer_pid(&stream).and_then(|pid| {
                             let parent = parent_pid(pid)?;
                             process_group(pid).map(|process_group| (pid, parent, process_group))
@@ -3258,15 +3287,21 @@ fn start_ipc_accept_loop(
                         let connection_fence = Arc::clone(&fence);
                         let connection_data_dir = data_dir.clone();
                         let connection_disconnected = disconnected.clone();
-                        // Retained before the worker starts so a collection that
-                        // begins while this connection is still being set up
-                        // cannot miss it. Reaping first keeps the retained set
-                        // proportional to the *live* connections rather than to
-                        // every connection this generation has ever served.
-                        workers.reap_finished();
-                        let unblock = stream.try_clone().map(AcceptedStream::new);
-                        let worker_completion = unblock.as_ref().ok().cloned();
-                        let _ = std::thread::Builder::new()
+                        // A worker without a shutdown half cannot participate in
+                        // the generation retirement barrier, so descriptor
+                        // duplication failure refuses the connection before a
+                        // thread or request state is created.
+                        let unblock = match stream.try_clone() {
+                            Ok(stream) => AcceptedStream::new(stream),
+                            Err(error) => {
+                                ErrorLog::record(&format!(
+                                    "daemon connection refused: accepted stream could not be duplicated: {error}"
+                                ));
+                                continue;
+                            }
+                        };
+                        let worker_completion = Some(unblock.clone());
+                        let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
                                 // The retained shutdown descriptor must not keep
@@ -3392,8 +3427,13 @@ fn start_ipc_accept_loop(
                                     agent.release_mcp_child(peer_process.0);
                                 }
                                 let _ = result;
-                            })
-                            .map(|handle| retain_client_worker(&workers, unblock, handle));
+                            });
+                        match spawned {
+                            Ok(handle) => retain_client_worker(&workers, Ok(unblock), handle),
+                            Err(error) => ErrorLog::record(&format!(
+                                "daemon client worker unavailable: {error}"
+                            )),
+                        }
                     }
                     // Drained: nothing more is queued, so wait for readiness.
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -3434,8 +3474,9 @@ fn start_ipc_accept_loop(
 /// onto a descriptor. The mirroring thread parks on the condvar, which means an
 /// idle daemon still performs no timed wakeups.
 struct ShutdownPipe {
-    read: std::os::fd::RawFd,
-    write: std::os::fd::RawFd,
+    read: OwnedFd,
+    shutdown: Arc<ShutdownRequest>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ShutdownPipe {
@@ -3447,10 +3488,10 @@ impl ShutdownPipe {
         if unsafe { libc::pipe(ends.as_mut_ptr()) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let pipe = Self {
-            read: ends[0],
-            write: ends[1],
-        };
+        // SAFETY: both descriptors were freshly returned by pipe(2), and each is
+        // moved into exactly one `OwnedFd`.
+        let read = unsafe { OwnedFd::from_raw_fd(ends[0]) };
+        let write = unsafe { OwnedFd::from_raw_fd(ends[1]) };
         // The daemon execs children (PTYs, the PR provider). Neither end may be
         // inherited: this daemon guards every other descriptor it owns the same
         // way, and a shutdown wake belongs to this process only. macOS has no
@@ -3461,18 +3502,22 @@ impl ShutdownPipe {
                 return Err(std::io::Error::last_os_error());
             }
         }
-        let write = pipe.write;
         let requested = Arc::clone(shutdown);
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("usagi-shutdown-wake".to_string())
             .spawn(move || {
                 requested.wait_until_requested();
                 // One byte is enough: the reader only needs readiness, and the
                 // descriptor is never reused for anything else.
-                // SAFETY: writing one byte from a local buffer to an owned pipe.
-                unsafe { libc::write(write, [1_u8].as_ptr().cast(), 1) };
+                // SAFETY: writing one byte from a local buffer to the worker's
+                // owned pipe descriptor.
+                unsafe { libc::write(write.as_raw_fd(), [1_u8].as_ptr().cast(), 1) };
             })?;
-        Ok(pipe)
+        Ok(Self {
+            read,
+            shutdown: Arc::clone(shutdown),
+            worker: Some(worker),
+        })
     }
 
     /// Waits until the listener has a connection or shutdown was requested.
@@ -3486,7 +3531,7 @@ impl ShutdownPipe {
                 revents: 0,
             },
             libc::pollfd {
-                fd: self.read,
+                fd: self.read.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -3508,10 +3553,12 @@ impl ShutdownPipe {
 impl Drop for ShutdownPipe {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
     fn drop(&mut self) {
-        // SAFETY: both ends are owned by this value.
-        unsafe {
-            libc::close(self.read);
-            libc::close(self.write);
+        // Wake and join before `read` is closed. The writer is owned by the
+        // worker, so it can never write through a raw descriptor number that
+        // this process has already closed and possibly reused for another file.
+        self.shutdown.request();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
@@ -7171,6 +7218,8 @@ fn spawn_standby_ipc_server(
             let _exit = ShutdownOnIpcWorkerExit {
                 shutdown: Arc::clone(&shutdown),
             };
+            let workers = Arc::new(ClientWorkers::new());
+            let pre_handshake = PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let wake = match ShutdownPipe::mirroring(&shutdown) {
                 Ok(wake) => wake,
                 Err(error) => {
@@ -7185,32 +7234,125 @@ fn spawn_standby_ipc_server(
                 while !shutdown.is_requested() {
                     match listener.accept() {
                         Ok(stream) => {
-                            let protocol = protocol.clone();
-                            let gate = gate.clone();
-                            let _ = std::thread::Builder::new()
-                                .name("usagi-ipc-standby-client".to_string())
-                                .spawn(move || {
-                                    let _ = stream.set_nonblocking(false);
-                                    let Ok(mut writer) = stream.try_clone() else {
-                                        return;
-                                    };
-                                    let mut reader = stream;
-                                    let _ = usagi_daemon::presentation::ipc::handle_connection_with(
-                                        &mut reader,
-                                        &mut writer,
-                                        &protocol,
-                                        &mut |request_id, body, hello| {
-                                            standby_reply(&gate, request_id, &body, hello)
-                                        },
-                                    );
-                                });
+                            if shutdown.is_requested() {
+                                break;
+                            }
+                            if !client_connection_capacity_available(
+                                &workers,
+                                CLIENT_CONNECTION_LIMIT,
+                            ) {
+                                ErrorLog::record(
+                                    "daemon standby connection refused: client capacity exhausted",
+                                );
+                                drop(stream);
+                                continue;
+                            }
+                            let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
+                                ErrorLog::record(
+                                    "daemon standby pre-handshake connection refused: capacity exhausted",
+                                );
+                                drop(stream);
+                                continue;
+                            };
+                            let unblock = match stream.try_clone() {
+                                Ok(stream) => AcceptedStream::new(stream),
+                                Err(error) => {
+                                    ErrorLog::record(&format!(
+                                        "daemon standby connection refused: accepted stream could not be duplicated: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            match spawn_standby_client_worker(
+                                stream,
+                                unblock.clone(),
+                                protocol.clone(),
+                                gate.clone(),
+                                pre_handshake_permit,
+                            ) {
+                                Ok(handle) => {
+                                    retain_client_worker(&workers, Ok(unblock), handle);
+                                }
+                                Err(error) => ErrorLog::record(&format!(
+                                    "daemon standby client worker unavailable: {error}"
+                                )),
+                            }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(_) => std::thread::sleep(ACCEPT_ERROR_BACKOFF),
                     }
                 }
             }
+            let report = workers.retire();
+            if !report.is_clean() {
+                ErrorLog::record(&format!(
+                    "daemon standby shutdown retired with client worker failures: {report:?}"
+                ));
+            }
             listener
+        })
+}
+
+fn spawn_standby_client_worker(
+    stream: std::os::unix::net::UnixStream,
+    completion: AcceptedStream,
+    protocol: usagi_core::infrastructure::ipc::ServerProtocol,
+    gate: AdmissionGate,
+    pre_handshake_permit: PreHandshakePermit,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("usagi-ipc-standby-client".to_string())
+        .spawn(move || {
+            let _completion = ShutdownAcceptedStreamOnDrop(Some(completion));
+            if stream.set_nonblocking(false).is_err() {
+                return;
+            }
+            let Ok(writer) = stream.try_clone() else {
+                return;
+            };
+            let deadline = Instant::now() + PRE_HANDSHAKE_DEADLINE;
+            let mut reader = PreHandshakeDeadlineStream::new(stream, deadline);
+            let mut writer = PreHandshakeDeadlineStream::new(writer, deadline);
+            let admitted = usagi_daemon::presentation::ipc::handshake_admitted(
+                &mut reader,
+                &mut writer,
+                &protocol,
+            );
+            drop(pre_handshake_permit);
+            let admitted = match admitted {
+                Ok(Some(admitted)) => admitted,
+                Ok(None) => return,
+                Err(error) => {
+                    let reason = if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) {
+                        "deadline exceeded"
+                    } else {
+                        "invalid or incomplete hello"
+                    };
+                    ErrorLog::record(&format!(
+                        "daemon standby pre-handshake connection refused: {reason}"
+                    ));
+                    return;
+                }
+            };
+            if reader.clear_deadlines().is_err() || writer.clear_deadlines().is_err() {
+                ErrorLog::record(
+                    "daemon standby admitted connection closed: pre-handshake deadline could not be cleared",
+                );
+                return;
+            }
+            let mut reader = reader.into_inner();
+            let mut writer = writer.into_inner();
+            let _ = usagi_daemon::presentation::ipc::handle_admitted_connection_with(
+                &mut reader,
+                &mut writer,
+                admitted,
+                &mut |request_id, body, hello| {
+                    standby_reply(&gate, request_id, &body, hello)
+                },
+            );
         })
 }
 
@@ -11535,6 +11677,17 @@ mod tests {
         assert!(worker.join().is_err());
     }
 
+    #[test]
+    fn dropping_a_shutdown_pipe_joins_its_writer_before_closing_descriptors() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let pipe = ShutdownPipe::mirroring(&shutdown).unwrap();
+        assert!(!shutdown.is_requested());
+
+        drop(pipe);
+
+        assert!(shutdown.is_requested());
+    }
+
     struct FixedRefreshClock {
         calls: Arc<AtomicUsize>,
         shutdown_after: Option<(usize, Arc<ShutdownRequest>)>,
@@ -15377,6 +15530,29 @@ instructions = "{instructions}"
         let mut byte = [0_u8; 1];
         assert_eq!(peer.read(&mut byte).unwrap(), 0);
         assert!(retained.shutdown().is_ok(), "closing twice is idempotent");
+    }
+
+    #[test]
+    fn established_client_capacity_reaps_completion_but_refuses_live_workers() {
+        let workers = ClientWorkers::new();
+        let (mut peer, mut accepted) = std::os::unix::net::UnixStream::pair().unwrap();
+        let retained = AcceptedStream::new(accepted.try_clone().unwrap());
+        let completion = retained.clone();
+        let worker = std::thread::spawn(move || {
+            let _completion = ShutdownAcceptedStreamOnDrop(Some(completion));
+            let mut byte = [0_u8; 1];
+            let _ = accepted.read(&mut byte);
+        });
+        retain_client_worker(&workers, Ok(retained), worker);
+
+        assert!(!client_connection_capacity_available(&workers, 1));
+        peer.write_all(&[1]).unwrap();
+        drop(peer);
+        while workers.outstanding() != 0 && !client_connection_capacity_available(&workers, 1) {
+            std::thread::yield_now();
+        }
+        assert!(client_connection_capacity_available(&workers, 1));
+        assert_eq!(workers.outstanding(), 0);
     }
 
     #[test]

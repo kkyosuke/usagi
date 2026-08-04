@@ -59,10 +59,14 @@ transport は u32 big-endian length prefix と JSON payload の frame を運ぶ�
 場合だけ clean close とする。既定 frame 上限は 1 MiB であり、reader は長さを検証してから
 payload を確保する。
 
-daemon は accept 後から `ServerHello` または handshake error の write 完了までを **pre-handshake** として
-daemon-wide に最大 32 connection だけ admit する。上限を超えた socket は worker thread と request state を作る前に
+active / standby daemon は accept 後から `ServerHello` または handshake error の write 完了までを
+**pre-handshake** として generation ごとに最大 32 connection だけ admit する。上限を超えた socket は worker thread と request state を作る前に
 close する。hello をまだ読んでいない相手へ新しい error frame は送らないため wire state は増えず、daemon の error log には
 peer data・credential・workspace を含まない `capacity exhausted` を記録する。
+
+handshake 成否にかかわらず、accept 済み worker の総数は generation ごとに最大 32 とする。finished worker を先に reap し、
+上限中は新しい socket を thread 作成前に close する。したがって正しい hello を送った後に idle し続ける同一 UID client も
+thread / socket descriptor を無制限には保持できない。この総数上限は established connection の時間制限ではなく、接続終了で枠を返す。
 
 admit した pre-handshake connection は、prefix read、body read、hello validation、reply write を合わせて 2 秒の単一の
 monotonic completion deadline を持つ。各 socket read / write はその絶対時刻までの残量だけで待つため、partial prefix や
@@ -962,10 +966,11 @@ socket の inode identity を再検証するため、bind 後に endpoint が置
 するときにだけ使い、endpoint が当該 generation の private directory 内の安全な socket であることを再検証する
 （[5. daemon の cross-process generation authority](05-daemon.md#cross-process-generation-authority)）。
 
-accept は peer UID の一致を確認した後、[pre-handshake admission と deadline](#frame-と-handshake)を適用する。
+active / standby の accept loop は peer UID の一致を確認した後、[pre-handshake admission と deadline](#frame-と-handshake)を適用する。
 credential check は admission permit と worker spawn より前であり、不一致 peer は従来どおり protocol byte を読まずに close する。
 capacity refusal も accepted descriptor 以外を複製せずに close するため、同一 UID の peer が incomplete hello を保持しても
-daemon の thread / FD 使用量は pre-handshake 上限に比例して有界である。
+daemon の thread / FD 使用量は pre-handshake 上限と全 client worker 上限に比例して有界である。retirement 用 descriptor を
+複製できなければ、その connection は worker を起動せず fail closed とする。
 
 private directory は、検証済みの trusted parent directory の直下に `0700` を mkdir syscall へ指定して作る。
 そのため process が mkdir と事後 chmod の間で停止しても group / other に公開された directory は残らない。
@@ -1099,7 +1104,8 @@ connection 上の全 subscription を同時に無効化**する。
 server は transport EOF を観測した connection worker から socket を先に解放し、connection-local な
 subscription / input ledger の削除は daemon-owned cleanup worker へ渡して直列化する。ledger の走査が長時間
 稼働した terminal の owner lock と競合しても、切断済み connection の reader / writer / retirement descriptor を
-保持しない。daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner
+保持しない。cleanup queue 自体も全 client worker 上限と同じ容量に制限し、consumer が owner lock を待つ場合でも
+queue memory と送信待ち worker の双方を有界にする。daemon shutdown は accept と全 connection worker を止めた後に cleanup queue を drain してから owner
 runtime を破棄するため、非同期化しても connection-local state を取り残さない。
 
 | client 側の観測 | 共有 connection | 全 subscription | 次に送るもの |
