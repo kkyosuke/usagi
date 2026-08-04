@@ -292,14 +292,16 @@ managed session を描き、footer は `[Closeup] active pane` になる。
 |---|---|
 | Switch・session 行 | その session（cursor が指す hover 対象） |
 | Switch・`+ new session` 行 | active managed session（session を指していないため target へ退避する） |
-| Switch・Director drawer が開いている | active managed session（drawer が前面の handoff を所有する） |
+| Switch・session 行・Director drawer が開いている | その session（drawer の背景でも cursor が指す hover 対象を維持する） |
 | Closeup | active managed session |
 
 preview は表示だけを移し、command target（active）と live PTY 入力の宛先は動かさない。cursor の移動が
 active を変えないのは [Home と target](#home-と-target) のとおりで、Switch は PTY へキーを流さないため、
 入力は常に active target の focus 済み tab へ向かう。一度も開かれていない session を hover した場合は、
 未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
-追従するため、同時に attach する live terminal は従来どおり 1 つである。
+追従するため、同時に attach する live terminal は従来どおり 1 つである。Director drawer が開いている間だけは、
+背景の右ペインが Switch の cursor に追従したまま、foreground terminal の attach と入力を drawer で選択中の
+root conversation が所有する。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
