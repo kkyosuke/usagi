@@ -58,9 +58,7 @@ use crate::presentation::views::workspace::{
     terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
-use crate::presentation::workspace_runtime::{
-    AgentReopenChoice, PaneRestoreTarget, WorkspaceRuntime,
-};
+use crate::presentation::workspace_runtime::{PaneRestoreTarget, WorkspaceRuntime};
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
     AgentTabIntentPortCommit, AgentTabProjection,
@@ -2193,7 +2191,7 @@ impl WorkspaceUi {
         let commit = context.port.mutate(
             context.workspace,
             context.state.revision,
-            AgentTabIntentMutation::Observe {
+            AgentTabIntentMutation::ObserveAll {
                 terminals,
                 agents,
                 allowed_sessions: context.allowed_sessions.clone(),
@@ -2240,22 +2238,6 @@ impl WorkspaceUi {
         std::mem::take(&mut self.agent_observation_requested)
     }
 
-    fn agent_reopen_choices(&self) -> Vec<AgentReopenChoice> {
-        self.agent_tab_intent
-            .as_ref()
-            .map_or_else(Vec::new, |context| {
-                context
-                    .state
-                    .dismissed
-                    .iter()
-                    .map(|continuation| AgentReopenChoice {
-                        label: AgentTabIntent::safe_label(*continuation),
-                        continuation: *continuation,
-                    })
-                    .collect()
-            })
-    }
-
     /// The saved Agent slot order of the whole workspace, flattened across
     /// targets. It gives a restored interrupted tab the position the user last
     /// saw it in (#506 slots keyed by lineage).
@@ -2273,12 +2255,9 @@ impl WorkspaceUi {
             })
     }
 
-    /// Lineages the user dismissed. They stay hidden until an explicit reopen
-    /// clears the dismissal; inventory absence never clears it.
-    fn agent_dismissed(&self) -> BTreeSet<AgentContinuationRef> {
-        self.agent_tab_intent
-            .as_ref()
-            .map_or_else(BTreeSet::new, |context| context.state.dismissed.clone())
+    /// No Agent lineage is hidden: daemon inventory owns visible membership.
+    fn agent_dismissed() -> BTreeSet<AgentContinuationRef> {
+        BTreeSet::new()
     }
 
     fn has_agent_intent_for(&self, session_id: Option<SessionId>) -> bool {
@@ -4047,7 +4026,7 @@ fn apply_restore_completion(
         workspace,
         allowed_sessions,
         &ui.agent_slot_order(),
-        &ui.agent_dismissed(),
+        &WorkspaceUi::agent_dismissed(),
         &BTreeSet::new(),
     )
     .tabs;
@@ -4066,7 +4045,6 @@ fn apply_restore_completion(
             };
         }
     };
-    runtime.set_reopen_choices(ui.agent_reopen_choices());
     if !observation.cas_accepted {
         return RestoreApply {
             port,
@@ -4149,15 +4127,6 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
     }
 }
 
-/// The durable key a closed Agent tab is dismissed by. A tab whose lineage the
-/// display intent already knows closes by continuation; one that is only
-/// identified by its live terminal closes by that exact fence until an
-/// observation binds its lineage.
-enum AgentDismissalKey {
-    Continuation(AgentContinuationRef),
-    Terminal(TerminalRef),
-}
-
 /// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work
 /// the runtime reports: detach a live subscription, or drop a still-pending
 /// launch (both its queued work and its completion routing) so it cannot spawn a
@@ -4167,55 +4136,15 @@ fn close_focused_terminal_pane(
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) {
-    // A live Agent tab is dismissed by its saved lineage; an interrupted history
-    // tab already carries its own lineage, so both close through the same
-    // continuation-scoped dismissal (#506) and neither deletes a provider
-    // conversation or a daemon runtime.
-    //
-    // A live Agent whose continuation is not observed yet (#599 projects it from
-    // the terminal fence alone) is closed by that exact fence instead. Skipping
-    // the mutation would close only the runtime tab and let the next inventory
-    // replay project the same conversation again (#613).
-    let dismissed = runtime
-        .focused_interrupted()
-        .map(|interrupted| AgentDismissalKey::Continuation(interrupted.continuation))
-        .or_else(|| {
-            runtime.focused_agent_terminal().map(|terminal| {
-                ui.agent_continuation_for(&terminal).map_or(
-                    AgentDismissalKey::Terminal(terminal),
-                    AgentDismissalKey::Continuation,
-                )
-            })
-        });
-    if let Some(key) = dismissed {
-        let selected = runtime.selection_after_close().flatten();
-        let selected = match selected.as_ref() {
-            Some(TabSelection::Live(terminal)) => ui.agent_continuation_for(terminal),
-            Some(TabSelection::Interrupted(continuation)) => Some(*continuation),
-            Some(TabSelection::Pending(_) | TabSelection::Ready(_)) | None => None,
-        };
-        let session_id = runtime.panes().active().and_then(Target::session_id);
-        let mutation = match key {
-            AgentDismissalKey::Continuation(continuation) => {
-                AgentTabIntentMutation::DismissAndSelect {
-                    continuation,
-                    session_id,
-                    selected,
-                }
-            }
-            AgentDismissalKey::Terminal(terminal) => {
-                AgentTabIntentMutation::DismissTerminalAndSelect {
-                    terminal,
-                    session_id,
-                    selected,
-                }
-            }
-        };
-        if let Err(error) = ui.mutate_agent_intent(mutation) {
-            surface_agent_tab_intent_error(runtime, error);
-            return;
-        }
-        runtime.set_reopen_choices(ui.agent_reopen_choices());
+    // Agent inventory is authoritative and every existing Agent stays visible.
+    // Closing a live or interrupted Agent tab would only hide a still-owned
+    // runtime and make capacity impossible to manage, so direct the user to
+    // terminate the CLI instead. Pending launches remain cancellable below.
+    if runtime.focused_agent_terminal().is_some() || runtime.focused_interrupted().is_some() {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+            "Agent tabs stay visible; exit the Agent with Ctrl-D",
+        ))));
+        return;
     }
     let outcome = runtime.close_focused_pane();
     if let Some(terminal) = outcome.detach {
@@ -4788,7 +4717,6 @@ fn drain_controller_host_actions(
                     match reopened {
                         Ok(()) => {
                             ui.request_agent_observation();
-                            runtime.set_reopen_choices(ui.agent_reopen_choices());
                             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
                                 Notice::new(
                                     "Agent reopen was saved; waiting for daemon observation",
@@ -4936,7 +4864,6 @@ fn drain_pane_completions_into_runtime(
                                     surface_agent_tab_intent_error(runtime, error);
                                 }
                             }
-                            runtime.set_reopen_choices(ui.agent_reopen_choices());
                         } else if matches!(target, Target::Root(_)) && ui.agent_tab_intent.is_some()
                         {
                             // A production root conversation must have the
@@ -5052,7 +4979,6 @@ fn apply_exact_resume(
         &resume.terminal,
     );
     debug_assert!(accepted.is_ok(), "validated exact resume remains accepted");
-    runtime.set_reopen_choices(ui.agent_reopen_choices());
 }
 
 /// Start the explicit resume of the selected interrupted tab (`Ctrl-O r`).
@@ -5173,7 +5099,6 @@ fn drive_workspace_controller(
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
-    runtime.set_reopen_choices(ui.agent_reopen_choices());
     let mut metrics_backend = MetricsBackend::new(composition.metrics);
     let mut metrics_projection = MetricsProjection::default();
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
@@ -11809,7 +11734,7 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_live_action_detaches_the_focused_terminal() {
+    fn close_tab_live_action_keeps_the_focused_agent_attached() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
@@ -11846,8 +11771,15 @@ mod tests {
             0,
         ));
 
-        assert!(runtime.active_pane().tabs().is_empty());
-        assert_eq!(*detaches.lock().unwrap(), vec![8]);
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert!(detaches.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+        );
     }
 
     #[test]
@@ -12242,16 +12174,13 @@ mod tests {
             Some(quiet_terminal_view)
         );
 
-        // Closing the selected live slot durably chooses the interrupted
-        // successor. That selection owns no VT, so its safe detail is rendered.
+        // Closing the selected live Agent is a no-op. The daemon-owned tab and
+        // selection remain intact until the CLI exits.
         let mut pending_targets = std::collections::HashMap::new();
         super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending_targets);
         let interrupted_projection = super::director_drawer_projection(&ui, &runtime, None);
         assert!(interrupted_projection.conversations[0].selected);
-        assert_eq!(
-            interrupted_projection.interrupted_detail.as_deref(),
-            Some(interrupted.safe_detail())
-        );
+        assert_eq!(interrupted_projection.interrupted_detail, None);
         assert_eq!(interrupted_projection.terminal_view, None);
         runtime.fail_tab_resume_for(
             Target::Root(workspace),
@@ -12260,10 +12189,7 @@ mod tests {
             "safe retry feedback".to_owned(),
         );
         let failed_projection = super::director_drawer_projection(&ui, &runtime, None);
-        assert_eq!(
-            failed_projection.interrupted_detail.as_deref(),
-            Some(interrupted.safe_detail())
-        );
+        assert_eq!(failed_projection.interrupted_detail, None);
         assert_eq!(
             failed_projection.feedback.as_deref(),
             Some("safe retry feedback")
@@ -12273,6 +12199,9 @@ mod tests {
             &mut ui,
             &mut runtime,
         ));
+        let selected_interrupted = super::director_drawer_projection(&ui, &runtime, None);
+        assert!(selected_interrupted.conversations[1].selected);
+        assert!(selected_interrupted.interrupted_detail.is_some());
         let pending = OperationId::new();
         let _ = runtime.request_pane(Target::Root(workspace), pending, PaneKind::Agent);
         runtime.inject_pane_event_for_test(
@@ -12341,7 +12270,7 @@ mod tests {
             crate::usecase::application::pane::PaneEvent::Resolved { operation: diff },
         );
         let filtered = super::director_drawer_projection(&ui, &runtime, None);
-        assert_eq!(filtered.conversations.len(), 3);
+        assert_eq!(filtered.conversations.len(), 4);
         assert!(
             filtered
                 .conversations
@@ -12938,8 +12867,7 @@ mod tests {
             self.mutations.lock().unwrap().push(mutation.clone());
             let before = state.clone();
             let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation }
-                | AgentTabIntentMutation::DismissAndSelect { continuation, .. } => {
+                AgentTabIntentMutation::Dismiss { continuation } => {
                     state.targets.iter().any(|target| {
                         target
                             .tabs
@@ -12957,6 +12885,11 @@ mod tests {
             let projection = if conflict {
                 match mutation {
                     AgentTabIntentMutation::Observe {
+                        terminals,
+                        agents,
+                        allowed_sessions,
+                    }
+                    | AgentTabIntentMutation::ObserveAll {
                         terminals,
                         agents,
                         allowed_sessions,
@@ -12985,8 +12918,7 @@ mod tests {
                         });
                         None
                     }
-                    AgentTabIntentMutation::DismissAndSelect { continuation, .. }
-                    | AgentTabIntentMutation::Dismiss { continuation } => {
+                    AgentTabIntentMutation::Dismiss { continuation } => {
                         state.apply(AgentTabIntentMutation::Dismiss { continuation })
                     }
                     AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. }
@@ -13122,6 +13054,40 @@ mod tests {
             .unwrap();
         assert!(!repeated.cas_conflict);
         assert_eq!(repeated.intent.revision, 5);
+    }
+
+    #[test]
+    fn memory_intent_port_projects_both_stale_observation_variants() {
+        let workspace = WorkspaceId::new();
+        let mut durable = AgentTabIntent::empty(workspace);
+        durable.revision = 1;
+        let mut port = MemoryIntentPort {
+            state: Arc::new(Mutex::new(durable)),
+            mutations: Arc::new(Mutex::new(Vec::new())),
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: Vec::new(),
+            resumable: Vec::new(),
+        };
+
+        for mutation in [
+            AgentTabIntentMutation::Observe {
+                terminals: Vec::new(),
+                agents: inventory.clone(),
+                allowed_sessions: BTreeSet::new(),
+            },
+            AgentTabIntentMutation::ObserveAll {
+                terminals: Vec::new(),
+                agents: inventory.clone(),
+                allowed_sessions: BTreeSet::new(),
+            },
+        ] {
+            let commit = port.mutate(workspace, 0, mutation).unwrap();
+            assert!(commit.cas_conflict);
+            assert!(!commit.mutation_applied);
+            assert_eq!(commit.projection, Some(AgentTabProjection::default()));
+        }
     }
 
     #[test]
@@ -14101,11 +14067,17 @@ mod tests {
         assert!(!retry.complete(redispatch_at, fresh.outcome));
         assert_eq!(mutations.lock().unwrap().len(), mutation_count + 1);
         assert_eq!(runtime.focused_terminal(), Some(second_terminal.clone()));
-        assert!(matches!(
-            runtime.active_pane().tabs(),
-            [PaneTab::Live(LivePane { terminal, kind: PaneKind::Agent })]
+        assert_eq!(runtime.active_pane().tabs().len(), 2);
+        assert!(runtime.active_pane().tabs().iter().any(|tab| matches!(
+            tab,
+            PaneTab::Live(LivePane { terminal, kind: PaneKind::Agent })
+                if terminal.fences(&first_terminal)
+        )));
+        assert!(runtime.active_pane().tabs().iter().any(|tab| matches!(
+            tab,
+            PaneTab::Live(LivePane { terminal, kind: PaneKind::Agent })
                 if terminal.fences(&second_terminal)
-        ));
+        )));
         assert!(!retry.begin_if_due(redispatch_at + std::time::Duration::from_secs(60)));
     }
 
@@ -14330,8 +14302,8 @@ mod tests {
             &mut runtime,
             &mut std::collections::HashMap::new(),
         );
-        assert!(runtime.active_pane().tabs().is_empty());
-        assert!(durable.lock().unwrap().dismissed.contains(&continuation));
+        assert_eq!(runtime.focused_terminal(), Some(old.clone()));
+        assert!(durable.lock().unwrap().dismissed.is_empty());
         assert!(
             durable.lock().unwrap().targets[0].tabs[0]
                 .terminal
@@ -14347,8 +14319,8 @@ mod tests {
             &BTreeSet::from([session]),
         );
         assert_eq!(fresh.outcome, super::RestoreJobOutcome::Applied);
-        assert!(runtime.active_pane().tabs().is_empty());
-        assert_ne!(runtime.focused_terminal(), Some(replacement));
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert_eq!(runtime.focused_terminal(), Some(replacement));
     }
 
     #[test]
@@ -14630,11 +14602,11 @@ mod tests {
         assert!(matches!(
             mutations.as_slice(),
             [
-                AgentTabIntentMutation::Observe {
+                AgentTabIntentMutation::ObserveAll {
                     allowed_sessions: initial_allowed,
                     ..
                 },
-                AgentTabIntentMutation::Observe {
+                AgentTabIntentMutation::ObserveAll {
                     allowed_sessions: removed_allowed,
                     ..
                 }
@@ -14650,7 +14622,7 @@ mod tests {
                 .iter()
                 .all(|target| target.session_id != Some(removed_session))
         );
-        assert_eq!(durable.dismissed, BTreeSet::from([root_dismissed]));
+        assert!(durable.dismissed.is_empty());
         assert!(
             durable.targets[0]
                 .tabs
@@ -15120,7 +15092,7 @@ mod tests {
 
         assert_eq!(runtime.focused_terminal(), Some(terminal));
         assert_eq!(runtime.active_pane().tabs().len(), 1);
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
         assert_eq!(
             serde_json::to_vec(&*durable.lock().unwrap()).unwrap(),
             bytes_before
@@ -15130,7 +15102,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some(AgentTabIntentError::Unavailable.safe_message())
+            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
         );
 
         let mut closed_intent = durable.lock().unwrap().clone();
@@ -15258,8 +15230,15 @@ mod tests {
             &mut runtime,
             &mut std::collections::HashMap::new(),
         );
+        assert_eq!(runtime.focused_terminal(), Some(agent_terminal.clone()));
+        assert!(durable.lock().unwrap().dismissed.is_empty());
+
+        // Seed legacy hidden state to exercise compatibility with an older
+        // writer. The current UI itself never creates this state.
+        ui.mutate_agent_intent(AgentTabIntentMutation::Dismiss { continuation })
+            .unwrap();
+        let _ = runtime.close_focused_pane();
         assert_eq!(runtime.focused_terminal(), Some(generic_terminal.clone()));
-        assert!(durable.lock().unwrap().dismissed.contains(&continuation));
 
         let (sender, receiver) = std::sync::mpsc::channel();
         sender
@@ -15350,7 +15329,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|mutation| matches!(mutation, AgentTabIntentMutation::Observe { .. }))
+                .filter(|mutation| matches!(mutation, AgentTabIntentMutation::ObserveAll { .. }))
                 .count(),
             2
         );
@@ -15434,7 +15413,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_selected_agent_persists_the_generic_successor_without_focus_drift() {
+    fn closing_selected_agent_keeps_it_visible_without_focus_drift() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let first = AgentContinuationRef::new();
@@ -15479,7 +15458,7 @@ mod tests {
                         kind: PaneKind::Agent,
                     },
                     LivePane {
-                        terminal: closed_terminal,
+                        terminal: closed_terminal.clone(),
                         kind: PaneKind::Agent,
                     },
                     LivePane {
@@ -15503,15 +15482,17 @@ mod tests {
             &mut std::collections::HashMap::new(),
         );
 
-        assert_eq!(runtime.focused_terminal(), Some(generic.clone()));
+        assert_eq!(runtime.focused_terminal(), Some(closed_terminal.clone()));
         {
             let state = durable.lock().unwrap();
-            assert!(state.dismissed.contains(&closed));
-            assert_eq!(state.targets[0].selected, None);
+            assert!(state.dismissed.is_empty());
+            assert_eq!(state.targets[0].selected, Some(closed));
         }
 
-        // Closing the generic successor is not a conversation dismissal, so it
+        // Closing a generic tab remains available and is not a conversation
+        // dismissal, so it
         // records neither a lineage nor a deferred terminal fence.
+        let _ = runtime.focus_terminal(Target::Session(session), generic.clone());
         let before = durable.lock().unwrap().clone();
         super::close_focused_terminal_pane(
             &mut ui,
@@ -15529,8 +15510,6 @@ mod tests {
     #[allow(clippy::too_many_lines)] // One fixture closes, replays, reconnects, and reopens.
     fn closing_an_unobserved_live_agent_survives_inventory_replay_and_reconnect() {
         let workspace = WorkspaceId::new();
-        let closed = AgentContinuationRef::new();
-        let surviving = AgentContinuationRef::new();
         let closed_terminal = scoped_terminal_ref(workspace, None);
         let surviving_terminal = scoped_terminal_ref(workspace, None);
         // Nothing is saved yet, so both root conversations are projected from
@@ -15580,137 +15559,16 @@ mod tests {
             &mut std::collections::HashMap::new(),
         );
 
-        assert_eq!(runtime.focused_terminal(), Some(surviving_terminal.clone()));
-        {
-            let state = durable.lock().unwrap();
-            assert!(state.dismissed_terminals.contains(&closed_terminal));
-            assert!(state.dismissed.is_empty());
-        }
-
-        let live_agents = |terminals: &[(TerminalRef, AgentContinuationRef)]| {
-            (
-                terminals
-                    .iter()
-                    .map(|(terminal, _)| TerminalInventoryEntry {
-                        terminal: terminal.clone(),
-                        kind: TerminalKind::Agent,
-                        live: true,
-                    })
-                    .collect::<Vec<_>>(),
-                AgentInventory {
-                    workspace_id: workspace,
-                    runtimes: terminals
-                        .iter()
-                        .map(|(terminal, continuation)| AgentRuntimeInventoryItem {
-                            runtime: AgentRuntimeRef::new(
-                                AgentRuntimeId::new(),
-                                terminal.clone(),
-                                None,
-                            )
-                            .unwrap(),
-                            continuation: *continuation,
-                            state: AgentRuntimeInventoryState::Live,
-                            resumed_from: None,
-                        })
-                        .collect(),
-                    resumable: Vec::new(),
-                },
-            )
-        };
-        let replay =
-            |ui: &mut WorkspaceUi,
-             runtime: &mut WorkspaceRuntime,
-             inventory: (Vec<TerminalInventoryEntry>, AgentInventory)| {
-                let fence = runtime.restore_fence();
-                let applied = super::apply_restore_completion(
-                    super::RestoreCompletion {
-                        port: Box::new(UnavailableAgentCommandPort),
-                        dispatched_interaction: fence.0,
-                        dispatched_registry_revision: fence.1,
-                        dispatched_allowed_sessions: BTreeSet::new(),
-                        terminals: Ok(inventory.0),
-                        agents: Ok(inventory.1),
-                        observation_coherent: true,
-                    },
-                    ui,
-                    runtime,
-                    workspace,
-                    &BTreeSet::new(),
-                );
-                assert_eq!(applied.outcome, super::RestoreJobOutcome::Applied);
-                runtime
-                    .active_pane()
-                    .tabs()
-                    .iter()
-                    .filter_map(|tab| match tab {
-                        PaneTab::Live(pane) => Some(pane.terminal.clone()),
-                        PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-            };
-
-        // The observation that finally binds the closed terminal to its lineage
-        // promotes the fence instead of projecting the conversation again.
-        let observation = live_agents(&[
-            (closed_terminal.clone(), closed),
-            (surviving_terminal.clone(), surviving),
-        ]);
+        assert_eq!(runtime.focused_terminal(), Some(closed_terminal));
+        assert!(durable.lock().unwrap().dismissed.is_empty());
+        assert!(durable.lock().unwrap().dismissed_terminals.is_empty());
         assert_eq!(
-            replay(&mut ui, &mut runtime, observation.clone()),
-            vec![surviving_terminal.clone()]
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
         );
-        {
-            let state = durable.lock().unwrap();
-            assert_eq!(state.dismissed, BTreeSet::from([closed]));
-            assert!(state.dismissed_terminals.is_empty());
-            assert_eq!(state.validate(workspace), Ok(()));
-        }
-
-        // A reconnect replay of the same inventory, and a replacement
-        // incarnation of the closed lineage, both stay closed.
-        assert_eq!(
-            replay(&mut ui, &mut runtime, observation),
-            vec![surviving_terminal.clone()]
-        );
-        let replacement = TerminalRef {
-            terminal_id: TerminalId::new(),
-            ..closed_terminal
-        };
-        assert_eq!(
-            replay(
-                &mut ui,
-                &mut runtime,
-                live_agents(&[
-                    (replacement.clone(), closed),
-                    (surviving_terminal.clone(), surviving),
-                ]),
-            ),
-            vec![surviving_terminal.clone()]
-        );
-
-        // Only an explicit reopen brings the conversation back.
-        assert_eq!(
-            ui.agent_reopen_choices()
-                .into_iter()
-                .map(|choice| (choice.label, choice.continuation))
-                .collect::<Vec<_>>(),
-            [(AgentTabIntent::safe_label(closed), closed)]
-        );
-        ui.mutate_agent_intent(AgentTabIntentMutation::Reopen {
-            continuation: closed,
-        })
-        .unwrap();
-        let reopened = replay(
-            &mut ui,
-            &mut runtime,
-            live_agents(&[
-                (replacement.clone(), closed),
-                (surviving_terminal.clone(), surviving),
-            ]),
-        );
-        assert_eq!(reopened.len(), 2);
-        assert!(reopened.contains(&replacement));
-        assert!(reopened.contains(&surviving_terminal));
     }
 
     #[test]
@@ -19990,7 +19848,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_history_tab_dismisses_its_lineage_without_resuming_anything() {
+    fn closing_a_history_tab_keeps_it_visible_without_resuming_anything() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let history = interrupted_history(workspace, Some(session), true);
@@ -20017,10 +19875,15 @@ mod tests {
 
         super::close_focused_terminal_pane(&mut ui, &mut runtime, &mut pending);
 
-        assert!(!runtime.active_pane().has_tabs());
-        assert!(ui.agent_dismissed().contains(&history.continuation));
-        // A dismissed lineage is offered for reopen and no provider resume ran.
-        assert_eq!(ui.agent_reopen_choices().len(), 1);
+        assert!(runtime.active_pane().has_tabs());
+        assert!(WorkspaceUi::agent_dismissed().is_empty());
+        assert_eq!(
+            runtime
+                .state()
+                .notice()
+                .map(|notice| notice.message.as_str()),
+            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+        );
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
     }

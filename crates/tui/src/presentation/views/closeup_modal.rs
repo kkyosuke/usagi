@@ -10,7 +10,6 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{TextInput, modal};
-use crate::presentation::workspace_runtime::AgentReopenChoice;
 use crate::usecase::{agent_command, closeup};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
@@ -27,7 +26,6 @@ pub struct CloseupModal {
     input: TextInput,
     expanded: bool,
     selected_subcommand: usize,
-    reopen_choices: Vec<AgentReopenChoice>,
     /// Agent CLIs installed on this machine. The `agent` picker and its Tab
     /// completion offer only these, so a selection is always runnable.
     available_models: AvailableModels,
@@ -70,22 +68,11 @@ impl CloseupModal {
             input: TextInput::default(),
             expanded: false,
             selected_subcommand: 0,
-            reopen_choices: Vec::new(),
             available_models: AvailableModels::all(),
             default_model: DefaultModel::default(),
             completion_cycle: None,
             error: None,
         }
-    }
-
-    /// Supply the secret-free continuation choices for `Reopen closed Agent`.
-    #[must_use]
-    pub fn with_reopen_choices(mut self, choices: Vec<AgentReopenChoice>) -> Self {
-        self.reopen_choices = choices;
-        self.selected_subcommand = self
-            .selected_subcommand
-            .min(self.subcommands().len().saturating_sub(1));
-        self
     }
 
     /// Constrain the `agent -m` picker and completion to the installed CLIs and
@@ -150,6 +137,14 @@ impl CloseupModal {
                 .map_or_else(String::new, |subcommand| {
                     format!("{} {}", self.selected_action().name, subcommand.value)
                 }),
+            // Action mode's input starts as a command-name filter, but once the
+            // user types an argument separator it is a complete command line.
+            // Returning the filtered row here made `agent -m codex` produce an
+            // empty submission because no command name starts with that whole
+            // string.
+            ModalSelectionMode::Action if self.input.value().contains(char::is_whitespace) => {
+                self.input.value().to_owned()
+            }
             ModalSelectionMode::Action => self
                 .matches()
                 .get(self.selected)
@@ -335,14 +330,6 @@ impl CloseupModal {
                 })
                 .collect(),
             "close" => vec![ModalSubcommand::plain("--force")],
-            "reopen" => self
-                .reopen_choices
-                .iter()
-                .map(|choice| ModalSubcommand {
-                    label: format!("{}  {}", choice.label, choice.continuation),
-                    value: choice.continuation.to_string(),
-                })
-                .collect(),
             "terminal" => vec![
                 ModalSubcommand::plain("open"),
                 ModalSubcommand::plain("new"),
@@ -389,11 +376,6 @@ impl CloseupModal {
         }
         let candidates = match command {
             "close" => vec!["--force".to_owned()],
-            "reopen" => self
-                .reopen_choices
-                .iter()
-                .map(|choice| choice.continuation.to_string())
-                .collect(),
             "terminal" => vec!["open".to_owned(), "new".to_owned()],
             _ => return Vec::new(),
         };
@@ -618,6 +600,25 @@ mod tests {
     }
 
     #[test]
+    fn action_mode_submits_a_typed_command_line_with_arguments() {
+        let mut modal = CloseupModal::new("daemon");
+        for character in "agent -m codex".chars() {
+            modal.insert_char(character);
+        }
+
+        assert!(modal.matches().is_empty());
+        assert_eq!(modal.submission(), "agent -m codex");
+
+        // A trailing separator is also meaningful: it submits the command and
+        // lets the command parser decide whether an omitted argument is valid.
+        modal = CloseupModal::new("daemon");
+        for character in "agent ".chars() {
+            modal.insert_char(character);
+        }
+        assert_eq!(modal.submission(), "agent ");
+    }
+
+    #[test]
     fn an_action_without_subcommands_neither_expands_nor_completes_arguments() {
         // `diff` and Closeup's workspace-only `env` take no arguments, so they
         // have no picker rows.
@@ -813,7 +814,7 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 6);
+        assert_eq!(modal.actions().len(), 5);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
         assert!(joined(&modal).contains("↑↓: select"));
@@ -828,7 +829,7 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 5);
+        assert_eq!(modal.selected(), 4);
         assert_eq!(modal.selected_action().name, "terminal");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
@@ -855,6 +856,13 @@ mod tests {
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
         assert_eq!(modal.submission(), "close");
+    }
+
+    #[test]
+    fn an_out_of_range_selection_has_no_subcommands() {
+        let mut modal = CloseupModal::new("s");
+        modal.selected = usize::MAX;
+        assert!(modal.subcommands().is_empty());
     }
 
     #[test]
@@ -969,48 +977,6 @@ mod tests {
             assert_eq!(modal.input.cursor(), cursor);
             assert_eq!(modal.selected, selected);
         }
-    }
-
-    #[test]
-    fn async_reopen_choices_are_safe_while_the_prompt_matches_no_command() {
-        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
-        let mut modal = CloseupModal::new("daemon");
-        for character in "no-match".chars() {
-            modal.insert_char(character);
-        }
-        let modal = modal.with_reopen_choices(vec![
-            crate::presentation::workspace_runtime::AgentReopenChoice {
-                label: "Agent safe".to_owned(),
-                continuation,
-            },
-        ]);
-        assert_eq!(modal.submission(), String::new());
-        assert!(joined(&modal).contains("no-match"));
-    }
-
-    #[test]
-    fn reopen_choices_expand_and_complete_by_continuation() {
-        let continuation = usagi_core::domain::id::AgentContinuationRef::new();
-        let choice = crate::presentation::workspace_runtime::AgentReopenChoice {
-            label: "Agent safe".to_owned(),
-            continuation,
-        };
-        let mut actions = CloseupModal::new("daemon").with_reopen_choices(vec![choice.clone()]);
-        while actions.selected_action().name != "reopen" {
-            actions.select_next();
-        }
-        actions.expand_selected();
-        assert!(joined(&actions).contains("Agent safe"));
-        assert_eq!(actions.submission(), format!("reopen {continuation}"));
-
-        let mut prompt = CloseupModal::with_selection_mode("daemon", ModalSelectionMode::Prompt)
-            .with_reopen_choices(vec![choice]);
-        let continuation_text = continuation.to_string();
-        for character in format!("reopen {}", &continuation_text[..8]).chars() {
-            prompt.insert_char(character);
-        }
-        prompt.complete_selected();
-        assert_eq!(prompt.input.value(), format!("reopen {continuation_text}"));
     }
 
     #[test]

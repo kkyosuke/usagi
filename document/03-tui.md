@@ -465,7 +465,7 @@ terminal bytes を変更しない。daemon runtime が既に成功していて i
 local success を捏造せず、既存 intent contract の safe error を表示する。
 
 coherent inventory は drawer が閉じていても root target の `AgentTabIntent` と reconcile し、保存済み order /
-selection / dismissal を準備する。保存済み exact ref が trusted live なら同じ `TerminalRef`、同 lineage が
+selection を準備する。保存済み exact ref が trusted live なら同じ `TerminalRef`、同 lineage が
 resumable なら同じ slot の interrupted tab を投影する。inventory-only conversation は deterministic order で末尾へ
 加え、消失した selection は同 slot より後の surviving tab、なければ先頭、conversation が無ければ empty state へ
 縮退する。drawer 自体は observation から自動 open しない。
@@ -895,16 +895,14 @@ session 作成と同じ interaction gate であり、受付時の interaction co
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
 pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
-選択 tab を前後へ並べ替え、`Ctrl-O x` / `Ctrl-O Ctrl-X` は選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
-target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
-terminal を停止しない。live Agent tab の close は subscription を detach して conversation lineage の dismissal を
-永続化し、同じ lineage の replacement / interrupted record を `reopen` の明示操作まで隠す。continuation がまだ
-観測されておらず terminal fence だけで投影されている live Agent の close は、その exact `TerminalRef` を
-[deferred dismissal](#deferred-dismissal未観測-lineage-の-close) として永続化する。generic Terminal tab の close は
-conversation の dismissal ではないため、lineage も fence も記録しない。`reopen` picker は
-`AgentContinuationRef` から作る safe label だけを表示し、選択 lineage の dismissal だけを解除する。reopen 自体は
-Agent launch、provider resume、runtime kill を行わない。pending tab の close は daemon へ未送信の client-owned launch
-だけを取り消し、送信済み operation を推測して再送・cancel しない。
+選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document tab と、daemon へ未送信の
+client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
+閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
+detach するだけで daemon-owned terminal を停止しない。pending launch は送信済み operation を推測して再送・cancel しない。
+
+live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、`Ctrl-O x` / `Ctrl-O Ctrl-X` では閉じない。
+この操作には `Agent tabs stay visible; exit the Agent with Ctrl-D` を表示する。Agent runtime を終了して実行枠を空ける操作は、
+対象 tab を選択して CLI へ `Ctrl-D` を送る。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
 
 shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
 切替時は以前の subscription を detach する。background target と選択外 tab の terminal coordinator は bounded
@@ -956,8 +954,7 @@ pending pane と daemon の答えを結ぶ identity は、**controller が pendi
 
 response が失われた・timeout した場合は、その pane を安全な失敗として閉じるだけで、**別の `OperationId` で blind retry
 しない**。TUI を開き直したときの in-flight launch の replay や `OperationId` の再利用も行わず、復元は
-[workspace open 時の pane 復元](#workspace-open-時の-pane-復元) の inventory 観測と
-[#506 dismissal precedence](#506-dismissal-precedence) の display intent だけが決める。
+[workspace open 時の pane 復元](#workspace-open-時の-pane-復元) の inventory 観測だけが決める。
 
 ### live terminal の出力表示と入力
 
@@ -1007,7 +1004,7 @@ Home の inventory（decision / session / metrics）を観測する 3 lane は
 
 - background lane は `Attach` も terminal 単位の `Resume` も**送らない**。detach 済み tab の観測 primitive は scope inventory だけである。
 - background で bound するのは exit metadata の観測時刻（cadence + queue 遅延 + request deadline 1 回分）だけであり、**final output byte の取得時刻は bound しない**。
-  final output は tab を foreground 化して再 attach したとき、または [completed entry](#exited-terminal-の-completed-entry) の明示 reopen で
+  final output は tab を foreground 化して再 attach したとき、または [completed entry](#exited-terminal-の-completed-entry) を history から明示選択したときに
   read-only に読む。
 - inventory が `live: false` として列挙した tracked terminal だけを exit として扱う。reply から単に欠落している entry は exit とみなさず、
   次の観測へ持ち越す（partial / 誤 routing な inventory で tab を閉じないため）。要求した scope 外の entry を含む reply は失敗として backoff する。
@@ -1206,7 +1203,10 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 - **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m sak` → `agent -m sakana.ai`、
   `agent --` → `agent --model` のように候補が 1 つなら確定し、**候補が複数のときは Tab を押すたびに巡回する**
   （`agent -m c` → `agent -m claude` → `agent -m codex` → `agent -m claude`）。曖昧さで Tab が無反応になることはない。
-  Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。
+  Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。filter へ引数区切りを含む
+  command line（`agent -m codex` など）を直接入力した場合も、その入力全体を submit する。
+- daemon の同時実行枠が満杯の場合は `Agent slots full; exit one with Ctrl-D, retry` を表示する。すべての既存 Agent は
+  tab に表示されるため、終了する Agent を選択して `Ctrl-D` を送ってから再試行する。Agent tab の close は非表示化しない。
 - 位置引数（`agent codex`）も同じ語彙・同じ install 判定で受け付ける。`-m` の重複、値の欠落、複数選択、未知の flag は
   安全な文言で拒否し、modal を閉じない（拒否の文言は [Closeup 入力の拒否表示](#closeup-入力の拒否表示) が正本）。
 - CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う（`sakana.ai` / `sakana_ai` /
@@ -1272,9 +1272,8 @@ conversation の専用 detail 行に、ID を含まない safe reason を表示�
 resume を自動送信せず、managed session は `session resume <name>`、root scope は drawer で選択した tab の
 `Ctrl-O r` を必須とする。
 
-- **two-source reconciliation**: daemon の unified terminal / Agent inventory が liveness・PTY ownership の正本、
-  `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択・
-  conversation lineage dismissal と[未観測 lineage の deferred dismissal](#deferred-dismissal未観測-lineage-の-close)の
+- **two-source reconciliation**: daemon の unified terminal / Agent inventory が membership・liveness・PTY ownership の正本、
+  `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択の
   正本である。local state は workspace identity、完全な last-known `TerminalRef`、
   provider-neutral な `AgentContinuationRef` だけを持ち、provider ID、argv、environment、transcript、terminal output を
   保存しない。generic Terminal tab は従来どおり inventory だけから復元する。
@@ -1295,19 +1294,17 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
   tab だけを attach / resync し、background target と選択外 tab は detached のまま保持する。
 - **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
   結果だけが durable Observe と pane projection を適用できる。遅延・順序外の結果は全体を拒否し、専用 port が戻り次第、
-  fresh fence で一度だけ再観測する。後続の close・reorder・selection を上書きせず focus を奪わない。transport failure と
+  fresh fence で一度だけ再観測する。後続の reorder・selection を上書きせず focus を奪わない。transport failure と
   fence rejection が同時なら transport failure を優先して outage backoff を維持する。
-- **commit**: Agent tab の確定した order / selection / close / reopen は file lock 下の atomic read-modify-write で commit する。
-  revision CAS が競合した場合は最新 state を読み直して stable continuation key ごとに mutation を適用する。ただし stale
-  Observe は最新 exact ref を stale candidate へ置換せず fresh observation を要求し、stale Reopen / admission は新しい Dismiss を
-  解除しない。reopen は dismissal を commit した後に dedicated port で fresh coherent observation を要求し、過去の cache から
-  pane 一覧を置換しない。dismissal は利用者が明示 reopen するまで保持し、inventory absence を retention / GC の根拠にしない。
-  保存失敗時は close / reorder / selection / reopen の可視 UI を変えず、typed safe notice を表示する。coherent restore の
+- **commit**: Agent tab の確定した order / selection は file lock 下の atomic read-modify-write で commit する。
+  revision CAS が競合した場合は最新 state を読み直して stable continuation key ごとに mutation を適用する。stale
+  Observe は最新 exact ref を stale candidate へ置換せず fresh observation を要求する。保存失敗時は reorder / selection の
+  可視 UI を変えず、typed safe notice を表示する。coherent restore の
   `Observe` 保存だけが失敗した場合も、既存 Agent / pending / generic の順序と選択を変更せず、inventory-only Agent を表示しない。
   generic inventory の新規 ref だけを append / exact-dedup し、次の保存成功 observation が全量 membership / order を確定する。
 - **session removal**: 成功した lifecycle snapshot の available session 集合は target 存在について authoritative である。集合から
-  消えた session は target の selection / slots と、それら slots が所有する dismissal だけを同一 commit で除去する。他 target と
-  dismissal は保持する。session が allowed のまま inventory から runtime だけが欠落した場合は dormant slot / dismissal を保持し、
+  消えた session は target の selection / slots を同一 commit で除去する。他 target は保持する。session が allowed のまま
+  inventory から runtime だけが欠落した場合は dormant slot を保持し、
   history retention の根拠にしない。available 集合の変更自体が controller の coalesced observation を1件要求する。既存 outage の
   backoff は短絡せず、旧集合で in-flight の結果は session-set fence で拒否して fresh 集合を一度だけ再観測する。
 
@@ -1315,45 +1312,28 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 
 | 入力 | 判定 | 動作 |
 |---|---|---|
-| dismissed lineage が durable inventory に残る | live / interrupted / resume unavailable | tab を出さず runtime / provider conversation は停止・削除しない |
+| legacy dismissal が保存されている | coherent な全量 observation | dismissal を消去し、inventory に存在する live / interrupted Agent を表示する |
 | saved exact ref が trusted live | unified terminal と Agent inventory の双方に完全一致 | 保存 slot へ live tab を 1 枚投影する |
 | saved ref は non-live、同じ continuation は resumable | durable history は存在 | slot intent を保持し、interrupted tab は自動投影・resume しない |
 | `live: false`（死んだ process / exited / orphan / identity_unknown） | attach 不可 | live tab を作らない。PTY master 復元不能は interrupted 契約に委ねる |
-| authoritative に削除された session | 成功した lifecycle snapshot の available session 集合から消えた | target / selection / slots と、その slots 所有 dismissal だけを同一 commit で除去する |
-| allowed session 内の inventory 欠落 | session 自体は lifecycle snapshot に残る | dormant slot / dismissal を保持し、別 target を復元する |
+| authoritative に削除された session | 成功した lifecycle snapshot の available session 集合から消えた | target / selection / slots を同一 commit で除去する |
+| allowed session 内の inventory 欠落 | session 自体は lifecycle snapshot に残る | dormant slot を保持し、別 target を復元する |
 | scope mismatch（別 workspace / worktree / session） | daemon が scope 完全一致で filter | 列挙されない |
 | saved generation が current active と異なるが、その owner generation が saved exact ref を live として列挙した | merged inventory が owner 自身の答えを持つ | 保存 slot へ live tab を 1 枚投影し、attach / input は owner endpoint へ配送する（[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)） |
 | saved generation の owner が answer しなかった | partial inventory は absence ではない | last-known tab を `reconnecting` として保持し、interrupted へ変換しない |
 | saved generation が trusted registry から消えた | verified retirement | tab を回収する。attach も input も別 generation へ再配送しない |
 | exact-equal terminal row の重複 | `TerminalRef` / kind / live がすべて同じ | normalize して 1 row にする |
 | conflicting terminal row / duplicate live continuation / Agent↔terminal 非全単射 | 同じ fenced ref の kind / live が競合する、または live Agent 対応が一意でない | observation 全体を拒否して retry する |
-| daemon 不通 / partial / cross-RPC 不整合 inventory | coherent な全量 observation ではない | 全 pane restore を適用せず retry し、intent / dismissal を GC せず local PTY も作らない |
-| deferred dismissal の fence が live Agent と一致する | exact `TerminalRef` が observation の live lineage に対応した | fence を lineage dismissal へ昇格し、tab を出さない（[deferred dismissal](#deferred-dismissal未観測-lineage-の-close)） |
+| daemon 不通 / partial / cross-RPC 不整合 inventory | coherent な全量 observation ではない | 全 pane restore を適用せず retry し、intent を変更せず local PTY も作らない |
 | corrupt schema | current schema として読めない | private peer へ quarantine し、空 intent から安全に再構築する |
 | future schema | current build より新しい | 元 bytes を保持して read-only にし、restore / mutation を適用せず typed notice を表示する |
 
-### deferred dismissal（未観測 lineage の close）
+### legacy dismissal の移行
 
-live Agent conversation は continuation が未観測でも terminal fence だけで投影される
-（[指示モード](#指示モードdirector-mode)）。この tab を閉じたとき dismissal key が無いことを理由に永続化を
-省くと、runtime だけが閉じて次の observation が同じ conversation を再投影する。そのため `AgentTabIntent` は
-lineage dismissal に加えて、**exact `TerminalRef` の deferred dismissal** を持つ。本節がその契約の正本である。
-
-| 局面 | 動作 |
-|---|---|
-| close 時に lineage が既知 | 従来どおり continuation の dismissal を commit する |
-| close 時に lineage が未知 | exact `TerminalRef` を deferred dismissal として commit する。可視 UI は他の close と同じ atomic 契約に従い、保存失敗時は tab を閉じず typed safe notice を出す |
-| observation が fence の lineage を証明した | 同じ commit で dismissal を continuation へ昇格し、fence を落とす。以降は lineage dismissal と同一に扱う |
-| observation に fence が現れない | fence を保持する（inventory absence は retention / GC の根拠にしない） |
-| session が authoritative に消えた | その session scope の fence を slots / dismissal と同じ commit で除去する |
-| 別 exact `TerminalRef` の live Agent | 昇格前の fence は他の incarnation を抑止しない |
-
-- 昇格前の fence は lineage を持たないため `reopen` picker に出さない。昇格後は他の dismissal と同じ safe label で
-  reopen できる。
-- CAS 競合時、deferred close は monotonic な delta として merge し、stale な後継 selection は捨てて最新 writer の
-  selection を残す。同じ terminal の再 close も revision を進め、その revision を読んだ stale Reopen を fence する。
-- deferred dismissal は現行 schema への追加 field であり、schema は上げない。旧 build はこの field を無視して
-  従来どおり読めるため、state 全体が future schema として read-only 化されることはない。
+既存 schema の `dismissed` / `dismissed_terminals` field は旧 build の保存データを読めるよう残すが、新しい close 操作は
+どちらも書き込まない。最初の coherent な全量 observation は両 field を同じ commit で空にしてから reconcile し、以前に
+非表示化された Agent を含めて daemon inventory に存在する live / interrupted Agent をすべて投影する。partial / 不整合な
+inventory では移行を確定せず、次の coherent observation を待つ。
 
 ## resume data compatibility
 
@@ -1365,8 +1345,8 @@ identity は daemon-issued `AgentContinuationRef` だけである。表示名、
 | 復元時の入力 | 判定 | fallback |
 |---|---|---|
 | saved managed session target が snapshot に無い | target identity が stale | active pane にせず、Home は surviving session または `+ new session` へ reconcile する |
-| saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot / dismissal を保持し live tab は投影しない |
-| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot と dismissal を保持する。aggregate allocator / retention policy は [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務 |
+| saved `TerminalRef` が live inventory に無いが continuation history は残る | attach 不可 | slot を保持し live tab は投影しない |
+| inventory から continuation が消えた | absence は retention / GC の証明ではない | slot を保持する。aggregate allocator / retention policy は [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務 |
 | terminal ID が同じでも daemon generation など fencing field が異なる | old / stale data | trusted owner が無ければ attach せず、名前や ID から置換しない |
 | attach / resync が ownership unknown または transport failure | 継続性を証明できない | safe feedback を表示し input を無効化する |
 
@@ -1389,7 +1369,7 @@ tombstone が到達可能である期間は daemon の aggregate retention が�
 [5. daemon](05-daemon.md#final-retention-と-aggregate-gc)）。final は observed / unobserved を問わず minimum
 visibility TTL の間は保護されるので、その間に completed entry を表示して `observe` / `dismiss` できる。TTL 経過後の
 final は pressure 下で決定的な順に回収され、`dismissed` が最初、まだ見ていない `unobserved` が最後になる。回収後の
-reopen は typed な expiry になり、別 terminal の history へ fallback しない。TUI は inventory から entry が消えたことを
+history 選択は typed な expiry になり、別 terminal の history へ fallback しない。TUI は inventory から entry が消えたことを
 retention の証明として扱わず、この typed 応答だけを根拠にする。
 
 ### workspace-global visibility の投影
@@ -1399,30 +1379,16 @@ observed < dismissed` の lattice と revision）である。TUI は completed i
 completed tab と visibility command を決める。projection は入力の純粋関数なので、CAS conflict を merge した後の
 再取得でも同じ結果へ収束する。
 
-| tombstone の visibility | #506 suppression | 明示 reopen | 投影 |
-|---|---|---|---|
-| `unobserved` | なし | — | completed tab を一度だけ自動表示し、`observe`（CAS）を送って「一度見た」を記録する |
-| `observed` | — | なし | 自動表示しない（再通知・二重 tab を作らない） |
-| `dismissed` | — | なし | 自動表示しない |
-| `unobserved` / `observed` / `dismissed` | — | あり | 該当 exact `TerminalRef` を read-only で表示する。`dismissed` は解除しない・runtime も resume しない |
-| `unobserved` | あり（#506 continuation-scoped dismissal） | なし | 自動表示せず `observe` も送らない。retention 期間 tombstone を保持し、明示 reopen だけが表示できる |
+| tombstone の visibility | history からの明示選択 | 投影 |
+|---|---|---|
+| `unobserved` | なし | completed tab を一度だけ自動表示し、`observe`（CAS）を送って「一度見た」を記録する |
+| `observed` / `dismissed` | なし | 自動表示しない（再通知・二重 tab を作らない） |
+| `unobserved` / `observed` / `dismissed` | あり | 該当 exact `TerminalRef` を read-only で表示する。`dismissed` は解除せず runtime も resume しない |
 
 - `observe` / `dismiss` は expected revision を伴う CAS で送る。conflict は authoritative snapshot を返すので、
   それへ merge して再投影する。late / out-of-order な write は `dismissed` を下げず、completed tab を復活させない。
   process-local な「見た」flag を authority にしない。
 - 別 exact `TerminalRef` incarnation の visibility は独立する。close / dismiss しても別 incarnation を誤抑止しない。
-
-### #506 dismissal precedence
-
-live Agent tab が [#506](../.usagi/issues/506-feat-tui-agent-tab-intent-daemon-inventory-open-reconcile.md) の
-continuation-scoped dismissal 済みなら、その runtime が後で exit しても final tombstone を completed tab や
-notification として自動再表示しない。#506 の suppression が auto-projection に優先する。suppressed final は破棄せず
-retention 期間保持し、history から exact `TerminalRef` を選ぶ明示 reopen 時だけ read-only final replay を表示できる。
-明示 reopen は #506 の live continuation intent や replacement spawn を復活させない。
-
-continuation lineage と exact terminal visibility は別の識別子であり、continuation から terminal への対応付けは
-#506 の contract だけが決める。本投影は #506 の suppression 集合を入力として受け取り、別 incarnation へ suppression を
-推測拡張しない。
 
 ## interrupted Agent の tab 投影と明示 resume
 
@@ -1448,7 +1414,7 @@ label・detail・feedback・log のいずれにも出さない。
 | exact-equal な inventory row の重複 | 同じ lineage | 1 枚に collapse する |
 | `AgentRuntimeRef` の session と terminal の session が不一致 | scope を信頼できない | 投影しない |
 | workspace / allowed session の外側、または別 workspace の inventory | scope mismatch | 投影しない |
-| #506 の continuation-scoped dismissal 済み | 利用者の close intent | 表示しない。明示 reopen だけが解除し、inventory 欠落では解除しない |
+| legacy dismissal が保存されている | coherent observation | dismissal を消去し、他の interrupted Agent と同じく表示する |
 | resumable item が無い / `available: false` / reason が `explicit_resume_available` でない | metadata 不足・live 保持・supersede 済み | tab は表示するが resume 不可にし、safe reason だけを出す |
 | target の lineage / runtime / workspace / session / worktree が当該 runtime と一致しない | 信頼できない target | target を捨て、resume 不可として表示する |
 
@@ -1503,8 +1469,8 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
    同じ位置に残る。
 4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
    inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
-5. `Ctrl-O x` は tab を閉じるだけで、provider conversation も runtime record も削除しない。閉じた lineage は
-   #506 の continuation-scoped dismissal に入り、`reopen` の明示操作だけが再表示する。
+5. `Ctrl-O x` は tab を閉じず、`Agent tabs stay visible; exit the Agent with Ctrl-D` を表示する。interrupted tab は
+   runtime を持たないため `Ctrl-D` も送らず、必要なら `Ctrl-O r` で明示 resume する。
 
 resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
 daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。

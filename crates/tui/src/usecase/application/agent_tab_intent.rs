@@ -2,8 +2,7 @@
 //!
 //! This state is deliberately not a runtime registry. Daemon inventories remain
 //! authoritative for liveness and PTY ownership; this module only reconciles
-//! their exact resource fences with the user's saved order, selection, and
-//! continuation-scoped dismissals.
+//! their exact resource fences with the user's saved order and selection.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,14 +43,12 @@ pub struct AgentTabIntent {
     /// Monotonic store revision used as a compare-and-swap fence.
     pub revision: u64,
     pub targets: Vec<AgentTabTargetIntent>,
-    /// Authoritative user close intent. It is union-preserved across stale
-    /// writers until the user explicitly reopens the lineage.
+    /// Legacy close intent retained for schema compatibility. A coherent
+    /// [`AgentTabIntentMutation::ObserveAll`] clears it before projection.
     pub dismissed: BTreeSet<AgentContinuationRef>,
-    /// Deferred close intent for the exact live terminals whose lineage was not
-    /// observed yet when the user closed them. Each fence is promoted into
-    /// [`Self::dismissed`] — and dropped from here — by the first observation
-    /// that binds it to a continuation, so a close is durable even before the
-    /// daemon has reported the conversation.
+    /// Legacy terminal-scoped close intent retained for schema compatibility.
+    /// A coherent [`AgentTabIntentMutation::ObserveAll`] clears it before
+    /// projection.
     ///
     /// The field is additive within [`AGENT_TAB_INTENT_SCHEMA`]: an older build
     /// reading this state simply forgets the deferred fences instead of having
@@ -152,6 +149,15 @@ impl AgentTabIntent {
                 agents,
                 allowed_sessions,
             } => Some(self.reconcile(&terminals, &agents, &allowed_sessions)),
+            AgentTabIntentMutation::ObserveAll {
+                terminals,
+                agents,
+                allowed_sessions,
+            } => {
+                self.dismissed.clear();
+                self.dismissed_terminals.clear();
+                Some(self.reconcile(&terminals, &agents, &allowed_sessions))
+            }
             AgentTabIntentMutation::Upsert {
                 session_id,
                 continuation,
@@ -165,44 +171,11 @@ impl AgentTabIntent {
                 session_id,
                 continuation,
             } => {
-                if let Some(target) = self
-                    .targets
-                    .iter_mut()
-                    .find(|target| target.session_id == session_id)
-                    && continuation.is_none_or(|candidate| {
-                        !self.dismissed.contains(&candidate)
-                            && target
-                                .tabs
-                                .iter()
-                                .any(|slot| slot.continuation == candidate)
-                    })
-                {
-                    target.selected = continuation;
-                }
+                self.select(session_id, continuation);
                 None
             }
             AgentTabIntentMutation::Dismiss { continuation } => {
-                if self.targets.iter().any(|target| {
-                    target
-                        .tabs
-                        .iter()
-                        .any(|slot| slot.continuation == continuation)
-                }) {
-                    self.dismissed.insert(continuation);
-                    self.repair_selections();
-                }
-                None
-            }
-            AgentTabIntentMutation::DismissAndSelect {
-                continuation,
-                session_id,
-                selected,
-            } => {
-                let _ = self.apply(AgentTabIntentMutation::Dismiss { continuation });
-                let _ = self.apply(AgentTabIntentMutation::Select {
-                    session_id,
-                    continuation: selected,
-                });
+                self.dismiss(continuation);
                 None
             }
             AgentTabIntentMutation::DismissTerminal { terminal } => {
@@ -232,6 +205,39 @@ impl AgentTabIntent {
                 self.reorder(session_id, &continuations);
                 None
             }
+        }
+    }
+
+    fn select(
+        &mut self,
+        session_id: Option<SessionId>,
+        continuation: Option<AgentContinuationRef>,
+    ) {
+        if let Some(target) = self
+            .targets
+            .iter_mut()
+            .find(|target| target.session_id == session_id)
+            && continuation.is_none_or(|candidate| {
+                !self.dismissed.contains(&candidate)
+                    && target
+                        .tabs
+                        .iter()
+                        .any(|slot| slot.continuation == candidate)
+            })
+        {
+            target.selected = continuation;
+        }
+    }
+
+    fn dismiss(&mut self, continuation: AgentContinuationRef) {
+        if self.targets.iter().any(|target| {
+            target
+                .tabs
+                .iter()
+                .any(|slot| slot.continuation == continuation)
+        }) {
+            self.dismissed.insert(continuation);
+            self.repair_selections();
         }
     }
 
@@ -652,6 +658,13 @@ pub enum AgentTabIntentMutation {
         agents: AgentInventory,
         allowed_sessions: BTreeSet<SessionId>,
     },
+    /// Reconcile a coherent inventory and retire legacy hide intent. Current
+    /// TUI policy displays every daemon-owned Agent.
+    ObserveAll {
+        terminals: Vec<TerminalInventoryEntry>,
+        agents: AgentInventory,
+        allowed_sessions: BTreeSet<SessionId>,
+    },
     /// Record a newly admitted or replacement Agent runtime.
     Upsert {
         session_id: Option<SessionId>,
@@ -667,13 +680,6 @@ pub enum AgentTabIntentMutation {
     },
     /// Hide one lineage without stopping its runtime or provider conversation.
     Dismiss { continuation: AgentContinuationRef },
-    /// Atomically hide one lineage and persist the successor chosen by the pane
-    /// reducer. `selected=None` means a generic or empty tab owns foreground.
-    DismissAndSelect {
-        continuation: AgentContinuationRef,
-        session_id: Option<SessionId>,
-        selected: Option<AgentContinuationRef>,
-    },
     /// Hide one exact live terminal whose lineage has not been observed yet.
     /// The next observation that binds it promotes the close to its lineage.
     DismissTerminal { terminal: TerminalRef },
@@ -878,6 +884,40 @@ mod tests {
         );
         assert_eq!(target.selected, Some(first));
         assert_eq!(intent.targets[0].tabs, target.tabs);
+    }
+
+    #[test]
+    fn observe_all_retires_legacy_dismissals_and_projects_every_live_agent() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let continuation = AgentContinuationRef::new();
+        let terminal = terminal(workspace, Some(session), worktree);
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.upsert(Some(session), continuation, terminal.clone(), false);
+        intent.dismissed.insert(continuation);
+        intent.dismissed_terminals.insert(terminal.clone());
+
+        let projection = intent
+            .apply(AgentTabIntentMutation::ObserveAll {
+                terminals: vec![live_entry(terminal.clone())],
+                agents: AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: vec![runtime(
+                        continuation,
+                        &terminal,
+                        AgentRuntimeInventoryState::Live,
+                    )],
+                    resumable: Vec::new(),
+                },
+                allowed_sessions: BTreeSet::from([session]),
+            })
+            .expect("observation projects live Agents");
+
+        assert!(intent.dismissed.is_empty());
+        assert!(intent.dismissed_terminals.is_empty());
+        assert_eq!(projection.targets.len(), 1);
+        assert_eq!(projection.targets[0].tabs[0].continuation, continuation);
     }
 
     #[test]

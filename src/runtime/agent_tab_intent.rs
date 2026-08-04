@@ -197,8 +197,7 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             // revision before this close could clear the newer user intent.
             // Unknown/authoritatively removed keys remain inert.
             let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation }
-                | AgentTabIntentMutation::DismissAndSelect { continuation, .. } => {
+                AgentTabIntentMutation::Dismiss { continuation } => {
                     current.targets.iter().any(|target| {
                         target
                             .tabs
@@ -218,6 +217,11 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             let projection = if cas_conflict {
                 match mutation {
                     AgentTabIntentMutation::Observe {
+                        terminals,
+                        agents,
+                        allowed_sessions,
+                    }
+                    | AgentTabIntentMutation::ObserveAll {
                         terminals,
                         agents,
                         allowed_sessions,
@@ -263,12 +267,6 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                         });
                         mutation_applied = already_applied;
                         None
-                    }
-                    AgentTabIntentMutation::DismissAndSelect { continuation, .. } => {
-                        // The close itself is monotonic and safe to merge. Its
-                        // local successor preview is stale, so preserve the
-                        // latest writer's selection and only merge Dismiss.
-                        current.apply(AgentTabIntentMutation::Dismiss { continuation })
                     }
                     AgentTabIntentMutation::Select {
                         session_id,
@@ -881,10 +879,8 @@ mod tests {
             .mutate(
                 workspace,
                 second_commit.intent.revision,
-                AgentTabIntentMutation::DismissAndSelect {
+                AgentTabIntentMutation::Dismiss {
                     continuation: first.continuation,
-                    session_id: None,
-                    selected: Some(first.continuation),
                 },
             )
             .unwrap();
@@ -1174,6 +1170,37 @@ mod tests {
                 .all(|slot| !slot.terminal.fences(&old.terminal))
         }));
         assert!(stale_projection.targets.is_empty());
+        assert_eq!(fs::read(&path).unwrap(), bytes_before);
+
+        let stale_all_runtime =
+            AgentRuntimeRef::new(AgentRuntimeId::new(), old.terminal.clone(), None).unwrap();
+        let stale_all = store
+            .mutate(
+                workspace,
+                first.intent.revision,
+                AgentTabIntentMutation::ObserveAll {
+                    terminals: vec![TerminalInventoryEntry {
+                        terminal: old.terminal.clone(),
+                        kind: TerminalKind::Agent,
+                        live: true,
+                    }],
+                    agents: AgentInventory {
+                        workspace_id: workspace,
+                        runtimes: vec![AgentRuntimeInventoryItem {
+                            runtime: stale_all_runtime,
+                            continuation: old.continuation,
+                            state: AgentRuntimeInventoryState::Live,
+                            resumed_from: None,
+                        }],
+                        resumable: Vec::new(),
+                    },
+                    allowed_sessions: std::collections::BTreeSet::default(),
+                },
+            )
+            .unwrap();
+        assert!(stale_all.cas_conflict);
+        assert!(!stale_all.mutation_applied);
+        assert!(stale_all.projection.unwrap().targets.is_empty());
         assert_eq!(fs::read(&path).unwrap(), bytes_before);
 
         let replacement_runtime =
@@ -1468,10 +1495,8 @@ mod tests {
             .mutate(
                 workspace,
                 opened.intent.revision,
-                AgentTabIntentMutation::DismissAndSelect {
+                AgentTabIntentMutation::Dismiss {
                     continuation: observed.continuation,
-                    session_id: None,
-                    selected: None,
                 },
             )
             .unwrap();

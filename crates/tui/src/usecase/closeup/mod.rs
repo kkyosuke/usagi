@@ -40,7 +40,6 @@ pub enum Command {
     Close { arguments: String },
     Diff { arguments: String },
     Env { arguments: String },
-    Reopen { arguments: String },
     Terminal { arguments: String },
 }
 
@@ -89,14 +88,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
     },
     CommandDefinition {
         info: CommandInfo {
-            name: "reopen",
-            description: "Reopen a dismissed Agent lineage",
-            usage: "reopen <continuation-ref>",
-        },
-        factory: |arguments| Command::Reopen { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
             name: "terminal",
             description: "Open a terminal in the selected session",
             usage: "terminal [open|new]",
@@ -120,7 +111,6 @@ impl Command {
             Self::Close { .. } => "close",
             Self::Diff { .. } => "diff",
             Self::Env { .. } => "env",
-            Self::Reopen { .. } => "reopen",
             Self::Terminal { .. } => "terminal",
         }
     }
@@ -134,7 +124,6 @@ impl Command {
             Self::Close { arguments } => Box::new(h::Close { arguments }),
             Self::Diff { arguments } => Box::new(h::Diff { arguments }),
             Self::Env { arguments } => Box::new(h::Env { arguments }),
-            Self::Reopen { arguments } => Box::new(h::Reopen { arguments }),
             Self::Terminal { arguments } => Box::new(h::Terminal { arguments }),
         }
     }
@@ -222,32 +211,11 @@ mod tests {
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
-        assert_eq!(
-            names,
-            ["agent", "close", "diff", "env", "reopen", "terminal"]
-        );
+        assert_eq!(names, ["agent", "close", "diff", "env", "terminal"]);
         assert!(
             definitions
                 .iter()
                 .all(|command| !command.description.is_empty() && !command.usage.is_empty())
-        );
-        assert_eq!(
-            Command::Reopen {
-                arguments: String::new(),
-            }
-            .name(),
-            "reopen"
-        );
-    }
-
-    #[test]
-    fn reopen_command_reports_its_registered_name() {
-        assert_eq!(
-            Command::Reopen {
-                arguments: String::new(),
-            }
-            .name(),
-            "reopen"
         );
     }
 
@@ -279,12 +247,6 @@ mod tests {
                 },
             ),
             (
-                "reopen 00000000-0000-4000-8000-000000000000",
-                Command::Reopen {
-                    arguments: "00000000-0000-4000-8000-000000000000".to_owned(),
-                },
-            ),
-            (
                 "terminal new",
                 Command::Terminal {
                     arguments: "new".to_owned(),
@@ -310,6 +272,10 @@ mod tests {
         assert_eq!(
             interpret("chat"),
             Err(ParseError::Unknown("chat".to_owned()))
+        );
+        assert_eq!(
+            interpret("reopen"),
+            Err(ParseError::Unknown("reopen".to_owned()))
         );
     }
 

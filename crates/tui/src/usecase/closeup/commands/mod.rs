@@ -7,14 +7,12 @@ mod agent;
 mod close;
 mod diff;
 mod env;
-mod reopen;
 mod terminal;
 
 pub(super) use agent::Agent;
 pub(super) use close::Close;
 pub(super) use diff::Diff;
 pub(super) use env::Env;
-pub(super) use reopen::Reopen;
 pub(super) use terminal::Terminal;
 
 #[cfg(test)]
