@@ -21,7 +21,8 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
-  - [mascot sidecar](#mascot-sidecar)
+  - [session 状態別件数](#session-状態別件数)
+  - [Agent concurrency](#agent-concurrency)
 - [Closeup pane](#closeup-pane)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
@@ -860,31 +861,63 @@ message の既定の供給元は**正常系以外の daemon 状態**である。
 異常に気づけるようにする。健全な正常系（feedback 無し・進行中 progress・再接続完了）はうさぎを無言に保つ。error ID を
 含む詳細は footer の feedback 行に委ね、bubble には載せない。呼び出し側が明示 message を与えた場合はそちらを優先する。
 
-### mascot sidecar
+mascot の右には最大 3 行の観測 status（sidecar）を並べる。sidecar は rabbit 自身の行に重ねて描くため、
+mascot block の予約行数を増やさず session viewport の容量を奪わない。各行は rabbit の幅に揃えた同じ列から
+始まり、sidebar 幅に合わせて clip する。現在の供給元は上から
+[session 状態別件数](#session-状態別件数)、[Agent concurrency](#agent-concurrency)、daemon metrics（CPU /
+resident memory）の 3 つで、mascot block ごと省略される狭幅ではいずれも表示しない。後者 2 つは同じ metrics
+snapshot から来るため、snapshot が無いときはどちらも出ず、session 状態別件数の行だけが残る。
 
-うさぎの右には daemon の観測値を最大 3 行の sidecar として並べる。sidecar はうさぎの 3 行に下揃えで重ねるだけで、
-mascot block の予約行数を増やさないため、session viewport と footer の配置は sidecar の有無で変わらない。
-現在の内容は次の 2 行である。
+### session 状態別件数
 
-| 行 | 内容 | 出典 |
+sidecar の 1 行目に、表示中 session の **running / waiting / failed 件数**を出す。件数は daemon 権威の
+projection から毎フレーム導出する派生値であり、[metrics](04-ipc.md) schema にも TUI の reducer state にも
+別の情報源を作らない。導出の入力は 2 つとも既に Home へ届いているものを使う。
+
+| 入力 | 権威 |
+|---|---|
+| session ごとの lifecycle | daemon の session lifecycle snapshot |
+| session scope の Agent phase 集約 | daemon の Agent phase 報告（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)と同じ projection） |
+
+分類は既存語彙だけで決め、新しい状態語彙を増やさない。1 session はちょうど 1 クラスに属するため、3 つの
+件数の合計が session 数を超えない。
+
+| クラス | 条件 | 色 |
 |---|---|---|
-| 1 | daemon process の CPU 使用率と resident memory | metrics snapshot の process counter |
-| 2 | **Agent concurrency の使用中/上限**（`使用中/上限`） | metrics snapshot の [agent concurrency projection](04-ipc.md#agent-concurrency-projection) |
+| `fail` | lifecycle が `failed` | Danger |
+| `wait` | `fail` でなく、phase 集約が `waiting` | Warning |
+| `run` | `fail` でなく、phase 集約が `running` | Success |
+| （非計上） | 上記以外（`absent` / `ready` / `done`） | — |
 
-Agent concurrency 行は daemon の admission 権威が報告した値をそのまま描く。TUI は runtime を数え直さず、
-上限の定数も持たない。表示は次の 4 状態を区別する。
+- 優先順位は `fail` > `wait` > `run` である。`failed` 行に古い phase 報告が残っている 1 フレームでも二重計上しない。
+- **`failed` は lifecycle だけが権威**である。`ended` / `exited` / `interrupted` は phase 集約の `done` へ畳まれて
+  非計上となり、失敗としては数えない。`interrupted` は daemon 再起動後に runtime identity を証明できなかった
+  daemon 所有の projection 状態で、resume 可能な履歴であるため（[interrupted Agent の tab 投影](#interrupted-agent-の-tab-投影と明示-resume)）、
+  使用不能な checkout を意味する `failed` とは別の事実である。
+- **0 件のクラスは描かない**。3 つとも 0（session が 0 件の場合を含む）なら行自体を出さない。
+- **daemon metrics が無くても出る**。件数は metrics observation と独立に導出するため、metrics 未取得でも
+  sidecar にこの行だけが載る。
+- 表示専用であり、click や絞り込みの操作は持たない。
+
+### Agent concurrency
+
+sidecar の 2 行目に、daemon が Agent launch を admit する際の **使用中/上限**を出す。値は daemon の admission
+権威が報告した [agent concurrency projection](04-ipc.md#agent-concurrency-projection) そのものであり、TUI は
+runtime を数え直さず、上限の定数も持たない。対象は Agent runtime の pool だけで、generic terminal capacity や
+supervisor run の同時実行数とは別物である（正本は
+[5. daemon](05-daemon.md#agent-concurrency-projection)）。
 
 | 状態 | 表示 | 色 |
 |---|---|---|
-| 使用中あり（上限未満） | `3/16` | 上限の 3/4 未満は dim、3/4 以上は warning |
-| 上限到達（次の launch は拒否される） | `16/16` | danger |
+| 使用中あり（上限未満） | `3/16` | 上限の 3/4 未満は dim、3/4 以上は Warning |
+| 上限到達（次の Agent launch は拒否される） | `16/16` | Danger |
 | idle と報告された | `0/16` | dim |
-| daemon が報告しない（schema 3 より前の peer） | `—` | dim |
+| daemon が報告しない（metrics schema 3 より前の peer） | `—` | dim |
 
-`0/16` と `—` は別の状態として描き分ける。前者は「daemon が idle と報告した」であり、後者は
-「daemon が何も言っていない」である。metrics snapshot 自体が無いときは sidecar を出さず、従来どおり
-`waiting daemon` の shimmer だけを表示する（[Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)）。sidebar が狭い場合は
-sidecar 行も他の mascot 行と同じ幅へ clip し、うさぎ自体が入らない幅では mascot block ごと省略される。
+- **`0/16` と `—` を描き分ける**。前者は「daemon が idle と報告した」であり、後者は「daemon が何も言っていない」
+  である。報告されない level を 0 と描くと、枠が空いているという誤った断定になる。
+- 表示専用であり、この行から launch の可否を判断しない。次の launch を拒否するかは daemon が admit の瞬間に決める。
+- 狭幅では他の mascot 行と同じ幅へ clip し、うさぎ自体が入らない幅では mascot block ごと省略される。
 
 ## Closeup pane
 

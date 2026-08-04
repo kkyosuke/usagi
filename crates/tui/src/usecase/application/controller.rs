@@ -761,7 +761,11 @@ impl TargetPhase {
         self.aggregation().rank()
     }
 
-    const fn aggregation(self) -> AgentPhaseAggregation {
+    /// The shared aggregation class of this projected phase, so a caller
+    /// classifying a session reuses the core vocabulary instead of re-deriving
+    /// its own mapping.
+    #[must_use]
+    pub const fn aggregation(self) -> AgentPhaseAggregation {
         match self {
             Self::Absent => AgentPhaseAggregation::Absent,
             Self::Ready => AgentPhaseAggregation::Ready,
