@@ -1,13 +1,13 @@
 ---
 number: 643
 title: feat(tui): Home sidebar に running / waiting / failed の session 件数を出す
-status: in-progress
+status: done
 priority: medium
 labels: [tui, ui, core]
 dependson: []
 related: []
 created_at: 2026-08-04T12:55:39.153260+00:00
-updated_at: 2026-08-04T12:55:46.679536+00:00
+updated_at: 2026-08-04T13:24:36.644945+00:00
 ---
 
 ## 目的
