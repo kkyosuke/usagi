@@ -24,6 +24,8 @@
 //!   並存する間、request を owner generation の endpoint へ配送する client 側の
 //!   routing（trusted endpoint 解決・inventory merge・generation 別 connection）。
 //! - [`agent_phase`] — daemon と TUI が共有する Agent phase の集約分類・順位。
+//! - [`session_state`] — session lifecycle と Agent phase 集約を running / waiting /
+//!   failed の表示クラスへ畳む純粋な分類と、その件数集計。
 
 pub mod agent;
 pub mod agent_phase;
@@ -36,6 +38,7 @@ pub mod note;
 pub mod owner_routing;
 pub mod pr_inventory;
 pub mod session;
+pub mod session_state;
 pub mod settings;
 pub mod vt_screen;
 pub mod workspace;
