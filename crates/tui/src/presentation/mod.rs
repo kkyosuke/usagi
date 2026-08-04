@@ -2356,7 +2356,24 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 /// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、Enter は save フローを
 /// 開始（loading）する。保存中の再入力は `begin_save` が弾く。
 #[allow(clippy::needless_pass_by_value)]
-fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) -> ConfigStep {
+fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
+    if config.is_editing_environment() {
+        match key {
+            Key::Enter => {
+                if config.commit_environment_line() {
+                    config.save_environment(settings);
+                }
+            }
+            Key::Backspace => config.backspace_environment(),
+            Key::Char(character) if !character.is_control() => {
+                config.type_environment(&character.to_string());
+            }
+            Key::Paste(text) => config.type_environment(&text),
+            Key::Escape => config.cancel_environment(),
+            _ => {}
+        }
+        return ConfigStep::Stay;
+    }
     match key {
         Key::Up | Key::Char('k') => {
             config.previous_field();
@@ -2377,6 +2394,7 @@ fn step_config(config: &mut Config, key: Key, _settings: &mut dyn SettingsPort) 
         // Enter begins the save flow (loading). `begin_save` is a no-op unless a
         // dirty Save row is focused with no save already in flight, so a rapid
         // second Enter cannot start a second save.
+        Key::Enter if config.open_environment() => ConfigStep::Stay,
         Key::Enter if config.begin_save() => ConfigStep::Save,
         Key::Escape => ConfigStep::Back,
         Key::Quit | Key::CtrlQ => ConfigStep::Quit,
@@ -4484,6 +4502,7 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
     role_editor: Option<crate::usecase::application::controller::RoleEditor>,
     /// Whole-second wall clock behind the sidebar's relative session times.
     ///
@@ -4540,6 +4559,7 @@ fn home_frame_material(
             .state()
             .create_session_error()
             .map(|error| error.message.clone()),
+        environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
         now: now.with_nanosecond(0).unwrap_or(now),
     }
@@ -4565,6 +4585,14 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
             material.width,
             &frame,
             message,
+        );
+    }
+    if let Some(editor) = &material.environment_editor {
+        return scratchpad_modal::render_environment_over(
+            material.height,
+            material.width,
+            &frame,
+            editor,
         );
     }
     if let Some(editor) = &material.role_editor {
@@ -8750,6 +8778,62 @@ mod tests {
         let failure = frame(&failing, &[]);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
+    }
+
+    #[test]
+    fn closeup_environment_editor_is_composited_over_home() {
+        use crate::presentation::views::workspace::ProjectedSession;
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        use crate::usecase::application::controller::{AppEvent, Effect};
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        for _ in 0..3 {
+            let _ = runtime.handle_key(Key::Down);
+        }
+        assert!(matches!(
+            runtime.handle_key(Key::Enter).as_slice(),
+            [Effect::LoadEnvironment {
+                scope: EnvScope::Workspace
+            }]
+        ));
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+            scope: EnvScope::Workspace,
+            entries: Vec::new(),
+            inherited: Vec::new(),
+        }));
+        let sessions = [ProjectedSession {
+            id: session,
+            label: "alpha".into(),
+            detail: "fixture".into(),
+            cwd: "/work/alpha".into(),
+            last_modified: now(),
+            has_notes: false,
+            pr_summary: None,
+            removing: false,
+            agent_resume: None,
+            lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_summary: None,
+            role_id: None,
+        }];
+        let frame = render_controller_frame(
+            20,
+            80,
+            &runtime,
+            "atlas",
+            std::path::Path::new("/work"),
+            &sessions,
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+        )
+        .join("\n");
+        assert!(frame.contains("Environment"));
+        assert!(frame.contains("this workspace's environment"));
     }
 
     #[test]
@@ -17929,6 +18013,32 @@ mod tests {
     }
 
     #[test]
+    fn step_config_routes_input_to_the_global_environment_editor() {
+        use crate::presentation::views::config::Field as ConfigField;
+
+        let mut settings = DefaultSettingsPort;
+        let mut config = Config::load(&mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        assert_eq!(config.field(), ConfigField::Environment);
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(config.is_editing_environment());
+
+        step_config(&mut config, Key::Char('A'), &mut settings);
+        step_config(&mut config, Key::Paste("=1x".to_owned()), &mut settings);
+        step_config(&mut config, Key::Backspace, &mut settings);
+        step_config(&mut config, Key::Other, &mut settings);
+        step_config(&mut config, Key::Enter, &mut settings);
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(!config.is_editing_environment());
+
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(config.is_editing_environment());
+        step_config(&mut config, Key::Escape, &mut settings);
+        assert!(!config.is_editing_environment());
+    }
+
+    #[test]
     fn step_config_saves_only_from_the_dirty_save_row() {
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
@@ -17937,6 +18047,7 @@ mod tests {
             ConfigStep::Stay
         ));
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
@@ -18133,9 +18244,10 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Agent model → Issue → Memory → Save).
-    const CONFIG_SAVE_KEYS: [Key; 7] = [
+    // Save (Theme → Modal mode → Environment → Agent model → Issue → Memory → Save).
+    const CONFIG_SAVE_KEYS: [Key; 8] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,

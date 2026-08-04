@@ -71,6 +71,9 @@ workspace の editor は、この継承関係を隠さない。編集中のス�
 **global の binding を read-only で併記**し、workspace 側が同名を持つものは上書き済みとして示す
 （[3. TUI#env editor](03-tui.md#env-editor)）。
 
+global binding は Welcome の Config にある `Environment (N vars)` から編集できる。Overview の `env global` も同じ
+global settings を編集する。workspace binding は Overview または Closeup の `env` から編集する。
+
 ## secret の解決
 
 平文の値は解決を要さずそのまま注入する。`op://` の値だけを 1Password CLI（`op read --no-newline`）で
