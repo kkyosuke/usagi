@@ -1385,17 +1385,11 @@ impl RuntimeCoordinator {
             })
             .count()
     }
-    /// How many Agent runtimes this coordinator admits at a time.
+    /// The concurrency level as [`admission`](Self::occupied_slots) counts it,
+    /// over the limit that check compares against.
     ///
-    /// The limit is injected at construction; this accessor exists so an
-    /// observer reads the policy the admission check itself uses instead of
-    /// re-reading the constant that supplied it.
-    #[must_use]
-    pub fn concurrency_limit(&self) -> usize {
-        self.limit
-    }
-
-    /// The concurrency level as [`admission`](Self::occupied_slots) counts it.
+    /// Both numbers come from this coordinator, so an observer never restates the
+    /// constant that supplied the limit.
     #[must_use]
     pub fn concurrency(&self) -> usagi_core::usecase::client::AgentConcurrency {
         usagi_core::usecase::client::AgentConcurrency {
@@ -2527,7 +2521,7 @@ mod tests {
                 limit: 1
             })
         );
-        assert_eq!(c.concurrency_limit(), 1);
+        assert_eq!(c.concurrency().limit, 1);
 
         let first = request();
         let (runtime, fence) = refs(&first);
