@@ -27,6 +27,7 @@ use usagi_core::usecase::session_state::SessionStateCounts;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
+use crate::presentation::views::daemon_modal;
 use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
@@ -234,6 +235,8 @@ pub struct HomeProjection {
     /// Persisted Overview command-palette input, when its overlay is open. The
     /// runtime owns this so the caret and filter survive across frames.
     overview_modal: Option<OverviewModal>,
+    /// Overview の `daemon` command が開く読み取り専用 status surface。
+    daemon_overlay: bool,
     /// Persisted Closeup action-modal input, when its overlay is open.
     closeup_modal: Option<CloseupModal>,
     /// Inline `+ new session` name draft, present exactly when the create form
@@ -368,6 +371,8 @@ impl HomeProjection {
             pr_overlay: state.pr_overlay().cloned(),
             preview_overlay: state.preview_overlay().cloned(),
             overview_modal: None,
+            daemon_overlay: state.overlay()
+                == Some(crate::usecase::application::controller::Overlay::Daemon),
             closeup_modal: None,
             create_draft,
             create_role,
@@ -1419,6 +1424,16 @@ pub fn render_home_at(
     };
     if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
+    } else if home.daemon_overlay {
+        daemon_modal::render_over(
+            height,
+            width,
+            &frame,
+            home.metrics.as_ref(),
+            home.health.evaluate(now.timestamp_millis()),
+            home.session_states,
+            home.sessions.len(),
+        )
     } else if let Some(overlay) = &home.pr_overlay {
         render_pr_overlay(height, width, &frame, overlay)
     } else if let Some(overlay) = &home.preview_overlay {
@@ -3189,6 +3204,41 @@ mod tests {
             message: SafeMessage::new("gh unavailable"),
             error_id: "pr".into(),
         }
+    }
+
+    #[test]
+    fn render_home_composes_the_daemon_status_opened_from_overview() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("daemon".into())),
+        );
+        let metrics = DaemonMetrics {
+            schema_version: 3,
+            sampled_at_ms: u64::try_from(now().timestamp_millis()).unwrap(),
+            cpu_percent_hundredths: 100,
+            resident_memory_bytes: 32 * MEBIBYTE,
+            active_subscribers: 1,
+            dropped_updates: 0,
+            terminal_dropped_bytes: 0,
+            terminal_coalesced_bytes: 0,
+            terminal_backpressured_bytes: 0,
+            pr_projection_dropped_bytes: 0,
+            pr_projection_coalesced_bytes: 0,
+            pr_projection_gaps: 0,
+            agent_concurrency: Some(AgentConcurrency {
+                in_use: 16,
+                limit: 16,
+            }),
+        };
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[])
+            .with_metrics(Some(metrics));
+        let frame = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        assert!(frame.contains("Daemon"));
+        assert!(frame.contains("16/16  saturated"));
+        assert!(frame.contains("Ctrl-D"));
     }
 
     #[test]

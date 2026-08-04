@@ -4,12 +4,14 @@
 //! [`super::Command::into_handler`] が解釈済みコマンドとの対応付けを 1 か所に集約する。
 
 mod config;
+mod daemon;
 mod env;
 mod issue;
 mod roles;
 mod session;
 
 pub(super) use config::Config;
+pub(super) use daemon::Daemon;
 pub(super) use env::Env;
 pub(super) use issue::Issue;
 pub(super) use roles::Roles;

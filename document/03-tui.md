@@ -694,6 +694,17 @@ daemon-authoritative な port を通る。screen graph は workspace 起動ご�
 daemon の snapshot revision を workspace 間で持ち越さない。remove の target は command の name に限定し、
 現在選択中の session record や root を暗黙に使わない。daemon が request を受理できない場合は、
 modal に安全な error を表示する。
+
+Overview の `daemon` は workspace の daemon status modal を開く。modal は最新の metrics observation と
+daemon-authoritative な session projection を使い、health、CPU / memory、接続 client 数、managed session の
+running / waiting / failed 件数、Agent concurrency の使用中 / 上限を一画面に表示する。値は診断専用であり、
+launch admission や ownership の判断には使わない。metrics 未取得と Agent concurrency 未報告はそれぞれ
+`waiting for daemon observation` / `unreported` と表示し、idle と読み替えない。
+
+Agent concurrency が `16/16` の場合、modal はこれが managed session 数ではなく Agent runtime 枠であることを
+明示する。live Agent の枠は対象 tab で `Ctrl-D` により Agent を終了して解放する。worktree 自体を撤去する場合だけ
+既存の `session remove -s` checklist を使う。status modal 自体は読み取り専用で、Esc で閉じる。
+
 `session resume <name>` はその session の provider conversation を明示的に再開する。TUI は新しい
 `OperationId` で pending Agent tab を作り、daemon が返す新しい完全な `TerminalRef` だけを同じ pending tab へ
 昇格する。この pending pane を伴う経路は controller の `ResumeAgent` effect だけが所有し、他の session command
