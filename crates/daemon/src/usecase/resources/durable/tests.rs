@@ -832,6 +832,7 @@ fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
     let old = DaemonGeneration::new();
     let new = DaemonGeneration::new();
     let resource = terminal(old);
+    let generic = terminal(old);
     let operation = OperationId::new();
     let mut old_store =
         ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(31, "start-31")));
@@ -855,18 +856,43 @@ fn hydrate_reclaims_a_retired_child_the_platform_proves_gone() {
         world.shard(old).resources[0].state,
         ResourceState::OwnershipUnknown
     );
+    let terminal_operation = OperationId::new();
+    ShardedTerminalStore::new(world.state(old, ObservedChildren::new().with(32, "start-32")))
+        .save(terminal_snapshot(vec![terminal_record(
+            &generic,
+            terminal_operation,
+            TerminalRuntimeState::Running,
+            Some(process(32, "start-32")),
+        )]))
+        .unwrap();
+    ShardedTerminalStore::new(world.state(old, ObservedChildren::new()))
+        .save(terminal_snapshot(vec![terminal_record(
+            &generic,
+            terminal_operation,
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            Some(process(32, "start-32")),
+        )]))
+        .unwrap();
 
     let hydrated = world
-        .state(new, ObservedChildren::new().with_gone(31))
+        .state(new, ObservedChildren::new().with_gone(31).with_gone(32))
         .hydrate()
         .unwrap();
 
     assert_eq!(hydrated.interrupted, 0);
     assert_eq!(hydrated.agents.records[0].state, RuntimeState::Interrupted);
     assert_eq!(
+        hydrated.terminals.records[0].state,
+        TerminalRuntimeState::Interrupted
+    );
+    assert_eq!(
         world.allocator().claim(&resource).unwrap().state,
         ClaimState::Released,
         "definite OS absence frees the retired generation's capacity"
+    );
+    assert_eq!(
+        world.allocator().claim(&generic).unwrap().state,
+        ClaimState::Released
     );
 }
 

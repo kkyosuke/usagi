@@ -6595,6 +6595,21 @@ mod tests {
     fn failed_session_is_not_normally_attachable_but_retained_panes_are_reachable() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::RetainedPaneActivated(Target::Root(workspace)),
+            )
+            .is_empty()
+        );
+        assert!(
+            update(
+                &mut state,
+                AppEvent::RetainedPaneActivated(Target::Session(session)),
+            )
+            .is_empty(),
+            "an available session cannot enter the recovery-only path"
+        );
         // The daemon reports the session as Failed.
         let _ = update(
             &mut state,
