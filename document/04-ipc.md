@@ -322,7 +322,8 @@ vocabulary である。`subscribe` は TUI 起動時および接続を回復し�
 せず新しく登録する。
 
 daemon が送る snapshot は次の versioned schema である。これは表示・診断専用で、TUI が
-session / terminal の所有権や local fallback を判断する根拠にはしない。
+session / terminal の所有権や local fallback を判断する根拠にはしない。TUI がこの sample 列から作る
+診断表示は [3. TUI](03-tui.md#daemon-health-indicator) が正本である。
 
 | field | type | meaning |
 |---|---|---|

@@ -4503,6 +4503,7 @@ fn home_frame_material(
     root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
+    health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,
     create_pending: Option<&str>,
@@ -4512,6 +4513,9 @@ fn home_frame_material(
         HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
             .with_pane(runtime.preview_pane())
             .with_metrics(metrics)
+            // Diagnostic-only material. It rides the frame material like every
+            // other renderer input, so an idle Home still skips redraws.
+            .with_health(health)
             .with_git_diffs(git_diffs)
             .with_terminal_view(
                 (!runtime.state().director_drawer_open())
@@ -4580,6 +4584,7 @@ fn render_controller_frame(
     root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
+    health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,
     create_pending: Option<&str>,
@@ -4592,6 +4597,7 @@ fn render_controller_frame(
         root_cwd,
         sessions,
         metrics,
+        health,
         git_diffs,
         terminal_view,
         create_pending,
@@ -5228,6 +5234,7 @@ fn drive_workspace_controller(
             &root_cwd,
             &sessions,
             metrics_projection.metrics(),
+            metrics_projection.health(),
             metrics_projection.git_diffs(),
             terminal_view,
             ui.creating_session
@@ -5341,6 +5348,7 @@ fn drive_workspace_controller(
                     &root_cwd,
                     &sessions,
                     metrics_projection.metrics(),
+                    metrics_projection.health(),
                     metrics_projection.git_diffs(),
                     terminal_view,
                     ui.creating_session
@@ -6369,6 +6377,15 @@ mod tests {
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::usecase::client::DaemonMetrics;
+    use usagi_core::usecase::daemon_health::DaemonHealthTracker;
+
+    /// The unobserved default: diagnostic health draws no indicator, so a frame
+    /// test keeps asserting the healthy Home frame. The judgement itself is
+    /// covered by `usagi_core::usecase::daemon_health` and by the sidecar tests
+    /// in [`views::workspace`].
+    fn health() -> DaemonHealthTracker {
+        DaemonHealthTracker::default()
+    }
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -8646,12 +8663,28 @@ mod tests {
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
         let root = std::path::Path::new("/work");
+        // Every case here composites the same Home geometry; only the runtime
+        // and its session rows vary. Diagnostic health uses its unobserved
+        // default so these assertions stay about the overlays.
+        let frame = |runtime: &WorkspaceRuntime, sessions: &[ProjectedSession]| {
+            render_controller_frame(
+                20,
+                80,
+                runtime,
+                "atlas",
+                root,
+                sessions,
+                None,
+                health(),
+                &git,
+                None,
+                None,
+            )
+        };
 
         // Base Home frame: workspace name and session row render.
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
-        let base = render_controller_frame(
-            20, 80, &runtime, "atlas", root, sessions, None, &git, None, None,
-        );
+        let base = frame(&runtime, sessions);
         assert!(base.join("\n").contains("atlas"));
         assert!(base.join("\n").contains("alpha"));
 
@@ -8664,18 +8697,7 @@ mod tests {
         for character in ['b', 'e', 't', 'a'] {
             let _ = creating.handle_key(Key::Char(character));
         }
-        let create = render_controller_frame(
-            20,
-            80,
-            &creating,
-            "atlas",
-            root,
-            &[],
-            None,
-            &git,
-            None,
-            None,
-        );
+        let create = frame(&creating, &[]);
         assert!(create.join("\n").contains("beta"));
         assert!(!create.join("\n").contains("New session"));
 
@@ -8683,9 +8705,7 @@ mod tests {
         // render, defaulting to `quit` focused.
         let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = quitting.apply_event(AppEvent::Key(AppKey::CtrlQ));
-        let quit = render_controller_frame(
-            20, 80, &quitting, "atlas", root, sessions, None, &git, None, None,
-        );
+        let quit = frame(&quitting, sessions);
         let quit_text = quit.join("\n");
         assert!(quit_text.contains("Leave this workspace?"));
         assert!(quit_text.contains("[ welcome ]"));
@@ -8696,9 +8716,7 @@ mod tests {
         // The runtime's persisted Overview palette renders through this path.
         let mut palette = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = palette.handle_key(Key::Char(':'));
-        let overview = render_controller_frame(
-            20, 80, &palette, "atlas", root, sessions, None, &git, None, None,
-        );
+        let overview = frame(&palette, sessions);
         assert!(overview.join("\n").contains("Overview"));
 
         let _ = palette.apply_event(AppEvent::Key(AppKey::SubmitOverview(
@@ -8708,9 +8726,7 @@ mod tests {
             scope: RoleEditorScope::Workspace,
             source: "version = 1\n".to_owned(),
         }));
-        let roles = render_controller_frame(
-            20, 80, &palette, "atlas", root, sessions, None, &git, None, None,
-        );
+        let roles = frame(&palette, sessions);
         assert!(roles.join("\n").contains("workspace roles.toml"));
 
         // Create-failure dialog: a failed create OperationResult opens it, and
@@ -8731,8 +8747,7 @@ mod tests {
             created: None,
             notice: Some(Notice::new("worktree path already exists")),
         }));
-        let failure =
-            render_controller_frame(20, 80, &failing, "atlas", root, &[], None, &git, None, None);
+        let failure = frame(&failing, &[]);
         assert!(failure.join("\n").contains("Session create failed"));
         assert!(failure.join("\n").contains("worktree path already exists"));
     }
@@ -8832,6 +8847,7 @@ mod tests {
             root,
             &[],
             None,
+            health(),
             &git,
             None,
             Some("beta"),
@@ -8841,8 +8857,19 @@ mod tests {
         assert!(pending_text.contains("creating"));
 
         // No pending create means no skeleton or loading caption.
-        let quiet =
-            render_controller_frame(20, 80, &idle, "atlas", root, &[], None, &git, None, None);
+        let quiet = render_controller_frame(
+            20,
+            80,
+            &idle,
+            "atlas",
+            root,
+            &[],
+            None,
+            health(),
+            &git,
+            None,
+            None,
+        );
         let quiet_text = strip(&quiet);
         assert!(!quiet_text.contains("beta"));
         assert!(!quiet_text.contains("creating"));
@@ -8860,6 +8887,7 @@ mod tests {
             root,
             &[],
             None,
+            health(),
             &git,
             None,
             Some("beta"),
@@ -9590,7 +9618,18 @@ mod tests {
 
         let material = |runtime: &WorkspaceRuntime| {
             home_frame_material(
-                20, 80, runtime, "demo", &root, &sessions, None, &no_diffs, None, None, clock,
+                20,
+                80,
+                runtime,
+                "demo",
+                &root,
+                &sessions,
+                None,
+                health(),
+                &no_diffs,
+                None,
+                None,
+                clock,
             )
         };
         let base = material(&runtime);
@@ -9617,7 +9656,18 @@ mod tests {
 
         // Terminal size (a resize that actually changes the geometry).
         let resized = home_frame_material(
-            21, 80, &runtime, "demo", &root, &sessions, None, &no_diffs, None, None, clock,
+            21,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            health(),
+            &no_diffs,
+            None,
+            None,
+            clock,
         );
         assert_ne!(resized, base, "a resize did not redraw");
 
@@ -9632,6 +9682,7 @@ mod tests {
             &root,
             &sessions,
             None,
+            health(),
             &no_diffs,
             None,
             None,
@@ -9646,6 +9697,7 @@ mod tests {
             &root,
             &sessions,
             None,
+            health(),
             &no_diffs,
             None,
             None,
@@ -9662,12 +9714,24 @@ mod tests {
             &root,
             &sessions,
             StaticMetrics.latest(),
+            health(),
             &no_diffs,
             None,
             None,
             clock,
         );
         assert_ne!(metrics, base, "a metrics update did not redraw");
+
+        // The diagnostic health observer. It is a renderer input, so it belongs
+        // to the material: a newly observed sample must be able to change the
+        // sidecar, and an unchanged observer must not force a redraw.
+        let mut observed = DaemonHealthTracker::default();
+        observed.observe(&StaticMetrics.latest().expect("static metrics"));
+        let health_material = home_frame_material(
+            20, 80, &runtime, "demo", &root, &sessions, None, observed, &no_diffs, None, None,
+            clock,
+        );
+        assert_ne!(health_material, base, "a health observation did not redraw");
 
         // Git diffs joined onto the sidebar rows.
         let diffs = BTreeMap::from([(
@@ -9681,7 +9745,18 @@ mod tests {
             },
         )]);
         let git = home_frame_material(
-            20, 80, &runtime, "demo", &root, &sessions, None, &diffs, None, None, clock,
+            20,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            health(),
+            &diffs,
+            None,
+            None,
+            clock,
         );
         assert_ne!(git, base, "a git diff update did not redraw");
 
@@ -9701,6 +9776,7 @@ mod tests {
             &root,
             &sessions,
             None,
+            health(),
             &no_diffs,
             Some(view),
             None,
@@ -9717,6 +9793,7 @@ mod tests {
             &root,
             &sessions,
             None,
+            health(),
             &no_diffs,
             None,
             Some("beta"),

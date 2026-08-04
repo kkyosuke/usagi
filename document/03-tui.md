@@ -21,6 +21,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Overview と modal](#overview-と-modal)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
+  - [daemon health indicator](#daemon-health-indicator)
   - [session 状態別件数](#session-状態別件数)
   - [Agent concurrency](#agent-concurrency)
 - [Closeup pane](#closeup-pane)
@@ -864,13 +865,58 @@ message の既定の供給元は**正常系以外の daemon 状態**である。
 mascot の右には最大 3 行の観測 status（sidecar）を並べる。sidecar は rabbit 自身の行に重ねて描くため、
 mascot block の予約行数を増やさず session viewport の容量を奪わない。各行は rabbit の幅に揃えた同じ列から
 始まり、sidebar 幅に合わせて clip する。現在の供給元は上から
-[session 状態別件数](#session-状態別件数)、[Agent concurrency](#agent-concurrency)、daemon metrics（CPU /
-resident memory）の 3 つで、mascot block ごと省略される狭幅ではいずれも表示しない。後者 2 つは同じ metrics
-snapshot から来るため、snapshot が無いときはどちらも出ず、session 状態別件数の行だけが残る。
+[daemon health indicator](#daemon-health-indicator)（異常時だけ）、[session 状態別件数](#session-状態別件数)、
+[Agent concurrency](#agent-concurrency)、daemon metrics（CPU / resident memory）の 4 つで、mascot block ごと
+省略される狭幅ではいずれも表示しない。後ろ 2 つは同じ metrics snapshot から来るため、snapshot が無ければ
+どちらも出ない。
+
+**供給元は 4 つだが枠は 3 行しかない**。4 つとも語ることがあるときは **Agent concurrency 行が譲る**
+（異常な daemon の方が急を要する報せであり、常設の件数・CPU/memory 行の位置も動かさないため）。この取捨は
+合成側で明示的に行う。widget の上限に任せると、代わりに最下段の CPU / memory 行が無言で消えるからである。
+
+### daemon health indicator
+
+sidecar の最上段に、**異常または要注意のときだけ** daemon health の 1 行を出す。**正常なら行を出さない**ので、
+正常時の Home frame は indicator 導入前と同一である。3 行が揃っても mascot の予約行数は変わらない。
+
+health は**診断専用の projection** である。reducer state に載らず、Effect を生まず、command の可否・resource
+ownership・fence の判定には一切参加しない。材料は表示専用の daemon metrics
+（[4. daemon IPC](04-ipc.md)）だけで、永続化もしない。daemon 切断・再同期要求は
+[feedback](#feedback-と終了) と mascot の speech bubble が正本であり、health はそれを二重に報告しない。
+health が担うのは「観測できているか」と counter 由来の劣化だけである。
+
+| 判定 | 条件 | 表示 |
+|---|---|---|
+| （静か） | 一度も観測していない（daemon 不在・lane 未起動）、または劣化していない | 行を出さない |
+| daemon 無応答 | 観測済みで、最新 sample が 30s 以上古い | danger |
+| metrics 停滞 | 観測済みで、最新 sample が 6s 以上古い | warning |
+| 端末出力の欠落 | retention window から捨てた量が 1MiB/s 以上を 3 sample 連続 | warning |
+| 端末出力の滞留 | PTY reader が queue 待ちした量が 256KiB/s 以上を 3 sample 連続 | warning |
+| PR 検出の欠落 | PR projection queue の満杯で確定済み出力を scan せず捨てた | warning |
+| 更新の取りこぼし | metrics tick の取りこぼしが毎秒 1 件以上を 3 sample 連続 | warning |
+
+daemon metrics の counter は process の生存期間で単調増加するため、値や「一度でも増えたか」で判定すると
+**一度警告したら消えない indicator** になる。加えて端末出力の欠落は bounded retention window の通常動作で、
+忙しい agent では常時増える。そのため判定は次の 4 つを守る。
+
+- **rate で見る**。sample 間の差分を経過時間で割った毎秒レートを閾値と比べる。単発のバーストは通らない。
+- **連続で見る**。閾値超えが規定 sample 数続いて初めて点灯する（PR 検出の欠落は通常動作でないため 1 回で点灯する）。
+- **減衰する**。点灯は最後の該当 sample から 10s で消えるため、事象が止まれば indicator も消える。
+- **再 baseline する**。counter の後退（daemon 再起動）、sample 時刻の後退、schema の変化、5s を超える観測の
+  空白（再接続直後）では差分を取らない。したがって再接続の 1 発目が警告になることはない。
+
+観測の停滞（freshness）は counter 由来の理由より優先する。停滞した snapshot から計算したレートを表示しない。
+metrics lane の失敗中も直前 sample が保持されるため（[背景観測 lane](#home-frame-loop-と背景観測-lane)）、
+「観測が止まった」ことは sample の時刻でしか判定できない。判定は sample 列と現在時刻だけの純関数であり、
+現在時刻は renderer の入力（[frame material](#frame-material-と再描画の判定)）として渡す。
+
+表示は `⚠` と短い理由だけで、raw な端末出力・path・secret・error ID を載せない。理由は閉じた語彙から選ぶため、
+自由文が indicator に流れ込む経路そのものが無い。**Nerd Font glyph は使わない**（`⚠` は speech bubble と同じ
+BMP 記号）。狭い sidebar では文言を落として記号だけに縮退し、記号も置けない幅では行を出さない。
 
 ### session 状態別件数
 
-sidecar の 1 行目に、表示中 session の **running / waiting / failed 件数**を出す。件数は daemon 権威の
+sidecar の常設行として、表示中 session の **running / waiting / failed 件数**を出す。件数は daemon 権威の
 projection から毎フレーム導出する派生値であり、[metrics](04-ipc.md) schema にも TUI の reducer state にも
 別の情報源を作らない。導出の入力は 2 つとも既に Home へ届いているものを使う。
 
@@ -901,7 +947,7 @@ projection から毎フレーム導出する派生値であり、[metrics](04-ip
 
 ### Agent concurrency
 
-sidecar の 2 行目に、daemon が Agent launch を admit する際の **使用中/上限**を出す。値は daemon の admission
+sidecar の常設行として、daemon が Agent launch を admit する際の **使用中/上限**を出す。値は daemon の admission
 権威が報告した [agent concurrency projection](04-ipc.md#agent-concurrency-projection) そのものであり、TUI は
 runtime を数え直さず、上限の定数も持たない。対象は Agent runtime の pool だけで、generic terminal capacity や
 supervisor run の同時実行数とは別物である（正本は
@@ -918,6 +964,9 @@ supervisor run の同時実行数とは別物である（正本は
   である。報告されない level を 0 と描くと、枠が空いているという誤った断定になる。
 - 表示専用であり、この行から launch の可否を判断しない。次の launch を拒否するかは daemon が admit の瞬間に決める。
 - 狭幅では他の mascot 行と同じ幅へ clip し、うさぎ自体が入らない幅では mascot block ごと省略される。
+- **sidecar の 3 行が埋まるときはこの行が譲る**。[daemon health indicator](#daemon-health-indicator) が点灯し、
+  かつ [session 状態別件数](#session-状態別件数)と daemon metrics も出ている場合、この行だけを落として
+  health / 件数 / CPU・memory の 3 行を残す。異常時の frame は indicator 導入時と同一に保たれる。
 
 ## Closeup pane
 
