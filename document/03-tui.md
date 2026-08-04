@@ -1206,7 +1206,11 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 - **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m sak` → `agent -m sakana.ai`、
   `agent --` → `agent --model` のように候補が 1 つなら確定し、**候補が複数のときは Tab を押すたびに巡回する**
   （`agent -m c` → `agent -m claude` → `agent -m codex` → `agent -m claude`）。曖昧さで Tab が無反応になることはない。
-  Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。
+  Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。filter へ引数区切りを含む
+  command line（`agent -m codex` など）を直接入力した場合も、その入力全体を submit する。
+- daemon の同時実行枠が満杯の場合は `Agent slots full; reopen/exit one, then retry` を表示する。表示中の Agent は
+  tab を選択して `Ctrl-D` で CLI を終了する。閉じて非表示にした live Agent は Closeup の `reopen` で tab に戻してから
+  終了する。tab の close は表示 intent と client subscription を閉じる操作であり、daemon-owned process 自体は終了しない。
 - 位置引数（`agent codex`）も同じ語彙・同じ install 判定で受け付ける。`-m` の重複、値の欠落、複数選択、未知の flag は
   安全な文言で拒否し、modal を閉じない（拒否の文言は [Closeup 入力の拒否表示](#closeup-入力の拒否表示) が正本）。
 - CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う（`sakana.ai` / `sakana_ai` /

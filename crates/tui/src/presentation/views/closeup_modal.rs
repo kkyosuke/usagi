@@ -150,6 +150,14 @@ impl CloseupModal {
                 .map_or_else(String::new, |subcommand| {
                     format!("{} {}", self.selected_action().name, subcommand.value)
                 }),
+            // Action mode's input starts as a command-name filter, but once the
+            // user types an argument separator it is a complete command line.
+            // Returning the filtered row here made `agent -m codex` produce an
+            // empty submission because no command name starts with that whole
+            // string.
+            ModalSelectionMode::Action if self.input.value().contains(char::is_whitespace) => {
+                self.input.value().to_owned()
+            }
             ModalSelectionMode::Action => self
                 .matches()
                 .get(self.selected)
@@ -615,6 +623,25 @@ mod tests {
         none.expand_selected();
         assert_eq!(none.submission(), "agent");
         assert!(!joined(&none).contains("-m"));
+    }
+
+    #[test]
+    fn action_mode_submits_a_typed_command_line_with_arguments() {
+        let mut modal = CloseupModal::new("daemon");
+        for character in "agent -m codex".chars() {
+            modal.insert_char(character);
+        }
+
+        assert!(modal.matches().is_empty());
+        assert_eq!(modal.submission(), "agent -m codex");
+
+        // A trailing separator is also meaningful: it submits the command and
+        // lets the command parser decide whether an omitted argument is valid.
+        modal = CloseupModal::new("daemon");
+        for character in "agent ".chars() {
+            modal.insert_char(character);
+        }
+        assert_eq!(modal.submission(), "agent ");
     }
 
     #[test]

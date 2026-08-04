@@ -22,6 +22,11 @@ use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 use usagi_core::usecase::client::DaemonMetrics;
 
+/// Daemon capacity refusal and the action-oriented copy shown in Closeup.
+/// The daemon owns the resource fact; the TUI owns the recovery vocabulary.
+const AGENT_CAPACITY_EXHAUSTED: &str = "daemon agent runtime capacity is exhausted";
+const AGENT_CAPACITY_RECOVERY: &str = "Agent slots full; reopen/exit one, then retry";
+
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::views::director_drawer::DirectorDrawerProjection;
 use crate::presentation::views::overview_modal::OverviewModal;
@@ -832,6 +837,11 @@ impl WorkspaceRuntime {
         operation: OperationId,
         message: String,
     ) -> Vec<PaneRegistryEffect> {
+        let message = if message == AGENT_CAPACITY_EXHAUSTED {
+            AGENT_CAPACITY_RECOVERY.to_owned()
+        } else {
+            message
+        };
         let effects = reduce_registry(
             &mut self.panes,
             PaneRegistryEvent::Pane {
@@ -842,6 +852,13 @@ impl WorkspaceRuntime {
         // A dropped placeholder can never complete, so retire its focus gate.
         self.pane_focus_at_request.remove(&operation);
         self.sync_live_pane();
+        // Losing the last pending tab reopens Closeup automatically. Materialize
+        // that modal now and copy the failure into its visible danger row; the
+        // underlying empty-pane feedback is covered by the modal itself.
+        self.sync_overlay_modals();
+        if let Some(modal) = self.closeup_modal.as_mut() {
+            modal.set_error(self.panes.active_pane().error().map(str::to_owned));
+        }
         effects
     }
 
@@ -3165,6 +3182,26 @@ mod tests {
                 .map(|notice| notice.message.as_str()),
             Some("boom")
         );
+    }
+
+    #[test]
+    fn agent_capacity_failure_points_to_the_closeup_recovery_actions() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let operation = submit_agent(&mut runtime);
+
+        let _ = runtime.fail_pane(
+            Target::Session(session),
+            operation,
+            super::AGENT_CAPACITY_EXHAUSTED.to_owned(),
+        );
+
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some(super::AGENT_CAPACITY_RECOVERY)
+        );
+        assert!(joined_frame(&runtime).contains(super::AGENT_CAPACITY_RECOVERY));
     }
 
     // ── R2: completion focus is gated on no later interaction ────────────────
