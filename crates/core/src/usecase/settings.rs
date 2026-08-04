@@ -128,6 +128,10 @@ mod tests {
             .unwrap();
         assert_eq!(readable.global.as_ref().unwrap().env, environment);
         readable
+            .save(SettingsScope::Workspace, &Settings::default())
+            .unwrap();
+        assert_eq!(readable.workspace.as_ref().unwrap(), &Settings::default());
+        readable
             .save(SettingsScope::Global, &Settings::default())
             .unwrap();
 

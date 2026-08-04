@@ -7254,6 +7254,13 @@ mod tests {
             storage: Storage::new(&global_dir),
             workspace: None,
         };
+        assert!(
+            port.save_environment(
+                SettingsScope::Workspace,
+                &usagi_core::domain::settings::EnvBindings::new(),
+            )
+            .is_err()
+        );
         port.select_workspace(&workspace).unwrap();
 
         // Capture the modal's stale effective view, then let the environment
