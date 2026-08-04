@@ -197,11 +197,11 @@ pub struct DeletePlan {
     pub force: bool,
     /// Whether the session's branch is deleted along with its worktree.
     ///
-    /// A removal the user asked for keeps the branch: it holds the work. Only the
-    /// compensation of a create that never produced any work undoes the branch
-    /// too, so a retry under the same session name is not blocked by it. Absent
-    /// in records written before this field existed, which is exactly the
-    /// branch-preserving behaviour those removals had.
+    /// An available session's branch is kept because it holds the work. A failed
+    /// session removal and the compensation of a create that never produced any
+    /// work undo the branch too, so a retry under the same session name is not
+    /// blocked by it. Absent in records written before this field existed, which
+    /// is exactly the branch-preserving behaviour those removals had.
     #[serde(default)]
     pub delete_branch: bool,
 }
