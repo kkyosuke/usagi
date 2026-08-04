@@ -1,13 +1,13 @@
 ---
 number: 644
 title: feat(daemon): Agent concurrency の「使用中/上限」を versioned metrics projection で公開し TUI に表示する
-status: in-progress
+status: done
 priority: medium
 labels: [daemon, tui, ipc, metrics, agent]
 dependson: []
 related: []
 created_at: 2026-08-04T12:57:11.598612+00:00
-updated_at: 2026-08-04T12:57:17.513680+00:00
+updated_at: 2026-08-04T13:40:55.833152+00:00
 ---
 
 ## 背景
