@@ -4093,19 +4093,6 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         // `env` owns the workspace-scoped editor rather than a per-session effect,
         // so it opens the editor and returns before the shared dismiss/notice tail.
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
-        closeup::Command::Reopen { arguments } => {
-            if let Ok(continuation) = AgentContinuationRef::parse(arguments.trim()) {
-                Some(Effect::ReopenAgent {
-                    workspace: state.workspace,
-                    continuation,
-                })
-            } else {
-                state.notice = Some(Notice::new(
-                    "reopen requires a valid Agent continuation reference",
-                ));
-                None
-            }
-        }
     };
     if effect.is_some() {
         // v1's `terminal new` hands the worktree to the OS terminal and leaves
@@ -6962,32 +6949,6 @@ mod tests {
             state.notice().map(|notice| notice.message.as_str()),
             Some("unknown closeup command: \"chat\"")
         );
-
-        let continuation = AgentContinuationRef::new();
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
-        assert_eq!(
-            update(
-                &mut state,
-                AppEvent::Key(AppKey::SubmitCloseup(format!("reopen {continuation}"))),
-            ),
-            vec![Effect::ReopenAgent {
-                workspace,
-                continuation,
-            }]
-        );
-
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
-        assert!(
-            update(
-                &mut state,
-                AppEvent::Key(AppKey::SubmitCloseup("reopen invalid".to_owned())),
-            )
-            .is_empty()
-        );
-        assert_eq!(
-            state.notice().map(|notice| notice.message.as_str()),
-            Some("reopen requires a valid Agent continuation reference")
-        );
     }
 
     #[test]
@@ -8541,17 +8502,6 @@ mod tests {
         state.active = Some(session);
         state.overlay = Some(Overlay::Closeup);
         let _ = submit_closeup(&mut state, "close invalid");
-        state.overlay = Some(Overlay::Closeup);
-        assert!(matches!(
-            submit_closeup(
-                &mut state,
-                &format!("reopen {}", AgentContinuationRef::new())
-            )
-            .as_slice(),
-            [Effect::ReopenAgent { .. }]
-        ));
-        state.overlay = Some(Overlay::Closeup);
-        assert!(submit_closeup(&mut state, "reopen invalid").is_empty());
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::NotesLoaded {

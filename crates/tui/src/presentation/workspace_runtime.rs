@@ -25,7 +25,7 @@ use usagi_core::usecase::client::DaemonMetrics;
 /// Daemon capacity refusal and the action-oriented copy shown in Closeup.
 /// The daemon owns the resource fact; the TUI owns the recovery vocabulary.
 const AGENT_CAPACITY_EXHAUSTED: &str = "daemon agent runtime capacity is exhausted";
-const AGENT_CAPACITY_RECOVERY: &str = "Agent slots full; reopen/exit one, then retry";
+const AGENT_CAPACITY_RECOVERY: &str = "Agent slots full; exit one with Ctrl-D, retry";
 
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::views::director_drawer::DirectorDrawerProjection;
@@ -61,13 +61,6 @@ pub struct CloseOutcome {
     pub cancel: Option<OperationId>,
 }
 
-/// One safe choice shown by `Reopen closed Agent`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentReopenChoice {
-    pub label: String,
-    pub continuation: AgentContinuationRef,
-}
-
 /// One target's ordered live panes from a completed restore job, plus the
 /// interrupted Agent conversations projected for the same target (#510).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +94,6 @@ pub struct WorkspaceRuntime {
     /// ([`AppState::interaction_count`]/[`PendingOperation::interaction_at_accept`]).
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
-    reopen_choices: Vec<AgentReopenChoice>,
     director_projection: DirectorDrawerProjection,
 }
 
@@ -131,7 +123,6 @@ impl WorkspaceRuntime {
             closeup_modal: None,
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
-            reopen_choices: Vec::new(),
             director_projection: DirectorDrawerProjection::default(),
         }
     }
@@ -266,14 +257,6 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn restore_fence(&self) -> (u64, u64) {
         (self.state.interaction_count(), self.panes.revision())
-    }
-
-    /// Replace the secret-free list used by the Closeup reopen picker.
-    pub fn set_reopen_choices(&mut self, choices: Vec<AgentReopenChoice>) {
-        self.reopen_choices = choices;
-        if let Some(modal) = self.closeup_modal.take() {
-            self.closeup_modal = Some(modal.with_reopen_choices(self.reopen_choices.clone()));
-        }
     }
 
     /// Replace presentation-only material for the open root Agent drawer.
@@ -652,7 +635,6 @@ impl WorkspaceRuntime {
         if self.state.overlay() == Some(Overlay::Closeup) {
             self.closeup_modal.get_or_insert_with(|| {
                 CloseupModal::with_selection_mode(String::new(), self.modal_selection_mode)
-                    .with_reopen_choices(self.reopen_choices.clone())
                     .with_agent_models(available_models, default_model)
             });
         } else {
@@ -701,9 +683,8 @@ impl WorkspaceRuntime {
 
     /// The focused live terminal when its tab hosts an Agent conversation.
     ///
-    /// Closing an Agent tab is a durable conversation dismissal while closing a
-    /// generic terminal tab is not, so the shell must tell them apart even
-    /// before any continuation has been observed for the tab (#613).
+    /// Agent tabs remain inventory-owned and cannot be closed from the tab UI,
+    /// so the shell must tell them apart from closable generic terminal tabs.
     #[must_use]
     pub fn focused_agent_terminal(&self) -> Option<TerminalRef> {
         let terminal = self.focused_terminal()?;
@@ -912,8 +893,8 @@ impl WorkspaceRuntime {
                 detach: None,
                 cancel: Some(*operation),
             },
-            // An interrupted tab owns no daemon transport: closing it is purely
-            // a display dismissal, which the shell persists through #506 intent.
+            // An interrupted tab owns no daemon transport. Callers keep Agent
+            // history visible and therefore do not route its close here.
             PaneSelection::Tab(TabSelection::Interrupted(_))
             | PaneSelection::Target(_)
             | PaneSelection::None => CloseOutcome::default(),
@@ -929,9 +910,8 @@ impl WorkspaceRuntime {
     }
 
     /// The interrupted conversation the active pane's selected tab shows, if the
-    /// selection is an interrupted tab. The shell uses it to persist the
-    /// continuation-scoped dismissal of a closed history tab (#506) and to label
-    /// the explicit Resume action.
+    /// selection is an interrupted tab. The shell uses it to keep history visible
+    /// and to label the explicit Resume action.
     #[must_use]
     pub fn focused_interrupted(&self) -> Option<&InterruptedTab> {
         let PaneSelection::Tab(TabSelection::Interrupted(selected)) =
@@ -1510,11 +1490,6 @@ mod tests {
             runtime.closeup_modal().unwrap().selection_mode(),
             ModalSelectionMode::Prompt
         );
-        runtime.set_reopen_choices(vec![super::AgentReopenChoice {
-            label: "Agent safe".to_owned(),
-            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
-        }]);
-        assert!(runtime.closeup_modal().is_some());
     }
 
     fn terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {

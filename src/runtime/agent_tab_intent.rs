@@ -221,6 +221,11 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                         terminals,
                         agents,
                         allowed_sessions,
+                    }
+                    | AgentTabIntentMutation::ObserveAll {
+                        terminals,
+                        agents,
+                        allowed_sessions,
                     } => {
                         // Observe is not a stable-key delta. Return only a
                         // latest-ref-exact projection, leave bytes untouched,
