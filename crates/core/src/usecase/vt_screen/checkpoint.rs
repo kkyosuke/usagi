@@ -36,10 +36,16 @@ pub const COLS_MAX: u32 = 2048;
 pub const CELLS_PER_TERMINAL_MAX: u32 = ROWS_MAX * COLS_MAX;
 /// Maximum retained scrollback rows in one buffer. Matches the live parser cap.
 pub const SCROLLBACK_MAX: usize = 10_000;
-/// Maximum entries in the interned style table.
-pub const STYLES_MAX: usize = 4_096;
+/// Maximum entries in the interned style table. Each retained cell can carry a
+/// distinct canonical style, plus one pending style per primary/alternate
+/// buffer, so this matches the live geometry and scrollback bounds.
+pub const STYLES_MAX: usize = 2 * ((SCROLLBACK_MAX + ROWS_MAX as usize) * COLS_MAX as usize + 1);
 /// Maximum length of the decoder's in-flight CSI parameter run, in bytes.
 pub const PARAMS_MAX: usize = 64;
+/// Maximum length of one canonical SGR style string, in bytes. A live style is
+/// one `ESC [` prefix, at most [`PARAMS_MAX`] parameter bytes, and one final
+/// `m`; checkpoint validation uses the same bound.
+pub const STYLE_BYTES_MAX: usize = PARAMS_MAX + 3;
 /// Maximum buffered partial UTF-8 bytes (a 4-byte sequence has at most 3
 /// pending continuation bytes).
 pub const UTF8_PENDING_MAX: usize = 3;
@@ -69,6 +75,8 @@ pub enum DecoderPhase {
     Escape,
     /// Collecting a `CSI` parameter/intermediate run.
     Csi,
+    /// Discarding an oversized `CSI` run until its final byte.
+    CsiOverflow,
     /// Swallowing an `OSC` string.
     Osc,
     /// Swallowing the byte after a charset-select escape.
@@ -186,6 +194,8 @@ pub enum CheckpointError {
     ScrollbackTooLong(usize),
     /// The style table exceeds [`STYLES_MAX`].
     TooManyStyles(usize),
+    /// An individual style exceeds [`STYLE_BYTES_MAX`].
+    StyleTooLong(usize),
     /// A `style_id` is past the end of the style table.
     StyleIdOutOfRange {
         /// The offending index.
@@ -261,6 +271,9 @@ impl std::fmt::Display for CheckpointError {
                 write!(f, "scrollback length {len} exceeds {SCROLLBACK_MAX}")
             }
             Self::TooManyStyles(len) => write!(f, "style table length {len} exceeds {STYLES_MAX}"),
+            Self::StyleTooLong(len) => {
+                write!(f, "style length {len} exceeds {STYLE_BYTES_MAX}")
+            }
             Self::StyleIdOutOfRange { id, styles } => {
                 write!(f, "style id {id} out of range (table length {styles})")
             }
@@ -341,8 +354,13 @@ impl ScreenCheckpoint {
         if cols == 0 || cols > COLS_MAX {
             return Err(CheckpointError::ColsOutOfRange(cols));
         }
-        if self.styles.len() > STYLES_MAX {
-            return Err(CheckpointError::TooManyStyles(self.styles.len()));
+        validate_style_count(self.styles.len(), STYLES_MAX)?;
+        if let Some(style) = self
+            .styles
+            .iter()
+            .find(|style| style.len() > STYLE_BYTES_MAX)
+        {
+            return Err(CheckpointError::StyleTooLong(style.len()));
         }
         if self.decoder.params.len() > PARAMS_MAX {
             return Err(CheckpointError::ParamsTooLong(self.decoder.params.len()));
@@ -374,9 +392,13 @@ impl ScreenCheckpoint {
     ///
     /// # Errors
     ///
-    /// Returns [`CheckpointError::TooLarge`] when the serialized form exceeds
-    /// the byte budget.
+    /// Returns a top-level semantic bound error before serialization, or
+    /// [`CheckpointError::TooLarge`] when the serialized form exceeds the byte
+    /// budget.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, CheckpointError> {
+        // Apply top-level bounds before serialization creates a second
+        // allocation proportional to hostile table/string input.
+        self.validated_geometry()?;
         // `serde_json` serialization of a well-formed struct does not fail.
         let bytes = serde_json::to_vec(self).unwrap_or_default();
         if bytes.len() > CHECKPOINT_BYTES_MAX {
@@ -408,5 +430,13 @@ impl ScreenCheckpoint {
             });
         }
         serde_json::from_slice(bytes).map_err(|error| CheckpointError::Malformed(error.to_string()))
+    }
+}
+
+pub(super) fn validate_style_count(len: usize, limit: usize) -> Result<(), CheckpointError> {
+    if len > limit {
+        Err(CheckpointError::TooManyStyles(len))
+    } else {
+        Ok(())
     }
 }
