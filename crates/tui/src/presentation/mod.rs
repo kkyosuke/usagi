@@ -19874,6 +19874,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn doctor_runner_renders_a_healthy_summary() {
+        use crate::usecase::doctor::DoctorReport;
+
+        let report = DoctorReport { checks: Vec::new() };
+        let mut buf = Vec::new();
+        let info = info();
+        let mut runner = BannerScreenRunner::with_doctor_report(&mut buf, &info, &report);
+        dispatch(&EntryScreen::Doctor, &mut runner).unwrap();
+        assert!(
+            String::from_utf8(buf)
+                .unwrap()
+                .ends_with("result: healthy\n")
+        );
+    }
+
     struct FailingWriter;
 
     impl Write for FailingWriter {
