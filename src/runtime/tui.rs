@@ -89,6 +89,7 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalInputResolution, TerminalSubscription,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
+use usagi_tui::usecase::doctor::{self, DoctorPort};
 use usagi_tui::usecase::overview;
 use usagi_tui::usecase::overview::SessionCommand;
 use usagi_tui::usecase::terminal_input::{
@@ -3793,6 +3794,52 @@ fn available_agent_models() -> AvailableAgentModels {
     )
 }
 
+struct RuntimeDoctorPort;
+
+impl DoctorPort for RuntimeDoctorPort {
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
+    fn tool_version(&mut self, executable: &str) -> Result<String, String> {
+        let output = Command::new(executable)
+            .arg("--version")
+            .output()
+            .map_err(|error| error.to_string())?;
+        let text = if output.stdout.is_empty() {
+            &output.stderr
+        } else {
+            &output.stdout
+        };
+        let detail = String::from_utf8_lossy(text)
+            .lines()
+            .next()
+            .unwrap_or("version output is empty")
+            .trim()
+            .to_owned();
+        if output.status.success() {
+            Ok(detail)
+        } else if detail.is_empty() {
+            Err(format!("exited with {}", output.status))
+        } else {
+            Err(detail)
+        }
+    }
+
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
+    fn settings_health(&mut self) -> Result<String, String> {
+        let mut settings = PersistentSettingsPort::open().map_err(|error| error.to_string())?;
+        settings
+            .read(SettingsScope::Global)
+            .map(|_| "settings storage is readable".to_owned())
+            .map_err(|error| error.to_string())
+    }
+
+    #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
+    fn daemon_health(&mut self) -> Result<String, String> {
+        crate::runtime::daemon::ensure_ready()
+            .map(|()| "daemon is reachable".to_owned())
+            .map_err(|error| error.to_string())
+    }
+}
+
 fn cli_is_available(program: &str) -> bool {
     Command::new(program).arg("--version").output().is_ok()
 }
@@ -3918,7 +3965,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
 /// from, and that daemon would then refuse every workspace the switcher can open.
 /// The workspace-bound connections those screens make when a workspace is chosen
 /// carry their own declaration and bootstrap the daemon there.
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=other_entries_route_to_their_banner_screens
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
 fn with_daemon_ready(
     out: &mut dyn Write,
     info: &AppInfo,
@@ -3943,13 +3990,14 @@ fn launch_ready(out: &mut dyn Write, info: &AppInfo, entry: &EntryScreen) -> std
         EntryScreen::Config => launch_screen_graph(out, Start::Config),
         EntryScreen::Workspace { path } => launch_workspace(out, path),
         EntryScreen::Doctor => {
-            let mut runner = BannerScreenRunner::new(out, info);
+            let report = doctor::diagnose(&mut RuntimeDoctorPort);
+            let mut runner = BannerScreenRunner::with_doctor_report(out, info, &report);
             application::run(entry, &mut runner)
         }
     }
 }
 
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=other_entries_route_to_their_banner_screens
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
 pub(crate) fn launch(
     out: &mut dyn Write,
     info: &AppInfo,

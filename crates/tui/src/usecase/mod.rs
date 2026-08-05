@@ -8,6 +8,8 @@
 pub mod agent_command;
 pub mod application;
 pub mod closeup;
+/// Doctor diagnostics and their injectable environment boundary.
+pub mod doctor;
 pub mod overview;
 /// Shared syntax for destructive session removal commands.
 pub mod session_remove;

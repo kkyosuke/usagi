@@ -6323,19 +6323,39 @@ impl SettingsPort for DefaultSettingsPort {
     }
 }
 
-/// 選ばれた TUI 画面を識別できる一行を出力する非対話 runner。
+/// 選ばれた非対話画面を出力する runner。
 ///
-/// 出力先とアプリ情報は呼び出し側から注入するため、実 stdout を直接所有しない。
+/// 通常 entry は識別行を、Doctor は注入された診断結果を出力する。出力先とアプリ情報は
+/// 呼び出し側から注入するため、実 stdout を直接所有しない。
 pub struct BannerScreenRunner<'a, W: Write + ?Sized> {
     out: &'a mut W,
     info: &'a AppInfo,
+    doctor_report: Option<&'a crate::usecase::doctor::DoctorReport>,
 }
 
 impl<'a, W: Write + ?Sized> BannerScreenRunner<'a, W> {
     /// 注入された出力先とアプリ情報から runner を作る。
     #[must_use]
     pub fn new(out: &'a mut W, info: &'a AppInfo) -> Self {
-        Self { out, info }
+        Self {
+            out,
+            info,
+            doctor_report: None,
+        }
+    }
+
+    /// Doctor の診断結果を表示する runner を作る。
+    #[must_use]
+    pub fn with_doctor_report(
+        out: &'a mut W,
+        info: &'a AppInfo,
+        report: &'a crate::usecase::doctor::DoctorReport,
+    ) -> Self {
+        Self {
+            out,
+            info,
+            doctor_report: Some(report),
+        }
     }
 
     /// 画面を識別する `label` をアプリ情報とともに一行で書き出す。
@@ -6358,7 +6378,27 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
     }
 
     fn doctor(&mut self) -> io::Result<()> {
-        self.write_screen("doctor TUI")
+        let report = self.doctor_report.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "doctor report is required")
+        })?;
+        writeln!(self.out, "{}: doctor", self.info.describe())?;
+        for check in &report.checks {
+            let status = match check.status {
+                crate::usecase::doctor::CheckStatus::Pass => "ok",
+                crate::usecase::doctor::CheckStatus::Warning => "warn",
+                crate::usecase::doctor::CheckStatus::Fail => "error",
+            };
+            writeln!(self.out, "[{status}] {}: {}", check.name, check.detail)?;
+        }
+        writeln!(
+            self.out,
+            "{}",
+            if report.is_healthy() {
+                "result: healthy"
+            } else {
+                "result: problems found"
+            }
+        )
     }
 }
 
@@ -19781,14 +19821,13 @@ mod tests {
     }
 
     #[test]
-    fn banner_screen_runner_names_every_tui_screen() {
+    fn banner_screen_runner_names_non_interactive_tui_screens() {
         let entries = [
             EntryScreen::Welcome,
             EntryScreen::Workspace {
                 path: PathBuf::from("/tmp/project"),
             },
             EntryScreen::Config,
-            EntryScreen::Doctor,
         ];
         let mut buf = Vec::new();
         let info = info();
@@ -19800,8 +19839,74 @@ mod tests {
             String::from_utf8(buf).unwrap(),
             "usagi v0.1.0: welcome TUI\n\
              usagi v0.1.0: workspace TUI (/tmp/project)\n\
-             usagi v0.1.0: config TUI\n\
-             usagi v0.1.0: doctor TUI\n"
+             usagi v0.1.0: config TUI\n"
+        );
+    }
+
+    #[test]
+    fn doctor_runner_renders_checks_and_summary() {
+        use crate::usecase::doctor::{CheckStatus, DiagnosticCheck, DoctorReport};
+
+        let report = DoctorReport {
+            checks: vec![
+                DiagnosticCheck {
+                    name: "Git",
+                    status: CheckStatus::Pass,
+                    detail: "git version 2.50".to_owned(),
+                },
+                DiagnosticCheck {
+                    name: "Codex CLI",
+                    status: CheckStatus::Warning,
+                    detail: "not found".to_owned(),
+                },
+                DiagnosticCheck {
+                    name: "Daemon",
+                    status: CheckStatus::Fail,
+                    detail: "connection refused".to_owned(),
+                },
+            ],
+        };
+        let mut buf = Vec::new();
+        let info = info();
+        let mut runner = BannerScreenRunner::with_doctor_report(&mut buf, &info, &report);
+        dispatch(&EntryScreen::Doctor, &mut runner).unwrap();
+
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "usagi v0.1.0: doctor\n\
+             [ok] Git: git version 2.50\n\
+             [warn] Codex CLI: not found\n\
+             [error] Daemon: connection refused\n\
+             result: problems found\n"
+        );
+    }
+
+    #[test]
+    fn doctor_runner_requires_a_report() {
+        let mut buf = Vec::new();
+        let info = info();
+        let mut runner = BannerScreenRunner::new(&mut buf, &info);
+        assert_eq!(
+            dispatch(&EntryScreen::Doctor, &mut runner)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn doctor_runner_renders_a_healthy_summary() {
+        use crate::usecase::doctor::DoctorReport;
+
+        let report = DoctorReport { checks: Vec::new() };
+        let mut buf = Vec::new();
+        let info = info();
+        let mut runner = BannerScreenRunner::with_doctor_report(&mut buf, &info, &report);
+        dispatch(&EntryScreen::Doctor, &mut runner).unwrap();
+        assert!(
+            String::from_utf8(buf)
+                .unwrap()
+                .ends_with("result: healthy\n")
         );
     }
 

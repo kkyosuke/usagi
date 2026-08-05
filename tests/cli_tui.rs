@@ -2054,12 +2054,19 @@ fn config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap(
 }
 
 #[test]
-fn other_entries_route_to_their_banner_screens() {
-    // 対話ループ未接続の画面（Doctor）は暫定バナー。
+fn doctor_reports_real_diagnostics() {
     let home = short_home();
     let output = run_with_home(&[OsStr::new("doctor")], &home);
     assert!(output.status.success());
-    assert!(stdout(&output).contains("doctor TUI"));
+    let out = stdout(&output);
+    assert!(out.contains(": doctor\n"));
+    assert!(out.contains("[ok] Git: git version"));
+    assert!(out.contains("Claude CLI:"));
+    assert!(out.contains("OpenAI CLI:"));
+    assert!(out.contains("Sakana AI CLI:"));
+    assert!(out.contains("[ok] Settings: settings storage is readable"));
+    assert!(out.contains("[ok] Daemon: daemon is reachable"));
+    assert!(out.contains("result: healthy"));
     assert!(output.stderr.is_empty());
     stop_daemon(&home);
 }
