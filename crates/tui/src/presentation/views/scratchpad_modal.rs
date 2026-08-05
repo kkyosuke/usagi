@@ -7,7 +7,8 @@
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::{
-    EnvironmentEditor, EnvironmentEntry, NoteEditor, NoteSection, RoleEditor, RoleEditorScope,
+    EnvironmentEditor, EnvironmentEntry, NoteEditor, NoteSection, ROLE_EDITOR_VIEWPORT_LINES,
+    RoleEditor, RoleEditorScope,
 };
 use usagi_core::usecase::env::EnvScope;
 
@@ -264,11 +265,8 @@ pub fn render_roles_over(
             editor
                 .source()
                 .lines()
-                .rev()
-                .take(14)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
+                .skip(editor.scroll_top())
+                .take(ROLE_EDITOR_VIEWPORT_LINES)
                 .map(|line| modal::content_line(line, INNER_WIDTH)),
         );
     }
@@ -280,6 +278,7 @@ pub fn render_roles_over(
     } else {
         "Ctrl-S: validate + save   Tab: scope   Esc: close"
     }));
+    lines.push(modal::footer("↑/↓: line   PageUp/PageDown: page"));
     modal::render_over(
         height,
         width,
@@ -598,5 +597,26 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         let workspace = render_roles_over(24, 80, &base(), state.role_editor().unwrap()).join("\n");
         assert!(workspace.contains("workspace roles.toml"));
+
+        let source = (0..30)
+            .map(|line| format!("line-{line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Workspace,
+                source,
+            }),
+        );
+        let tail = render_roles_over(24, 80, &base(), state.role_editor().unwrap()).join("\n");
+        assert!(!tail.contains("line-00"));
+        assert!(tail.contains("line-29"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
+        let head = render_roles_over(24, 80, &base(), state.role_editor().unwrap()).join("\n");
+        assert!(head.contains("line-00"));
+        assert!(!head.contains("line-29"));
+        assert!(head.contains("PageUp/PageDown"));
     }
 }
