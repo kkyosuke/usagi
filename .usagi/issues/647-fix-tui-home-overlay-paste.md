@@ -1,13 +1,13 @@
 ---
 number: 647
 title: fix(tui): Home overlay の入力欄で貼り付け（Paste）が一律破棄される
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, tui, input]
 dependson: []
 related: []
 created_at: 2026-08-05T01:01:31.057691+00:00
-updated_at: 2026-08-05T08:28:21.317622+00:00
+updated_at: 2026-08-05T08:38:56.711265+00:00
 ---
 
 ## 出典
