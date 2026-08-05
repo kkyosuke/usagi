@@ -1,6 +1,6 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -883,7 +883,7 @@ impl MetricsPort for DaemonMetricsPort {
         let mut git_changed = false;
         if let Some(sessions) = sessions {
             self.git_sessions = sessions.to_vec();
-            let active_ids = sessions.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+            let active_ids = sessions.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
             let before = self.git_diffs.len();
             self.git_diffs.retain(|id, _| active_ids.contains(id));
             git_changed |= self.git_diffs.len() != before;

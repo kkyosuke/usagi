@@ -8,7 +8,7 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -320,7 +320,7 @@ impl HomeProjection {
         let snapshot_by_id = snapshot_sessions
             .iter()
             .map(|session| (session.id, session))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         let sessions = state
             .sessions()
             .iter()
@@ -572,10 +572,7 @@ impl HomeProjection {
     /// that needs to rebuild the current Home frame.
     #[must_use]
     pub(crate) fn terminal_view(&self) -> Option<&TerminalViewProjection> {
-        match self.terminal_view.as_ref() {
-            Some(view) => Some(view.as_ref()),
-            None => None,
-        }
+        self.terminal_view.as_deref()
     }
 
     /// Replace the open drawer's presentation material without changing its
