@@ -4138,6 +4138,38 @@ mod tests {
             VersionProbeResult::Failed
         );
         assert_eq!(
+            version_result_from_observation(ChildObservation::ObservationFailed),
+            VersionProbeResult::Failed
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::SpawnFailed),
+            VersionProbeResult::Unavailable
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::TimedOut),
+            VersionProbeResult::TimedOut
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::InvalidOutput),
+            VersionProbeResult::InvalidOutput
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::OutputTooLarge),
+            VersionProbeResult::OutputTooLarge
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::EmptyOutput),
+            VersionProbeResult::EmptyOutput
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::Version("tool 1.0".to_owned())),
+            Ok("tool 1.0".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::Failed),
+            Err("version command failed".to_owned())
+        );
+        assert_eq!(
             version_detail(VersionProbeResult::TimedOut),
             Err("version probe timed out".to_owned())
         );
