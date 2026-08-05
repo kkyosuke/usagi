@@ -5,8 +5,6 @@
 //! cleanup. Results are deliberately closed and never contain argv, paths,
 //! environment values, credentials, raw OS errors, or failed command output.
 
-#![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=timeout_terminates_the_process_group_and_reaps_the_child,exited_parent_cannot_leave_a_descendant_holding_capture_pipes
-
 use std::io::Read;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
@@ -57,6 +55,7 @@ struct Capture {
 /// either pipe can fill without deadlocking the child, while retained memory is
 /// limited to `output_limit` bytes per stream.
 #[must_use]
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
     let mut command = Command::new(program);
     command
@@ -73,8 +72,14 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
         terminate_and_reap(&mut child, policy.terminate_grace);
         return ChildObservation::ObservationFailed;
     };
-    let stdout = thread::spawn(move || capture(stdout, policy.output_limit));
-    let stderr = thread::spawn(move || capture(stderr, policy.output_limit));
+    let stdout = thread::spawn(move || {
+        let mut stdout = stdout;
+        capture(&mut stdout, policy.output_limit)
+    });
+    let stderr = thread::spawn(move || {
+        let mut stderr = stderr;
+        capture(&mut stderr, policy.output_limit)
+    });
 
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
@@ -114,6 +119,7 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
     normalize_output(stdout.bytes, stderr.bytes)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=exited_parent_cannot_leave_a_descendant_holding_capture_pipes
 fn close_descendant_pipes(
     pid: u32,
     stdout: &thread::JoinHandle<Capture>,
@@ -139,7 +145,7 @@ fn close_descendant_pipes(
     signal_group(pid, libc::SIGKILL);
 }
 
-fn capture(mut reader: impl Read, limit: usize) -> Capture {
+fn capture(reader: &mut dyn Read, limit: usize) -> Capture {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
     let mut exceeded = false;
     let mut buffer = [0_u8; 8 * 1024];
@@ -175,6 +181,7 @@ fn normalize_output(stdout: Vec<u8>, stderr: Vec<u8>) -> ChildObservation {
     ChildObservation::Success(line.to_owned())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=timeout_terminates_the_process_group_and_reaps_the_child
 fn terminate_and_reap(child: &mut std::process::Child, grace: Duration) {
     signal_group(child.id(), libc::SIGTERM);
     let deadline = Instant::now() + grace;
@@ -195,6 +202,7 @@ fn terminate_and_reap(child: &mut std::process::Child, grace: Duration) {
     let _ = child.wait();
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=timeout_terminates_the_process_group_and_reaps_the_child
 fn signal_group(pid: u32, signal: libc::c_int) {
     if let Ok(pid) = libc::pid_t::try_from(pid) {
         // SAFETY: the child was placed in a process group whose ID is its PID;
@@ -209,6 +217,21 @@ fn signal_group(pid: u32, signal: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingReader {
+        returned_bytes: bool,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.returned_bytes {
+                return Err(std::io::Error::other("injected read failure"));
+            }
+            self.returned_bytes = true;
+            buffer[..2].copy_from_slice(b"ok");
+            Ok(2)
+        }
+    }
 
     fn policy() -> ChildPolicy {
         ChildPolicy {
@@ -255,6 +278,46 @@ mod tests {
         assert_eq!(
             observe("sh", &["-c", "printf 12345678901234567 >&2"], policy()),
             ChildObservation::OutputTooLarge
+        );
+    }
+
+    #[test]
+    fn capture_bounds_memory_and_normalizes_read_failures() {
+        let mut exact = std::io::Cursor::new(b"1234");
+        let captured = capture(&mut exact, 4);
+        assert_eq!(captured.bytes, b"1234");
+        assert!(!captured.exceeded);
+
+        let mut oversized = std::io::Cursor::new(b"12345");
+        let captured = capture(&mut oversized, 4);
+        assert_eq!(captured.bytes, b"1234");
+        assert!(captured.exceeded);
+
+        let mut failing = FailingReader {
+            returned_bytes: false,
+        };
+        let captured = capture(&mut failing, 4);
+        assert_eq!(captured.bytes, b"ok");
+        assert!(captured.exceeded);
+    }
+
+    #[test]
+    fn output_normalization_is_strict_and_prefers_stdout() {
+        assert_eq!(
+            normalize_output(b" stdout \nignored".to_vec(), b"stderr".to_vec()),
+            ChildObservation::Success("stdout".to_owned())
+        );
+        assert_eq!(
+            normalize_output(Vec::new(), b" stderr ".to_vec()),
+            ChildObservation::Success("stderr".to_owned())
+        );
+        assert_eq!(
+            normalize_output(vec![0xff], Vec::new()),
+            ChildObservation::InvalidOutput
+        );
+        assert_eq!(
+            normalize_output(b"  \n".to_vec(), Vec::new()),
+            ChildObservation::EmptyOutput
         );
     }
 
