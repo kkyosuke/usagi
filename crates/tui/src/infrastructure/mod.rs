@@ -6,4 +6,3 @@
 
 /// daemon push を TUI-local projection へ写す adapter。
 pub mod daemon;
-pub mod metrics;

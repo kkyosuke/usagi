@@ -8928,34 +8928,6 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
 }
 
-/// A daemon client for display-only observation: the TUI's metrics subscription.
-///
-/// It declares no workspace (the samples are process diagnostics, not workspace
-/// state) and it never bootstraps, so an entry screen that has not chosen a
-/// workspace yet cannot cold-start a daemon bound to whatever directory the TUI
-/// happens to have been launched from. Without a running daemon there are simply
-/// no metrics.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_tui_pty
-pub(crate) fn observation_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
-    let clock = SystemClock::new();
-    let data_dir =
-        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    let build = current_build();
-    let connect = move |clock: SystemClock, budget_ms: u64| {
-        connect_deadline_client(
-            &data_dir,
-            policy,
-            build.clone(),
-            ClientWorkspace::Unbound,
-            clock,
-            budget_ms,
-        )
-        .map_err(|error| ClientError::Unavailable(error.to_string()))
-    };
-    let initial = connect(clock, policy.timeout_ms)?;
-    Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
-}
-
 /// A workspace-bound daemon client for a background observation lane.
 ///
 /// It is [`policy_client`] without the bootstrap: same declared workspace, same
@@ -12451,14 +12423,26 @@ mod tests {
     }
 
     #[test]
-    fn production_metrics_composition_shares_broker_lifecycle_and_resets_on_restart() {
+    fn production_snapshot_polling_does_not_drop_but_a_slow_observer_does() {
         use usagi_core::usecase::client::MetricsAction;
 
         let broker = Arc::new(Mutex::new(MetricsBroker::default()));
         let sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
         let pipeline = TerminalPipelineMetrics::default();
+        let mut snapshot_client = None;
+        for _ in 0..4 {
+            let snapshot = metrics_response(
+                &broker,
+                &sampler,
+                &pipeline,
+                &mut snapshot_client,
+                MetricsAction::Snapshot,
+            );
+            assert_eq!(snapshot.active_subscribers, 0);
+            assert_eq!(snapshot.dropped_updates, 0);
+        }
+
         let mut slow = None;
-        let mut fast = None;
         assert_eq!(
             metrics_response(
                 &broker,
@@ -12470,19 +12454,6 @@ mod tests {
             .active_subscribers,
             1
         );
-        assert_eq!(
-            metrics_response(
-                &broker,
-                &sampler,
-                &pipeline,
-                &mut fast,
-                MetricsAction::Subscribe,
-            )
-            .active_subscribers,
-            2
-        );
-
-        let mut snapshot_client = None;
         metrics_response(
             &broker,
             &sampler,
@@ -12490,29 +12461,15 @@ mod tests {
             &mut snapshot_client,
             MetricsAction::Snapshot,
         );
-        assert!(fast.as_ref().unwrap().try_recv().is_ok());
-        let snapshot = metrics_response(
+        let dropped = metrics_response(
             &broker,
             &sampler,
             &pipeline,
             &mut snapshot_client,
             MetricsAction::Snapshot,
         );
-        assert_eq!(snapshot.active_subscribers, 2);
-        assert_eq!(snapshot.dropped_updates, 1);
-        assert!(fast.as_ref().unwrap().try_recv().is_ok());
+        assert_eq!(dropped.dropped_updates, 1);
 
-        assert_eq!(
-            metrics_response(
-                &broker,
-                &sampler,
-                &pipeline,
-                &mut fast,
-                MetricsAction::Unsubscribe,
-            )
-            .active_subscribers,
-            1
-        );
         let disconnected = slow.take().unwrap();
         broker
             .lock()
