@@ -84,26 +84,6 @@ impl TerminalScreen {
         self.rows_with_scrollback_window(0, usize::MAX, false)
     }
 
-    /// Grid cells — retained scrollback then the visible grid, joined untrimmed so
-    /// their row indices match the render iteration above — that sit on an
-    /// `http(s)` URL. Rendering underlines these to mark links clickable (#389);
-    /// detection is the pure #387 core over the ANSI-free grid.
-    fn link_cells(&self) -> HashSet<TerminalPoint> {
-        let viewport: Vec<String> = self
-            .screen
-            .scrollback()
-            .iter()
-            .chain(self.screen.grid())
-            .map(|row| {
-                row.iter()
-                    .filter(|cell| !cell.continuation())
-                    .map(Cell::ch)
-                    .collect()
-            })
-            .collect();
-        scan_links(&viewport).cells
-    }
-
     /// Renders retained scrollback and the visible grid with the current PTY
     /// cursor as an inverted cell.
     #[must_use]
@@ -130,6 +110,21 @@ impl TerminalScreen {
         } else {
             content
         }
+    }
+
+    /// Number of retained rows needed to display both live content and a
+    /// selection. A pointer may select blank fixed-grid padding below the live
+    /// cursor, so the highlight extends the projected tail without exceeding
+    /// the retained screen.
+    #[must_use]
+    pub fn rows_with_scrollback_selection_count(
+        &self,
+        anchor: (usize, usize),
+        focus: (usize, usize),
+    ) -> usize {
+        self.rows_with_scrollback_count(true)
+            .max(anchor.0.max(focus.0).saturating_add(1))
+            .min(self.retained_row_count())
     }
 
     /// Renders only the requested retained-row window.
@@ -189,45 +184,62 @@ impl TerminalScreen {
         anchor: (usize, usize),
         focus: (usize, usize),
     ) -> Vec<String> {
+        self.rows_with_scrollback_window_selection(0, usize::MAX, anchor, focus)
+    }
+
+    /// Renders only the requested retained-row window with a cell-precise
+    /// selection.
+    ///
+    /// The selection owns a complete ANSI-free snapshot for copying, but a
+    /// lingering highlight must not force every redraw or scroll action to
+    /// project the complete 10,000-row history. Link detection is expanded only
+    /// to logical lines touching this window, matching the unselected path.
+    #[must_use]
+    pub fn rows_with_scrollback_window_selection(
+        &self,
+        start: usize,
+        end: usize,
+        anchor: (usize, usize),
+        focus: (usize, usize),
+    ) -> Vec<String> {
+        let count = self.rows_with_scrollback_selection_count(anchor, focus);
+        let start = start.min(count);
+        let end = end.min(count);
+        if start >= end {
+            return Vec::new();
+        }
         let (first, last) = if anchor <= focus {
             (anchor, focus)
         } else {
             (focus, anchor)
         };
-        let links = self.link_cells();
-        let scrollback_len = self.screen.scrollback().len();
-        let (cursor_row, cursor_col) = self.screen.cursor();
-        let cursor_style = self.screen.cursor_style();
-        let mut rows: Vec<_> = self
-            .screen
-            .scrollback()
-            .iter()
-            .enumerate()
-            .map(|(row, cells)| {
-                render_row_selected(
-                    cells,
-                    None,
-                    "",
-                    selection_for(row, first, last),
-                    Some((row, &links)),
-                )
+        let (scan_start, scan_end) = self.logical_scan_range(start, end, count);
+        let plain = (scan_start..scan_end)
+            .map(|row| unstyled_row(self.retained_row(row)))
+            .collect::<Vec<_>>();
+        let links = scan_links(&plain)
+            .cells
+            .into_iter()
+            .map(|point| TerminalPoint {
+                row: point.row + scan_start,
+                column: point.column,
             })
-            .chain(self.screen.grid().iter().enumerate().map(|(index, cells)| {
-                let row = scrollback_len + index;
-                let cursor = (index == cursor_row).then_some(cursor_col);
+            .collect::<HashSet<_>>();
+        let cursor_row = self.cursor_retained_row();
+        let (_, cursor_col) = self.screen.cursor();
+        let cursor_style = self.screen.cursor_style();
+        (start..end)
+            .map(|row| {
+                let cursor = (row == cursor_row).then_some(cursor_col);
                 render_row_selected(
-                    cells,
+                    self.retained_row(row),
                     cursor,
                     cursor_style,
                     selection_for(row, first, last),
                     Some((row, &links)),
                 )
-            }))
-            .collect();
-        while rows.last().is_some_and(String::is_empty) {
-            rows.pop();
-        }
-        rows
+            })
+            .collect()
     }
 
     /// Renders the visible grid with the current PTY cursor as an inverted cell.
@@ -527,6 +539,25 @@ mod tests {
     }
 
     #[test]
+    fn long_history_selection_projects_only_the_requested_window() {
+        let mut screen = TerminalScreen::new(2, 80);
+        for row in 0..10_000 {
+            screen.advance(format!("row-{row:05}\r\n").as_bytes());
+        }
+        let count = screen.rows_with_scrollback_count(true);
+        let start = count.saturating_sub(24);
+        let anchor = (start, 0);
+        let focus = (count - 1, 2);
+        let window = screen.rows_with_scrollback_window_selection(start, count, anchor, focus);
+        assert_eq!(window.len(), count - start);
+        assert!(window.iter().all(|row| row.contains("\x1b[7m")));
+        assert_eq!(
+            window,
+            screen.rows_with_scrollback_and_cursor_selection(anchor, focus)[start..count]
+        );
+    }
+
+    #[test]
     fn retained_window_is_empty_for_empty_reversed_or_out_of_bounds_ranges() {
         let mut screen = TerminalScreen::new(2, 8);
         screen.advance(b"one\r\ntwo");
@@ -535,6 +566,29 @@ mod tests {
         assert!(
             screen
                 .rows_with_scrollback_window(usize::MAX, usize::MAX, true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retained_selection_window_is_empty_for_empty_reversed_or_out_of_bounds_ranges() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo");
+        let anchor = (0, 0);
+        let focus = (1, 2);
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(1, 1, anchor, focus)
+                .is_empty()
+        );
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(2, 1, anchor, focus)
+                .is_empty()
+        );
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(usize::MAX, usize::MAX, anchor, focus,)
                 .is_empty()
         );
     }
@@ -604,6 +658,14 @@ mod tests {
         let block = screen.rows_with_scrollback_and_cursor_selection((0, 0), (1, 5));
         assert_eq!(block[0], "\u{1b}[7mab    \u{1b}[0m");
         assert_eq!(block[1], "\u{1b}[7m      \u{1b}[0m");
+    }
+
+    #[test]
+    fn selection_extends_the_projection_into_blank_padding_below_the_cursor() {
+        let screen = TerminalScreen::new(4, 6);
+        let rows = screen.rows_with_scrollback_and_cursor_selection((0, 0), (2, 2));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2], "\u{1b}[7m   \u{1b}[0m");
     }
 
     #[test]
