@@ -8100,6 +8100,7 @@ mod tests {
             error: None,
             loading: false,
             saving: false,
+            scroll_top: 0,
         });
         let _ = update(
             &mut roles,

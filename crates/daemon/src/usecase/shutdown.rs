@@ -17,7 +17,7 @@
 use std::{
     sync::{
         Arc, Condvar, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -26,6 +26,7 @@ use std::{
 #[derive(Debug, Default)]
 pub struct ShutdownRequest {
     requested: Arc<AtomicBool>,
+    background_worker_failures: Arc<AtomicU8>,
     // The mutex guards nothing but the notification itself: `requested` is the
     // authority. Locking it inside `request` before notifying is what orders the
     // store against a waiter's re-check, so no wakeup is lost.
@@ -45,6 +46,7 @@ impl ShutdownRequest {
     pub fn with_flag(requested: Arc<AtomicBool>) -> Self {
         Self {
             requested,
+            background_worker_failures: Arc::new(AtomicU8::new(0)),
             guard: Mutex::new(()),
             changed: Condvar::new(),
         }
@@ -57,6 +59,24 @@ impl ShutdownRequest {
     #[must_use]
     pub fn flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.requested)
+    }
+
+    /// A lock-free view of long-lived worker failures for the metrics broker.
+    #[must_use]
+    pub fn background_worker_health(&self) -> BackgroundWorkerHealth {
+        BackgroundWorkerHealth(Arc::clone(&self.background_worker_failures))
+    }
+
+    /// Runs one long-lived worker behind the daemon's failure detector.
+    ///
+    /// A panic is recorded before it resumes unwinding, so the process panic
+    /// hook still writes its ordinary diagnostic while metrics retain the fact
+    /// that this worker stopped until the daemon is restarted.
+    pub fn monitor_background_worker(&self, worker: BackgroundWorker) -> BackgroundWorkerMonitor {
+        BackgroundWorkerMonitor {
+            failures: Arc::clone(&self.background_worker_failures),
+            worker,
+        }
     }
 
     #[must_use]
@@ -116,9 +136,55 @@ impl ShutdownRequest {
     }
 }
 
+/// The fixed set of daemon maintenance workers whose unexpected exit disables
+/// a product feature until restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundWorker {
+    PrRefresh,
+    SessionTeardown,
+    Custody,
+    RetentionGc,
+    DrainingCollection,
+    DecisionMaintenance,
+}
+
+impl BackgroundWorker {
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// A worker-lifetime guard that records only unwinding exits.
+#[derive(Debug)]
+pub struct BackgroundWorkerMonitor {
+    failures: Arc<AtomicU8>,
+    worker: BackgroundWorker,
+}
+
+impl Drop for BackgroundWorkerMonitor {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.failures.fetch_or(self.worker.bit(), Ordering::Release);
+        }
+    }
+}
+
+/// Cloneable, lock-free failure gauge consumed by display-only metrics.
+#[derive(Debug, Clone, Default)]
+pub struct BackgroundWorkerHealth(Arc<AtomicU8>);
+
+impl BackgroundWorkerHealth {
+    /// Number of distinct maintenance workers that panicked in this process.
+    #[must_use]
+    pub fn failed_count(&self) -> u8 {
+        u8::try_from(self.0.load(Ordering::Acquire).count_ones()).unwrap_or(u8::MAX)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
     fn a_tick_elapses_without_shutdown_and_reports_no_request() {
@@ -181,5 +247,32 @@ mod tests {
         flag.store(true, Ordering::Release);
         assert!(shutdown.is_requested());
         assert!(shutdown.wait_for_tick(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn every_background_worker_failure_is_retained_once() {
+        let shutdown = ShutdownRequest::new();
+        for worker in [
+            BackgroundWorker::PrRefresh,
+            BackgroundWorker::SessionTeardown,
+            BackgroundWorker::Custody,
+            BackgroundWorker::RetentionGc,
+            BackgroundWorker::DrainingCollection,
+            BackgroundWorker::DecisionMaintenance,
+        ] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let _monitor = shutdown.monitor_background_worker(worker);
+                panic!("injected");
+            }));
+            assert!(result.is_err());
+        }
+        assert_eq!(shutdown.background_worker_health().failed_count(), 6);
+
+        let duplicate = catch_unwind(AssertUnwindSafe(|| {
+            let _monitor = shutdown.monitor_background_worker(BackgroundWorker::Custody);
+            panic!("again");
+        }));
+        assert!(duplicate.is_err());
+        assert_eq!(shutdown.background_worker_health().failed_count(), 6);
     }
 }

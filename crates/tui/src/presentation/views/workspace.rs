@@ -1338,6 +1338,7 @@ const fn health_reason_label(reason: HealthReason) -> &'static str {
         HealthReason::TerminalBackpressure => "端末出力の滞留",
         HealthReason::PrScanIncomplete => "PR 検出の欠落",
         HealthReason::MetricsUpdatesDropped => "更新の取りこぼし",
+        HealthReason::BackgroundWorkerStopped => "worker 停止",
     }
 }
 
@@ -2451,6 +2452,7 @@ mod tests {
                 in_use: 1,
                 limit: 16,
             }),
+            failed_background_workers: 0,
         }
     }
 
@@ -3287,6 +3289,7 @@ mod tests {
                 in_use: 16,
                 limit: 16,
             }),
+            failed_background_workers: 0,
         };
         let runtime_item = |session_id| {
             let runtime_id = AgentRuntimeId::new();
@@ -3476,6 +3479,7 @@ mod tests {
                 in_use: 1,
                 limit: 16,
             }),
+            failed_background_workers: 0,
         };
         let sidecar = super::mascot_metrics(Some(&metrics), 0);
         let with_metrics = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &sidecar)
@@ -3803,6 +3807,7 @@ mod tests {
                 in_use: 0,
                 limit: 16,
             }),
+            failed_background_workers: 0,
         };
         ws.set_metrics(Some(metrics.clone()));
         assert_eq!(ws.metrics(), Some(metrics));
@@ -3838,6 +3843,7 @@ mod tests {
                 in_use: 3,
                 limit: 16,
             }),
+            failed_background_workers: 0,
         };
 
         // The daemon observation flows through `with_metrics` into the sidecar row
@@ -3927,6 +3933,7 @@ mod tests {
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
             agent_concurrency: None,
+            failed_background_workers: 0,
         };
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let render = |metrics: &usagi_core::usecase::client::DaemonMetrics| {
@@ -4038,6 +4045,7 @@ mod tests {
                 in_use: 2,
                 limit: 16,
             }),
+            failed_background_workers: 0,
         }
     }
 
@@ -4235,6 +4243,7 @@ mod tests {
             HealthReason::TerminalBackpressure,
             HealthReason::PrScanIncomplete,
             HealthReason::MetricsUpdatesDropped,
+            HealthReason::BackgroundWorkerStopped,
         ] {
             let label = health_reason_label(reason);
             let badge = health_badge(DaemonHealth::Warning(reason), LEFT_WIDTH)

@@ -207,6 +207,7 @@ mod tests {
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
             agent_concurrency: None,
+            failed_background_workers: 0,
         }
     }
 

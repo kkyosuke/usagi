@@ -9,6 +9,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_cha
 
 use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
 
+use super::shutdown::BackgroundWorkerHealth;
+
 /// The Agent concurrency level, published by the authority that admits Agent
 /// launches and read by the metrics broker.
 ///
@@ -119,6 +121,7 @@ pub struct MetricsBroker {
     dropped_updates: u64,
     latest: MetricsSample,
     agent_concurrency: AgentConcurrencyGauge,
+    background_workers: BackgroundWorkerHealth,
 }
 
 impl MetricsBroker {
@@ -133,6 +136,19 @@ impl MetricsBroker {
     pub fn with_agent_concurrency(agent_concurrency: AgentConcurrencyGauge) -> Self {
         Self {
             agent_concurrency,
+            ..Self::default()
+        }
+    }
+
+    /// Binds both runtime authorities read by the wire snapshot without locks.
+    #[must_use]
+    pub fn with_runtime_health(
+        agent_concurrency: AgentConcurrencyGauge,
+        background_workers: BackgroundWorkerHealth,
+    ) -> Self {
+        Self {
+            agent_concurrency,
+            background_workers,
             ..Self::default()
         }
     }
@@ -162,7 +178,7 @@ impl MetricsBroker {
     #[must_use]
     pub fn snapshot(&self) -> DaemonMetrics {
         DaemonMetrics {
-            schema_version: 3,
+            schema_version: 4,
             sampled_at_ms: self.latest.sampled_at_ms,
             cpu_percent_hundredths: self.latest.cpu_percent_hundredths,
             resident_memory_bytes: self.latest.resident_memory_bytes,
@@ -175,6 +191,7 @@ impl MetricsBroker {
             pr_projection_coalesced_bytes: self.latest.pr_projection_coalesced_bytes,
             pr_projection_gaps: self.latest.pr_projection_gaps,
             agent_concurrency: self.agent_concurrency.observe(),
+            failed_background_workers: self.background_workers.failed_count(),
         }
     }
 
@@ -267,8 +284,8 @@ mod tests {
         let mut broker = MetricsBroker::default();
         assert_eq!(broker.snapshot().agent_concurrency, None);
         assert_eq!(broker.publish(sample(1)).agent_concurrency, None);
-        // Schema 3 is what a snapshot carrying the projection declares.
-        assert_eq!(broker.snapshot().schema_version, 3);
+        // Schema 4 carries both runtime health projections.
+        assert_eq!(broker.snapshot().schema_version, 4);
     }
 
     #[test]
