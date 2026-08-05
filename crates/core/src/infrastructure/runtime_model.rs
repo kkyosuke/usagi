@@ -6,11 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::domain::settings::DefaultModel;
+use crate::domain::settings::{AvailableModels, DefaultModel};
 
 const CONFIG_PATH: &str = ".usagi/config.toml";
 
@@ -48,9 +49,29 @@ pub struct PathExecutableLocator;
 
 impl ExecutableLocator for PathExecutableLocator {
     fn is_available(&self, executable: &str) -> bool {
-        env::var_os("PATH")
-            .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(executable).is_file()))
+        env::var_os("PATH").is_some_and(|paths| {
+            env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(executable);
+                candidate.metadata().is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+        })
     }
+}
+
+/// Captures the installed provider set without executing any provider CLI.
+///
+/// Callers retain this value for their process lifetime (or replace it only on
+/// an explicit refresh), so every picker and validation surface observes one
+/// stable snapshot.
+#[must_use]
+pub fn observe_available_models(locator: &dyn ExecutableLocator) -> AvailableModels {
+    AvailableModels::new(
+        DefaultModel::ALL
+            .into_iter()
+            .filter(|model| locator.is_available(model.command())),
+    )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,8 +160,13 @@ fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use crate::domain::settings::DefaultModel;
+
     use super::{
-        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, supported_agent_runtimes,
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, observe_available_models,
+        supported_agent_runtimes,
     };
     use tempfile::tempdir;
 
@@ -199,10 +225,40 @@ mod tests {
     }
 
     #[test]
+    fn availability_snapshot_uses_the_locator_once_per_provider() {
+        use std::sync::Mutex;
+
+        struct RecordingLocator(Mutex<Vec<String>>);
+        impl ExecutableLocator for RecordingLocator {
+            fn is_available(&self, executable: &str) -> bool {
+                self.0.lock().unwrap().push(executable.to_owned());
+                executable == "codex"
+            }
+        }
+
+        let locator = RecordingLocator(Mutex::new(Vec::new()));
+        let available = observe_available_models(&locator);
+        assert_eq!(
+            available.iter().collect::<Vec<_>>(),
+            vec![DefaultModel::OpenAi]
+        );
+        assert_eq!(
+            *locator.0.lock().unwrap(),
+            ["claude", "codex", "codex-fugu"]
+        );
+    }
+
+    #[test]
     fn path_locator_finds_files_on_path_and_rejects_missing_names() {
         let _guard = crate::test_support::process_env_guard();
         let bin = tempdir().unwrap();
         std::fs::write(bin.path().join("usagi-test-runtime"), "").unwrap();
+        std::fs::write(bin.path().join("not-executable"), "").unwrap();
+        std::fs::set_permissions(
+            bin.path().join("usagi-test-runtime"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         let previous_path = std::env::var_os("PATH").expect("test process has PATH");
         unsafe {
             std::env::set_var("PATH", bin.path());
@@ -210,6 +266,7 @@ mod tests {
 
         let locator = PathExecutableLocator;
         assert!(locator.is_available("usagi-test-runtime"));
+        assert!(!locator.is_available("not-executable"));
         assert!(!locator.is_available("absent-runtime"));
 
         unsafe {

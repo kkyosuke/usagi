@@ -1339,7 +1339,8 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 | `agent -m codex` | Codex | `codex` |
 | `agent -m sakana.ai` | sakana.ai（Codex 互換、実行は `codex-fugu`） | `sakana-ai` |
 
-- **候補は install 済みの CLI だけ**である。合成ルートが各 CLI の実行可能性を観測して TUI に注入し、Action menu の
+- **候補は install 済みの CLI だけ**である。合成ルートは起動時に provider CLI を実行せず PATH lookup だけで
+  `AvailableModels` snapshot を一度作り、process lifetime を通して Config、Closeup、Director に同じ値を注入する。Action menu の
   展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。install されていない CLI は表示・補完せず、直接入力しても
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
 - **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付ける。

@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
@@ -25,6 +25,7 @@ use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, Environme
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::settings::DefaultModel;
+use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
     ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
@@ -1286,17 +1287,23 @@ fn configured_local_llm_model(data_home: &paths::DataHome) -> Option<String> {
 /// failures.  Keeping it injected makes the root composable with fixture
 /// executables without installing or authenticating a real CLI.
 trait AgentReadinessProbe: Send + Sync {
-    fn ready(&self, product: &str) -> Result<(), ()>;
+    fn observe(&self, product: &str) -> AgentReadiness;
 }
 
 const AGENT_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_READINESS_TERMINATE_GRACE: Duration = Duration::from_millis(250);
-const AGENT_READINESS_POLL: Duration = Duration::from_millis(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AgentReadiness {
+    Ready,
+    #[default]
+    Unavailable,
+}
 
 #[derive(Default)]
 struct ReadinessSlot {
     running: bool,
-    result: Option<Result<(), ()>>,
+    result: Option<AgentReadiness>,
 }
 
 #[derive(Default)]
@@ -1326,39 +1333,46 @@ impl Default for SystemAgentReadiness {
 }
 
 impl AgentReadinessProbe for SystemAgentReadiness {
-    fn ready(&self, product: &str) -> Result<(), ()> {
+    fn observe(&self, product: &str) -> AgentReadiness {
         // Which products exist, and which status command proves each one usable,
         // is the shared agent CLI vocabulary owned by core domain settings. This
         // root only runs the resolved probe, so the Codex-compatible
         // `codex-fugu` behind the `sakana-ai` profile is recognised without a
         // second table here (#609). An unmodelled product still fails closed.
-        let probe = DefaultModel::readiness_command_for(product).ok_or(())?;
+        let Some(probe) = DefaultModel::readiness_command_for(product) else {
+            return AgentReadiness::Unavailable;
+        };
         self.ready_command(product, probe.program(), probe.arguments())
     }
 }
 
 impl SystemAgentReadiness {
-    fn ready_command(&self, product: &str, program: &str, arguments: &[&str]) -> Result<(), ()> {
-        let mut state = self.state.lock().map_err(|_| ())?;
+    fn ready_command(&self, product: &str, program: &str, arguments: &[&str]) -> AgentReadiness {
+        let Ok(mut state) = self.state.lock() else {
+            return AgentReadiness::Unavailable;
+        };
         let slot = state.providers.entry(product.to_owned()).or_default();
         if slot.running {
-            let (state_after_wait, timeout) = self
-                .completed
-                .wait_timeout_while(state, self.timeout + self.terminate_grace, |state| {
+            let Ok((state_after_wait, timeout)) = self.completed.wait_timeout_while(
+                state,
+                self.timeout + self.terminate_grace,
+                |state| {
                     state
                         .providers
                         .get(product)
                         .is_some_and(|slot| slot.running)
-                })
-                .map_err(|_| ())?;
+                },
+            ) else {
+                return AgentReadiness::Unavailable;
+            };
             if timeout.timed_out() {
-                return Err(());
+                return AgentReadiness::Unavailable;
             }
             return state_after_wait
                 .providers
                 .get(product)
                 .and_then(|slot| slot.result)
-                .unwrap_or(Err(()));
+                .unwrap_or(AgentReadiness::Unavailable);
         }
         slot.running = true;
         slot.result = None;
@@ -1366,7 +1380,9 @@ impl SystemAgentReadiness {
 
         let result =
             bounded_readiness_command(program, arguments, self.timeout, self.terminate_grace);
-        let mut state = self.state.lock().map_err(|_| ())?;
+        let Ok(mut state) = self.state.lock() else {
+            return AgentReadiness::Unavailable;
+        };
         let slot = state
             .providers
             .get_mut(product)
@@ -1383,45 +1399,29 @@ fn bounded_readiness_command(
     arguments: &[&str],
     timeout: Duration,
     terminate_grace: Duration,
-) -> Result<(), ()> {
-    let mut child = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ())?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait().map_err(|_| ())? {
-            Some(status) => return status.success().then_some(()).ok_or(()),
-            None if Instant::now() < deadline => std::thread::sleep(AGENT_READINESS_POLL),
-            None => return terminate_readiness_child(&mut child, terminate_grace),
-        }
-    }
+) -> AgentReadiness {
+    readiness_from_observation(&observe(
+        program,
+        arguments,
+        ChildPolicy {
+            timeout,
+            terminate_grace,
+            output_limit: 16 * 1024,
+        },
+    ))
 }
 
-fn terminate_readiness_child(child: &mut Child, grace: Duration) -> Result<(), ()> {
-    #[cfg(unix)]
-    // SAFETY: `Child::id` is the exact process spawned above. SIGTERM is only a
-    // best-effort grace signal; the same Child handle is killed and reaped below.
-    unsafe {
-        libc::kill(child.id().try_into().map_err(|_| ())?, libc::SIGTERM);
+fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness {
+    match observation {
+        // Status commands need not print a version or other public detail.
+        ChildObservation::Success(_) | ChildObservation::EmptyOutput => AgentReadiness::Ready,
+        ChildObservation::SpawnFailed
+        | ChildObservation::ExitFailure
+        | ChildObservation::TimedOut
+        | ChildObservation::OutputTooLarge
+        | ChildObservation::InvalidOutput
+        | ChildObservation::ObservationFailed => AgentReadiness::Unavailable,
     }
-    #[cfg(not(unix))]
-    let _ = child.kill();
-
-    let deadline = Instant::now() + grace;
-    loop {
-        match child.try_wait().map_err(|_| ())? {
-            Some(_) => return Err(()),
-            None if Instant::now() < deadline => std::thread::sleep(AGENT_READINESS_POLL),
-            None => break,
-        }
-    }
-    child.kill().map_err(|_| ())?;
-    child.wait().map(|_| ()).map_err(|_| ())?;
-    Err(())
 }
 fn working_directories(
     sessions: &SharedSessionRuntime,
@@ -6042,12 +6042,13 @@ fn run_agent_readiness(
     let Some(preflight) = preflight else {
         return Ok(());
     };
-    agent.readiness.ready(preflight.product()).map_err(|()| {
-        usagi_core::infrastructure::ipc::ProtocolError::new(
+    match agent.readiness.observe(preflight.product()) {
+        AgentReadiness::Ready => Ok(()),
+        AgentReadiness::Unavailable => Err(usagi_core::infrastructure::ipc::ProtocolError::new(
             usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
             "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
-        )
-    })
+        )),
+    }
 }
 
 fn dispatch_agent_after_preflight(
@@ -9728,8 +9729,8 @@ mod tests {
             let readiness = Arc::clone(&readiness);
             std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script]))
         };
-        assert_eq!(first.join().unwrap(), Err(()));
-        assert_eq!(second.join().unwrap(), Err(()));
+        assert_eq!(first.join().unwrap(), AgentReadiness::Unavailable);
+        assert_eq!(second.join().unwrap(), AgentReadiness::Unavailable);
 
         let pids = std::fs::read_to_string(pid_file).unwrap();
         let pids = pids.lines().collect::<Vec<_>>();
@@ -9741,6 +9742,26 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH),
             "timed-out readiness child was reaped"
+        );
+    }
+
+    #[test]
+    fn readiness_is_distinct_from_install_and_rejects_unauthenticated_status() {
+        assert_eq!(
+            readiness_from_observation(&ChildObservation::EmptyOutput),
+            AgentReadiness::Ready
+        );
+        assert_eq!(
+            readiness_from_observation(&ChildObservation::ExitFailure),
+            AgentReadiness::Unavailable
+        );
+        assert_eq!(
+            readiness_from_observation(&ChildObservation::TimedOut),
+            AgentReadiness::Unavailable
+        );
+        assert_eq!(
+            readiness_from_observation(&ChildObservation::OutputTooLarge),
+            AgentReadiness::Unavailable
         );
     }
 
