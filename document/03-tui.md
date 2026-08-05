@@ -62,7 +62,7 @@ New は Clone（リポジトリを新しいディレクトリへ clone）と Exi
 入力中の draft を保ったまま notice を出して同画面に留まり、そのまま修正・再実行できる。作成の実行中は
 入力を読まないため、`Enter` の連打で作成が二重に走ることはない。`Esc` は Welcome へ戻り、`Ctrl+C` は終了する。
 
-Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode、`Workspace init` 見出しに
+Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
 `↑↓` で行を、`←→` で値を切り替える。未保存の値には `●` が付く。dirty な Save 行で `Enter` を押すと保存フローが始まり、
@@ -147,12 +147,13 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme と Modal mode はすべての workspace に適用する。Agent・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・Environment はすべての workspace に適用する。Agent・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Issue・Memory だけを保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Modal mode・Agent・Issue・Memory を所有し、`env` と
-`local_llm` を保持する。Workspace Config は Agent・Issue・Memory を所有し、workspace の `env` を保持する。
+merge して atomic write する。Global Config は Theme・Modal mode・Agent・Issue・Memory を所有し、Environment 行の
+editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` と `local_llm` を保持する。
+Workspace Config は Agent・Issue・Memory を所有し、workspace の `env` を保持する。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
 Agent は `default_model`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
@@ -739,6 +740,13 @@ Closeup は**引数を取らず workspace スコープだけ**を編集し、`Ta
 対象 session 固有の環境を作らず、この workspace に属する root / session の次回 pane 起動へ共通して効く。
 保存場所・スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の
 操作だけを述べる。
+
+Welcome の Config では Global セクションの `Environment (N vars)` を選んで Enter を押すと global editor を開く。
+開く直前に最新の global binding を読み、全置換用のスナップショットとして固定する。確認画面は、editor を開いている間に
+別画面が保存した global env はこのスナップショットの保存で失われ得ることを示し、Enter で続行、Esc で中止する。
+`NAME=value` を Enter で追加・更新し、`NAME=` で削除する。複数行Pasteは改行ごとに各行を binding として取り込む。
+空の入力で Enter を押すと global `env` だけを保存して Config に戻り、Esc は未保存の environment draft を破棄して
+Config に戻る。
 
 | 入力 | 動作 |
 |---|---|

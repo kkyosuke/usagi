@@ -2,7 +2,7 @@
 
 use std::{io, path::Path};
 
-use crate::domain::settings::Settings;
+use crate::domain::settings::{EnvBindings, Settings};
 
 /// The persistence target selected by the Config entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,26 @@ pub trait SettingsPort {
     ///
     /// Returns an error when the backend cannot save the selected scope.
     fn save(&mut self, scope: SettingsScope, settings: &Settings) -> io::Result<()>;
+
+    /// Persist only the environment bindings owned by `scope`.
+    ///
+    /// Config uses this narrow operation for its environment editor so saving a
+    /// Theme or Agent draft cannot roll back an environment change made after
+    /// the Config screen opened. Backends with merge-on-save semantics should
+    /// override this method and hold their scope lock across read-modify-write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected scope cannot be read or saved.
+    fn save_environment(
+        &mut self,
+        scope: SettingsScope,
+        environment: &EnvBindings,
+    ) -> io::Result<()> {
+        let mut settings = self.read(scope)?;
+        settings.env.clone_from(environment);
+        self.save(scope, &settings)
+    }
 }
 
 /// Resolve settings for a Home entry without allowing a damaged preference
@@ -76,7 +96,11 @@ mod tests {
                 .map_err(|error| io::Error::new(error.kind(), error.to_string()))
         }
 
-        fn save(&mut self, _: SettingsScope, _: &Settings) -> io::Result<()> {
+        fn save(&mut self, scope: SettingsScope, settings: &Settings) -> io::Result<()> {
+            match scope {
+                SettingsScope::Global => self.global = Ok(settings.clone()),
+                SettingsScope::Workspace => self.workspace = Ok(settings.clone()),
+            }
             Ok(())
         }
     }
@@ -96,6 +120,17 @@ mod tests {
             global: Ok(global.clone()),
         };
         assert_eq!(read_for_workspace_entry(&mut readable), effective);
+        let environment = [("RUST_LOG".to_owned(), "debug".to_owned())]
+            .into_iter()
+            .collect();
+        readable
+            .save_environment(SettingsScope::Global, &environment)
+            .unwrap();
+        assert_eq!(readable.global.as_ref().unwrap().env, environment);
+        readable
+            .save(SettingsScope::Workspace, &Settings::default())
+            .unwrap();
+        assert_eq!(readable.workspace.as_ref().unwrap(), &Settings::default());
         readable
             .save(SettingsScope::Global, &Settings::default())
             .unwrap();

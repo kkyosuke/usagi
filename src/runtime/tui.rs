@@ -3192,6 +3192,32 @@ impl SettingsPort for PersistentSettingsPort {
         }
         Ok(())
     }
+
+    fn save_environment(
+        &mut self,
+        scope: SettingsScope,
+        environment: &EnvBindings,
+    ) -> std::io::Result<()> {
+        match scope {
+            SettingsScope::Global => {
+                let _lock = self.storage.lock().map_err(io_error)?;
+                let mut latest = self.storage.load_settings().map_err(io_error)?;
+                latest.env.clone_from(environment);
+                self.storage.save_settings(&latest).map_err(io_error)?;
+            }
+            SettingsScope::Workspace => {
+                let workspace = self
+                    .workspace
+                    .as_ref()
+                    .ok_or_else(|| io_error("workspace settings require an opened workspace"))?;
+                let _lock = workspace.lock().map_err(io_error)?;
+                let mut latest = workspace.load().map_err(io_error)?;
+                latest.env.clone_from(environment);
+                workspace.save(&latest).map_err(io_error)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
@@ -7228,6 +7254,13 @@ mod tests {
             storage: Storage::new(&global_dir),
             workspace: None,
         };
+        assert!(
+            port.save_environment(
+                SettingsScope::Workspace,
+                &usagi_core::domain::settings::EnvBindings::new(),
+            )
+            .is_err()
+        );
         port.select_workspace(&workspace).unwrap();
 
         // Capture the modal's stale effective view, then let the environment
@@ -7268,6 +7301,48 @@ mod tests {
         );
         assert!(!effective.memory_enabled);
         assert_eq!(effective.env, concurrent.env);
+    }
+
+    #[test]
+    fn settings_port_saves_each_environment_scope_without_replacing_other_fields() {
+        let temporary = tempfile::tempdir().unwrap();
+        let global_dir = temporary.path().join("global");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let storage = Storage::new(&global_dir);
+        storage
+            .save_settings(&Settings {
+                theme: Theme::Dark,
+                ..Settings::default()
+            })
+            .unwrap();
+        WorkspaceSettingsStore::new(&workspace)
+            .save(&LocalSettings {
+                issue_enabled: Some(false),
+                ..LocalSettings::default()
+            })
+            .unwrap();
+        let mut port = PersistentSettingsPort {
+            storage: Storage::new(&global_dir),
+            workspace: None,
+        };
+        port.select_workspace(&workspace).unwrap();
+
+        let global_env = [("GLOBAL".to_owned(), "1".to_owned())]
+            .into_iter()
+            .collect();
+        port.save_environment(SettingsScope::Global, &global_env)
+            .unwrap();
+        let workspace_env = [("LOCAL".to_owned(), "2".to_owned())].into_iter().collect();
+        port.save_environment(SettingsScope::Workspace, &workspace_env)
+            .unwrap();
+
+        let global = Storage::new(&global_dir).load_settings().unwrap();
+        assert_eq!(global.theme, Theme::Dark);
+        assert_eq!(global.env, global_env);
+        let local = WorkspaceSettingsStore::new(&workspace).load().unwrap();
+        assert_eq!(local.issue_enabled, Some(false));
+        assert_eq!(local.env, workspace_env);
     }
 
     #[test]
