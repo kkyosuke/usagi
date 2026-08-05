@@ -52,7 +52,7 @@ v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)�
 | `usagi daemon start` | daemon をバックグラウンドで起動し、登録された pid を表示する。すでに稼働中ならその pid を表示する |
 | `usagi daemon stop` | 稼働中の daemon を終了する。live な Agent / generic terminal を持つ daemon は拒否し、`--force` で明示的に手放したときだけ停止する。stale な lifecycle record は回収する |
 | `usagi daemon status` | daemon が稼働中か、stale record が回収可能かを表示する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。`stop` と同じく live runtime があれば `--force` なしでは拒否する（[planned replacement](05-daemon.md#planned-replacement)） |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、安全な handoff の前提が欠ける場合だけ拒否する。`--force` は live PTY を明示的に破棄する cold transition（[planned replacement](05-daemon.md#planned-replacement)） |
 | `usagi daemon` | daemon を前景で serve する（通常は `start` が起動する内部経路） |
 | `usagi mcp` | daemon へ接続し（停止中は自動起動）、接続後は stdin の EOF まで stdio JSON-RPC server を実行する。daemon に接続できなければ server を開始せず failure status で終了する（[MCP の起動と経路](07-mcp.md#起動と経路)） |
 | `usagi <不正な引数>` | [process argv contract](02-architecture.md#process-argv-contract) に従い、clap の利用方法エラーとして拒否する |
