@@ -110,6 +110,8 @@ fn reap_children(state: &ReaperState, lifetime: &Weak<()>) {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=platform_child_reaper_reaps_short_helpers_around_a_long_lived_child
+
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Weak};
     use std::time::{Duration, Instant};
