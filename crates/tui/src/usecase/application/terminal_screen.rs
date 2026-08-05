@@ -571,6 +571,29 @@ mod tests {
     }
 
     #[test]
+    fn retained_selection_window_is_empty_for_empty_reversed_or_out_of_bounds_ranges() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo");
+        let anchor = (0, 0);
+        let focus = (1, 2);
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(1, 1, anchor, focus)
+                .is_empty()
+        );
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(2, 1, anchor, focus)
+                .is_empty()
+        );
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(usize::MAX, usize::MAX, anchor, focus,)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn retained_row_count_includes_a_blank_live_cursor_but_not_blank_padding() {
         let mut screen = TerminalScreen::new(4, 8);
         assert_eq!(screen.rows_with_scrollback_count(false), 0);
