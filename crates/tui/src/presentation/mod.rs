@@ -6764,6 +6764,25 @@ mod tests {
         }
     }
 
+    /// Publish one daemon snapshot on an exact drain observation. The frame
+    /// loop itself advances `takes`; no wall-clock delay or worker scheduling is
+    /// involved, so cache invalidation tests can put the change between two
+    /// already-rendered frames deterministically.
+    struct ScheduledSessionRefreshPort {
+        publish_on_take: usize,
+        takes: usize,
+        update: Option<SessionCommandResult>,
+    }
+
+    impl SessionRefreshPort for ScheduledSessionRefreshPort {
+        fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+            self.takes += 1;
+            (self.takes == self.publish_on_take)
+                .then(|| self.update.take().map(Ok))
+                .flatten()
+        }
+    }
+
     /// A decision lane that counts what the frame loop asked of it. The daemon
     /// round trip belongs to the resident worker, so `refresh` here does exactly
     /// what the production port does: record a wake and return (#551).
@@ -9738,6 +9757,300 @@ mod tests {
         assert_eq!(
             terminal_builds, 1,
             "terminal viewport/link projection was rebuilt on idle ticks"
+        );
+    }
+
+    /// A terminal harness that records the projection generations visible at
+    /// every actual draw. With `wait_for_builds`, it drives neutral ticks until
+    /// the requested cache invalidation has happened, then quits. The condition
+    /// is observable loop state rather than elapsed time; the finite ceiling is
+    /// only a failure guard for a broken wiring under test.
+    struct CacheInvalidationTerminal {
+        keys: VecDeque<Key>,
+        wait_for_builds: Option<(usize, usize)>,
+        quit_started: bool,
+        neutral_ticks: usize,
+        frames: Vec<Vec<String>>,
+        builds_at_draw: Vec<(usize, usize)>,
+    }
+
+    impl CacheInvalidationTerminal {
+        fn scripted(keys: impl IntoIterator<Item = Key>) -> Self {
+            Self {
+                keys: keys.into_iter().collect(),
+                wait_for_builds: None,
+                quit_started: false,
+                neutral_ticks: 0,
+                frames: Vec::new(),
+                builds_at_draw: Vec::new(),
+            }
+        }
+
+        fn until_builds(keys: impl IntoIterator<Item = Key>, builds: (usize, usize)) -> Self {
+            Self {
+                wait_for_builds: Some(builds),
+                ..Self::scripted(keys)
+            }
+        }
+    }
+
+    impl Terminal for CacheInvalidationTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((20, 80))
+        }
+
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.frames.push(frame.to_vec());
+            self.builds_at_draw.push(projection_build_counts());
+            Ok(())
+        }
+
+        fn wait(&mut self, _duration: std::time::Duration) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            if let Some(key) = self.keys.pop_front() {
+                return Ok(key);
+            }
+            let Some(expected) = self.wait_for_builds else {
+                return Err(io::Error::other("no more cache-invalidation keys"));
+            };
+            let observed = projection_build_counts();
+            if observed.0 >= expected.0 && observed.1 >= expected.1 {
+                if self.quit_started {
+                    return Ok(Key::Char('y'));
+                }
+                self.quit_started = true;
+                return Ok(Key::Live(LiveTerminalAction::QuitConfirmation));
+            }
+            self.neutral_ticks += 1;
+            if self.neutral_ticks >= 10_000 {
+                return Err(io::Error::other(format!(
+                    "cache invalidation was not observed: expected {expected:?}, got {observed:?}"
+                )));
+            }
+            std::thread::yield_now();
+            Ok(Key::Other)
+        }
+
+        fn copy_text(&mut self, _text: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The session revision must cross both cache gates in the real composition
+    /// loop: first rebuild the owned row/path projection, then rebuild and draw
+    /// the frame that contains it.
+    #[test]
+    fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
+        reset_projection_build_counts();
+        let snapshot = snapshot("session-cache");
+        let original = snapshot.session_ids[0];
+        let added = SessionId::new();
+        let mut added_record = snapshot.state.sessions[0].clone();
+        added_record.name = "cache-added".to_owned();
+        added_record.root = PathBuf::from("/tmp/session-cache/cache-added");
+        let update = SessionCommandResult {
+            message: "daemon snapshot changed".to_owned(),
+            sessions: Some(vec![snapshot.state.sessions[0].clone(), added_record]),
+            session_ids: Some(vec![original, added]),
+            agent_resumes: None,
+            session_lifecycles: None,
+            session_roles: None,
+            revision: Some(1),
+        };
+        let mut term = CacheInvalidationTerminal::scripted([
+            Key::Other,
+            Key::Other,
+            Key::Other,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: Some(Box::new(ScheduledSessionRefreshPort {
+                publish_on_take: 3,
+                takes: 0,
+                update: Some(update),
+            })),
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+            Exit::Quit
+        );
+
+        let (session_builds, terminal_builds) = projection_build_counts();
+        assert_eq!(session_builds, 2, "the changed session key did not rebuild");
+        assert_eq!(terminal_builds, 1, "a session change rebuilt the terminal");
+        assert!(
+            term.builds_at_draw.contains(&(2, 1)),
+            "the frame key did not redraw after the session material rebuild"
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("cache-added")),
+            "the redrawn frame did not contain the changed session projection"
+        );
+    }
+
+    struct ImmediateTerminalLaunchPort(TerminalRef);
+
+    impl PaneLaunchCommandPort for ImmediateTerminalLaunchPort {
+        fn launch(
+            &self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent launch is not scripted".to_owned())
+        }
+
+        fn resume(
+            &self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _operation: OperationId,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent resume is not scripted".to_owned())
+        }
+
+        fn resume_exact(
+            &self,
+            _target: usagi_core::domain::agent::AgentResumeTarget,
+            _operation: OperationId,
+        ) -> Result<super::ExactAgentResume, String> {
+            Err("exact agent resume is not scripted".to_owned())
+        }
+
+        fn launch_terminal(
+            &self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _geometry: Geometry,
+            _arguments: &str,
+            _operation: OperationId,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The resident stream starts with one checkpoint and publishes exactly one
+    /// later output chunk. This changes the authoritative `TerminalSession` screen
+    /// revision after the pane itself has already been projected once.
+    struct ChangingTerminalPort {
+        replay: Vec<u8>,
+        empty_polls_before_update: usize,
+        update: Option<Vec<u8>>,
+    }
+
+    impl AgentCommandPort for ChangingTerminalPort {
+        fn launch(
+            &mut self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent launch is not scripted".to_owned())
+        }
+
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
+                revision: 1,
+                output_offset: self.replay.len() as u64,
+                next_input_seq: None,
+                screen: attach_checkpoint(&self.replay, geometry),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            if self.empty_polls_before_update > 0 {
+                self.empty_polls_before_update -= 1;
+                return Ok(Vec::new());
+            }
+            let Some(data) = self.update.take() else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![TerminalChunk {
+                start_offset: after_offset,
+                end_offset: after_offset + data.len() as u64,
+                data,
+            }])
+        }
+    }
+
+    /// The actual controller path must propagate both a focused-pane change and
+    /// a later terminal screen revision through `terminal_material_key` and the
+    /// aggregate `FrameMaterialKey`. Each invalidation owes one viewport/link
+    /// rebuild and one draw containing the new owned projection.
+    #[test]
+    fn terminal_output_change_invalidates_the_joined_material_and_redraws() {
+        reset_projection_build_counts();
+        let snapshot = snapshot("terminal-cache");
+        let terminal = live_terminal_ref(snapshot.workspace_id, snapshot.session_ids[0]);
+        let mut keys = vec![Key::Enter, Key::Live(LiveTerminalAction::OpenCloseupModal)];
+        keys.extend("terminal open".chars().map(Key::Char));
+        keys.push(Key::Enter);
+        let mut term = CacheInvalidationTerminal::until_builds(keys, (1, 3));
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(ChangingTerminalPort {
+                replay: b"cache-before".to_vec(),
+                empty_polls_before_update: 1,
+                update: Some(b"\r\ncache-after".to_vec()),
+            })),
+            launch: Some(Box::new(ImmediateTerminalLaunchPort(terminal))),
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+            Exit::Quit
+        );
+
+        let (session_builds, terminal_builds) = projection_build_counts();
+        assert_eq!(session_builds, 1, "a terminal change rebuilt session rows");
+        assert_eq!(
+            terminal_builds, 3,
+            "focused pane and screen revision did not each invalidate the terminal key"
+        );
+        for generation in [2, 3] {
+            assert!(
+                term.builds_at_draw.contains(&(1, generation)),
+                "frame key did not redraw terminal generation {generation}"
+            );
+        }
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("cache-after")),
+            "the redraw did not contain output from the changed terminal screen"
         );
     }
 
