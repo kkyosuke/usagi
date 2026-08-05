@@ -3,7 +3,7 @@
 <div align="center">
 
 <pre>
-   (\(\
+    (\(\&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;
    (='-')     ╻ ╻ ┏━┓ ┏━┓ ┏━╸ ╻
   o(_(")(")   ┃ ┃ ┗━┓ ┣━┫ ┃╺┓ ┃
               ┗━┛ ┗━┛ ╹ ╹ ┗━┛ ╹
@@ -24,15 +24,15 @@
 > この README はフルリライト中の **v2** を説明する。現在 GitHub Releases で配布している
 > バイナリは [v1](v1/README.md) であり、v2 はリポジトリルートからソースで実行する。
 
-## usagi でできること
+## usagi でやりたいこと
 
-- リポジトリごとに workspace を登録し、Welcome 画面から切り替える。
-- 作業単位ごとに `.usagi/sessions/<name>/` の git worktree を作り、変更を隔離する。
-- Claude、Codex、Sakana AI の Agent と通常の terminal を daemon 管理の PTY で動かす。
-- TUI を閉じても daemon 上の Agent と terminal を継続し、次回 attach または明示 resume する。
-- session の状態、Git 差分、PR、ノートを Home 画面で確認する。
-- AI エージェントへ MCP 経由で issue、memory、session の委譲・観測ツールを公開する。
-- session role、環境変数、利用する Agent、issue / memory ツールの有効・無効を設定する。
+usagi が目指すのは、複数種類の AI エージェントを同じ UI から操作し、並行する作業を session として
+管理できる開発環境である。
+
+- Claude、Codex、Sakana AI と通常の terminal をひとつの画面で起動し、切り替えながら操作する。
+- 作業ごとに session を作り、独立した git worktree、Agent、terminal、差分、PR、ノートをまとめて管理する。
+- TUI を離れても作業を daemon 上で継続し、あとから同じ session に戻る。
+- issue や memory を Agent と共有し、ひとつの作業を別の session へ委譲しながら進める。
 
 設計上の位置づけと現在の実装範囲は
 [プロジェクト概要](document/01-overview.md)、画面とキー操作の詳細は
@@ -48,12 +48,12 @@ workspace を開くと Home へ移り、左側に session、右側に選択し�
 Diff / Notes と live pane を表示する。
 
 ```text
-┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ─────┐
+┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ──────┐
 │   feature-login      │                                          │
-│   12m ago  #42  +18  │  選択中 session の情報・端末・差分       │
+│   12m ago  #42  +18  │  Session info, terminal, and diff        │
 │ > review-auth        │                                          │
-│   now      ↑1   +4   │  Agent と shell は daemon-owned PTY で   │
-│   + new session      │  動き、TUI はここへ attach する           │
+│   now      ↑1   +4   │  Agent and shell run in daemon PTYs;     │
+│   + new session      │  the TUI attaches here                   │
 └──────────────────────┴──────────────────────────────────────────┘
 ```
 
