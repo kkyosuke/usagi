@@ -112,6 +112,8 @@ catalog が不正な場合は picker を空に縮退させ、既存 session の 
 Overview の `roles [workspace|global]` は対象 layer の versioned `roles.toml` を source のまま編集する。
 保存時は effective two-layer catalog として検証し、error は draft を保持したまま inline 表示する。成功時は
 source を再 serialize せず、コメント・順序・空白を維持して durable temp file + atomic rename で置換する。
+editor の14行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動する。読み込み時と末尾への
+追記時は source の末尾へ自動追従する。
 
 次の場所へ role instruction を保存しない。
 

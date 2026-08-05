@@ -241,8 +241,8 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::DecisionNext));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let _ = update(&mut state, AppEvent::Key(AppKey::DecisionPageNext));
-        let _ = update(&mut state, AppEvent::Key(AppKey::DecisionPagePrevious));
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
         let _ = update(
             &mut state,
             AppEvent::Key(AppKey::SetDecisionFreeform("custom".to_owned())),

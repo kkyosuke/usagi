@@ -112,10 +112,13 @@ pub enum RoleEditorScope {
     Workspace,
 }
 
+pub const ROLE_EDITOR_VIEWPORT_LINES: usize = 14;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleEditor {
     scope: RoleEditorScope,
     source: String,
+    scroll_top: usize,
     error: Option<SafeError>,
     loading: bool,
     saving: bool,
@@ -126,6 +129,7 @@ impl RoleEditor {
         Self {
             scope,
             source: String::new(),
+            scroll_top: 0,
             error: None,
             loading: true,
             saving: false,
@@ -140,6 +144,10 @@ impl RoleEditor {
         &self.source
     }
     #[must_use]
+    pub const fn scroll_top(&self) -> usize {
+        self.scroll_top
+    }
+    #[must_use]
     pub fn error(&self) -> Option<&SafeError> {
         self.error.as_ref()
     }
@@ -150,6 +158,28 @@ impl RoleEditor {
     #[must_use]
     pub const fn is_saving(&self) -> bool {
         self.saving
+    }
+
+    fn max_scroll_top(&self) -> usize {
+        self.source
+            .lines()
+            .count()
+            .saturating_sub(ROLE_EDITOR_VIEWPORT_LINES)
+    }
+
+    fn follow_tail(&mut self) {
+        self.scroll_top = self.max_scroll_top();
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        self.scroll_top = self.scroll_top.saturating_sub(lines);
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        self.scroll_top = self
+            .scroll_top
+            .saturating_add(lines)
+            .min(self.max_scroll_top());
     }
 }
 
@@ -1538,10 +1568,10 @@ pub enum AppKey {
     DecisionPrevious,
     /// Move within the pending list or current decision options.
     DecisionNext,
-    /// Scroll a long decision's text towards its beginning without changing its answer.
-    DecisionPagePrevious,
-    /// Scroll a long decision's text towards its end without changing its answer.
-    DecisionPageNext,
+    /// Scroll the active viewport one page towards its beginning.
+    PageUp,
+    /// Scroll the active viewport one page towards its end.
+    PageDown,
     /// Replace the permitted freeform answer draft.
     SetDecisionFreeform(String),
     /// Submit the selected stable option or nonempty permitted freeform text.
@@ -1636,8 +1666,8 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         KeyCode::Tab => Some(AppKey::Tab),
         KeyCode::Backspace => Some(AppKey::Backspace),
         KeyCode::Escape => Some(AppKey::Escape),
-        KeyCode::PageUp => Some(AppKey::DecisionPagePrevious),
-        KeyCode::PageDown => Some(AppKey::DecisionPageNext),
+        KeyCode::PageUp => Some(AppKey::PageUp),
+        KeyCode::PageDown => Some(AppKey::PageDown),
         KeyCode::Up => Some(AppKey::Up),
         KeyCode::Down => Some(AppKey::Down),
         KeyCode::Left => Some(AppKey::Left),
@@ -2940,6 +2970,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 .filter(|editor| editor.scope == *scope)
             {
                 editor.source.clone_from(source);
+                editor.follow_tail();
                 editor.error = None;
                 editor.loading = false;
                 editor.saving = false;
@@ -3272,18 +3303,37 @@ fn update_role_editor(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
                 source: editor.source.clone(),
             }]
         }
+        AppKey::Up if !editor.loading && !editor.saving => {
+            editor.scroll_up(1);
+            Vec::new()
+        }
+        AppKey::Down if !editor.loading && !editor.saving => {
+            editor.scroll_down(1);
+            Vec::new()
+        }
+        AppKey::PageUp if !editor.loading && !editor.saving => {
+            editor.scroll_up(ROLE_EDITOR_VIEWPORT_LINES);
+            Vec::new()
+        }
+        AppKey::PageDown if !editor.loading && !editor.saving => {
+            editor.scroll_down(ROLE_EDITOR_VIEWPORT_LINES);
+            Vec::new()
+        }
         AppKey::Enter if !editor.loading && !editor.saving => {
             editor.source.push('\n');
+            editor.follow_tail();
             editor.error = None;
             Vec::new()
         }
         AppKey::Backspace if !editor.loading && !editor.saving => {
             editor.source.pop();
+            editor.follow_tail();
             editor.error = None;
             Vec::new()
         }
         AppKey::Char(character) if !editor.loading && !editor.saving && !character.is_control() => {
             editor.source.push(*character);
+            editor.follow_tail();
             editor.error = None;
             Vec::new()
         }
@@ -3364,11 +3414,11 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                     .min(editor.decision.options.len().saturating_sub(1));
                 editor.scroll_offset = None;
             }
-            AppKey::DecisionPagePrevious => {
+            AppKey::PageUp => {
                 editor.scroll_offset =
                     Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
             }
-            AppKey::DecisionPageNext => {
+            AppKey::PageDown => {
                 editor.scroll_offset =
                     Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
             }
@@ -3565,8 +3615,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::SaveRoles
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
-        | AppKey::DecisionPagePrevious
-        | AppKey::DecisionPageNext
+        | AppKey::PageUp
+        | AppKey::PageDown
         | AppKey::SetDecisionFreeform(_)
         | AppKey::SubmitDecision => Vec::new(),
     }
@@ -4916,8 +4966,8 @@ mod tests {
             Some(AppKey::CtrlA)
         );
         for (code, expected) in [
-            (KeyCode::PageUp, AppKey::DecisionPagePrevious),
-            (KeyCode::PageDown, AppKey::DecisionPageNext),
+            (KeyCode::PageUp, AppKey::PageUp),
+            (KeyCode::PageDown, AppKey::PageDown),
         ] {
             assert_eq!(
                 classify_management_input(LiveInput::Key(
@@ -7633,6 +7683,46 @@ mod tests {
                 .as_str()
                 .contains("roles takes")
         );
+    }
+
+    #[test]
+    fn role_editor_scrolls_long_sources_and_follows_tail_edits() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("roles workspace".into())),
+        );
+        let source = (0..30)
+            .map(|line| format!("line-{line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RolesLoaded {
+                scope: RoleEditorScope::Workspace,
+                source,
+            }),
+        );
+
+        assert_eq!(state.role_editor().unwrap().scroll_top(), 16);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.role_editor().unwrap().scroll_top(), 15);
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
+        assert_eq!(state.role_editor().unwrap().scroll_top(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
+        assert_eq!(state.role_editor().unwrap().scroll_top(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+        assert_eq!(state.role_editor().unwrap().scroll_top(), 16);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
+        assert_eq!(state.role_editor().unwrap().scroll_top(), 17);
+        assert!(state.role_editor().unwrap().source().ends_with("\nx"));
     }
 
     #[test]
