@@ -1,14 +1,14 @@
 ---
 number: 663
 title: perf(tui): frame diff grid の per-cell String allocation を run-based に削減する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, performance, rendering, memory]
 dependson: []
 related: [228, 554, 660]
 parent: 654
 created_at: 2026-08-05T13:51:06.531679+00:00
-updated_at: 2026-08-05T13:51:06.531679+00:00
+updated_at: 2026-08-05T23:17:40.265564+00:00
 ---
 
 ## Finding（P2 rendering / allocator pressure）
