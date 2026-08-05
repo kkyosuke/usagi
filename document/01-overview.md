@@ -150,4 +150,5 @@ path も、filesystem が実在する絶対ディレクトリとして解決で�
 通常 file は開かない。
 
 非対話環境（パイプ・CI など）では、選ばれた Welcome / Config / Workspace の 1 フレームを出力して
-終了する。Doctor は対話ループを持たず、選択された画面名を `BannerScreenRunner` が表示する。
+終了する。Doctor は Git と任意の Agent CLI の導入状況、設定ストレージの読み込み、daemon の起動・接続を
+診断し、項目ごとの結果と全体の成否を出力して終了する。
