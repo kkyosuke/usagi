@@ -1,13 +1,13 @@
 ---
 number: 652
 title: feat(tui): Roles editor に scroll を追加し末尾14行以外も閲覧できるようにする
-status: in-progress
+status: done
 priority: low
 labels: [review, v2, tui, roles]
 dependson: []
 related: []
 created_at: 2026-08-05T01:02:24.030642+00:00
-updated_at: 2026-08-05T09:06:06.389634+00:00
+updated_at: 2026-08-05T09:12:24.253953+00:00
 ---
 
 ## 出典
