@@ -524,6 +524,10 @@ impl WorkspaceRuntime {
                 modal.insert_char(character);
                 Vec::new()
             }
+            Key::Paste(text) => {
+                modal.paste(&text);
+                Vec::new()
+            }
             Key::Enter => {
                 let submission = modal.submission();
                 modal.record_submission();
@@ -603,6 +607,10 @@ impl WorkspaceRuntime {
             }
             Key::Char(character) => {
                 modal.insert_char(character);
+                Vec::new()
+            }
+            Key::Paste(text) => {
+                modal.paste(&text);
                 Vec::new()
             }
             Key::Enter => {
@@ -1641,6 +1649,20 @@ mod tests {
     }
 
     #[test]
+    fn overview_paste_replaces_the_selection_at_the_caret() {
+        let mut runtime = overview_on(WorkspaceId::new());
+        type_str(&mut runtime, "abc");
+        let _ = runtime.handle_key(Key::Home);
+        let _ = runtime.handle_key(Key::SelectRight);
+        let _ = runtime.handle_key(Key::Paste("貼\n付".to_owned()));
+
+        let modal = runtime.overview_modal().unwrap();
+        assert_eq!(modal.input(), "貼\n付bc");
+        assert_eq!(modal.cursor(), "貼\n付".len());
+        assert_eq!(modal.selection(), None);
+    }
+
+    #[test]
     fn overview_history_recall_survives_an_invalid_submit() {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
@@ -1851,6 +1873,22 @@ mod tests {
         let _ = runtime.handle_key(Key::SelectHome);
         let _ = runtime.handle_key(Key::LineEnd);
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+    }
+
+    #[test]
+    fn closeup_paste_replaces_the_selection_at_the_caret() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        type_str(&mut runtime, "abc");
+        let _ = runtime.handle_key(Key::Home);
+        let _ = runtime.handle_key(Key::SelectRight);
+        let _ = runtime.handle_key(Key::Paste("貼\n付".to_owned()));
+
+        let modal = runtime.closeup_modal().unwrap();
+        assert_eq!(modal.input(), "貼\n付bc");
+        assert_eq!(modal.cursor(), "貼\n付".len());
+        assert_eq!(modal.selection(), None);
     }
 
     #[test]

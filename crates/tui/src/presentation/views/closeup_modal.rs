@@ -87,6 +87,18 @@ impl CloseupModal {
         self
     }
 
+    /// The prompt text currently owned by this modal.
+    #[must_use]
+    pub fn input(&self) -> &str {
+        self.input.value()
+    }
+
+    /// The prompt caret's byte offset.
+    #[must_use]
+    pub fn cursor(&self) -> usize {
+        self.input.cursor()
+    }
+
     /// 対象セッション名。
     #[must_use]
     pub fn session(&self) -> &str {
@@ -156,6 +168,13 @@ impl CloseupModal {
     /// Insert one character in Prompt mode.
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(c);
+        self.edited();
+    }
+
+    /// Insert one bracketed-paste payload at the current caret, replacing any
+    /// active selection just like ordinary typing.
+    pub fn paste(&mut self, text: &str) {
+        self.input.insert_str(text);
         self.edited();
     }
 

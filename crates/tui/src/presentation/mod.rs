@@ -3184,6 +3184,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Right => AppKey::Right,
         Key::Enter => AppKey::Enter,
         Key::Backspace => AppKey::Backspace,
+        Key::Paste(text) => AppKey::Paste(text),
         Key::Tab => AppKey::Tab,
         Key::Escape => AppKey::Escape,
         // Runtime adapters preserve Ctrl-A as U+0001. `Ctrl-A` (LineStart) and
@@ -3214,10 +3215,6 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         // (Open Workspace only), and the caret/selection keys that have meaning
         // only inside a focused text field (End/Ctrl-E, Delete, Shift+arrows).
         Key::Passthrough(_)
-        // Home navigation and its overlay text fields (`:` palette, create-session
-        // name, tab rename) do not consume a bracketed paste; the live pane owns
-        // paste via `key_to_terminal_bytes`.
-        | Key::Paste(_)
         | Key::Pointer(_)
         | Key::Click { .. }
         | Key::CtrlD
@@ -6561,6 +6558,10 @@ mod tests {
             Some(AppEvent::Key(AppKey::Backspace))
         );
         assert_eq!(
+            app_event_from_key(Key::Paste("貼り付け".to_owned())),
+            Some(AppEvent::Key(AppKey::Paste("貼り付け".to_owned())))
+        );
+        assert_eq!(
             app_event_from_key(Key::Tab),
             Some(AppEvent::Key(AppKey::Tab))
         );
@@ -6635,8 +6636,6 @@ mod tests {
         assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
         // Raw passthrough and terminal pointer drags never reach the Home reducer.
         assert_eq!(app_event_from_key(Key::Passthrough(vec![0x1b])), None);
-        // A bracketed paste is a live-pane concern; Home navigation ignores it.
-        assert_eq!(app_event_from_key(Key::Paste("x".to_owned())), None);
         // Sidebar clicks need the real runtime's injected monotonic timestamp.
         assert_eq!(app_event_from_key(Key::Click { column: 3, row: 4 }), None);
         // Left/Right reach the reducer to move the Yes/No confirmation focus; the

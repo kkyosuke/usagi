@@ -116,6 +116,14 @@ impl TextInput {
         self.cursor += c.len_utf8();
     }
 
+    /// キャレット位置に文字列をまとめて挿入し、キャレットをその後ろへ進める。選択があれば
+    /// 貼り付けた文字列で置換する。空文字列でも選択範囲は削除される。
+    pub fn insert_str(&mut self, text: &str) {
+        self.take_selection();
+        self.value.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
     /// キャレットの手前の 1 文字を削除し、キャレットを戻す。選択があれば選択範囲を
     /// まるごと削除する（キャレットは削除位置）。選択が無く行頭なら何もしない。
     /// 削除したかを返す。
@@ -266,6 +274,20 @@ mod tests {
         assert_eq!(input.value(), "abc");
         assert_eq!(input.before(), "ab");
         assert_eq!(input.after(), "c");
+    }
+
+    #[test]
+    fn paste_inserts_a_block_at_the_caret_and_replaces_a_selection() {
+        let mut input = TextInput::with_value("aいz");
+        input.move_left();
+        input.insert_str("貼\n付");
+        assert_eq!(input.value(), "aい貼\n付z");
+        assert_eq!(input.cursor(), "aい貼\n付".len());
+
+        input.select_home();
+        input.insert_str("置換");
+        assert_eq!(input.value(), "置換z");
+        assert_eq!(input.cursor(), "置換".len());
     }
 
     #[test]
