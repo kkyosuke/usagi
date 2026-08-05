@@ -186,7 +186,8 @@ pub struct HomeProjection {
     selected: Selection,
     active: Option<SessionId>,
     /// Session drawn in the right pane. Switch previews the row under the
-    /// cursor; every other case shows the command target ([`preview_session`]).
+    /// cursor, including while Director is open; every other case shows the
+    /// command target ([`preview_session`]).
     preview: Option<SessionId>,
     mode: HomeMode,
     /// Phase line of the previewed session, not of the command target: the right
@@ -632,13 +633,14 @@ impl HomeProjection {
 ///
 /// Switch owns sidebar navigation, so its right pane follows the cursor: moving
 /// it is how the user looks at another session before choosing to act on it.
-/// Every other case — Closeup, the `+ new session` action row, an open Director
-/// drawer — shows the command target instead. `WorkspaceRuntime::preview_pane`
-/// resolves the same session so the tab strip and the header name one session.
+/// Closeup and the `+ new session` action row show the command target instead.
+/// Opening Director does not change this background projection: the drawer is a
+/// foreground surface, so the visible Switch pane continues to describe the
+/// selected row. `WorkspaceRuntime::preview_pane` resolves the same session so
+/// the tab strip and the header name one session.
 fn preview_session(state: &AppState) -> Option<SessionId> {
     let crate::usecase::application::controller::Route::Home(mode) = state.route();
     if mode == HomeMode::Switch
-        && !state.director_drawer_open()
         && let Selection::Target(Target::Session(session)) = state.selected()
     {
         return Some(session);
@@ -4448,6 +4450,23 @@ mod tests {
                 .any(|line| strip(line).contains("preview pane"))
         );
         assert!(!frame.iter().any(|line| strip(line).contains("active pane")));
+
+        // Director is a foreground drawer, not a change of the Switch preview
+        // target. The pane behind it must keep the hovered session's identity
+        // and phase instead of falling back to the active session (or absent).
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime_ref(workspace, second),
+                phase: AgentPhase::Running,
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        let director = HomeProjection::from_state(&state, "work", Path::new("/work"), &sessions);
+        assert_eq!(director.preview, Some(second));
+        assert_eq!(director.preview_phase, TargetPhase::Running);
+        assert_eq!(director.preview_label(), "second");
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
 
         // Entering Closeup makes the hovered session the target; the pane header
         // is unchanged, and the footer now names an active pane.

@@ -175,14 +175,12 @@ impl WorkspaceRuntime {
     ///
     /// Switch owns sidebar navigation, so its right pane follows the row under
     /// the cursor instead of the target Closeup last operated on: moving the
-    /// cursor is how the user looks at another session. `None` keeps the active
-    /// target's pane, which covers Closeup, the `+ new session` action row, and
-    /// an open Director drawer (the drawer's own foreground handoff owns the
-    /// registry's active entry and must not be overridden by a hover).
+    /// cursor is how the user looks at another session. This stays true while
+    /// Director is open because the drawer is a foreground surface and must not
+    /// replace the selected session shown behind it. `None` keeps the managed
+    /// command target's pane for Closeup and the `+ new session` action row.
     fn preview_session(&self) -> Option<SessionId> {
-        if self.state.director_drawer_open()
-            || !matches!(self.state.route(), Route::Home(HomeMode::Switch))
-        {
+        if !matches!(self.state.route(), Route::Home(HomeMode::Switch)) {
             return None;
         }
         match self.state.selected() {
@@ -216,6 +214,13 @@ impl WorkspaceRuntime {
     /// terminal the shell attaches to for output.
     #[must_use]
     pub fn preview_terminal(&self) -> Option<TerminalRef> {
+        // Director's selected root conversation remains the foreground terminal
+        // even though the dimmed Switch pane behind the drawer follows its
+        // sidebar cursor. The caller suppresses this viewport from the Home pane
+        // and passes it to the drawer projection instead.
+        if self.state.director_drawer_open() {
+            return self.focused_terminal();
+        }
         let Some(session) = self.preview_session() else {
             return self.focused_terminal();
         };
@@ -2183,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_director_drawer_keeps_the_preview_on_its_own_foreground() {
+    fn an_open_director_drawer_keeps_the_switch_pane_on_the_hovered_session() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
         let second = SessionId::new();
@@ -2192,11 +2197,12 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer));
         assert!(runtime.state().director_drawer_open());
 
-        // The drawer owns the foreground handoff, so a sidebar hover must not
-        // move the previewed pane or terminal out from under it.
+        // The drawer keeps its root terminal as the foreground viewport, while
+        // the Switch pane visible behind it continues to describe the hovered
+        // session instead of falling back to the managed command target.
         assert_eq!(runtime.preview_terminal(), runtime.focused_terminal());
-        assert_eq!(runtime.preview_pane().tabs().len(), 1);
-        assert_eq!(runtime.preview_pane().tabs(), runtime.managed_pane().tabs());
+        assert!(runtime.preview_pane().tabs().is_empty());
+        assert_ne!(runtime.preview_pane().tabs(), runtime.managed_pane().tabs());
     }
 
     #[test]
