@@ -1,13 +1,13 @@
 ---
 number: 648
 title: fix(daemon): 未 drain の metrics observer queue が MetricsUpdatesDropped を自己誘発する
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, daemon, tui, metrics]
 dependson: []
 related: []
 created_at: 2026-08-05T01:01:50.495056+00:00
-updated_at: 2026-08-05T08:41:10.717288+00:00
+updated_at: 2026-08-05T08:47:37.288167+00:00
 ---
 
 ## 出典
