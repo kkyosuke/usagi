@@ -152,8 +152,14 @@ pub fn run<
             info,
         ),
         DaemonCommand::Start => {
-            let line =
-                usecase::start::start(env.store, env.probe, env.launcher, env.sleeper, info)?;
+            let line = usecase::start::start(
+                env.store,
+                env.probe,
+                env.launcher,
+                env.sleeper,
+                env.ready,
+                info,
+            )?;
             writeln!(out, "{line}")
         }
         DaemonCommand::Status => {

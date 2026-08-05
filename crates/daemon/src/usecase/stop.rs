@@ -11,8 +11,8 @@
 //!   then conditionally clears that exact leftover record. Both stale reasons
 //!   take this path — a vanished owner and a reused PID are equally proven gone,
 //!   and neither is signalled;
-//! - **unverified**: refuses with zero effect, because ownership is undecided
-//!   rather than disproved;
+//! - **unverified**: never signals the recorded PID, but attempts the same
+//!   singleton-lock-fenced endpoint and exact-record cleanup as stale state;
 //! - **not running**: reports there is nothing to stop.
 //!
 //! The store's file seam, probe, terminator, and stale cleanup transaction are injected, so this
@@ -36,7 +36,7 @@ use crate::usecase::serve::DaemonRecordPort;
 // seconds with the production 50 ms sleeper on a contended host.
 const MAX_CLEANUP_POLLS: usize = 100;
 
-/// Outcome of a lock-fenced stale daemon cleanup attempt.
+/// Outcome of a lock-fenced lifecycle artifact cleanup attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaleCleanup {
     /// The stale endpoint was proved absent and the exact record was cleared.
@@ -45,14 +45,17 @@ pub enum StaleCleanup {
     Superseded,
 }
 
-/// Cleans stale endpoint state and its exact lifecycle record as one operation.
+/// Cleans an unowned endpoint and its exact lifecycle record as one operation.
 ///
 /// Production implementations hold the daemon singleton lock across the exact
 /// record recheck, socket-first endpoint retirement, and conditional record
-/// clear. This closes the race in which a replacement starts after the initial
-/// liveness probe.
+/// clear. The lock is reclaim authority independently of process identity:
+/// stale and unverified records enter this transaction, while only an exact
+/// process identity may enter the signal path. This closes both the replacement
+/// race and the legacy-record wedge without addressing an unrelated PID.
 pub trait StaleDaemonCleanup {
-    /// Reclaims `expected` only while it remains the exact stale owner.
+    /// Reclaims `expected` only while no active daemon holds the singleton lock
+    /// and it remains the exact lifecycle record.
     ///
     /// # Errors
     ///
@@ -116,10 +119,10 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
             wait_for_owner_cleanup(store, probe, sleeper, record)?;
             Ok(format!("{describe}: daemon stopped (pid {pid})"))
         }
-        DaemonState::Stale(_) => {
+        DaemonState::Stale(_) | DaemonState::Unverified => {
             let record = record
                 .as_ref()
-                .expect("classify reports Stale only for a present record");
+                .expect("classify reports a reclaim candidate only for a present record");
             match stale_cleanup.cleanup_if(store, record) {
                 Ok(StaleCleanup::Cleared) => Ok(format!("{describe}: cleared stale daemon record")),
                 Ok(StaleCleanup::Superseded) => Err(io::Error::new(
@@ -129,9 +132,6 @@ pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
                 Err(error) => Err(error),
             }
         }
-        DaemonState::Unverified => Err(io::Error::other(
-            "daemon owner identity is unverified; refusing to signal or reclaim the record",
-        )),
         DaemonState::Absent => Ok(format!("{describe}: daemon not running")),
     }
 }
@@ -499,22 +499,24 @@ mod tests {
     }
 
     #[test]
-    fn unverified_owner_is_neither_signalled_nor_reclaimed() {
+    fn unverified_owner_is_reclaimed_without_signalling() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let record = DaemonRecord::new(4321);
         store.save(&record).unwrap();
         let terminator = RecordingTerminator::default();
-        let error = stop(
-            &store,
-            &ObservedAs(DaemonProcessObservation::Unknown),
-            &terminator,
-            &NoopSleeper,
-            &info(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("identity is unverified"));
+        assert_eq!(
+            stop(
+                &store,
+                &ObservedAs(DaemonProcessObservation::Unknown),
+                &terminator,
+                &NoopSleeper,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: cleared stale daemon record"
+        );
         assert!(terminator.terminated().is_empty());
-        assert_eq!(store.load().unwrap(), Some(record));
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]

@@ -138,7 +138,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 |---|---|
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。stale は owner 消滅と PID 再利用を区別した文言で報告し、どちらも reclaimable であることを示す |
-| `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale record（owner 消滅・PID 再利用のいずれも）は process に signal を送らず、singleton lock 下で stale endpoint を回収してから消去する。unverified record は signal・回収とも拒否する |
+| `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。`--force` は live runtime を明示的に破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
@@ -311,10 +311,13 @@ ordinary client bootstrap の stale recovery は、record の有無と exact pro
 | 有り | PID に存在する process の start identity が保存値と一致 | `running` | `status` は pid を表示し、`start` は起動せず、`stop` は signal して owner cleanup を待つ |
 | 有り | PID に process が存在しない | `stale`（owner 消滅） | signal を送らず reclaim し、`start` / `restart` は replacement を 1 つ起動する |
 | 有り | PID は存在するが別 incarnation が占有（PID 再利用） | `stale`（PID 再利用） | owner 消滅と同じ扱い。所有者が別 incarnation へ置き換わったことは、所有者が消滅したことの肯定的証拠である |
-| 有り | identity 欠落（legacy record）・observation failure・platform 未対応 | `unverified` | signal・record 消去・endpoint 回収・replacement 起動をいずれも行わず record を保持する |
+| 有り | identity 欠落（legacy record）・observation failure・platform 未対応 | `unverified` | PIDへsignalしない。`status`はrecord retainedを表示する。`start` / `stop` / `restart`と到達不能endpointからのbootstrapは、`daemon.lock`を取得でき、lock下のrecord再照合が一致する場合だけsignal-free recoveryへ進む |
 
 `stale` の 2 つの原因は reclaim 可能性が同じでも別の事象なので、`status` は利用者が区別できる文言で報告する。
-`unverified` だけが所有権不明であり、これを reclaim しないことが fail-closed の境界である。
+`unverified` はprocess signalの所有権不明であり、raw PIDをsignalしないことがfail-closedの境界である。一方、
+active daemonの所有権は`daemon.lock`が正本なので、lock取得、record全体の再照合、socket-first / locator-lastのretireを
+すべて満たす場合は、processへ触れずfilesystem上のstale lifecycle artifactだけを回収する。lockがbusy、recordが変化、
+locatorがunsafe、またはcleanupが失敗した場合はrecordを保持する。
 
 record の `pid` は 1 つの process を名指せる値でなければならない。`0`（`kill` が caller の process group を指す）、
 `1`（init）、`pid_t` の範囲外（負の PID の wire 表現）は deserialize と registration の両境界で拒否するため、
@@ -544,9 +547,10 @@ exact `0600` と `FD_CLOEXEC` を fd 上で検証する。reopen も同じ flags
 create と `fchmod` の間の abnormal exit が残した、permission bit が `0600` の部分集合である node（mode `000` を含む）は、
 private owner directory 内の exact path が symlink でない owner-owned regular single-link file である場合だけ `0600` へ
 修復して secure reopen する。group / other bit を持つ broad mode、symlink、hardlink、non-regular node、owner / inode
-replacement は修復せず拒否する。唯一の migration 例外として、origin/main の旧実装が残した exact `0644` の
-`bootstrap.lock` は owner-owned regular single-link file である場合だけ一度 `0600` へ正規化する。`daemon.lock`、
-`record.lock`、`current.lock` は `0644` を含む broad mode を修復しない。
+replacement は修復せず拒否する。migration例外として、旧実装がprocess umaskで残したexact `0644` の
+`bootstrap.lock`、data directoryの`daemon.lock`、workspace fenceの`daemon.lock`は、owner-owned regular single-link
+fileである場合だけdescriptor検証後に一度`0600`へ正規化する。`record.lock`と`current.lock`は`0644`を含むbroad modeを
+修復しない。
 
 fd の lock 取得後には pathname を再度 `lstat` し、path と locked fd の device / inode が一致し、双方が上記 invariant を
 満たすことを検証する。open と `flock` の間に path が swap / recreate されて別 inode になった場合は fail closed とし、
