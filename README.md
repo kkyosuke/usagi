@@ -3,7 +3,7 @@
 <div align="center">
 
 <pre>
-    (\(\
+    (\(\&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;
    (='-')     ╻ ╻ ┏━┓ ┏━┓ ┏━╸ ╻
   o(_(")(")   ┃ ┃ ┗━┓ ┣━┫ ┃╺┓ ┃
               ┗━┛ ┗━┛ ╹ ╹ ┗━┛ ╹
@@ -50,10 +50,10 @@ Diff / Notes と live pane を表示する。
 ```text
 ┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ──────┐
 │   feature-login      │                                          │
-│   12m ago  #42  +18  │  選択中 session の情報・端末・差分       │
+│   12m ago  #42  +18  │  Session info, terminal, and diff        │
 │ > review-auth        │                                          │
-│   now      ↑1   +4   │  Agent と shell は daemon-owned PTY で   │
-│   + new session      │  動き、TUI はここへ attach する          │
+│   now      ↑1   +4   │  Agent and shell run in daemon PTYs;     │
+│   + new session      │  the TUI attaches here                   │
 └──────────────────────┴──────────────────────────────────────────┘
 ```
 
