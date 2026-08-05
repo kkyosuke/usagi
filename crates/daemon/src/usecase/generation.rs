@@ -723,6 +723,10 @@ mod tests {
             registry.resolve_orphan(&pane, ProcessObservation::Unknown, false),
             Err(GenerationError::TerminalUnavailable)
         );
+        assert_eq!(
+            registry.forget_terminal(&pane),
+            Err(GenerationError::TerminalUnavailable)
+        );
     }
     #[test]
     fn crash_with_verified_child_is_orphan_until_explicitly_acknowledged() {

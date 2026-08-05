@@ -2361,6 +2361,36 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_session_forgets_an_agent_that_already_exited() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        coordinator.exit(&runtime, 0, &mut store).unwrap();
+
+        assert_eq!(
+            coordinator
+                .close_session(session, &mut store, &mut spawner)
+                .unwrap(),
+            [runtime]
+        );
+        assert!(!spawner.terminated);
+        assert!(coordinator.snapshot().records.is_empty());
+        assert!(store.0.last().unwrap().records.is_empty());
+    }
+
+    #[test]
     fn closing_a_session_keeps_an_agent_whose_process_cannot_be_reaped() {
         let request = request();
         let session = request.scope.session_id.unwrap();
