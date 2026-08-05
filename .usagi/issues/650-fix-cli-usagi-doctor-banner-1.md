@@ -1,13 +1,13 @@
 ---
 number: 650
 title: fix(cli): usagi doctor が診断ロジックを持たず banner 1行を出すだけ
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, cli, tui, diagnostics]
 dependson: []
 related: []
 created_at: 2026-08-05T01:02:06.714132+00:00
-updated_at: 2026-08-05T08:47:25.355472+00:00
+updated_at: 2026-08-05T08:55:27.508152+00:00
 ---
 
 ## 出典
