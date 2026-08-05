@@ -15,7 +15,10 @@ use usagi_core::domain::{
         DurableLaunchSnapshot, LaunchRequest, LaunchValidationError, ProviderResumePhase,
         ProviderResumeRef, ProviderResumeStatus,
     },
-    id::{AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, TerminalRef},
+    id::{
+        AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, SessionId,
+        TerminalRef,
+    },
     terminal_launch::TerminalKind,
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
 };
@@ -1024,6 +1027,70 @@ impl RuntimeCoordinator {
             let _ = self.persist(store);
         }
         collected.len()
+    }
+
+    /// Terminates and forgets every Agent runtime owned by one managed session.
+    ///
+    /// Session teardown calls this before removing the worktree. Running
+    /// processes are terminated through their exact fenced terminal identity;
+    /// exited and interrupted records are forgotten as well, so removing a
+    /// session cannot leave an Agent inventory row behind. A partial terminate
+    /// failure keeps only the runtimes whose process could not be reaped and is
+    /// retryable by the durable session teardown worker.
+    pub fn close_session(
+        &mut self,
+        session: SessionId,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
+        let targets = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.runtime.session_id == Some(session))
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect::<Vec<_>>();
+        let mut terminate_failed = false;
+
+        for (_, record) in &targets {
+            if record.state == RuntimeState::Running {
+                if spawner.terminate_reap(&record.runtime.terminal).is_err() {
+                    terminate_failed = true;
+                    continue;
+                }
+                self.generation
+                    .resolve_orphan(&record.runtime.terminal, ProcessObservation::Gone, false)
+                    .map_err(RuntimeError::Generation)?;
+                let retained = self.record_mut(&record.runtime)?;
+                retained.state = RuntimeState::Reclaimed;
+                retained.process = None;
+            }
+        }
+        if terminate_failed {
+            self.persist(store)?;
+            return Err(RuntimeError::ReconcileRequired(
+                ReconcileState::OrphanRunning,
+            ));
+        }
+
+        let mut closed = Vec::new();
+        for (key, record) in targets {
+            self.generation
+                .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
+                .map_err(RuntimeError::Generation)?;
+            self.generation
+                .forget_terminal(&record.runtime.terminal)
+                .map_err(RuntimeError::Generation)?;
+            self.records.remove(&key);
+            self.terminals.forget(&record.runtime.terminal);
+            self.retention.forget(&record.runtime.terminal);
+            closed.push(record.runtime);
+        }
+
+        // Persist even when a retry finds no records. If a prior store write
+        // failed after the in-memory close, this converges the durable snapshot
+        // before the worktree teardown is allowed to continue.
+        self.persist(store)?;
+        Ok(closed)
     }
 
     /// The aggregate retention authority this owner shares with the generic
@@ -2263,6 +2330,93 @@ mod tests {
             None,
         )
     }
+
+    #[test]
+    fn closing_a_session_terminates_and_forgets_its_agent_runtime() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+
+        let closed = coordinator
+            .close_session(session, &mut store, &mut spawner)
+            .unwrap();
+
+        assert!(spawner.terminated);
+        assert_eq!(closed, [runtime]);
+        assert!(coordinator.snapshot().records.is_empty());
+        coordinator.snapshot().validate_ownership().unwrap();
+        assert!(store.0.last().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn closing_a_session_forgets_an_agent_that_already_exited() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        coordinator.exit(&runtime, 0, &mut store).unwrap();
+
+        assert_eq!(
+            coordinator
+                .close_session(session, &mut store, &mut spawner)
+                .unwrap(),
+            [runtime]
+        );
+        assert!(!spawner.terminated);
+        assert!(coordinator.snapshot().records.is_empty());
+        assert!(store.0.last().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn closing_a_session_keeps_an_agent_whose_process_cannot_be_reaped() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            runtime,
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+
+        assert_eq!(
+            coordinator.close_session(session, &mut store, &mut spawner),
+            Err(RuntimeError::ReconcileRequired(
+                ReconcileState::OrphanRunning
+            ))
+        );
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+    }
+
     #[test]
     fn resolve_once_persists_before_spawn_and_replays_after_detach() {
         let first_request = request();

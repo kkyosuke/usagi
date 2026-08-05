@@ -135,7 +135,7 @@ use usagi_daemon::usecase::session_runtime::{
     perform_compensating_remove, perform_create, perform_delegated_create, perform_remove,
 };
 use usagi_daemon::usecase::session_teardown::{
-    TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
+    PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
 };
 use usagi_daemon::usecase::shutdown::ShutdownRequest;
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
@@ -2301,6 +2301,7 @@ fn spawn_ipc_server(
         &children,
         hydrate_retained,
     )?;
+    reconcile_removed_session_agents(&runtime, &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
@@ -2327,7 +2328,11 @@ fn spawn_ipc_server(
         .map_err(|error| std::io::Error::other(error.message))?;
     start_decision_maintenance(Arc::clone(&decisions), Arc::clone(&shutdown))?;
     start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
-    let teardown = start_session_teardown_worker(Arc::clone(&runtime), Arc::clone(&shutdown))?;
+    let teardown = start_session_teardown_worker(
+        Arc::clone(&runtime),
+        Arc::clone(&agent),
+        Arc::clone(&shutdown),
+    )?;
     // Before any client can observe them: roll back the sessions a delegation
     // created and then died before dispatching into.
     let compensated = reconcile_orphan_delegations(
@@ -2390,6 +2395,35 @@ fn spawn_ipc_server(
         connection_cleanup,
         shutdown,
     )
+}
+
+/// Removes Agent records whose managed session was already retired by an
+/// older daemon. This startup pass repairs the historical state where session
+/// teardown removed the lifecycle row without closing its Agent owner.
+fn reconcile_removed_session_agents(
+    sessions: &SharedSessionRuntime,
+    agent: &SharedAgentRuntime,
+) -> std::io::Result<usize> {
+    let retained = sessions
+        .lock()
+        .map_err(|_| std::io::Error::other("session owner is unavailable"))?
+        .session_ids()
+        .map_err(|error| std::io::Error::other(error.safe_message()))?;
+    let mut agent = agent
+        .lock()
+        .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
+    let removed = agent
+        .managed_session_ids()
+        .difference(&retained)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut closed = 0;
+    for session in removed {
+        closed += agent
+            .close_session(session)
+            .map_err(|error| std::io::Error::other(error.message))?;
+    }
+    Ok(closed)
 }
 
 /// Retain one accepted connection's worker so a collection can unblock and join it.
@@ -2526,17 +2560,39 @@ where
 /// that a previous daemon was interrupted in.
 fn start_session_teardown_worker(
     sessions: SharedSessionRuntime,
+    agent: SharedAgentRuntime,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<Arc<TeardownSignal>> {
     let signal = Arc::new(TeardownSignal::new());
     spawn_session_teardown_worker(
         SharedSessionTeardown::new(sessions),
-        WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
+        AgentAndWorktreeTeardown {
+            agent,
+            worktree: WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
+        },
         Arc::clone(&signal),
         shutdown,
         SESSION_TEARDOWN_TICK,
     )?;
     Ok(signal)
+}
+
+/// Orders session destruction so no Agent process or durable Agent inventory
+/// can outlive the worktree scope it belongs to.
+struct AgentAndWorktreeTeardown<E> {
+    agent: SharedAgentRuntime,
+    worktree: E,
+}
+
+impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
+    fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
+        self.agent
+            .lock()
+            .map_err(|_| "agent owner is unavailable".to_owned())?
+            .close_session(teardown.session_id)
+            .map_err(|error| error.message)?;
+        self.worktree.tear_down(teardown)
+    }
 }
 
 fn spawn_session_teardown_worker<J, E>(

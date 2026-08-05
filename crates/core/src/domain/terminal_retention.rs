@@ -523,6 +523,21 @@ impl RetentionLedger {
         true
     }
 
+    /// Forgets all derived retention state for an exact terminal.
+    ///
+    /// Durable owners use this when the owning scope itself is deleted. Unlike
+    /// ordinary pressure collection, scope deletion must not retain a final or
+    /// an eviction marker that can never be addressed again.
+    pub fn forget(&mut self, terminal: &TerminalRef) -> bool {
+        let reservation = self.release(terminal);
+        let final_record = self.take_final(terminal).is_some();
+        let marker = self.markers.remove(terminal).is_some();
+        if marker {
+            self.marker_order.retain(|key| key != terminal);
+        }
+        reservation || final_record || marker
+    }
+
     /// Whether a reservation is currently held for `terminal`.
     #[must_use]
     pub fn is_reserved(&self, terminal: &TerminalRef) -> bool {
@@ -1055,6 +1070,29 @@ mod tests {
         assert_eq!(metrics.reserved_finals, 0);
         assert_eq!(metrics.reserved_bytes, 0);
         assert!(!ledger.is_reserved(&terminal));
+    }
+
+    #[test]
+    fn forgetting_a_deleted_scope_drops_reservations_finals_and_markers() {
+        let mut ledger = RetentionLedger::new(small_budget());
+        let space = workspace();
+
+        let reserved = terminal_in(space);
+        ledger.reserve(at(0), &reserved).unwrap();
+        assert!(ledger.forget(&reserved));
+        assert!(!ledger.is_reserved(&reserved));
+
+        let retained = admit_and_exit(&mut ledger, space, TerminalKind::Agent, at(0), 128);
+        assert!(matches!(ledger.lookup(&retained), FinalLookup::Retained(_)));
+        assert!(ledger.forget(&retained));
+        assert_eq!(ledger.lookup(&retained), FinalLookup::Unknown);
+
+        let evicted = admit_and_exit(&mut ledger, space, TerminalKind::Agent, at(0), 128);
+        ledger.collect(at(101));
+        assert!(matches!(ledger.lookup(&evicted), FinalLookup::Evicted(_)));
+        assert!(ledger.forget(&evicted));
+        assert_eq!(ledger.lookup(&evicted), FinalLookup::Unknown);
+        assert!(!ledger.forget(&evicted));
     }
 
     #[test]
