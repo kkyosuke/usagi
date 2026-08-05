@@ -137,7 +137,7 @@ use usagi_daemon::usecase::session_runtime::{
 use usagi_daemon::usecase::session_teardown::{
     PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
 };
-use usagi_daemon::usecase::shutdown::ShutdownRequest;
+use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
@@ -2383,8 +2383,9 @@ fn spawn_ipc_server(
         pr_inventory,
         projection,
         decisions,
-        Arc::new(Mutex::new(MetricsBroker::with_agent_concurrency(
+        Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
             agent_concurrency,
+            shutdown.background_worker_health(),
         ))),
         Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
         pipeline_metrics,
@@ -2516,6 +2517,7 @@ where
     std::thread::Builder::new()
         .name("usagi-pr-refresh".to_string())
         .spawn(move || {
+            let _worker_health = shutdown.monitor_background_worker(BackgroundWorker::PrRefresh);
             let mut worker =
                 RefreshWorker::new(runner, clock, PR_REFRESH_PER_TICK, PR_REFRESH_FRESHNESS_MS);
             if let Ok(mut projector) = pr_inventory.lock()
@@ -2609,6 +2611,8 @@ where
     std::thread::Builder::new()
         .name("usagi-session-teardown".to_string())
         .spawn(move || {
+            let _worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::SessionTeardown);
             let cancel = Arc::clone(&shutdown);
             let cancelled = move || cancel.is_requested();
             // The first drain resumes a teardown left `Deleting` by a previous
@@ -2675,6 +2679,7 @@ where
     std::thread::Builder::new()
         .name("usagi-daemon-custody".to_string())
         .spawn(move || {
+            let _worker_health = shutdown.monitor_background_worker(BackgroundWorker::Custody);
             while !shutdown.is_requested() {
                 // After a handoff this process deliberately no longer owns the
                 // lifecycle record. Its authority is the draining registry
@@ -2776,6 +2781,7 @@ where
     std::thread::Builder::new()
         .name("usagi-retention-gc".to_string())
         .spawn(move || {
+            let _worker_health = shutdown.monitor_background_worker(BackgroundWorker::RetentionGc);
             while !shutdown.is_requested() {
                 collect();
                 if shutdown.wait_for_tick(tick) {
@@ -2839,6 +2845,8 @@ where
     std::thread::Builder::new()
         .name("usagi-draining-collection".to_string())
         .spawn(move || {
+            let _worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::DrainingCollection);
             while !shutdown.is_requested() {
                 if collect() {
                     shutdown.request();
@@ -2920,6 +2928,8 @@ fn spawn_decision_maintenance(
     std::thread::Builder::new()
         .name("usagi-decision-maintenance".to_string())
         .spawn(move || {
+            let _worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::DecisionMaintenance);
             while !shutdown.is_requested() {
                 let _ = decisions.expire_due(chrono::Utc::now());
                 let _ = consume_user_decision_events(&decisions);
@@ -12338,6 +12348,44 @@ mod tests {
     }
 
     #[test]
+    fn a_panicked_background_worker_is_reported_as_daemon_health_danger() {
+        use usagi_core::usecase::client::MetricsAction;
+        use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
+
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let handle = spawn_retention_gc_worker(
+            || panic!("injected retention worker panic"),
+            Arc::clone(&shutdown),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(handle.join().is_err());
+
+        let broker = Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
+            AgentConcurrencyGauge::default(),
+            shutdown.background_worker_health(),
+        )));
+        let sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
+        let pipeline = TerminalPipelineMetrics::default();
+        let mut observer = None;
+        let snapshot = metrics_response(
+            &broker,
+            &sampler,
+            &pipeline,
+            &mut observer,
+            MetricsAction::Snapshot,
+        );
+        assert_eq!(snapshot.failed_background_workers, 1);
+
+        let mut tracker = DaemonHealthTracker::default();
+        tracker.observe(&snapshot);
+        assert_eq!(
+            tracker.evaluate(i64::try_from(snapshot.sampled_at_ms).unwrap()),
+            DaemonHealth::Danger(HealthReason::BackgroundWorkerStopped)
+        );
+    }
+
+    #[test]
     fn the_draining_collector_retries_observations_and_never_outlives_shutdown() {
         let shutdown = Arc::new(ShutdownRequest::new());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -12515,7 +12563,7 @@ mod tests {
             MetricsAction::Subscribe,
         );
         assert_eq!(unknown.agent_concurrency, None);
-        assert_eq!(unknown.schema_version, 3);
+        assert_eq!(unknown.schema_version, 4);
 
         // What the authority publishes is what the reply reports, on the very next
         // request and without another sample being pushed.

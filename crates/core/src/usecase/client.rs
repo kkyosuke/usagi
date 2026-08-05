@@ -359,6 +359,9 @@ pub struct DaemonMetrics {
     /// from a daemon that simply said nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_concurrency: Option<AgentConcurrency>,
+    /// Long-lived daemon maintenance workers that panicked in this process.
+    #[serde(default)]
+    pub failed_background_workers: u8,
 }
 
 /// Product-neutral Agent launch intent sent by a TUI client.

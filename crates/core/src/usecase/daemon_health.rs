@@ -97,6 +97,8 @@ pub enum HealthReason {
     PrScanIncomplete,
     /// metrics tick が購読側に届かず捨てられ続けている。
     MetricsUpdatesDropped,
+    /// 長寿命 maintenance worker が panic して停止した。
+    BackgroundWorkerStopped,
 }
 
 /// health の判定結果。`Ok` は理由を持たないため、無効な組み合わせを表現できない。
@@ -196,6 +198,7 @@ impl RateGate {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonHealthTracker {
     observed: Option<Observed>,
+    failed_background_workers: u8,
     terminal_dropped: RateGate,
     terminal_backpressured: RateGate,
     pr_dropped: RateGate,
@@ -233,6 +236,7 @@ impl DaemonHealthTracker {
             sample_at_ms,
             schema_version: metrics.schema_version,
         });
+        self.failed_background_workers = metrics.failed_background_workers;
         self.terminal_dropped.observe(
             metrics.terminal_dropped_bytes,
             sample_at_ms,
@@ -290,6 +294,9 @@ impl DaemonHealthTracker {
         if age_ms >= STALLED_MS {
             return DaemonHealth::Warning(HealthReason::MetricsStalled);
         }
+        if self.failed_background_workers != 0 {
+            return DaemonHealth::Danger(HealthReason::BackgroundWorkerStopped);
+        }
         [
             (self.terminal_dropped, HealthReason::TerminalOutputDropped),
             (
@@ -332,7 +339,27 @@ mod tests {
             pr_projection_gaps: 0,
             // health は Agent concurrency を読まない（診断は counter と freshness だけ）。
             agent_concurrency: None,
+            failed_background_workers: 0,
         }
+    }
+
+    #[test]
+    fn a_failed_background_worker_is_persistent_danger() {
+        let mut tracker = DaemonHealthTracker::default();
+        let mut metrics = sample(1_000);
+        metrics.failed_background_workers = 1;
+        tracker.observe(&metrics);
+        assert_eq!(
+            tracker.evaluate(1_000),
+            DaemonHealth::Danger(HealthReason::BackgroundWorkerStopped)
+        );
+
+        metrics.sampled_at_ms = 2_000;
+        tracker.observe(&metrics);
+        assert_eq!(
+            tracker.evaluate(2_000),
+            DaemonHealth::Danger(HealthReason::BackgroundWorkerStopped)
+        );
     }
 
     /// 1s 間隔で `count` 件の sample を畳む。各 sample は `field` を `step` ずつ増やす

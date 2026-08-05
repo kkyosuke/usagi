@@ -207,6 +207,7 @@ const fn health_reason(reason: HealthReason) -> &'static str {
         HealthReason::TerminalBackpressure => "terminal backpressure",
         HealthReason::PrScanIncomplete => "PR scan incomplete",
         HealthReason::MetricsUpdatesDropped => "metrics updates dropping",
+        HealthReason::BackgroundWorkerStopped => "background worker stopped",
     }
 }
 
@@ -234,6 +235,7 @@ mod tests {
             pr_projection_coalesced_bytes: 0,
             pr_projection_gaps: 0,
             agent_concurrency: Some(AgentConcurrency { in_use, limit: 16 }),
+            failed_background_workers: 0,
         }
     }
 
@@ -361,6 +363,10 @@ mod tests {
             (
                 HealthReason::MetricsUpdatesDropped,
                 "metrics updates dropping",
+            ),
+            (
+                HealthReason::BackgroundWorkerStopped,
+                "background worker stopped",
             ),
         ] {
             let frame = strip(

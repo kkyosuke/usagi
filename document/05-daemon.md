@@ -1258,6 +1258,12 @@ bounded queue への publish、drop 集計、wire snapshot はこの broker が�
 subscriber と drop count は 0 から始まる。TUI は push queue を登録せず snapshot を周期的に取得する。
 subscribe する client は再接続後に新しい observer を登録し、その queue を drain する。
 
+6 種類の長寿命 maintenance worker（PR refresh、session teardown、custody、retention GC、draining
+collection、decision maintenance）は共通の panic 境界を持つ。panic hook の診断ログに加え、境界は worker
+ごとの process-local failure bit を lock-free gauge に記録する。metrics broker は失敗 worker 数を snapshot に
+載せるため、worker が停止しても daemon health indicator が restart まで danger を表示する。通常の tick loop は
+追加の polling や lock を行わない。
+
 同じ snapshot は terminal retention で trim / coalesce した byte 数と、PTY observation queue で
 backpressure した byte 数も process-local counter として返す。counter と log は byte 数だけを扱い、
 terminal output、argv、environment、secret を含めない。

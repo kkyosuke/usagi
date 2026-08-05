@@ -1,13 +1,13 @@
 ---
 number: 649
 title: fix(daemon): background worker の panic を検知せず該当機能が無通知で停止する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, reliability]
 dependson: []
 related: []
 created_at: 2026-08-05T01:01:58.871445+00:00
-updated_at: 2026-08-05T01:01:58.871445+00:00
+updated_at: 2026-08-05T08:27:55.941259+00:00
 ---
 
 ## 出典

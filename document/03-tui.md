@@ -922,6 +922,7 @@ health が担うのは「観測できているか」と counter 由来の劣化�
 | 端末出力の滞留 | PTY reader が queue 待ちした量が 256KiB/s 以上を 3 sample 連続 | warning |
 | PR 検出の欠落 | PR projection queue の満杯で確定済み出力を scan せず捨てた | warning |
 | 更新の取りこぼし | metrics tick の取りこぼしが毎秒 1 件以上を 3 sample 連続 | warning |
+| background worker 停止 | 長寿命 maintenance worker のいずれかが panic した | danger |
 
 daemon metrics の counter は process の生存期間で単調増加するため、値や「一度でも増えたか」で判定すると
 **一度警告したら消えない indicator** になる。加えて端末出力の欠落は bounded retention window の通常動作で、
@@ -934,6 +935,7 @@ daemon metrics の counter は process の生存期間で単調増加するた�
   空白（再接続直後）では差分を取らない。したがって再接続の 1 発目が警告になることはない。
 
 観測の停滞（freshness）は counter 由来の理由より優先する。停滞した snapshot から計算したレートを表示しない。
+worker 停止は daemon restart まで回復しないため、process-local failure count が 1 以上の間は継続して点灯する。
 metrics lane の失敗中も直前 sample が保持されるため（[背景観測 lane](#home-frame-loop-と背景観測-lane)）、
 「観測が止まった」ことは sample の時刻でしか判定できない。判定は sample 列と現在時刻だけの純関数であり、
 現在時刻は renderer の入力（[frame material](#frame-material-と再描画の判定)）として渡す。
