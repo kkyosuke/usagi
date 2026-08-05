@@ -1,14 +1,14 @@
 ---
 number: 657
 title: fix(tui): New workspace clone/register を entry loop の外で非同期実行する
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, tui, workspace, freeze, git, usability]
 dependson: []
 related: [86]
 parent: 654
 created_at: 2026-08-05T13:40:18.509749+00:00
-updated_at: 2026-08-05T22:18:57.544041+00:00
+updated_at: 2026-08-05T22:34:25.659997+00:00
 ---
 
 ## Finding（P1 usability / freeze）
