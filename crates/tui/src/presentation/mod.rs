@@ -18060,6 +18060,11 @@ mod tests {
         assert!(!config.is_confirming_environment());
         step_config(&mut config, Key::Escape, &mut settings);
         assert!(!config.is_editing_environment());
+
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(config.is_confirming_environment());
+        step_config(&mut config, Key::Escape, &mut settings);
+        assert!(!config.is_editing_environment());
     }
 
     #[test]
