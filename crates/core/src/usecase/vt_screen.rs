@@ -20,6 +20,7 @@
 //! without reaching into parser state.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use unicode_width::UnicodeWidthChar;
 
@@ -28,11 +29,11 @@ mod checkpoint;
 pub use checkpoint::{
     ActiveBuffer, BufferCheckpoint, CELLS_PER_TERMINAL_MAX, CHECKPOINT_BYTES_MAX, COLS_MAX,
     CellRun, CheckpointError, DecoderCheckpoint, DecoderPhase, Geometry, PARAMS_MAX, ROWS_MAX,
-    RowCheckpoint, SCHEMA_VERSION, SCROLLBACK_MAX, STYLES_MAX, ScreenCheckpoint, UTF8_NEEDED_MAX,
-    UTF8_PENDING_MAX,
+    RowCheckpoint, SCHEMA_VERSION, SCROLLBACK_MAX, STYLE_BYTES_MAX, STYLES_MAX, ScreenCheckpoint,
+    UTF8_NEEDED_MAX, UTF8_PENDING_MAX,
 };
 
-/// Escape-sequence parser position.  Only these five states are reachable; any
+/// Escape-sequence parser position. Only these six states are reachable; any
 /// byte that does not belong to the active state returns the parser to
 /// [`Phase::Ground`] without emitting output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,8 @@ enum Phase {
     Escape,
     /// Collecting a `CSI` (`ESC [`) parameter/intermediate run until its final.
     Csi,
+    /// Discarding an oversized `CSI` run until its final byte.
+    CsiOverflow,
     /// Swallowing an `OSC` (`ESC ]`) string until `BEL` or `ESC`.
     Osc,
     /// Swallowing the single byte that follows a charset-select (`ESC (`/`)`).
@@ -138,13 +141,161 @@ pub struct VtScreen {
     primary_screen: Option<Box<ScreenBuffer>>,
 }
 
+/// Semantic SGR attributes used to replace the unbounded raw escape append
+/// log. The rendered/checkpoint form is rebuilt as one canonical sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct SgrState {
+    attributes: u8,
+    foreground: Option<SgrColor>,
+    background: Option<SgrColor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SgrColor {
+    Standard(u16),
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+impl SgrState {
+    const BOLD: u8 = 1 << 0;
+    const DIM: u8 = 1 << 1;
+    const UNDERLINE: u8 = 1 << 2;
+    const REVERSE: u8 = 1 << 3;
+
+    fn from_style(mut style: &str) -> Self {
+        let mut state = Self::default();
+        while let Some(params_and_rest) = style.strip_prefix("\u{1b}[") {
+            let Some(final_index) = params_and_rest.find('m') else {
+                return Self::default();
+            };
+            state.apply(&params_and_rest[..final_index]);
+            style = &params_and_rest[final_index + 1..];
+        }
+        if style.is_empty() {
+            state
+        } else {
+            Self::default()
+        }
+    }
+
+    fn apply(&mut self, params: &str) {
+        if params.is_empty() {
+            *self = Self::default();
+            return;
+        }
+        let values: Vec<&str> = params.split(';').collect();
+        let mut index = 0;
+        while index < values.len() {
+            let code = if values[index].is_empty() {
+                Some(0)
+            } else {
+                values[index].parse::<u16>().ok()
+            };
+            match code {
+                Some(0) => *self = Self::default(),
+                Some(1) => self.attributes |= Self::BOLD,
+                Some(2) => self.attributes |= Self::DIM,
+                Some(4) => self.attributes |= Self::UNDERLINE,
+                Some(7) => self.attributes |= Self::REVERSE,
+                Some(22) => {
+                    self.attributes &= !(Self::BOLD | Self::DIM);
+                }
+                Some(24) => self.attributes &= !Self::UNDERLINE,
+                Some(27) => self.attributes &= !Self::REVERSE,
+                Some(code @ (30..=37 | 90..=97)) => {
+                    self.foreground = Some(SgrColor::Standard(code));
+                }
+                Some(39) => self.foreground = None,
+                Some(code @ (40..=47 | 100..=107)) => {
+                    self.background = Some(SgrColor::Standard(code));
+                }
+                Some(49) => self.background = None,
+                Some(code @ (38 | 48)) => {
+                    if let Some((color, consumed)) = parse_extended_color(&values[index + 1..]) {
+                        if code == 38 {
+                            self.foreground = Some(color);
+                        } else {
+                            self.background = Some(color);
+                        }
+                        index += consumed;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+    }
+
+    fn canonical(&self) -> String {
+        let mut params = String::new();
+        for (attribute, code) in [
+            (Self::BOLD, 1),
+            (Self::DIM, 2),
+            (Self::UNDERLINE, 4),
+            (Self::REVERSE, 7),
+        ] {
+            if self.attributes & attribute != 0 {
+                push_sgr_param(&mut params, code);
+            }
+        }
+        if let Some(color) = &self.foreground {
+            push_color(&mut params, 38, color);
+        }
+        if let Some(color) = &self.background {
+            push_color(&mut params, 48, color);
+        }
+        if params.is_empty() {
+            String::new()
+        } else {
+            format!("\u{1b}[{params}m")
+        }
+    }
+}
+
+fn parse_extended_color(values: &[&str]) -> Option<(SgrColor, usize)> {
+    match values {
+        ["5", index, ..] => Some((SgrColor::Indexed(index.parse().ok()?), 2)),
+        ["2", red, green, blue, ..] => Some((
+            SgrColor::Rgb(red.parse().ok()?, green.parse().ok()?, blue.parse().ok()?),
+            4,
+        )),
+        _ => None,
+    }
+}
+
+fn push_sgr_param(params: &mut String, value: impl std::fmt::Display) {
+    if !params.is_empty() {
+        params.push(';');
+    }
+    write!(params, "{value}").expect("writing to a String cannot fail");
+}
+
+fn push_color(params: &mut String, selector: u8, color: &SgrColor) {
+    match color {
+        SgrColor::Standard(code) => push_sgr_param(params, code),
+        SgrColor::Indexed(index) => {
+            push_sgr_param(params, selector);
+            push_sgr_param(params, 5);
+            push_sgr_param(params, index);
+        }
+        SgrColor::Rgb(red, green, blue) => {
+            push_sgr_param(params, selector);
+            push_sgr_param(params, 2);
+            push_sgr_param(params, red);
+            push_sgr_param(params, green);
+            push_sgr_param(params, blue);
+        }
+    }
+}
+
 impl VtScreen {
     /// Creates a blank screen.  `rows` and `cols` are clamped to at least one so
     /// the grid always has a valid cursor cell.
     #[must_use]
     pub fn new(rows: usize, cols: usize) -> Self {
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+        let rows = rows.clamp(1, ROWS_MAX as usize);
+        let cols = cols.clamp(1, COLS_MAX as usize);
         Self {
             rows,
             cols,
@@ -179,8 +330,8 @@ impl VtScreen {
     /// width duplicates rows. Resize the decoded cells instead: cells outside
     /// the new viewport are clipped and existing history keeps its row count.
     pub fn resize(&mut self, rows: usize, cols: usize) {
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+        let rows = rows.clamp(1, ROWS_MAX as usize);
+        let cols = cols.clamp(1, COLS_MAX as usize);
         if (self.rows, self.cols) == (rows, cols) {
             return;
         }
@@ -310,6 +461,7 @@ impl VtScreen {
             Phase::Ground => self.ground(byte),
             Phase::Escape => self.escape(byte),
             Phase::Csi => self.csi(byte),
+            Phase::CsiOverflow => self.csi_overflow(byte),
             Phase::Osc => self.osc(byte),
             Phase::Charset => self.phase = Phase::Ground,
         }
@@ -382,12 +534,22 @@ impl VtScreen {
 
     fn csi(&mut self, byte: u8) {
         match byte {
-            0x20..=0x3f => self.params.push(byte as char),
+            0x20..=0x3f if self.params.len() < PARAMS_MAX => self.params.push(byte as char),
+            0x20..=0x3f => {
+                self.params.clear();
+                self.phase = Phase::CsiOverflow;
+            }
             0x40..=0x7e => {
                 self.dispatch_csi(byte as char);
                 self.phase = Phase::Ground;
             }
             _ => self.phase = Phase::Ground,
+        }
+    }
+
+    fn csi_overflow(&mut self, byte: u8) {
+        if matches!(byte, 0x40..=0x7e) {
+            self.phase = Phase::Ground;
         }
     }
 
@@ -524,7 +686,7 @@ impl VtScreen {
             // transcript history; a lower region is a transient full-screen UI.
             if self.primary_screen.is_none() && self.scroll_top == 0 {
                 self.scrollback.push(row);
-                if self.scrollback.len() > 10_000 {
+                if self.scrollback.len() > SCROLLBACK_MAX {
                     self.scrollback.remove(0);
                 }
             }
@@ -556,22 +718,10 @@ impl VtScreen {
     }
 
     fn sgr(&mut self) {
-        // `CSI m` is reset. Any sequence containing `0` also starts a fresh
-        // state, so a later repaint can faithfully reconstruct the style from
-        // the beginning of a row rather than relying on terminal history.
-        let reset = self.params.is_empty()
-            || self
-                .params
-                .split(';')
-                .any(|parameter| parameter.is_empty() || parameter == "0");
-        if reset {
-            self.style.clear();
-        }
-        if !self.params.is_empty() && self.params != "0" {
-            self.style.push_str("\u{1b}[");
-            self.style.push_str(&self.params);
-            self.style.push('m');
-        }
+        let mut state = SgrState::from_style(&self.style);
+        state.apply(&self.params);
+        self.style = state.canonical();
+        debug_assert!(self.style.len() <= STYLE_BYTES_MAX);
     }
 
     fn save_cursor(&mut self) {
@@ -666,6 +816,7 @@ impl Phase {
             Self::Ground => DecoderPhase::Ground,
             Self::Escape => DecoderPhase::Escape,
             Self::Csi => DecoderPhase::Csi,
+            Self::CsiOverflow => DecoderPhase::CsiOverflow,
             Self::Osc => DecoderPhase::Osc,
             Self::Charset => DecoderPhase::Charset,
         }
@@ -677,6 +828,7 @@ impl Phase {
             DecoderPhase::Ground => Self::Ground,
             DecoderPhase::Escape => Self::Escape,
             DecoderPhase::Csi => Self::Csi,
+            DecoderPhase::CsiOverflow => Self::CsiOverflow,
             DecoderPhase::Osc => Self::Osc,
             DecoderPhase::Charset => Self::Charset,
         }
@@ -1122,6 +1274,11 @@ mod tests {
         let screen = VtScreen::new(0, 0);
         assert_eq!(rows(&screen), vec![String::new()]);
         assert_eq!(screen.cursor(), (0, 0));
+
+        let rows_clamped = VtScreen::new(ROWS_MAX as usize + 1, 1).checkpoint();
+        assert_eq!(rows_clamped.geometry.rows, ROWS_MAX);
+        let cols_clamped = VtScreen::new(1, COLS_MAX as usize + 1).checkpoint();
+        assert_eq!(cols_clamped.geometry.cols, COLS_MAX);
     }
 
     #[test]
@@ -1519,6 +1676,92 @@ mod tests {
         assert_eq!(rows(&screen), vec!["  X", "", ""]);
     }
 
+    #[test]
+    fn oversized_csi_is_bounded_discarded_and_recovers_after_final() {
+        let mut screen = VtScreen::new(1, 8);
+        screen.advance(b"\x1b[31mA\x1b[");
+        screen.advance(&vec![b'1'; 1024 * 1024]);
+
+        let checkpoint = screen.checkpoint();
+        assert_eq!(checkpoint.decoder.phase, DecoderPhase::CsiOverflow);
+        assert!(checkpoint.decoder.params.is_empty());
+        assert!(checkpoint.to_json_bytes().is_ok());
+        let mut restored = VtScreen::from_checkpoint(&checkpoint).expect("overflow restores");
+
+        // The oversized final is swallowed instead of dispatching the retained
+        // prefix as a cursor/style command. Normal text and CSI then resume.
+        restored.advance(b"HB\x1b[0mC");
+        assert_eq!(rows(&restored), vec!["ABC"]);
+        assert_eq!(restored.grid()[0][0].style(), "\u{1b}[31m");
+        assert_eq!(restored.grid()[0][1].style(), "\u{1b}[31m");
+        assert_eq!(restored.grid()[0][2].style(), "");
+    }
+
+    #[test]
+    fn sgr_chains_canonicalize_to_bounded_semantic_state() {
+        let mut screen = VtScreen::new(1, 4);
+        let mut chain = Vec::with_capacity(400_000);
+        for _ in 0..100_000 {
+            chain.extend_from_slice(b"\x1b[1m");
+        }
+        screen.advance(&chain);
+        screen.advance(b"x");
+
+        assert_eq!(screen.cursor_style(), "\u{1b}[1m");
+        assert_eq!(screen.grid()[0][0].style(), "\u{1b}[1m");
+        assert!(screen.cursor_style().len() <= STYLE_BYTES_MAX);
+        assert_roundtrip(&screen);
+    }
+
+    #[test]
+    fn checkpoint_accepts_more_than_the_old_style_table_limit() {
+        let mut screen = VtScreen::new(3, 2048);
+        for color in 0..4097_u32 {
+            let red = color >> 16;
+            let green = (color >> 8) & 0xff;
+            let blue = color & 0xff;
+            screen.advance(format!("\u{1b}[38;2;{red};{green};{blue}mx").as_bytes());
+        }
+        assert!(screen.checkpoint().styles.len() > 4096);
+        assert_roundtrip(&screen);
+    }
+
+    #[test]
+    fn sgr_canonical_state_preserves_attributes_and_color_forms() {
+        let mut screen = VtScreen::new(1, 4);
+        screen.advance(b"\x1b[1;2;4;7;38;2;1;2;3;48;5;208mA");
+        assert_eq!(
+            screen.grid()[0][0].style(),
+            "\u{1b}[1;2;4;7;38;2;1;2;3;48;5;208m"
+        );
+
+        screen.advance(b"\x1b[22;24;27;39;49mB\x1b[94;107mC");
+        assert_eq!(screen.grid()[0][1].style(), "");
+        assert_eq!(screen.grid()[0][2].style(), "\u{1b}[94;107m");
+
+        // Schema-v1 checkpoints may carry the old append-log representation;
+        // the next update folds it into the same canonical semantic state.
+        screen.style = "\u{1b}[31m\u{1b}[1m".to_owned();
+        screen.advance(b"\x1b[4mD");
+        assert_eq!(screen.grid()[0][3].style(), "\u{1b}[1;4;31m");
+    }
+
+    #[test]
+    fn sgr_parser_fails_closed_for_malformed_legacy_and_parameters() {
+        assert_eq!(SgrState::from_style("\u{1b}[31"), SgrState::default());
+        assert_eq!(SgrState::from_style("not-sgr"), SgrState::default());
+
+        let mut state = SgrState::default();
+        state.apply("");
+        state.apply("1;;31");
+        assert_eq!(state.canonical(), "\u{1b}[31m");
+
+        state.apply("38;5;7;48;2;1;2;3");
+        assert_eq!(state.canonical(), "\u{1b}[38;5;7;48;2;1;2;3m");
+        state.apply("38;9;999");
+        assert_eq!(state.canonical(), "\u{1b}[38;5;7;48;2;1;2;3m");
+    }
+
     // ----- ScreenCheckpoint round-trip and bounded/hostile decode -----
 
     /// Builds a screen and feeds each chunk in order.
@@ -1566,6 +1809,7 @@ mod tests {
             built(3, 12, &[b"base\r\nline\x1b[?1049halt\x1b[?1049l"]),
             built(2, 8, &[b"mid-escape\x1b"]),
             built(2, 8, &[b"mid-csi\x1b[1;2"]),
+            built(2, 8, &[b"mid-csi-overflow\x1b[11111111111111111111111111111111111111111111111111111111111111111"]),
             built(2, 8, &[b"mid-osc\x1b]0;partial title"]),
             built(2, 8, &[b"mid-charset\x1b("]),
             built(1, 8, &[&star[..1]]),
@@ -1743,9 +1987,22 @@ mod tests {
         };
         assert_eq!(reject(&cp), CheckpointError::ColsOutOfRange(COLS_MAX + 1));
 
+        assert_eq!(
+            checkpoint::validate_style_count(2, 1),
+            Err(CheckpointError::TooManyStyles(2))
+        );
+
         let mut cp = valid_checkpoint();
-        cp.styles = vec![String::new(); STYLES_MAX + 1];
-        assert_eq!(reject(&cp), CheckpointError::TooManyStyles(STYLES_MAX + 1));
+        cp.styles = vec!["x".repeat(STYLE_BYTES_MAX + 1)];
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::StyleTooLong(STYLE_BYTES_MAX + 1)
+        );
+        assert_eq!(
+            cp.to_json_bytes()
+                .expect_err("style rejected before serialize"),
+            CheckpointError::StyleTooLong(STYLE_BYTES_MAX + 1)
+        );
 
         let mut cp = valid_checkpoint();
         cp.decoder.params = "1".repeat(PARAMS_MAX + 1);
@@ -1906,7 +2163,20 @@ mod tests {
     fn json_boundary_rejects_oversized_and_malformed_input() {
         // Serializing a checkpoint larger than one frame is rejected.
         let mut cp = valid_checkpoint();
-        cp.styles = vec!["x".repeat(4096); 400];
+        cp.geometry.cols = 3;
+        let row = RowCheckpoint {
+            runs: vec![
+                CellRun {
+                    style_id: 0,
+                    ch: 'x',
+                    continuation: false,
+                    repeat: 1,
+                };
+                3
+            ],
+        };
+        cp.primary.grid = vec![row.clone()];
+        cp.primary.scrollback = vec![row; SCROLLBACK_MAX];
         let err = cp.to_json_bytes().expect_err("oversized checkpoint");
         assert!(matches!(err, CheckpointError::TooLarge { .. }));
 
@@ -1937,6 +2207,7 @@ mod tests {
             CheckpointError::TooManyCells(9),
             CheckpointError::ScrollbackTooLong(9),
             CheckpointError::TooManyStyles(9),
+            CheckpointError::StyleTooLong(9),
             CheckpointError::StyleIdOutOfRange { id: 9, styles: 1 },
             CheckpointError::RowRepeatOverflow,
             CheckpointError::RowLength {

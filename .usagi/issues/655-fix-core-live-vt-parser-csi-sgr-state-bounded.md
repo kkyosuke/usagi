@@ -1,14 +1,14 @@
 ---
 number: 655
 title: fix(core): live VT parser の CSI/SGR state を bounded に保つ
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, terminal, memory, security, correctness]
 dependson: []
 related: [524, 533, 534]
 parent: 654
 created_at: 2026-08-05T13:40:17.703014+00:00
-updated_at: 2026-08-05T13:50:14.341586+00:00
+updated_at: 2026-08-05T22:28:29.983865+00:00
 ---
 
 ## Finding（P1 memory / availability）
