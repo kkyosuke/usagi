@@ -1,6 +1,6 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -841,6 +841,7 @@ struct DaemonMetricsPort {
     metrics: RefreshPump<Option<DaemonMetrics>>,
     latest: Option<DaemonMetrics>,
     git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
+    git_sessions: Vec<(usagi_core::domain::id::SessionId, PathBuf)>,
     git_receiver: Option<mpsc::Receiver<(usagi_core::domain::id::SessionId, GitDiff)>>,
     last_git_refresh: Option<Instant>,
 }
@@ -854,6 +855,7 @@ impl DaemonMetricsPort {
             metrics: spawn_metrics_pump(),
             latest: None,
             git_diffs: BTreeMap::new(),
+            git_sessions: Vec::new(),
             git_receiver: None,
             last_git_refresh: None,
         }
@@ -861,32 +863,37 @@ impl DaemonMetricsPort {
 }
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_metrics_projection_contract
 impl MetricsPort for DaemonMetricsPort {
-    // Real daemon I/O belongs to the composition root; UI behaviour is tested
-    // through its injected MetricsPort boundary.
-    fn latest(&mut self) -> Option<DaemonMetrics> {
+    fn poll_updates(
+        &mut self,
+        sessions: Option<&[(usagi_core::domain::id::SessionId, PathBuf)]>,
+    ) -> Vec<presentation::metrics::MetricsUpdate> {
+        let mut updates = Vec::new();
         // The first frame that wants a sample starts the lane; a composition
         // nobody draws never reaches the daemon.
         self.metrics.activate();
         // A failed observation keeps the previous sample rather than blanking
         // the mascot: the lane's backoff already reports the outage rate, and a
         // momentary daemon hiccup should not flicker the frame.
-        if let Some(Ok(sample)) = self.metrics.take() {
-            self.latest = sample;
+        if let Some(Ok(sample)) = self.metrics.take()
+            && self.latest != sample
+        {
+            self.latest.clone_from(&sample);
+            updates.push(presentation::metrics::MetricsUpdate::Metrics(sample));
         }
-        self.latest.clone()
-    }
-
-    fn git_diffs(
-        &mut self,
-        sessions: &[(usagi_core::domain::id::SessionId, PathBuf)],
-    ) -> BTreeMap<usagi_core::domain::id::SessionId, GitDiff> {
-        let active_ids = sessions.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-        self.git_diffs.retain(|id, _| active_ids.contains(id));
+        let mut git_changed = false;
+        if let Some(sessions) = sessions {
+            self.git_sessions = sessions.to_vec();
+            let active_ids = sessions.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>();
+            let before = self.git_diffs.len();
+            self.git_diffs.retain(|id, _| active_ids.contains(id));
+            git_changed |= self.git_diffs.len() != before;
+        }
         let mut finished = false;
         if let Some(receiver) = &self.git_receiver {
             loop {
                 match receiver.try_recv() {
                     Ok((id, status)) => {
+                        git_changed |= self.git_diffs.get(&id) != Some(&status);
                         self.git_diffs.insert(id, status);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -904,9 +911,10 @@ impl MetricsPort for DaemonMetricsPort {
             && self
                 .last_git_refresh
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+            && !self.git_sessions.is_empty()
         {
             let (sender, receiver) = mpsc::channel();
-            let sessions = sessions.to_vec();
+            let sessions = self.git_sessions.clone();
             thread::spawn(move || {
                 let runner = SystemGit;
                 for (id, path) in sessions {
@@ -928,7 +936,12 @@ impl MetricsPort for DaemonMetricsPort {
             self.git_receiver = Some(receiver);
             self.last_git_refresh = Some(Instant::now());
         }
-        self.git_diffs.clone()
+        if git_changed {
+            updates.push(presentation::metrics::MetricsUpdate::GitDiffs(
+                self.git_diffs.clone(),
+            ));
+        }
+        updates
     }
 }
 

@@ -28,6 +28,7 @@
 //! coordinator is exercised with a fake port in unit tests.
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 use usagi_core::domain::id::{OperationId, TerminalRef};
 use usagi_core::usecase::vt_screen::{CheckpointError, ScreenCheckpoint};
@@ -553,6 +554,22 @@ impl TerminalSession {
     #[must_use]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Cheap fingerprint of every input that can change the rendered viewport.
+    /// The decoded screen remains authoritative; this value is only a cache
+    /// fence and advances through the daemon cursor/snapshot/geometry state.
+    #[must_use]
+    pub fn projection_key(&self) -> u64 {
+        let mut key = std::collections::hash_map::DefaultHasher::new();
+        self.cursor.hash(&mut key);
+        self.snapshot_revision.hash(&mut key);
+        self.geometry.rows.hash(&mut key);
+        self.geometry.cols.hash(&mut key);
+        (self.state as u8).hash(&mut key);
+        (self.history as u8).hash(&mut key);
+        self.error.hash(&mut key);
+        key.finish()
     }
 
     /// Whether the current view restored the terminal's retained history, or is
@@ -1469,6 +1486,35 @@ mod tests {
             end_offset: start + data.len() as u64,
             data: data.to_vec(),
         }
+    }
+
+    #[test]
+    fn projection_key_gates_terminal_row_and_link_scan_across_one_thousand_idle_ticks() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 20, b"https://example.com", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let mut cached_key = None;
+        let mut scans = 0;
+        let mut rows = Vec::new();
+
+        for _ in 0..1_000 {
+            let key = session.projection_key();
+            if cached_key != Some(key) {
+                rows = session.display_row_window(0, usize::from(geometry().rows));
+                cached_key = Some(key);
+                scans += 1;
+            }
+        }
+
+        assert_eq!(scans, 1);
+        assert!(rows.join("\n").contains("https://example.com"));
+
+        port.polls.push(Ok(vec![chunk(20, b"/changed")]));
+        session.poll(&mut port);
+        assert_ne!(cached_key, Some(session.projection_key()));
     }
 
     #[test]
