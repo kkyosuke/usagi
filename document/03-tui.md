@@ -58,9 +58,16 @@ New は Clone（リポジトリを新しいディレクトリへ clone）と Exi
 - 前後の空白は判定前に trim する。判定は正規化せず完全一致で行うため決定的で、Unicode を含む名前も
   不当に弾かない。
 
-作成が成功すると、その workspace を Open / Recent と同じ経路で開いて Home へ遷移する。作成が失敗すると、
-入力中の draft を保ったまま notice を出して同画面に留まり、そのまま修正・再実行できる。作成の実行中は
-入力を読まないため、`Enter` の連打で作成が二重に走ることはない。`Esc` は Welcome へ戻り、`Ctrl+C` は終了する。
+作成は token と検証済み request identity を持つ effect として、entry loop の外にある単一 worker へ dispatch する。
+実行中も entry loop は tick・描画・入力・resize を処理し、New は spinner を更新する。同時に実行する作成は 1 件で、
+実行中の編集と `Enter` は無視する。completion は token と request の両方が pending operation と一致するときだけ採用し、
+stale / duplicate completion が別の draft や workspace を開くことはない。
+
+作成が成功すると、その workspace を Open / Recent と同じ snapshot/composition 経路で 1 回だけ Home へ遷移する。
+作成が失敗すると、入力中の draft を保ったまま安全な notice を出して同画面に留まり、そのまま修正・再実行できる。
+実行中の `Esc` は操作の画面上の待機を cancel して Welcome へ戻り、completion は workspace を開かず破棄する。
+worker 内の `git clone` 自体は強制終了しないため、処理が完了するまで新しい作成は開始しない。失敗・cancel のどちらでも
+既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
 Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Issue・Memory を表示する。開いている workspace の Overview で `config` を

@@ -109,6 +109,8 @@ pub struct New {
     name_dirty: bool,
 
     notice: Option<String>,
+    /// Animation frame while the background create worker owns this draft.
+    creating_frame: Option<usize>,
     /// Directory-path fields に対して Tab が見つけた候補。繰り返し Tab を押すとこの順に
     /// 入力欄へ反映する。
     directory_matches: Vec<String>,
@@ -179,6 +181,30 @@ impl New {
     /// 通知を差し替える。
     pub fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
+    }
+
+    /// Mark the validated draft as owned by the background create worker.
+    pub fn begin_create(&mut self) {
+        self.creating_frame = Some(0);
+        self.notice = None;
+    }
+
+    /// Advance the create spinner on an entry-loop wake-up.
+    pub fn advance_create_animation(&mut self) {
+        if let Some(frame) = self.creating_frame.as_mut() {
+            *frame = frame.wrapping_add(1);
+        }
+    }
+
+    /// Stop showing the create operation without changing any draft field.
+    pub fn finish_create(&mut self) {
+        self.creating_frame = None;
+    }
+
+    /// Whether a create operation currently owns the form.
+    #[must_use]
+    pub const fn is_creating(&self) -> bool {
+        self.creating_frame.is_some()
     }
 
     /// フォームを検証し、必須項目が揃っていれば workspace を作る backend request を返す。
@@ -657,10 +683,19 @@ fn fields_lines(block_pad: &str, state: &New) -> Vec<String> {
 
 /// フォーム下の通知（検証エラー）。常に 2 行（空の区切り＋通知スロット）返し、出現・消滅で
 /// フォームがずれないようにする。
-fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
-    let slot = match notice {
-        Some(notice) => format!("{block_pad}{}", Role::Danger.style().bold().paint(notice)),
-        None => String::new(),
+fn notice_lines(block_pad: &str, state: &New) -> Vec<String> {
+    let slot = match (state.creating_frame, state.notice()) {
+        (Some(frame), _) => {
+            let loading = format!(
+                "{} creating workspace…",
+                widgets::loading::spinner_char(frame)
+            );
+            format!("{block_pad}{}", Role::Accent.style().bold().paint(&loading))
+        }
+        (None, Some(notice)) => {
+            format!("{block_pad}{}", Role::Danger.style().bold().paint(notice))
+        }
+        (None, None) => String::new(),
     };
     vec![String::new(), slot]
 }
@@ -668,7 +703,9 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 /// フォーカス中フィールドに応じたフッタのヒント。モード選択では ←→ が種類切替、テキスト欄では
 /// キャレット移動を意味するので、現在のフィールドがすることだけを書く。
 fn footer_hint(state: &New) -> &'static str {
-    if state.focus() == Field::Mode {
+    if state.is_creating() {
+        "Creating… / Esc: back (completion will be ignored) / Ctrl-Q: quit"
+    } else if state.focus() == Field::Mode {
         "←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back"
     } else if matches!(state.focus(), Field::Location | Field::Path) {
         "Tab: complete directory / ←→: move caret / ↑↓: move field / Enter: create / Esc: back"
@@ -694,7 +731,7 @@ pub fn render(raw_height: usize, raw_width: usize, state: &New) -> Vec<String> {
         ));
         body.push(String::new());
         body.extend(fields_lines(&block_pad, state));
-        body.extend(notice_lines(&block_pad, state.notice()));
+        body.extend(notice_lines(&block_pad, state));
         body
     })
 }
@@ -746,6 +783,27 @@ mod tests {
         assert_eq!(state.notice(), None);
         // derive された Clone / Debug も計測対象なので触れる。
         assert!(format!("{:?}", state.clone()).contains("New"));
+    }
+
+    #[test]
+    fn create_progress_animates_and_finishes_without_changing_the_draft() {
+        let mut state = New::default();
+        state.focus_next();
+        type_str(&mut state, "https://example.com/acme/app.git");
+        state.begin_create();
+        assert!(state.is_creating());
+        let first = joined(&state);
+        assert!(first.contains("creating workspace"));
+        assert!(first.contains("completion will be ignored"));
+
+        state.advance_create_animation();
+        let second = joined(&state);
+        assert_ne!(first, second);
+
+        state.finish_create();
+        assert!(!state.is_creating());
+        assert_eq!(state.url(), "https://example.com/acme/app.git");
+        assert!(!joined(&state).contains("creating workspace"));
     }
 
     #[test]
