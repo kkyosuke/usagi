@@ -6091,13 +6091,9 @@ pub fn run_screen_graph_with_backend(
     loop {
         let mut created_snapshot = None;
         while let Some(completion) = loader.take_create_completion() {
-            let matches_pending = pending_create.as_ref().is_some_and(|pending| {
+            let Some(pending) = pending_create.take_if(|pending| {
                 pending.token == completion.token && pending.request == completion.request
-            });
-            if !matches_pending {
-                continue;
-            }
-            let Some(pending) = pending_create.take() else {
+            }) else {
                 continue;
             };
             new_form.finish_create();
@@ -18045,6 +18041,7 @@ mod tests {
         create_completions: VecDeque<WorkspaceCreateCompletion>,
         held_create: Option<WorkspaceCreateCompletion>,
         hold_create: bool,
+        dispatch_error: Option<&'static str>,
         release_after_polls: Option<usize>,
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
@@ -18087,6 +18084,9 @@ mod tests {
         }
 
         fn dispatch_create(&mut self, effect: WorkspaceCreateEffect) -> io::Result<()> {
+            if let Some(error) = self.dispatch_error {
+                return Err(io::Error::other(error));
+            }
             self.created.push(effect.request.clone());
             let completion = if self.create_failures > 0 {
                 self.create_failures -= 1;
@@ -19002,6 +19002,28 @@ mod tests {
     }
 
     #[test]
+    fn loading_new_can_quit_without_waiting_for_create_completion() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            hold_create: true,
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.created.len(), 1);
+    }
+
+    #[test]
     fn cancelled_create_completion_after_reentry_never_opens_the_workspace() {
         let mut term = FakeTerminal::with_keys(&[
             Key::Char('e'),
@@ -19036,6 +19058,44 @@ mod tests {
             .find(|frame| frame.join("\n").contains("New Project"))
             .expect("re-entered New frame");
         assert!(last_new.join("\n").contains('x'));
+    }
+
+    #[test]
+    fn reentered_new_refuses_resubmit_until_cancelled_failure_completes() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Escape,
+            Key::Char('e'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            fail: true,
+            hold_create: true,
+            release_after_polls: Some(3),
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.created.len(), 1);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("previous creation is still finishing"))
+        );
+        assert!(frames.iter().any(|frame| frame.contains("open failed")));
     }
 
     #[test]
@@ -19223,6 +19283,37 @@ mod tests {
         let text = last_new.join("\n");
         assert!(text.contains("open failed")); // the failure notice
         assert!(text.contains('x')); // the draft path is retained
+    }
+
+    #[test]
+    fn new_form_keeps_the_draft_when_worker_dispatch_fails() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            dispatch_error: Some("worker dispatch failed"),
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert!(loader.created.is_empty());
+        let last_new = term
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.join("\n").contains("New Project"))
+            .expect("still on the New screen after dispatch failed");
+        let text = last_new.join("\n");
+        assert!(text.contains("worker dispatch failed"));
+        assert!(text.contains('x'));
     }
 
     #[test]
