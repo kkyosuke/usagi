@@ -103,7 +103,8 @@ typed refusal になる。
 したがって TUI の終了や同 build client の再接続だけでは daemon-owned Agent PTY は失われない。一方、cold transition は
 旧 owner process を終了するため、その process が持つ PTY master と live Agent / generic Terminal を継続できない。
 fresh daemon は unfinished runtime を `identity_unknown` へ reconcile し、旧 `TerminalRef` を live として復元しない。
-このため `daemon stop` / `daemon restart` / `daemon replace` は live runtime を持つ daemon を既定で拒否する
+このため `daemon restart` / `daemon replace` は live runtime があれば PTY を維持する seamless rollover を試み、
+安全な handoff の前提が欠ける場合だけ拒否する。`daemon stop` は渡す先がないため、live runtime を既定で拒否する
 （[planned replacement](#planned-replacement)）。検証済み active locator への接続が `ConnectionRefused` になった場合だけ、共有
 bootstrap は後述の exact stale-owner recovery を試みる。draining、malformed / unsafe locator、所有権または lifecycle
 record の安全性が不明な場合は replacement を起動せず、安全な typed lifecycle error を表示する。client が
@@ -121,7 +122,9 @@ development build mismatch
   client -> stable rollover operation -> cold restart -> exact build reconnect
 
 manual restart / replace, daemon owns live runtime
-  client -> census -> refused, effect 0 -> old process + PTY remain alive
+  client -> census -> seamless prerequisites available -> gated rollover -> PTY preserved
+                   -> seamless prerequisite missing -> refused, effect 0
+                                                      -> old process + PTY remain alive
 
 manual cold transition (--force, or nothing live)
   client -> stop old -> quiesce / retire endpoint -> old process exit
@@ -430,12 +433,12 @@ generation なので、seamless の successor 候補にはならない。
 
 | live runtime | 要求 | 結果 |
 |---|---|---|
-| 0 | planned | cold transition |
-| 1 以上 | planned、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
-| 1 以上 | planned、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
-| 1 以上 | `--force` | 明示的な cold transition |
-| 1 以上 | planned | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
-| 1 以上 | `--force`（明示 cold transition） | cold transition |
+| 0 | planned replacement | cold transition |
+| 1 以上 | planned replacement、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
+| 1 以上 | planned replacement、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
+| 1 以上 | replacement `--force` | 明示的な cold transition |
+| 1 以上 | `stop` | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
+| 1 以上 | `stop --force` | cold transition |
 
 拒否は typed であり、何を守ったか（Agent runtime 数と generic terminal 数）と、
 seamless に保てなかった理由を示す。`daemon stop` は rollover とは別契約であり、渡す先の successor が
@@ -518,7 +521,9 @@ task daemon:dev -- restart
 task daemon:dev -- restart --force   # live runtime を明示的に手放す cold transition
 ```
 
-`restart` / `stop` は live runtime を持つ daemon を `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。その拒否を上書きするのは `--force` そのものであり、task 名ではない。`--` を省くと Task が `restart` を task 名として解釈するため、引数は必ず `--` の後ろに置く。
+`restart` は live runtime があれば seamless rollover を試み、その前提が欠ける場合だけ拒否する。`stop` は live runtime を
+`--force` なしでは拒否する（[planned replacement](#planned-replacement)）。`--force` は task 名にかかわらず live PTY を
+明示的に手放す cold transition である。`--` を省くと Task が `restart` を task 名として解釈するため、引数は必ず `--` の後ろに置く。
 
 managed session state は repository 内の `.usagi/` ではなく、この shared daemon directory に保存する。最初の
 起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。lifecycle

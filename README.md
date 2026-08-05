@@ -215,7 +215,9 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
 | `usagi daemon install-service` | macOS の LaunchAgent として daemon を登録する |
 
-`stop` / `restart` は live Agent や terminal があると拒否する。巻き添えにしてよい場合だけ `--force` を付ける。
+`restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
+安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。
+`--force` は live PTY を破棄してよい場合だけ使う。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
 macOS 以外では LaunchAgent の install / uninstall は利用できない。全コマンドの現在の動作は
 [実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
 
