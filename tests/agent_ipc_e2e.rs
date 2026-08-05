@@ -106,6 +106,19 @@ fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     write_codex_cli(bin, "codex", count, ready_status);
 }
 
+fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then\n  if [ -f '{}' ]; then echo $$ >> '{}'; trap '' TERM; while :; do :; done; fi\n  exit 0\nfi\nprintf '%s\\n' spawn >> '{}'\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        hang.display(),
+        probes.display(),
+        count.display(),
+    );
+    let path = bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Install a fixture Codex-grammar CLI under `program`.
 ///
 /// `sakana-ai` launches the Codex-compatible `codex-fugu`, so the two profiles
@@ -772,6 +785,85 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
         safe_readiness_error(client.request(request()).unwrap_err());
         assert!(!count.exists(), "readiness failure must not spawn the PTY");
     }
+}
+
+#[test]
+fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
+    let _serial = DAEMON_START_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    let hang = home.path().join("hang-readiness");
+    let probes = home.path().join("probe-pids");
+    write_switchable_hung_codex(&bin, &count, &hang, &probes);
+    let mut daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut foreground = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut foreground);
+    let (_, terminal) = launch(&mut foreground, workspace, session, None);
+    let subscription = attach(&mut foreground, &terminal);
+    fs::write(&hang, "hang").unwrap();
+
+    let mut launches = Vec::new();
+    for _ in 0..6 {
+        let data_dir = data_dir.clone();
+        launches.push(thread::spawn(move || {
+            client(&data_dir).request(DaemonRequest::Agent {
+                operation_id: OperationId::new().to_string(),
+                intent: launch_intent(workspace, session, None),
+            })
+        }));
+    }
+    assert!(
+        observe_until(Duration::from_secs(1), || probes.is_file()),
+        "hung readiness fixture did not start"
+    );
+
+    let available = Instant::now();
+    foreground
+        .request(DaemonRequest::AgentInventory { workspace })
+        .expect("Agent inventory remains available during readiness");
+    foreground
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal,
+                subscription,
+                input_seq: 0,
+                input_operation: None,
+                bytes: b"done\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("existing Agent terminal input remains available during readiness");
+    assert!(
+        available.elapsed() < Duration::from_secs(1),
+        "owner operations waited for readiness"
+    );
+
+    assert!(
+        daemon.terminate_and_wait(Duration::from_secs(5)),
+        "shutdown waited without bound for readiness"
+    );
+    for launch in launches {
+        let _ = launch.join().unwrap();
+    }
+    let pids = fs::read_to_string(&probes).unwrap();
+    assert_eq!(
+        pids.lines().count(),
+        1,
+        "concurrent launch burst exceeded one probe for its provider"
+    );
+    let pid = pids.trim().parse::<libc::pid_t>().unwrap();
+    // SAFETY: signal 0 only observes whether the recorded fixture PID remains.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
 }
 
 /// #609 product E2E: the `sakana-ai` profile launches the Codex-compatible
