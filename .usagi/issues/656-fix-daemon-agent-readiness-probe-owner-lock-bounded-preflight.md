@@ -1,14 +1,14 @@
 ---
 number: 656
 title: fix(daemon): Agent readiness probe を owner lock 外の bounded preflight にする
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, daemon, agent, freeze, process, resilience]
 dependson: []
 related: []
 parent: 654
 created_at: 2026-08-05T13:40:18.097359+00:00
-updated_at: 2026-08-05T22:18:25.532258+00:00
+updated_at: 2026-08-05T22:34:17.618865+00:00
 ---
 
 ## Finding（P1 freeze / daemon availability）
