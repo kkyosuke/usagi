@@ -1506,6 +1506,10 @@ mod tests {
     fn steady_scrollback_append_evicts_one_row_independent_of_history_length() {
         const APPENDS: usize = 20_000;
 
+        let mut disabled = VecDeque::new();
+        assert!(!append_scrollback(&mut disabled, Vec::new(), 0));
+        assert!(disabled.is_empty());
+
         for retained_rows in [100, 1_000, SCROLLBACK_MAX] {
             let mut history = (0..retained_rows)
                 .map(|_| Vec::new())
