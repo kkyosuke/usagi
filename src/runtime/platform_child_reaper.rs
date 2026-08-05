@@ -111,6 +111,7 @@ fn reap_children(state: &ReaperState, lifetime: &Weak<()>) {
 #[cfg(all(test, unix))]
 mod tests {
     use std::process::{Command, Stdio};
+    use std::sync::{Arc, Weak};
     use std::time::{Duration, Instant};
 
     use super::{MAX_TRACKED_CHILDREN, PlatformChildReaper};
@@ -134,14 +135,9 @@ mod tests {
     }
 
     fn spawn(reaper: &PlatformChildReaper, command: &mut Command) {
-        loop {
-            match reaper.spawn(command) {
-                Ok(()) => return,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::yield_now();
-                }
-                Err(error) => panic!("helper spawn failed: {error}"),
-            }
+        while let Err(error) = reaper.spawn(command) {
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            std::thread::yield_now();
         }
     }
 
@@ -179,14 +175,22 @@ mod tests {
             ));
             spawn(&reaper, &mut command);
         }
+        wait_until(Duration::from_secs(5), || {
+            reaper.tracked() == Some(MAX_TRACKED_CHILDREN)
+        });
 
         let mut overflow = helper(&format!("touch '{}'", overflow_marker.display()));
-        assert_eq!(
-            reaper.spawn(&mut overflow).unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
+        let overflow_error = loop {
+            let error = reaper.spawn(&mut overflow).unwrap_err();
+            if error.to_string() == "platform child reaper is busy" {
+                std::thread::yield_now();
+            } else {
+                break error;
+            }
+        };
+        assert_eq!(overflow_error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(overflow_error.to_string(), "too many platform helpers");
         assert!(!overflow_marker.exists());
-        assert_eq!(reaper.tracked(), Some(MAX_TRACKED_CHILDREN));
 
         std::fs::remove_file(blocker).unwrap();
         wait_until(Duration::from_secs(5), || reaper.tracked() == Some(0));
@@ -203,6 +207,15 @@ mod tests {
             std::io::ErrorKind::NotFound
         );
         assert_eq!(reaper.tracked(), Some(0));
+
+        let unavailable = PlatformChildReaper {
+            state: Weak::new(),
+            _lifetime: Arc::new(()),
+        };
+        assert_eq!(
+            unavailable.spawn(&mut helper("exit 0")).unwrap_err().kind(),
+            std::io::ErrorKind::Other
+        );
 
         let state = reaper.state.upgrade().unwrap();
         let guard = state.children.lock().unwrap();
