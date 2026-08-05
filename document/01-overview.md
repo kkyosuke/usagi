@@ -119,7 +119,7 @@ Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した
 session 名だけに作用し、現在選択中の row や root を暗黙の対象にしない。
 Overview の `daemon` は daemon health、process metrics、session 状態別件数、Agent concurrency をまとめた
-読み取り専用 modal を開く。`16/16` は session 数ではなく Agent runtime 枠であり、live Agent は対象 tab の
+読み取り専用 modal を開く。daemon の Agent runtime 一覧も scope、状態、短縮 ID とともに表示し、live Agent は対象 tab の
 `Ctrl-D` で終了する。表示内容と未報告時の縮退は [TUI の Overview と modal](03-tui.md#overview-と-modal) を正本とする。
 左ペインは terminal の wake-up ごとに daemon の session snapshot を再取得するため、MCP など別クライアントが
 作成・削除した session も表示へ反映する。session command の実行中は、その完了時の snapshot で同じ同期を行う。
