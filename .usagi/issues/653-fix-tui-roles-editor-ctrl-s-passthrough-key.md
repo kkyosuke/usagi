@@ -1,5 +1,5 @@
 ---
-number: 646
+number: 653
 title: fix(tui): Roles editor の Ctrl-S 保存が passthrough_key で握り潰される
 status: todo
 priority: high
