@@ -3264,7 +3264,7 @@ fn open_agent_runtime(
 }
 
 fn start_agent_observer(
-    agent: std::sync::Weak<Mutex<AgentRuntime>>,
+    agent: std::sync::Weak<SharedAgentState>,
     observations: Receiver<AgentPtyObservation>,
     projection: Arc<PrProjectionQueue>,
     supervisor: SharedSupervisorRuntime,
