@@ -5,7 +5,8 @@
 //! registered:
 //!
 //! 1. **single-instance guard** — if a live daemon already holds the record,
-//!    refuse rather than launch a second one;
+//!    refuse rather than launch a second one; stale or unverified records enter
+//!    signal-free, singleton-lock-fenced recovery;
 //! 2. **launch** — spawn a detached `serve` process;
 //! 3. **confirm** — poll `daemon.json` until the launched process registers a
 //!    live record, then report its pid; time out if it never does.
@@ -22,6 +23,7 @@ use usagi_core::domain::daemon::{DaemonState, classify};
 use usagi_core::infrastructure::daemon::{DaemonLauncher, LivenessProbe, Sleeper};
 
 use crate::usecase::serve::DaemonRecordPort;
+use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 
 /// How many times to poll for the launched daemon's record before giving up.
 /// At the synthesis root's ~50ms sleep this is a ~2s window.
@@ -43,6 +45,7 @@ pub fn start(
     probe: &dyn LivenessProbe,
     launcher: &dyn DaemonLauncher,
     sleeper: &dyn Sleeper,
+    stale_cleanup: &dyn StaleDaemonCleanup,
     info: &AppInfo,
 ) -> io::Result<String> {
     let existing = store.load()?;
@@ -61,15 +64,26 @@ pub fn start(
                 "{describe}: daemon already running (pid {running})"
             ));
         }
-        DaemonState::Unverified => {
-            return Err(io::Error::other(
-                "daemon owner identity is unverified; refusing to start a replacement",
-            ));
+        // Process identity is signal authority, not reclaim authority.  Stale
+        // and unverified records both enter the same signal-free transaction:
+        // production acquires daemon.lock, rechecks the complete record, and
+        // retires its endpoint before clearing it. A live owner keeps the lock,
+        // so an undecidable PID never authorizes either a signal or cleanup.
+        DaemonState::Stale(_) | DaemonState::Unverified => {
+            let record = existing
+                .as_ref()
+                .expect("classify reports a present non-absent state only for a record");
+            match stale_cleanup.cleanup_if(store, record)? {
+                StaleCleanup::Cleared => {}
+                StaleCleanup::Superseded => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "daemon ownership changed during startup recovery",
+                    ));
+                }
+            }
         }
-        // Both stale reasons prove the recorded owner is gone, so a replacement
-        // is safe: the launched `serve` still has to win the singleton lock and
-        // reclaim the leftover endpoint before it registers.
-        DaemonState::Stale(_) | DaemonState::Absent => {}
+        DaemonState::Absent => {}
     }
 
     let pid = launch_and_confirm(store, probe, launcher, sleeper)?;
@@ -111,11 +125,14 @@ pub(crate) fn launch_and_confirm(
 mod tests {
     use super::start;
     use crate::test_support::{
-        FixedProbe, InMemoryRecordFile, NoopSleeper, ObservedAs, TestLauncher,
+        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, TestLauncher,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
     use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe};
+
+    use crate::usecase::serve::DaemonRecordPort;
+    use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 
     fn info() -> AppInfo {
         AppInfo {
@@ -139,13 +156,62 @@ mod tests {
         }
     }
 
+    /// Treats only the pre-migration record as ownership-unknown. The daemon
+    /// registered by the launcher represents a current identified owner.
+    struct LegacyPidProbe(u32);
+
+    impl LivenessProbe for LegacyPidProbe {
+        fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
+            if record.pid == self.0 {
+                DaemonProcessObservation::Unknown
+            } else {
+                DaemonProcessObservation::Exact
+            }
+        }
+    }
+
+    struct BusyCleanup;
+
+    impl StaleDaemonCleanup for BusyCleanup {
+        fn cleanup_if(
+            &self,
+            _store: &dyn DaemonRecordPort,
+            _expected: &DaemonRecord,
+        ) -> std::io::Result<StaleCleanup> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "daemon singleton lock is held",
+            ))
+        }
+    }
+
+    struct SupersededCleanup;
+
+    impl StaleDaemonCleanup for SupersededCleanup {
+        fn cleanup_if(
+            &self,
+            _store: &dyn DaemonRecordPort,
+            _expected: &DaemonRecord,
+        ) -> std::io::Result<StaleCleanup> {
+            Ok(StaleCleanup::Superseded)
+        }
+    }
+
     #[test]
     fn launches_and_reports_the_registered_pid() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // The launcher mimics the spawned serve registering pid 5555.
         let launcher = TestLauncher::registering(&store, 5555);
         assert_eq!(
-            start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).unwrap(),
+            start(
+                &store,
+                &FixedProbe(true),
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon started (pid 5555)"
         );
     }
@@ -158,7 +224,15 @@ mod tests {
         // A launcher that would register 5555 if wrongly called.
         let launcher = TestLauncher::registering(&store, 5555);
         assert_eq!(
-            start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).unwrap(),
+            start(
+                &store,
+                &FixedProbe(true),
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon already running (pid 1111)"
         );
         // The launcher was not invoked — the record is untouched.
@@ -170,26 +244,83 @@ mod tests {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // An idle launcher spawns nothing, so no record ever appears.
         let launcher = TestLauncher::idle(&store);
-        assert!(start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).is_err());
+        assert!(
+            start(
+                &store,
+                &FixedProbe(true),
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn refuses_to_replace_an_unverified_record() {
+    fn reclaims_an_unverified_record_without_signalling_then_starts() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
         store.save(&existing).unwrap();
         let launcher = TestLauncher::registering(&store, 5555);
+        assert_eq!(
+            start(
+                &store,
+                &LegacyPidProbe(existing.pid),
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon started (pid 5555)"
+        );
+        assert_eq!(launcher.launches(), 1);
+        assert_ne!(store.load().unwrap(), Some(existing));
+    }
+
+    #[test]
+    fn unverified_recovery_refusal_preserves_record_and_never_launches() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let existing = DaemonRecord::new(1111);
+        store.save(&existing).unwrap();
+        let launcher = TestLauncher::registering(&store, 5555);
+
         let error = start(
             &store,
-            &ObservedAs(DaemonProcessObservation::Unknown),
+            &LegacyPidProbe(existing.pid),
             &launcher,
             &NoopSleeper,
+            &BusyCleanup,
             &info(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("identity is unverified"));
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         assert_eq!(launcher.launches(), 0);
         assert_eq!(store.load().unwrap(), Some(existing));
+    }
+
+    #[test]
+    fn ownership_change_during_recovery_is_busy_and_never_launches() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let existing = DaemonRecord::new(1111);
+        store.save(&existing).unwrap();
+        let launcher = TestLauncher::registering(&store, 5555);
+
+        let error = start(
+            &store,
+            &LegacyPidProbe(existing.pid),
+            &launcher,
+            &NoopSleeper,
+            &SupersededCleanup,
+            &info(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(error.to_string().contains("ownership changed"));
+        assert_eq!(launcher.launches(), 0);
     }
 
     #[test]
@@ -205,6 +336,7 @@ mod tests {
                 &ReusedPidProbe(stale.pid),
                 &launcher,
                 &NoopSleeper,
+                &NoopReady,
                 &info()
             )
             .unwrap(),
@@ -225,6 +357,16 @@ mod tests {
     fn propagates_load_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
         let launcher = TestLauncher::idle(&store);
-        assert!(start(&store, &FixedProbe(true), &launcher, &NoopSleeper, &info()).is_err());
+        assert!(
+            start(
+                &store,
+                &FixedProbe(true),
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .is_err()
+        );
     }
 }

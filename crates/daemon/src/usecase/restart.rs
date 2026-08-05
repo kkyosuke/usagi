@@ -49,8 +49,7 @@ pub fn restart<F: RecordFile, P: LivenessProbe, T: Terminator, L: DaemonLauncher
 mod tests {
     use super::restart;
     use crate::test_support::{
-        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, ObservedAs, RecordingTerminator,
-        TestLauncher,
+        FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
@@ -140,6 +139,20 @@ mod tests {
         }
     }
 
+    /// Reports the seeded legacy pid as unverified and every replacement as
+    /// its exact owner.
+    struct LegacyPidProbe(u32);
+
+    impl LivenessProbe for LegacyPidProbe {
+        fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
+            if record.pid == self.0 {
+                DaemonProcessObservation::Unknown
+            } else {
+                DaemonProcessObservation::Exact
+            }
+        }
+    }
+
     #[test]
     fn reclaims_a_reused_pid_record_then_starts_one_replacement() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
@@ -169,28 +182,30 @@ mod tests {
     }
 
     #[test]
-    fn refuses_an_unverified_owner_before_launching_anything() {
+    fn reclaims_an_unverified_owner_without_signalling_then_restarts() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
         store.save(&existing).unwrap();
         let terminator = RecordingTerminator::default();
         let launcher = TestLauncher::registering(&store, 5555);
 
-        let error = restart(
-            &store,
-            &ObservedAs(DaemonProcessObservation::Unknown),
-            &terminator,
-            &launcher,
-            &NoopSleeper,
-            &NoopReady,
-            &info(),
-        )
-        .unwrap_err();
+        assert_eq!(
+            restart(
+                &store,
+                &LegacyPidProbe(existing.pid),
+                &terminator,
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon restarted (pid 5555)"
+        );
 
-        assert!(error.to_string().contains("identity is unverified"));
         assert!(terminator.terminated().is_empty());
-        assert_eq!(launcher.launches(), 0);
-        assert_eq!(store.load().unwrap(), Some(existing));
+        assert_eq!(launcher.launches(), 1);
+        assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
     }
 
     #[test]

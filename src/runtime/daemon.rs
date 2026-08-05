@@ -6028,7 +6028,7 @@ fn private_lock_error(label: &str, detail: &str) -> std::io::Error {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PrivateLockModePolicy {
     CrashResidue,
-    BootstrapLegacy0644,
+    OwnerLegacy0644,
 }
 
 fn verify_private_lock_metadata(
@@ -6042,7 +6042,7 @@ fn verify_private_lock_metadata(
     let mode_is_safe = match mode_policy {
         None => mode == 0o600,
         Some(PrivateLockModePolicy::CrashResidue) => mode & !0o600 == 0,
-        Some(PrivateLockModePolicy::BootstrapLegacy0644) => mode & !0o600 == 0 || mode == 0o644,
+        Some(PrivateLockModePolicy::OwnerLegacy0644) => mode & !0o600 == 0 || mode == 0o644,
     };
     if !metadata.is_file()
         || metadata.uid() != unsafe { libc::geteuid() }
@@ -8249,7 +8249,7 @@ impl WorkspaceFence for FileWorkspaceFence {
         let file = open_private_lock(
             &self.path,
             "daemon workspace fence",
-            PrivateLockModePolicy::CrashResidue,
+            PrivateLockModePolicy::OwnerLegacy0644,
         )?;
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -8310,7 +8310,7 @@ impl InstanceLock for FileInstanceLock {
         let file = open_private_lock(
             &self.path,
             "daemon instance lock",
-            PrivateLockModePolicy::CrashResidue,
+            PrivateLockModePolicy::OwnerLegacy0644,
         )?;
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -9231,16 +9231,17 @@ fn recover_stale_client_endpoint_with(
         Some(&expected),
         ExactProcessControl.observe(&expected),
     ) {
-        // Owner gone or its pid reused: the OS has proved the recorded
-        // incarnation no longer exists, so its endpoint is reclaimable.
-        usagi_core::domain::daemon::DaemonState::Stale(_) => {}
+        // A stale owner is process-verified gone. An unverified legacy PID is
+        // not signal authority, but this callback is entered only after a
+        // validated current locator was unreachable. In both cases the held
+        // singleton lock is reclaim authority: after the exact-record recheck,
+        // no active owner can be displaced and no PID is addressed.
+        usagi_core::domain::daemon::DaemonState::Stale(_)
+        | usagi_core::domain::daemon::DaemonState::Unverified => {}
         usagi_core::domain::daemon::DaemonState::Alive => {
             return Ok(bootstrap::StaleRecovery::OwnerActive);
         }
-        // Ownership undecided, or the record vanished under us: preserve every
-        // artifact.
-        usagi_core::domain::daemon::DaemonState::Unverified
-        | usagi_core::domain::daemon::DaemonState::Absent => {
+        usagi_core::domain::daemon::DaemonState::Absent => {
             return Ok(bootstrap::StaleRecovery::NotProven);
         }
     }
@@ -9374,7 +9375,7 @@ fn acquire_bootstrap_lock_within(
         lock_private_exclusive(
             &path,
             "bootstrap lock",
-            PrivateLockModePolicy::BootstrapLegacy0644,
+            PrivateLockModePolicy::OwnerLegacy0644,
             wait,
         )
     })();
@@ -10175,6 +10176,24 @@ mod tests {
     }
 
     #[test]
+    fn workspace_fence_narrows_the_exact_legacy_owner_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let fence = workspace_fence(workspace.path(), 4242);
+        std::fs::create_dir_all(fence.workspace.join(paths::STATE_DIR)).unwrap();
+        ensure_private_dir(fence.path.parent().unwrap()).unwrap();
+        std::fs::write(&fence.path, []).unwrap();
+        std::fs::set_permissions(&fence.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(fence.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+        assert_eq!(
+            std::fs::metadata(&fence.path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn workspace_fence_refuses_through_a_symlinked_or_relative_spelling() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
         let workspace = root.path().join("workspace");
@@ -10354,6 +10373,22 @@ mod tests {
                 & 0o777,
             0o640
         );
+
+        // Pre-identity daemon builds created their singleton lock through the
+        // process umask. The exact owner/single-link 0644 residue is narrowed
+        // through the validated descriptor; no other broad mode is accepted.
+        std::fs::set_permissions(&broad_instance_lock, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(broad_instance.acquire().unwrap());
+        assert_eq!(
+            std::fs::metadata(&broad_instance_lock)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(broad_instance);
         std::fs::remove_file(&broad_instance_lock).unwrap();
 
         let instance_target = daemon.join("instance-target");
@@ -11073,12 +11108,11 @@ mod tests {
     }
 
     #[test]
-    fn client_bootstrap_recovery_and_stop_agree_on_an_unverified_owner() {
+    fn client_bootstrap_reclaims_an_unverified_owner_without_signalling() {
         use std::mem::ManuallyDrop;
 
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         let data = directory.path();
-        let info = daemon_test_info();
         let daemon = data.join("daemon");
         let mut listener =
             ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
@@ -11086,9 +11120,10 @@ mod tests {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon.join("daemon.json"),
         });
-        // A legacy record carries no identity, so ownership stays undecided. Both
-        // the bootstrap recovery and the lifecycle `stop` read the same
-        // observation through the same domain decision, so neither reclaims it.
+        // A legacy record carries no signal identity. The live PID therefore
+        // remains unverified, but daemon.lock proves this process does not own
+        // the active role. Recovery reclaims the endpoint without ever
+        // addressing that PID.
         let record = DaemonRecord::new(std::process::id());
         store.save(&record).unwrap();
         assert_eq!(
@@ -11098,22 +11133,17 @@ mod tests {
 
         assert_eq!(
             recover_stale_client_endpoint(data).unwrap(),
-            bootstrap::StaleRecovery::NotProven
+            bootstrap::StaleRecovery::Recovered
         );
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!socket.exists());
+        assert!(!daemon.join("current.json").exists());
         assert!(
-            usagi_daemon::usecase::stop::stop(
-                &store,
-                &ExactProcessControl,
-                &SigtermTerminator,
-                &RealSleeper,
-                &fresh_ipc_ready(data, &info),
-                &info,
-            )
-            .is_err()
+            ExactProcessControl
+                .process_start_identity(std::process::id())
+                .is_ok(),
+            "recovery must not signal the unverified PID"
         );
-        assert_eq!(store.load().unwrap(), Some(record));
-        assert!(socket.exists());
-        assert!(daemon.join("current.json").exists());
 
         // SAFETY: the listener has not moved and still owns normal cleanup.
         unsafe { ManuallyDrop::drop(&mut listener) };
