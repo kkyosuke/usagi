@@ -274,20 +274,21 @@ impl TerminalScreen {
     }
 
     fn retained_row_count(&self) -> usize {
-        self.screen.scrollback().len() + self.screen.grid().len()
+        self.screen.scrollback_len() + self.screen.grid().len()
     }
 
     fn retained_row(&self, row: usize) -> &[Cell] {
-        let scrollback = self.screen.scrollback();
-        if row < scrollback.len() {
-            &scrollback[row]
+        if row < self.screen.scrollback_len() {
+            self.screen
+                .scrollback_row(row)
+                .expect("row is bounded by scrollback_len")
         } else {
-            &self.screen.grid()[row - scrollback.len()]
+            &self.screen.grid()[row - self.screen.scrollback_len()]
         }
     }
 
     fn cursor_retained_row(&self) -> usize {
-        self.screen.scrollback().len() + self.screen.cursor().0
+        self.screen.scrollback_len() + self.screen.cursor().0
     }
 
     fn logical_scan_range(&self, start: usize, end: usize, count: usize) -> (usize, usize) {
