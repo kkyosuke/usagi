@@ -1,13 +1,13 @@
 ---
 number: 651
 title: docs: restart の拒否のみを説明する README/overview が実装の seamless rollover と食い違う
-status: in-progress
+status: done
 priority: medium
 labels: [review, v2, docs, daemon]
 dependson: []
 related: []
 created_at: 2026-08-05T01:02:16.964086+00:00
-updated_at: 2026-08-05T09:03:44.898914+00:00
+updated_at: 2026-08-05T09:05:24.313582+00:00
 ---
 
 ## 出典
