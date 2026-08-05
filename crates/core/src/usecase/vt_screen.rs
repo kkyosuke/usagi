@@ -1746,6 +1746,22 @@ mod tests {
         assert_eq!(screen.grid()[0][3].style(), "\u{1b}[1;4;31m");
     }
 
+    #[test]
+    fn sgr_parser_fails_closed_for_malformed_legacy_and_parameters() {
+        assert_eq!(SgrState::from_style("\u{1b}[31"), SgrState::default());
+        assert_eq!(SgrState::from_style("not-sgr"), SgrState::default());
+
+        let mut state = SgrState::default();
+        state.apply("");
+        state.apply("1;;31");
+        assert_eq!(state.canonical(), "\u{1b}[31m");
+
+        state.apply("38;5;7;48;2;1;2;3");
+        assert_eq!(state.canonical(), "\u{1b}[38;5;7;48;2;1;2;3m");
+        state.apply("38;9;999");
+        assert_eq!(state.canonical(), "\u{1b}[38;5;7;48;2;1;2;3m");
+    }
+
     // ----- ScreenCheckpoint round-trip and bounded/hostile decode -----
 
     /// Builds a screen and feeds each chunk in order.
