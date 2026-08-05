@@ -1018,8 +1018,10 @@ invariant で再検証し、それ以降の owner directory component は parent
 socket discovery と process lifecycle discovery は別の fence を使う。`current.json` は generation endpoint の owner
 を、`daemon.json` は daemon process の `(pid, process_start_identity, started_at)` を示す。client lifecycle は PID
 の存在だけで record を active / stale と判断しない。OS process-start identity が保存値と一致する場合だけ active、
-PID が存在しない場合だけ reclaimable stale とし、legacy identity 欠落、PID reuse、観測失敗は unverified として
-locator と record を保持する。exact owner signal と lifecycle cleanup の順序は
+PIDが存在しない場合とprocess-start identity mismatchはreclaimable staleとし、legacy identity欠落と観測失敗は
+unverifiedとする。exact owner signalはidentity一致時だけ許す一方、到達不能endpointのcleanupは`daemon.lock`取得と
+record全体の再照合を別のreclaim authorityとして使う。lockまたは再照合を証明できなければlocatorとrecordを保持する。
+exact owner signal と lifecycle cleanup の順序は
 [5. daemon](05-daemon.md#daemon-process-lifecycle) を正本とする。
 
 `ServerHello.daemon_process` は server の自己申告であり、単独では lifecycle authority にならない。client は established
