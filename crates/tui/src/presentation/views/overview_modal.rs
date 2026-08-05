@@ -230,6 +230,15 @@ impl OverviewModal {
         self.expanded = false;
     }
 
+    /// Insert one bracketed-paste payload at the current caret, replacing any
+    /// active selection just like ordinary typing.
+    pub fn paste(&mut self, text: &str) {
+        self.input.insert_str(text);
+        self.selected = 0;
+        self.history_index = None;
+        self.expanded = false;
+    }
+
     /// キャレット手前の 1 文字を削除し、選択を先頭に戻す。
     pub fn backspace(&mut self) {
         self.input.backspace();

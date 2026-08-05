@@ -214,6 +214,11 @@ impl CreateSessionForm {
         self.revalidate();
     }
 
+    fn paste(&mut self, text: &str) {
+        self.name.push_str(text);
+        self.revalidate();
+    }
+
     fn backspace(&mut self) {
         self.name.pop();
         self.revalidate();
@@ -1494,6 +1499,8 @@ pub enum AppKey {
     Tab,
     /// Delete the final character in the selected local form field.
     Backspace,
+    /// Insert one bracketed-paste payload into the focused Home input.
+    Paste(String),
     /// Ctrl-A / terminals that decode it as Home while Home is in Switch mode.
     CtrlA,
     /// Ctrl-O returns Closeup to Switch. It has no effect while already in Switch.
@@ -3282,6 +3289,11 @@ fn update_role_editor(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             editor.error = None;
             Vec::new()
         }
+        AppKey::Paste(text) if !editor.loading && !editor.saving => {
+            editor.source.push_str(text);
+            editor.error = None;
+            Vec::new()
+        }
         AppKey::Char(character) if !editor.loading && !editor.saving && !character.is_control() => {
             editor.source.push(*character);
             editor.error = None;
@@ -3386,6 +3398,9 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 editor.freeform.pop();
                 editor.error = None;
             }
+            AppKey::Paste(text) if editor.decision.allow_freeform => {
+                paste_decision_freeform(editor, &text);
+            }
             AppKey::SubmitDecision | AppKey::Enter => {
                 let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty()
                 {
@@ -3444,6 +3459,11 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
     }
     Vec::new()
+}
+
+fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
+    editor.freeform.push_str(text);
+    editor.error = None;
 }
 
 /// Open the pending-decision list and ask its owner for a fresh snapshot.
@@ -3541,6 +3561,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::Left
         | AppKey::Right
         | AppKey::Backspace
+        | AppKey::Paste(_)
         | AppKey::Home
         | AppKey::Char(_)
         | AppKey::CtrlC
@@ -3606,6 +3627,7 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
             }
             Some(Vec::new())
         }
+        AppKey::Paste(text) if notes_open => Some(paste_note_draft(state, text)),
         AppKey::CommitNoteDraft => Some(commit_note_draft(state)),
         AppKey::ToggleTodo(index) => {
             if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open)
@@ -3671,6 +3693,9 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
             }
             Some(Vec::new())
         }
+        AppKey::Paste(text) if environment_open => {
+            Some(paste_environment_draft(state, text, environment_open))
+        }
         AppKey::SaveEnvironment => Some(editable_environment(state, environment_open).map_or_else(
             Vec::new,
             |editor| {
@@ -3683,6 +3708,26 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
         )),
         _ => None,
     }
+}
+
+fn paste_note_draft(state: &mut AppState, text: &str) -> Vec<Effect> {
+    if let Some(editor) = state.note_editor.as_mut() {
+        editor.draft.push_str(text);
+        editor.error = None;
+    }
+    Vec::new()
+}
+
+fn paste_environment_draft(
+    state: &mut AppState,
+    text: &str,
+    environment_open: bool,
+) -> Vec<Effect> {
+    if let Some(editor) = editable_environment(state, environment_open) {
+        editor.draft.push_str(text);
+        editor.error = None;
+    }
+    Vec::new()
 }
 
 /// The environment editor when it owns input and accepts edits (no read or save
@@ -4282,6 +4327,10 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
         }
         AppKey::Backspace => {
             form.backspace();
+            Vec::new()
+        }
+        AppKey::Paste(text) => {
+            form.paste(text);
             Vec::new()
         }
         AppKey::Up => {
@@ -7918,6 +7967,93 @@ mod tests {
             created_at: chrono::Utc::now(),
             resolved_at: None,
         }
+    }
+
+    #[test]
+    fn paste_is_inserted_into_every_reducer_owned_home_input() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+
+        let mut notes = AppState::home(workspace, vec![session]);
+        let _ = update(&mut notes, AppEvent::Key(AppKey::OpenNotes));
+        let _ = update(
+            &mut notes,
+            AppEvent::Key(AppKey::SetNoteDraft("before ".to_owned())),
+        );
+        let _ = update(
+            &mut notes,
+            AppEvent::Key(AppKey::Paste("貼\n付".to_owned())),
+        );
+        assert_eq!(notes.note_editor().unwrap().draft(), "before 貼\n付");
+
+        let mut environment = AppState::home(workspace, vec![session]);
+        let _ = update(&mut environment, AppEvent::Key(AppKey::OpenEnvironment));
+        environment.environment_editor.as_mut().unwrap().loading = false;
+        let _ = update(
+            &mut environment,
+            AppEvent::Key(AppKey::SetEnvironmentDraft("TOKEN=".to_owned())),
+        );
+        let _ = update(
+            &mut environment,
+            AppEvent::Key(AppKey::Paste("long-value".to_owned())),
+        );
+        assert_eq!(
+            environment.environment_editor().unwrap().draft(),
+            "TOKEN=long-value"
+        );
+
+        let mut roles = AppState::home(workspace, Vec::new());
+        roles.overlay = Some(Overlay::Roles);
+        roles.role_editor = Some(RoleEditor {
+            scope: RoleEditorScope::Workspace,
+            source: "version = 1\n".to_owned(),
+            error: None,
+            loading: false,
+            saving: false,
+        });
+        let _ = update(
+            &mut roles,
+            AppEvent::Key(AppKey::Paste("[roles.dev]\nmodel = \"codex\"\n".to_owned())),
+        );
+        assert_eq!(
+            roles.role_editor().unwrap().source(),
+            "version = 1\n[roles.dev]\nmodel = \"codex\"\n"
+        );
+
+        let mut create = AppState::home(workspace, vec![session]);
+        let _ = update(&mut create, AppEvent::Key(AppKey::CtrlA));
+        let _ = update(&mut create, AppEvent::Key(AppKey::Char('a')));
+        let _ = update(
+            &mut create,
+            AppEvent::Key(AppKey::Paste("-pasted".to_owned())),
+        );
+        assert_eq!(create.create_session_form().unwrap().name(), "a-pasted");
+
+        let mut decision = pending_decision(workspace);
+        decision.allow_freeform = true;
+        let mut decisions = AppState::home(workspace, Vec::new());
+        let _ = update(&mut decisions, AppEvent::Key(AppKey::OpenDecisions));
+        let _ = update(
+            &mut decisions,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![decision],
+            }),
+        );
+        let _ = update(&mut decisions, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut decisions,
+            AppEvent::Key(AppKey::Paste("free form".to_owned())),
+        );
+        assert_eq!(
+            decisions
+                .decision_overlay()
+                .unwrap()
+                .editor()
+                .unwrap()
+                .freeform(),
+            "free form"
+        );
     }
 
     #[test]
