@@ -758,6 +758,11 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため、失敗 record を remove すれば同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
 | branch | available session の `session_remove` は branch `usagi/<name>` を残す（成果を保持するため）。failed session の remove と compensating teardown は `DeletePlan.delete_branch` を持ち、worktree 撤去の**後**に branch も削除する（checkout 中の branch は削除できない） |
+| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap し、終了済み・interrupted を含む Agent runtime record を durable inventory から除去してから worktree を撤去する。Agent の終了に失敗した場合は worktree を残して retry する |
+
+daemon 起動時にも session lifecycle の全 `SessionId` と Agent inventory を照合する。session record が既に無い
+Agent は旧 teardown が残した orphan として durable inventory と retention ledger から回収する。root Agent は
+`SessionId` を持たないため、この照合の対象外である。
 
 compensating teardown は、`session_delegate_brief` が作成したが dispatch に至らなかった session を巻き戻すために
 daemon 自身が admit する removal である。client が要求できる removal ではなく、force と branch 削除は payload で

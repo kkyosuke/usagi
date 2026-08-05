@@ -476,6 +476,28 @@ impl GenerationCoordinator {
         Ok(())
     }
 
+    /// Forgets a resolved terminal whose durable runtime record is being
+    /// deleted. Live ownership must be resolved first, so callers cannot use
+    /// record cleanup as an unfenced process kill or capacity release.
+    pub fn forget_terminal(&mut self, terminal: &TerminalRef) -> Result<(), GenerationError> {
+        let key = terminal_key(terminal);
+        let ownership = self
+            .terminals
+            .get(&key)
+            .filter(|known| known.terminal.fences(terminal))
+            .ok_or(GenerationError::TerminalOwnedElsewhere)?;
+        if matches!(
+            ownership.state,
+            TerminalState::Available
+                | TerminalState::OrphanRunning
+                | TerminalState::IdentityUnknown
+        ) {
+            return Err(GenerationError::TerminalUnavailable);
+        }
+        self.terminals.remove(&key);
+        Ok(())
+    }
+
     /// Retires a draining daemon only after every owned terminal is resolved.
     ///
     pub fn collect_draining(

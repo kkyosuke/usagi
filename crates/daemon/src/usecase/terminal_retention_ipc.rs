@@ -137,6 +137,12 @@ impl SharedTerminalRetention {
         self.with(|ledger| ledger.release(terminal))
     }
 
+    /// Drops an exact runtime's reservation, final, and eviction marker when
+    /// its owning scope is deleted.
+    pub fn forget(&self, terminal: &TerminalRef) -> bool {
+        self.with(|ledger| ledger.forget(terminal))
+    }
+
     /// Stores an admitted runtime's final into its reserved capacity. This
     /// never fails, so an exit result is never dropped to respect a cap.
     pub fn commit_final(

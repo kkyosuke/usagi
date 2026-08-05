@@ -2164,6 +2164,58 @@ impl AgentRuntime {
         self.coordinator.collect_garbage(&mut *self.store)
     }
 
+    /// Closes every Agent runtime belonging to a managed session.
+    ///
+    /// This is daemon-internal teardown, not a client-selected terminal kill:
+    /// the session lifecycle supplies the stable [`SessionId`], and each live
+    /// process is terminated only through its daemon-owned fenced terminal.
+    pub fn close_session(&mut self, session: SessionId) -> Result<usize, ProtocolError> {
+        let owned_operations = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.session_id == Some(session))
+            .map(|record| {
+                (
+                    record.runtime.agent_runtime_id,
+                    record.operation.operation_id.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let closed = self
+            .coordinator
+            .close_session(session, &mut *self.store, &mut *self.pty)
+            .map_err(map_runtime_error)?;
+        let runtime_ids = closed
+            .iter()
+            .map(|runtime| runtime.agent_runtime_id)
+            .collect::<Vec<_>>();
+        let operation_ids = owned_operations
+            .into_iter()
+            .filter(|(runtime, _)| runtime_ids.contains(runtime))
+            .map(|(_, operation)| operation)
+            .collect::<Vec<_>>();
+        self.operations
+            .retain(|operation, _| !operation_ids.contains(operation));
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(runtime));
+        Ok(closed.len())
+    }
+
+    /// Managed-session identities currently retained by the Agent owner.
+    #[must_use]
+    pub fn managed_session_ids(&self) -> std::collections::BTreeSet<SessionId> {
+        self.coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter_map(|record| record.runtime.session_id)
+            .collect()
+    }
+
     /// The resource ids this owner still answers for.
     ///
     /// Durable state of a generation that is gone may only be collected once
@@ -3299,6 +3351,44 @@ mod tests {
             ErrorCode::IdempotencyConflict,
             "the same identity with another intent stays a conflict"
         );
+    }
+
+    #[test]
+    fn session_close_removes_the_agent_from_runtime_inventory_and_replay() {
+        let mut runtime = runtime();
+        pty_mut(&mut runtime).terminate_success = true;
+        let session = SessionId::new();
+        let launch_intent = AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: Some(session),
+            profile: None,
+        };
+        let operation = OperationId::new().to_string();
+        runtime
+            .launch(&operation, &launch_intent, &FakeScope(Ok(scope())))
+            .unwrap();
+        let runtime_id = runtime.coordinator.snapshot().records[0]
+            .runtime
+            .agent_runtime_id;
+        runtime
+            .reported_phases
+            .insert(runtime_id, AgentPhase::Running);
+
+        assert_eq!(
+            runtime.managed_session_ids(),
+            [session].into_iter().collect()
+        );
+        assert_eq!(runtime.close_session(session).unwrap(), 1);
+        assert!(
+            runtime
+                .inventory(launch_intent.workspace)
+                .runtimes
+                .is_empty()
+        );
+        assert!(runtime.managed_session_ids().is_empty());
+        assert_eq!(runtime.operation_outcome(&operation), None);
+        assert!(runtime.mcp_callers.is_empty());
+        assert!(runtime.reported_phases.is_empty());
     }
 
     #[test]
