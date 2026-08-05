@@ -1261,11 +1261,17 @@ bounded queue への publish、drop 集計、wire snapshot はこの broker が�
 subscriber と drop count は 0 から始まる。TUI は push queue を登録せず snapshot を周期的に取得する。
 subscribe する client は再接続後に新しい observer を登録し、その queue を drain する。
 
-6 種類の長寿命 maintenance worker（PR refresh、session teardown、custody、retention GC、draining
-collection、decision maintenance）は共通の panic 境界を持つ。panic hook の診断ログに加え、境界は worker
-ごとの process-local failure bit を lock-free gauge に記録する。metrics broker は失敗 worker 数を snapshot に
-載せるため、worker が停止しても daemon health indicator が restart まで danger を表示する。通常の tick loop は
-追加の polling や lock を行わない。
+daemon の長寿命 worker は、maintenance 6 種（PR refresh、session teardown、custody、retention GC、draining
+collection、decision maintenance）と critical pipeline 3 種（Agent observer、generic terminal observer、PR
+projection）の closed vocabulary を共有する。共通境界は panic と unexpected normal exit の両方を worker ごとの
+process-local failure bit へ記録し、metrics broker は失敗 worker 数を snapshot に載せる。このため、worker が停止すると
+daemon health indicator は restart まで danger を表示する。
+
+owner-output observer または PR projection の異常終了は shared shutdown も要求する。failure cleanup は projection
+queue を閉じて producer を bounded refusal へ収束させ、observer receiver の終了は backpressure 中の PTY reader を
+channel disconnect で解放する。planned shutdown は failure bit を立てず、accept loop の lifecycle owner が source と
+projection を閉じた後、maintenance を含む全 worker handle を join する。worker vocabulary、health bitset の幅、worker
+count は `BackgroundWorker` が一元管理する。
 
 同じ snapshot は terminal retention で trim / coalesce した byte 数と、PTY observation queue で
 backpressure した byte 数も process-local counter として返す。counter と log は byte 数だけを扱い、

@@ -1,14 +1,14 @@
 ---
 number: 658
 title: fix(daemon): terminal observer / PR projection worker の停止を health と shutdown に接続する
-status: todo
+status: in-progress
 priority: high
 labels: [review, v2, daemon, terminal, worker, reliability, shutdown]
 dependson: []
 related: [555, 649]
 parent: 654
 created_at: 2026-08-05T13:40:18.929554+00:00
-updated_at: 2026-08-05T13:50:14.937981+00:00
+updated_at: 2026-08-05T23:03:49.808027+00:00
 ---
 
 ## Finding（P1 reliability / hidden stop）

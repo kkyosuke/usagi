@@ -1664,6 +1664,7 @@ enum AgentPtyObservation {
     /// exit is still committed by a process that can prove the child was its
     /// own, and the proof is released the instant that commit is behind us.
     Exited(TerminalRef, i32, Option<ChildRelease>),
+    Shutdown,
 }
 
 const PTY_OBSERVATION_QUEUE_ITEMS: usize = 64;
@@ -1908,6 +1909,7 @@ enum PtyObservation {
         i32,
         Option<ChildRelease>,
     ),
+    Shutdown,
 }
 
 struct DaemonPty {
@@ -1984,7 +1986,10 @@ impl GenericPtySpawner for DaemonPty {
                 let observation =
                     PtyObservation::Output(output_terminal.clone(), bytes[..count].to_vec());
                 if send_pty_observation(&output_sender, observation, count, &metrics).is_err() {
-                    break;
+                    // The lifecycle owner dropped the observer. Do not move on
+                    // to a child wait that could retain this reader forever;
+                    // returning also releases the child-identity proof.
+                    return;
                 }
             }
             if let Ok(status) = exit_pty
@@ -2314,6 +2319,64 @@ fn start_connection_cleanup_worker_with(
 use super::bootstrap;
 use super::launchd;
 
+/// Owns every daemon-wide worker from its first successful spawn.
+///
+/// Startup errors and accept-loop unwinds therefore take the same close-and-join
+/// path as planned shutdown instead of detaching the handles accumulated so far.
+struct DaemonBackgroundWorkers {
+    handles: Vec<std::thread::JoinHandle<()>>,
+    shutdown: Arc<ShutdownRequest>,
+    projection: Arc<PrProjectionQueue>,
+    agent_observations: Option<SyncSender<AgentPtyObservation>>,
+    terminal_observations: Option<SyncSender<PtyObservation>>,
+}
+
+impl DaemonBackgroundWorkers {
+    fn new(shutdown: Arc<ShutdownRequest>, projection: Arc<PrProjectionQueue>) -> Self {
+        Self {
+            handles: Vec::new(),
+            shutdown,
+            projection,
+            agent_observations: None,
+            terminal_observations: None,
+        }
+    }
+
+    fn bind_agent_observations(&mut self, sender: SyncSender<AgentPtyObservation>) {
+        self.agent_observations = Some(sender);
+    }
+
+    fn bind_terminal_observations(&mut self, sender: SyncSender<PtyObservation>) {
+        self.terminal_observations = Some(sender);
+    }
+
+    fn push(&mut self, handle: std::thread::JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    fn shutdown_and_join(&mut self) {
+        self.shutdown.request();
+        if let Some(sender) = self.agent_observations.take() {
+            let _ = sender.send(AgentPtyObservation::Shutdown);
+        }
+        if let Some(sender) = self.terminal_observations.take() {
+            let _ = sender.send(PtyObservation::Shutdown);
+        }
+        self.projection.close();
+        for worker in self.handles.drain(..) {
+            if worker.join().is_err() {
+                ErrorLog::record("daemon background worker panicked during shutdown");
+            }
+        }
+    }
+}
+
+impl Drop for DaemonBackgroundWorkers {
+    fn drop(&mut self) {
+        self.shutdown_and_join();
+    }
+}
+
 // IPC request routing remains in the composition adapter, and each argument is one
 // independently resolved startup fact (endpoint, generation, data directory, fenced
 // workspace, build, owner record, custody probe, shutdown); bundling them would only
@@ -2366,6 +2429,8 @@ fn spawn_ipc_server(
     // releasing the runtime lock, so no scan and no durable write happens inside
     // it (#555).
     let projection = Arc::new(PrProjectionQueue::new());
+    let mut background_workers =
+        DaemonBackgroundWorkers::new(Arc::clone(&shutdown), Arc::clone(&projection));
     let pipeline_metrics = Arc::new(TerminalPipelineMetrics::default());
     // One daemon-wide aggregate retention budget for exited terminal and Agent
     // finals (#526). Both owners reserve from it before spawning and commit
@@ -2373,6 +2438,7 @@ fn spawn_ipc_server(
     // tombstones without bound.
     let retention = usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new();
     let (pty, observations) = DaemonPty::new(Arc::clone(&pipeline_metrics), Arc::clone(&children));
+    background_workers.bind_terminal_observations(pty.observations.clone());
     let workspace_root = trusted_repository_root(&runtime)?;
     // The handshake fence compares a client's declared workspace against the
     // same trusted root the session runtime resolved, so a client working in
@@ -2398,12 +2464,18 @@ fn spawn_ipc_server(
         &children,
         hydrate_retained,
     )?;
-    start_terminal_observer(Arc::clone(&terminal), observations, Arc::clone(&projection))?;
+    background_workers.push(start_terminal_observer(
+        Arc::downgrade(&terminal),
+        observations,
+        Arc::clone(&projection),
+        Arc::clone(&shutdown),
+    )?);
     let (agent_pty, agent_observations) = AgentPty::new(
         terminal_environment(),
         Arc::clone(&pipeline_metrics),
         Arc::clone(&children),
     );
+    background_workers.bind_agent_observations(agent_pty.observations.clone());
     let mcp_command = std::env::current_exe()?;
     // The Agent runtime publishes the concurrency it admits from here, and the
     // metrics broker below reads it without taking the runtime's lock: a
@@ -2430,29 +2502,41 @@ fn spawn_ipc_server(
             "supervisor startup reconciliation deferred: {error}"
         ));
     }
-    start_agent_observer(
-        Arc::clone(&agent),
+    background_workers.push(start_agent_observer(
+        Arc::downgrade(&agent),
         agent_observations,
         Arc::clone(&projection),
         Arc::clone(&supervisor),
-    )?;
+        Arc::clone(&shutdown),
+    )?);
     // Socket workers only enqueue connection-local ledger cleanup. The single
     // consumer prevents a disconnect storm from retaining one accepted socket
     // triplet per worker while all of them contend on the terminal owners.
     let (disconnected, disconnects) = mpsc::sync_channel(CLIENT_CONNECTION_LIMIT);
     let connection_cleanup =
         start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
-    start_pr_projection_worker(Arc::clone(&pr_inventory), Arc::clone(&projection))?;
+    background_workers.push(start_pr_projection_worker(
+        Arc::clone(&pr_inventory),
+        Arc::clone(&projection),
+        Arc::clone(&shutdown),
+    )?);
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
-    start_decision_maintenance(Arc::clone(&decisions), Arc::clone(&shutdown))?;
-    start_pr_refresh_worker(Arc::clone(&pr_inventory), Arc::clone(&shutdown))?;
-    let teardown = start_session_teardown_worker(
+    background_workers.push(start_decision_maintenance(
+        Arc::clone(&decisions),
+        Arc::clone(&shutdown),
+    )?);
+    background_workers.push(start_pr_refresh_worker(
+        Arc::clone(&pr_inventory),
+        Arc::clone(&shutdown),
+    )?);
+    let (teardown, teardown_worker) = start_session_teardown_worker(
         Arc::clone(&runtime),
         Arc::clone(&agent),
         Arc::clone(&shutdown),
     )?;
+    background_workers.push(teardown_worker);
     // Before any client can observe them: roll back the sessions a delegation
     // created and then died before dispatching into.
     let compensated = reconcile_orphan_delegations(
@@ -2465,13 +2549,13 @@ fn spawn_ipc_server(
             "daemon startup compensated {compensated} delegated session(s) whose dispatch never started"
         ));
     }
-    start_retention_gc_worker(
+    background_workers.push(start_retention_gc_worker(
         Arc::clone(&terminal),
         Arc::clone(&agent),
         open_runtime_state(data_dir, daemon_generation, &children)?,
         Arc::clone(&shutdown),
-    )?;
-    start_draining_collection_worker(
+    )?);
+    background_workers.push(start_draining_collection_worker(
         open_runtime_state(data_dir, daemon_generation, &children)?,
         GenerationRegistry::new(
             GenerationRegistryFile::new(data_dir)?,
@@ -2481,15 +2565,15 @@ fn spawn_ipc_server(
         daemon_generation,
         Arc::clone(&workers),
         Arc::clone(&shutdown),
-    )?;
+    )?);
     if let Some(custody) = custody {
-        start_custody_worker(
+        background_workers.push(start_custody_worker(
             custody,
             owner,
             data_dir.to_path_buf(),
             fence.gate.clone(),
             Arc::clone(&shutdown),
-        )?;
+        )?);
     }
     start_ipc_accept_loop(
         listener,
@@ -2514,6 +2598,7 @@ fn spawn_ipc_server(
         workers,
         disconnected,
         connection_cleanup,
+        background_workers,
         shutdown,
     )
 }
@@ -2610,7 +2695,7 @@ fn bind_ipc_listener(
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
     shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<()> {
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_pr_refresh_worker(
         pr_inventory,
         shutdown,
@@ -2620,7 +2705,6 @@ fn start_pr_refresh_worker(
         },
         PR_REFRESH_TICK,
     )
-    .map(|_| ())
 }
 
 fn spawn_pr_refresh_worker<R, C>(
@@ -2637,7 +2721,7 @@ where
     std::thread::Builder::new()
         .name("usagi-pr-refresh".to_string())
         .spawn(move || {
-            let _worker_health = shutdown.monitor_background_worker(BackgroundWorker::PrRefresh);
+            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::PrRefresh);
             let mut worker =
                 RefreshWorker::new(runner, clock, PR_REFRESH_PER_TICK, PR_REFRESH_FRESHNESS_MS);
             if let Ok(mut projector) = pr_inventory.lock()
@@ -2669,6 +2753,7 @@ where
                     break;
                 }
             }
+            worker_health.finish_planned();
         })
 }
 
@@ -2684,9 +2769,9 @@ fn start_session_teardown_worker(
     sessions: SharedSessionRuntime,
     agent: SharedAgentRuntime,
     shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<Arc<TeardownSignal>> {
+) -> std::io::Result<(Arc<TeardownSignal>, std::thread::JoinHandle<()>)> {
     let signal = Arc::new(TeardownSignal::new());
-    spawn_session_teardown_worker(
+    let worker = spawn_session_teardown_worker(
         SharedSessionTeardown::new(sessions),
         AgentAndWorktreeTeardown {
             agent,
@@ -2696,7 +2781,7 @@ fn start_session_teardown_worker(
         shutdown,
         SESSION_TEARDOWN_TICK,
     )?;
-    Ok(signal)
+    Ok((signal, worker))
 }
 
 /// Orders session destruction so no Agent process or durable Agent inventory
@@ -2731,7 +2816,7 @@ where
     std::thread::Builder::new()
         .name("usagi-session-teardown".to_string())
         .spawn(move || {
-            let _worker_health =
+            let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::SessionTeardown);
             let cancel = Arc::clone(&shutdown);
             let cancelled = move || cancel.is_requested();
@@ -2767,6 +2852,7 @@ where
                 // finalization failed still needs retrying.
                 should_drain = signal.wait(tick) || retry_finalization;
             }
+            worker_health.finish_planned();
         })
 }
 
@@ -2781,8 +2867,8 @@ fn start_custody_worker(
     data_dir: PathBuf,
     gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<()> {
-    spawn_custody_worker(probe, owner, data_dir, gate, shutdown, CUSTODY_TICK).map(|_| ())
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_custody_worker(probe, owner, data_dir, gate, shutdown, CUSTODY_TICK)
 }
 
 fn spawn_custody_worker<P>(
@@ -2799,7 +2885,7 @@ where
     std::thread::Builder::new()
         .name("usagi-daemon-custody".to_string())
         .spawn(move || {
-            let _worker_health = shutdown.monitor_background_worker(BackgroundWorker::Custody);
+            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::Custody);
             while !shutdown.is_requested() {
                 // After a handoff this process deliberately no longer owns the
                 // lifecycle record. Its authority is the draining registry
@@ -2826,7 +2912,7 @@ where
                         // Request the same graceful shutdown a SIGTERM does, so
                         // endpoint retirement and record clearing stay on one path.
                         shutdown.request();
-                        return;
+                        break;
                     }
                     // An undecidable observation is not a loss: keep serving and
                     // re-evaluate on the next tick.
@@ -2836,6 +2922,7 @@ where
                     break;
                 }
             }
+            worker_health.finish_planned();
         })
 }
 
@@ -2863,7 +2950,7 @@ fn start_retention_gc_worker(
     agent: SharedAgentRuntime,
     durable: ShardedRuntimeState,
     shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<()> {
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     let limits = shipping_retention_limits();
     spawn_retention_gc_worker(
         move || {
@@ -2885,7 +2972,6 @@ fn start_retention_gc_worker(
         shutdown,
         RETENTION_GC_TICK,
     )
-    .map(|_| ())
 }
 
 /// The worker loop, with the collection step injected so a test can drive it
@@ -2901,13 +2987,14 @@ where
     std::thread::Builder::new()
         .name("usagi-retention-gc".to_string())
         .spawn(move || {
-            let _worker_health = shutdown.monitor_background_worker(BackgroundWorker::RetentionGc);
+            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::RetentionGc);
             while !shutdown.is_requested() {
                 collect();
                 if shutdown.wait_for_tick(tick) {
                     break;
                 }
             }
+            worker_health.finish_planned();
         })
 }
 
@@ -2920,7 +3007,7 @@ fn start_draining_collection_worker(
     generation: usagi_core::domain::id::DaemonGeneration,
     workers: Arc<ClientWorkers>,
     shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<()> {
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_draining_collection_worker(
         move || match collect_if_drained(&registry, &gate, &workers, generation, &durable) {
             Ok(Collection::Collected(report)) => {
@@ -2945,7 +3032,6 @@ fn start_draining_collection_worker(
         shutdown,
         DRAINING_COLLECTION_TICK,
     )
-    .map(|_| ())
 }
 
 /// The collection loop with the observation injected for deterministic tests.
@@ -2965,17 +3051,18 @@ where
     std::thread::Builder::new()
         .name("usagi-draining-collection".to_string())
         .spawn(move || {
-            let _worker_health =
+            let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::DrainingCollection);
             while !shutdown.is_requested() {
                 if collect() {
                     shutdown.request();
-                    return;
+                    break;
                 }
                 if shutdown.wait_for_tick(tick) {
                     break;
                 }
             }
+            worker_health.finish_planned();
         })
 }
 
@@ -3034,8 +3121,8 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 fn start_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
     shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<()> {
-    spawn_decision_maintenance(decisions, shutdown, DECISION_MAINTENANCE_TICK).map(|_| ())
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_decision_maintenance(decisions, shutdown, DECISION_MAINTENANCE_TICK)
 }
 
 /// The loop, with the tick injected so a test can drive it without waiting out
@@ -3048,7 +3135,7 @@ fn spawn_decision_maintenance(
     std::thread::Builder::new()
         .name("usagi-decision-maintenance".to_string())
         .spawn(move || {
-            let _worker_health =
+            let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::DecisionMaintenance);
             while !shutdown.is_requested() {
                 let _ = decisions.expire_due(chrono::Utc::now());
@@ -3057,6 +3144,7 @@ fn spawn_decision_maintenance(
                     break;
                 }
             }
+            worker_health.finish_planned();
         })
 }
 
@@ -3176,14 +3264,19 @@ fn open_agent_runtime(
 }
 
 fn start_agent_observer(
-    agent: SharedAgentRuntime,
+    agent: std::sync::Weak<Mutex<AgentRuntime>>,
     observations: Receiver<AgentPtyObservation>,
     projection: Arc<PrProjectionQueue>,
     supervisor: SharedSupervisorRuntime,
-) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("usagi-agent-observer".to_string())
-        .spawn(move || {
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let failed_projection = Arc::clone(&projection);
+    spawn_critical_worker(
+        "usagi-agent-observer",
+        BackgroundWorker::AgentObserver,
+        shutdown,
+        move || failed_projection.close(),
+        move |_| {
             while let Ok(observation) = observations.recv() {
                 match observation {
                     AgentPtyObservation::Output(reference, bytes) => {
@@ -3191,6 +3284,9 @@ fn start_agent_observer(
                         // nothing else. PR detection is submitted afterwards, so
                         // the lock is never held for a scan or for durable IO.
                         let committed = {
+                            let Some(agent) = agent.upgrade() else {
+                                break;
+                            };
                             let Ok(mut agent) = agent.lock() else {
                                 break;
                             };
@@ -3206,6 +3302,9 @@ fn start_agent_observer(
                     }
                     AgentPtyObservation::Exited(reference, status, release) => {
                         {
+                            let Some(agent) = agent.upgrade() else {
+                                break;
+                            };
                             let Ok(mut agent) = agent.lock() else {
                                 break;
                             };
@@ -3228,10 +3327,11 @@ fn start_agent_observer(
                             ));
                         }
                     }
+                    AgentPtyObservation::Shutdown => break,
                 }
             }
-        })
-        .map(|_| ())
+        },
+    )
 }
 
 /// Starts the only production PR projection worker.
@@ -3242,10 +3342,15 @@ fn start_agent_observer(
 fn start_pr_projection_worker(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
-) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("usagi-pr-projection".to_string())
-        .spawn(move || {
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let failed_projection = Arc::clone(&projection);
+    spawn_critical_worker(
+        "usagi-pr-projection",
+        BackgroundWorker::PrProjection,
+        shutdown,
+        move || failed_projection.close(),
+        move |_| {
             while let Some(item) = projection.recv() {
                 let Ok(mut projector) = pr_inventory.lock() else {
                     break;
@@ -3264,8 +3369,37 @@ fn start_pr_projection_worker(
                     }
                 }
             }
+        },
+    )
+}
+
+fn spawn_critical_worker<R, F>(
+    name: &str,
+    worker: BackgroundWorker,
+    shutdown: Arc<ShutdownRequest>,
+    on_failure: F,
+    run: R,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    R: FnOnce(&ShutdownRequest) + Send + 'static,
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let monitor = shutdown.monitor_background_worker(worker);
+            let result = panic::catch_unwind(AssertUnwindSafe(|| run(&shutdown)));
+            if result.is_ok() && shutdown.is_requested() {
+                monitor.finish_planned();
+            } else {
+                drop(monitor);
+                shutdown.request();
+                on_failure();
+            }
+            if let Err(payload) = result {
+                panic::resume_unwind(payload);
+            }
         })
-        .map(|_| ())
 }
 
 fn open_session_runtime(
@@ -3331,23 +3465,31 @@ fn new_terminal_runtime(
 }
 
 fn start_terminal_observer<S, Q>(
-    terminal: Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
+    terminal: std::sync::Weak<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
     projection: Arc<PrProjectionQueue>,
-) -> std::io::Result<()>
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>>
 where
     S: TerminalStore + Send + 'static,
     Q: TerminalScopeResolver + Send + 'static,
 {
-    std::thread::Builder::new()
-        .name("usagi-terminal-observer".to_string())
-        .spawn(move || {
+    let failed_projection = Arc::clone(&projection);
+    spawn_critical_worker(
+        "usagi-terminal-observer",
+        BackgroundWorker::TerminalObserver,
+        shutdown,
+        move || failed_projection.close(),
+        move |_| {
             while let Ok(observation) = observations.recv() {
                 match observation {
                     PtyObservation::Output(reference, bytes) => {
                         // As in the Agent observer: the lock covers journaling
                         // only, and PR detection happens after it is released.
                         let committed = {
+                            let Some(terminal) = terminal.upgrade() else {
+                                break;
+                            };
                             let Ok(mut terminal) = terminal.lock() else {
                                 break;
                             };
@@ -3363,6 +3505,9 @@ where
                     }
                     PtyObservation::Exited(reference, status, release) => {
                         {
+                            let Some(terminal) = terminal.upgrade() else {
+                                break;
+                            };
                             let Ok(mut terminal) = terminal.lock() else {
                                 break;
                             };
@@ -3373,10 +3518,11 @@ where
                         drop(release);
                         projection.submit_closed(reference.terminal_id, reference.session_id);
                     }
+                    PtyObservation::Shutdown => break,
                 }
             }
-        })
-        .map(|_| ())
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition owns the independently injected daemon services.
@@ -3400,6 +3546,7 @@ fn start_ipc_accept_loop(
     workers: Arc<ClientWorkers>,
     disconnected: SyncSender<ConnectionId>,
     connection_cleanup: std::thread::JoinHandle<()>,
+    mut background_workers: DaemonBackgroundWorkers,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     std::thread::Builder::new()
@@ -3669,6 +3816,12 @@ fn start_ipc_accept_loop(
             if connection_cleanup.join().is_err() {
                 ErrorLog::record("daemon connection cleanup worker panicked");
             }
+            // Stop every daemon-owned pipeline from the lifecycle owner, then
+            // join every retained handle. Observer receive timeouts make their
+            // source channels close promptly, unblocking a PTY reader that was
+            // backpressured in a bounded send. Projection is closed only after
+            // serving has stopped, and drains its already accepted work.
+            background_workers.shutdown_and_join();
             listener
         })
 }
@@ -12661,6 +12814,122 @@ mod tests {
     }
 
     #[test]
+    fn every_critical_worker_unexpected_return_requests_shutdown_and_closes_its_source() {
+        for worker in [
+            BackgroundWorker::AgentObserver,
+            BackgroundWorker::TerminalObserver,
+            BackgroundWorker::PrProjection,
+        ] {
+            let shutdown = Arc::new(ShutdownRequest::new());
+            let closed = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&closed);
+            let handle = spawn_critical_worker(
+                "injected-critical-worker",
+                worker,
+                Arc::clone(&shutdown),
+                move || observed.store(true, Ordering::Release),
+                |_| {},
+            )
+            .unwrap();
+
+            handle.join().unwrap();
+            assert!(
+                shutdown.is_requested(),
+                "{worker:?} did not stop the daemon"
+            );
+            assert!(
+                closed.load(Ordering::Acquire),
+                "{worker:?} source stayed open"
+            );
+            assert_eq!(shutdown.background_worker_health().failed_count(), 1);
+        }
+    }
+
+    #[test]
+    fn every_critical_worker_panic_is_recorded_before_unwind_and_requests_shutdown() {
+        for worker in [
+            BackgroundWorker::AgentObserver,
+            BackgroundWorker::TerminalObserver,
+            BackgroundWorker::PrProjection,
+        ] {
+            let shutdown = Arc::new(ShutdownRequest::new());
+            let closed = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&closed);
+            let handle = spawn_critical_worker(
+                "injected-critical-worker",
+                worker,
+                Arc::clone(&shutdown),
+                move || observed.store(true, Ordering::Release),
+                move |_| panic!("injected {worker:?} panic"),
+            )
+            .unwrap();
+
+            assert!(handle.join().is_err());
+            assert!(
+                shutdown.is_requested(),
+                "{worker:?} did not stop the daemon"
+            );
+            assert!(
+                closed.load(Ordering::Acquire),
+                "{worker:?} source stayed open"
+            );
+            assert_eq!(shutdown.background_worker_health().failed_count(), 1);
+        }
+    }
+
+    #[test]
+    fn planned_critical_worker_shutdown_joins_without_a_health_failure() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let handle = spawn_critical_worker(
+            "planned-critical-worker",
+            BackgroundWorker::AgentObserver,
+            Arc::clone(&shutdown),
+            || panic!("planned shutdown must not run failure cleanup"),
+            ShutdownRequest::wait_until_requested,
+        )
+        .unwrap();
+
+        shutdown.request();
+        handle.join().unwrap();
+        assert_eq!(shutdown.background_worker_health().failed_count(), 0);
+    }
+
+    #[test]
+    fn lifecycle_owner_closes_sources_and_joins_every_critical_worker() {
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let health = shutdown.background_worker_health();
+        let projection = Arc::new(PrProjectionQueue::new());
+        let joined = Arc::new(AtomicUsize::new(0));
+        let mut workers = DaemonBackgroundWorkers::new(shutdown, Arc::clone(&projection));
+
+        for worker in [
+            BackgroundWorker::AgentObserver,
+            BackgroundWorker::TerminalObserver,
+            BackgroundWorker::PrProjection,
+        ] {
+            let completed = Arc::clone(&joined);
+            workers.push(
+                spawn_critical_worker(
+                    "planned-critical-worker",
+                    worker,
+                    Arc::clone(&workers.shutdown),
+                    || panic!("planned shutdown must not run failure cleanup"),
+                    move |shutdown| {
+                        shutdown.wait_until_requested();
+                        completed.fetch_add(1, Ordering::AcqRel);
+                    },
+                )
+                .unwrap(),
+            );
+        }
+
+        drop(workers);
+        assert_eq!(joined.load(Ordering::Acquire), 3);
+        assert_eq!(health.failed_count(), 0);
+        assert_eq!(projection.recv(), None);
+    }
+
+    #[test]
     fn the_draining_collector_retries_observations_and_never_outlives_shutdown() {
         let shutdown = Arc::new(ShutdownRequest::new());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -13758,6 +14027,7 @@ instructions = "{instructions}"
                     assert_eq!(status, 0);
                     break;
                 }
+                PtyObservation::Shutdown => panic!("unexpected observer shutdown"),
             }
         }
     }
@@ -14089,6 +14359,7 @@ instructions = "{instructions}"
                 PtyObservation::Exited(_, status, _) => {
                     panic!("unexpected exit status {status}")
                 }
+                PtyObservation::Shutdown => panic!("unexpected observer shutdown"),
             }
         }
     }
@@ -14116,6 +14387,7 @@ instructions = "{instructions}"
                 AgentPtyObservation::Exited(_, status, _) => {
                     panic!("unexpected exit status {status}");
                 }
+                AgentPtyObservation::Shutdown => panic!("unexpected observer shutdown"),
             }
         }
     }
@@ -14141,7 +14413,13 @@ instructions = "{instructions}"
             GenerationRole::Active,
         ))));
         let projection = Arc::new(PrProjectionQueue::new());
-        start_pr_projection_worker(Arc::clone(&projector), Arc::clone(&projection)).unwrap();
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let worker = start_pr_projection_worker(
+            Arc::clone(&projector),
+            Arc::clone(&projection),
+            Arc::clone(&shutdown),
+        )
+        .unwrap();
         let session = SessionId::new();
         let terminal = TerminalId::new();
 
@@ -14199,9 +14477,11 @@ instructions = "{instructions}"
         // Closing retires the worker: `recv` returns `None` once drained. The
         // accept worker's guard is what closes it in production, including on an
         // unwind, so the guard's drop is the path under test.
+        shutdown.request();
         drop(ClosePrProjectionOnExit {
             projection: Arc::clone(&projection),
         });
+        worker.join().unwrap();
         assert_eq!(projection.recv(), None);
     }
 
@@ -14219,6 +14499,7 @@ instructions = "{instructions}"
         };
         let metrics = Arc::new(TerminalPipelineMetrics::default());
         let (pty, observations) = DaemonPty::new(metrics, Arc::new(SpawnedChildren::default()));
+        let observer_stop = pty.observations.clone();
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             TrustedLoginShell {
@@ -14234,14 +14515,21 @@ instructions = "{instructions}"
             },
         )));
         let projection = Arc::new(PrProjectionQueue::new());
-        start_terminal_observer(Arc::clone(&runtime), observations, Arc::clone(&projection))
-            .unwrap();
-        start_pr_projection_worker(
+        let shutdown = Arc::new(ShutdownRequest::new());
+        let observer = start_terminal_observer(
+            Arc::downgrade(&runtime),
+            observations,
+            Arc::clone(&projection),
+            Arc::clone(&shutdown),
+        )
+        .unwrap();
+        let projector = start_pr_projection_worker(
             Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
                 PrInventoryStore::new(directory.path()),
                 GenerationRole::Active,
             )))),
             Arc::clone(&projection),
+            Arc::clone(&shutdown),
         )
         .unwrap();
         let connection = ConnectionId::new();
@@ -14395,6 +14683,11 @@ instructions = "{instructions}"
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(runtime.lock().unwrap().exit(&terminal, 0).is_err());
+        shutdown.request();
+        observer_stop.send(PtyObservation::Shutdown).unwrap();
+        projection.close();
+        observer.join().unwrap();
+        projector.join().unwrap();
     }
 
     #[test]

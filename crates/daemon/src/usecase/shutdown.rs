@@ -17,7 +17,7 @@
 use std::{
     sync::{
         Arc, Condvar, Mutex, PoisonError,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -26,7 +26,7 @@ use std::{
 #[derive(Debug, Default)]
 pub struct ShutdownRequest {
     requested: Arc<AtomicBool>,
-    background_worker_failures: Arc<AtomicU8>,
+    background_worker_failures: Arc<AtomicU16>,
     // The mutex guards nothing but the notification itself: `requested` is the
     // authority. Locking it inside `request` before notifying is what orders the
     // store against a waiter's re-check, so no wakeup is lost.
@@ -46,7 +46,7 @@ impl ShutdownRequest {
     pub fn with_flag(requested: Arc<AtomicBool>) -> Self {
         Self {
             requested,
-            background_worker_failures: Arc::new(AtomicU8::new(0)),
+            background_worker_failures: Arc::new(AtomicU16::new(0)),
             guard: Mutex::new(()),
             changed: Condvar::new(),
         }
@@ -69,13 +69,14 @@ impl ShutdownRequest {
 
     /// Runs one long-lived worker behind the daemon's failure detector.
     ///
-    /// A panic is recorded before it resumes unwinding, so the process panic
-    /// hook still writes its ordinary diagnostic while metrics retain the fact
-    /// that this worker stopped until the daemon is restarted.
+    /// A panic or return not marked with
+    /// [`BackgroundWorkerMonitor::finish_planned`] is retained until restart.
+    /// The process panic hook remains responsible for its ordinary diagnostic.
     pub fn monitor_background_worker(&self, worker: BackgroundWorker) -> BackgroundWorkerMonitor {
         BackgroundWorkerMonitor {
             failures: Arc::clone(&self.background_worker_failures),
             worker,
+            planned: false,
         }
     }
 
@@ -136,8 +137,10 @@ impl ShutdownRequest {
     }
 }
 
-/// The fixed set of daemon maintenance workers whose unexpected exit disables
-/// a product feature until restart.
+/// The fixed set of daemon workers whose unexpected exit disables a product
+/// feature until restart.
+///
+/// This is the single authority for the health bitset and its cardinality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundWorker {
     PrRefresh,
@@ -146,24 +149,50 @@ pub enum BackgroundWorker {
     RetentionGc,
     DrainingCollection,
     DecisionMaintenance,
+    AgentObserver,
+    TerminalObserver,
+    PrProjection,
 }
 
 impl BackgroundWorker {
-    const fn bit(self) -> u8 {
-        1 << self as u8
+    pub const ALL: [Self; 9] = [
+        Self::PrRefresh,
+        Self::SessionTeardown,
+        Self::Custody,
+        Self::RetentionGc,
+        Self::DrainingCollection,
+        Self::DecisionMaintenance,
+        Self::AgentObserver,
+        Self::TerminalObserver,
+        Self::PrProjection,
+    ];
+
+    pub const COUNT: usize = Self::ALL.len();
+
+    const fn bit(self) -> u16 {
+        1 << self as u16
     }
 }
 
-/// A worker-lifetime guard that records only unwinding exits.
+/// A worker-lifetime guard that records every exit not explicitly completed as
+/// planned.
 #[derive(Debug)]
 pub struct BackgroundWorkerMonitor {
-    failures: Arc<AtomicU8>,
+    failures: Arc<AtomicU16>,
     worker: BackgroundWorker,
+    planned: bool,
+}
+
+impl BackgroundWorkerMonitor {
+    /// Marks the guarded worker's return as part of planned daemon shutdown.
+    pub fn finish_planned(mut self) {
+        self.planned = true;
+    }
 }
 
 impl Drop for BackgroundWorkerMonitor {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if !self.planned {
             self.failures.fetch_or(self.worker.bit(), Ordering::Release);
         }
     }
@@ -171,10 +200,10 @@ impl Drop for BackgroundWorkerMonitor {
 
 /// Cloneable, lock-free failure gauge consumed by display-only metrics.
 #[derive(Debug, Clone, Default)]
-pub struct BackgroundWorkerHealth(Arc<AtomicU8>);
+pub struct BackgroundWorkerHealth(Arc<AtomicU16>);
 
 impl BackgroundWorkerHealth {
-    /// Number of distinct maintenance workers that panicked in this process.
+    /// Number of distinct daemon workers that exited unexpectedly in this process.
     #[must_use]
     pub fn failed_count(&self) -> u8 {
         u8::try_from(self.0.load(Ordering::Acquire).count_ones()).unwrap_or(u8::MAX)
@@ -252,27 +281,35 @@ mod tests {
     #[test]
     fn every_background_worker_failure_is_retained_once() {
         let shutdown = ShutdownRequest::new();
-        for worker in [
-            BackgroundWorker::PrRefresh,
-            BackgroundWorker::SessionTeardown,
-            BackgroundWorker::Custody,
-            BackgroundWorker::RetentionGc,
-            BackgroundWorker::DrainingCollection,
-            BackgroundWorker::DecisionMaintenance,
-        ] {
+        for worker in BackgroundWorker::ALL {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let _monitor = shutdown.monitor_background_worker(worker);
                 panic!("injected");
             }));
             assert!(result.is_err());
         }
-        assert_eq!(shutdown.background_worker_health().failed_count(), 6);
+        assert_eq!(
+            shutdown.background_worker_health().failed_count(),
+            u8::try_from(BackgroundWorker::COUNT).unwrap()
+        );
 
         let duplicate = catch_unwind(AssertUnwindSafe(|| {
             let _monitor = shutdown.monitor_background_worker(BackgroundWorker::Custody);
             panic!("again");
         }));
         assert!(duplicate.is_err());
-        assert_eq!(shutdown.background_worker_health().failed_count(), 6);
+        assert_eq!(
+            shutdown.background_worker_health().failed_count(),
+            u8::try_from(BackgroundWorker::COUNT).unwrap()
+        );
+    }
+
+    #[test]
+    fn planned_worker_completion_is_not_a_failure() {
+        let shutdown = ShutdownRequest::new();
+        shutdown
+            .monitor_background_worker(BackgroundWorker::AgentObserver)
+            .finish_planned();
+        assert_eq!(shutdown.background_worker_health().failed_count(), 0);
     }
 }
