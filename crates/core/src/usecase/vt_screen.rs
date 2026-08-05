@@ -1505,10 +1505,24 @@ mod tests {
     #[test]
     fn steady_scrollback_append_evicts_one_row_independent_of_history_length() {
         const APPENDS: usize = 20_000;
+        let row = |ch| {
+            vec![Cell {
+                ch,
+                style: String::new(),
+                continuation: false,
+            }]
+        };
 
         let mut disabled = VecDeque::new();
         assert!(!append_scrollback(&mut disabled, Vec::new(), 0));
         assert!(disabled.is_empty());
+        let mut retained_while_disabled = VecDeque::from([row('a')]);
+        assert!(!append_scrollback(
+            &mut retained_while_disabled,
+            row('b'),
+            0
+        ));
+        assert_eq!(retained_while_disabled, VecDeque::from([row('a')]));
 
         for retained_rows in [100, 1_000, SCROLLBACK_MAX] {
             let mut history = (0..retained_rows)
@@ -1524,13 +1538,6 @@ mod tests {
             assert_eq!(eviction_visits, APPENDS);
         }
 
-        let row = |ch| {
-            vec![Cell {
-                ch,
-                style: String::new(),
-                continuation: false,
-            }]
-        };
         let mut history = VecDeque::from([row('a'), row('b'), row('c')]);
         assert!(append_scrollback(&mut history, row('d'), 3));
         assert_eq!(
