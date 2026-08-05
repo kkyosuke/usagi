@@ -632,6 +632,7 @@ mod tests {
     #[test]
     fn golden_frame_uses_display_columns_and_never_splits_wide_glyphs() {
         let rendered = frame(5, 2, &["A\u{1b}[31mあ\u{1b}[0mB", "界x"]);
+        assert_eq!(rendered, frame(5, 2, &["A\u{1b}[31mあ\u{1b}[0mB", "界x"]));
         assert!(matches!(
             rendered.cell(0, 0),
             Some(Cell::Glyph {
@@ -741,6 +742,8 @@ mod tests {
             Some(Cell::Glyph { width: 1, .. })
         ));
         assert_eq!(cell_text(&malformed, 0, 0), "\u{1b}X");
+        assert_eq!(malformed.glyph_text(0, &Cell::Empty), "");
+        assert_eq!(frame(2, 1, &["\u{1b}"]).cell(0, 0), Some(&Cell::Empty));
         assert_eq!(frame(2, 1, &["\u{1b}[31"]).cell(0, 0), Some(&Cell::Empty));
     }
 
