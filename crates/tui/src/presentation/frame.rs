@@ -6,6 +6,8 @@
 
 use unicode_width::UnicodeWidthChar;
 
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 const ESC: char = '\u{1b}';
 const RESET: &str = "\u{1b}[0m";
 
@@ -30,18 +32,24 @@ pub const INPUT_CURSOR_MARKER: char = '\u{e0002}';
 pub enum Cell {
     /// Nothing has been drawn at this column.
     Empty,
-    /// A visible scalar, its display width, and the ANSI SGR state active for it.
-    ///
-    /// `text` keeps only the escape sequences that must be emitted at this
-    /// position. `style` is retained separately so that an incremental render
-    /// also redraws every glyph whose already-drawn terminal attributes change.
+    /// A visible scalar, its display width, and compact frame-local references.
     Glyph {
-        text: String,
+        scalar: char,
         width: u8,
-        style: String,
+        text_start: u32,
+        text_len: u32,
+        style_id: u32,
     },
     /// The second column of the preceding double-width [`Cell::Glyph`].
     Continuation,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Row {
+    /// Concatenated render text for the row. Glyph cells reference byte ranges
+    /// in this buffer, so ordinary glyphs do not own individual `String`s.
+    text: String,
+    hash: u64,
 }
 
 impl Cell {
@@ -54,13 +62,30 @@ impl Cell {
 }
 
 /// A rectangular, display-column based terminal frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     width: usize,
     height: usize,
     cells: Vec<Cell>,
+    rows: Vec<Row>,
+    /// Canonical non-empty SGR states. ID zero always means the plain style.
+    styles: Vec<String>,
     input_cursor: Option<(usize, usize)>,
 }
+
+impl PartialEq for Frame {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.input_cursor == other.input_cursor
+            && (0..self.height).all(|row| {
+                self.rows[row].hash == other.rows[row].hash
+                    && (0..self.width).all(|column| cells_equal(self, other, row, column))
+            })
+    }
+}
+
+impl Eq for Frame {}
 
 impl Frame {
     /// Builds a grid of `width` columns and `height` rows from view lines.
@@ -77,8 +102,13 @@ impl Frame {
             width,
             height,
             cells: vec![Cell::Empty; width.saturating_mul(height)],
+            rows: vec![Row::default(); height],
+            styles: Vec::new(),
             input_cursor: None,
         };
+        for row in 0..height {
+            frame.rows[row].hash = frame.row_hash(row);
+        }
         for (row, line) in lines.into_iter().take(height).enumerate() {
             frame.set_line(row, line.as_ref());
         }
@@ -118,41 +148,49 @@ impl Frame {
         let mut pending_ansi = String::new();
         let mut active_style = String::new();
         let mut last_glyph = None;
-        let chars = line.chars().collect::<Vec<_>>();
-        let mut index = 0;
-        while index < chars.len() {
-            if chars[index] == INPUT_CURSOR_MARKER {
+        let mut row_text = String::with_capacity(line.len());
+        let mut chars = line.char_indices().peekable();
+        while let Some((byte_index, character)) = chars.next() {
+            if character == INPUT_CURSOR_MARKER {
                 // A focused form/modal must take precedence over a live
                 // terminal cursor that can still be present in its background.
                 self.input_cursor = Some((row, column));
-                index += 1;
                 continue;
             }
-            if chars[index] == TERMINAL_CURSOR_MARKER {
+            if character == TERMINAL_CURSOR_MARKER {
                 if self.input_cursor.is_none() {
                     self.input_cursor = Some((row, column));
                 }
-                index += 1;
                 continue;
             }
-            if chars[index] == '\u{1b}' {
-                let (sequence, consumed) = ansi_sequence(&chars[index..]);
-                pending_ansi.push_str(&sequence);
-                update_active_style(&mut active_style, &sequence);
-                index += consumed;
+            if character == ESC {
+                let (sequence, consumed_bytes) = ansi_sequence(&line[byte_index..]);
+                pending_ansi.push_str(sequence);
+                update_active_style(&mut active_style, sequence);
+                let sequence_end = byte_index + consumed_bytes;
+                while chars
+                    .peek()
+                    .is_some_and(|(next_index, _)| *next_index < sequence_end)
+                {
+                    let _ = chars.next();
+                }
                 continue;
             }
 
-            let glyph = chars[index];
-            let glyph_width = UnicodeWidthChar::width(glyph).unwrap_or(0);
-            index += 1;
+            let glyph_width = UnicodeWidthChar::width(character).unwrap_or(0);
             if glyph_width == 0 {
                 if let Some(last_glyph) = last_glyph
-                    && let Cell::Glyph { text, .. } = &mut self.cells[last_glyph]
+                    && let Cell::Glyph { text_len, .. } = &mut self.cells[last_glyph]
                 {
-                    text.push(glyph);
+                    row_text.push(character);
+                    *text_len = text_len
+                        .checked_add(
+                            u32::try_from(character.len_utf8())
+                                .expect("UTF-8 scalar length fits u32"),
+                        )
+                        .expect("frame row text length fits u32");
                 } else {
-                    pending_ansi.push(glyph);
+                    pending_ansi.push(character);
                 }
                 continue;
             }
@@ -160,12 +198,19 @@ impl Frame {
                 break;
             }
             let cell_index = row * self.width + column;
-            let mut text = std::mem::take(&mut pending_ansi);
-            text.push(glyph);
+            let text_start = u32::try_from(row_text.len()).expect("frame row text offset fits u32");
+            row_text.push_str(&pending_ansi);
+            pending_ansi.clear();
+            row_text.push(character);
+            let text_len =
+                u32::try_from(row_text.len()).expect("frame row text length fits u32") - text_start;
+            let style_id = self.intern_style(&active_style);
             self.cells[cell_index] = Cell::Glyph {
-                text,
+                scalar: character,
                 width: u8::try_from(glyph_width).expect("unicode display width fits in u8"),
-                style: active_style.clone(),
+                text_start,
+                text_len,
+                style_id,
             };
             for offset in 1..glyph_width {
                 self.cells[cell_index + offset] = Cell::Continuation;
@@ -174,10 +219,71 @@ impl Frame {
             column += glyph_width;
         }
         if let Some(last_glyph) = last_glyph.filter(|_| !pending_ansi.is_empty())
-            && let Cell::Glyph { text, .. } = &mut self.cells[last_glyph]
+            && let Cell::Glyph { text_len, .. } = &mut self.cells[last_glyph]
         {
-            text.push_str(&pending_ansi);
+            row_text.push_str(&pending_ansi);
+            *text_len = text_len
+                .checked_add(u32::try_from(pending_ansi.len()).expect("ANSI text length fits u32"))
+                .expect("frame row text length fits u32");
         }
+        self.rows[row].text = row_text;
+        self.rows[row].hash = self.row_hash(row);
+    }
+
+    fn intern_style(&mut self, style: &str) -> u32 {
+        if style.is_empty() {
+            return 0;
+        }
+        if let Some(index) = self.styles.iter().position(|candidate| candidate == style) {
+            return u32::try_from(index + 1).expect("frame style count fits u32");
+        }
+        self.styles.push(style.to_owned());
+        u32::try_from(self.styles.len()).expect("frame style count fits u32")
+    }
+
+    fn style(&self, style_id: u32) -> &str {
+        if style_id == 0 {
+            ""
+        } else {
+            &self.styles[usize::try_from(style_id - 1).expect("style ID fits usize")]
+        }
+    }
+
+    fn glyph_text(&self, row: usize, cell: &Cell) -> &str {
+        let Cell::Glyph {
+            text_start,
+            text_len,
+            ..
+        } = cell
+        else {
+            return "";
+        };
+        let start = usize::try_from(*text_start).expect("text offset fits usize");
+        let end = start + usize::try_from(*text_len).expect("text length fits usize");
+        &self.rows[row].text[start..end]
+    }
+
+    fn row_hash(&self, row: usize) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for column in 0..self.width {
+            match self.cell(row, column).expect("row cell is inside frame") {
+                Cell::Empty => 0_u8.hash(&mut hasher),
+                Cell::Continuation => 1_u8.hash(&mut hasher),
+                cell @ Cell::Glyph {
+                    scalar,
+                    width,
+                    style_id,
+                    ..
+                } => {
+                    2_u8.hash(&mut hasher);
+                    scalar.hash(&mut hasher);
+                    width.hash(&mut hasher);
+                    self.glyph_text(row, cell).hash(&mut hasher);
+                    self.style(*style_id).hash(&mut hasher);
+                }
+            }
+        }
+        hasher.finish()
     }
 
     fn glyph_start(&self, row: usize, column: usize) -> usize {
@@ -204,9 +310,9 @@ impl Frame {
         // SGR 開始列がなくても `style` には現在の属性が残っているので、span の先頭で
         // 再出力する。これをしないと、後から追記された入力文字だけが terminal の
         // reset 後に白く描画される。
-        if let Some(Cell::Glyph {
-            text: glyph, style, ..
-        }) = self.cell(row, start)
+        if let Some(cell @ Cell::Glyph { style_id, .. }) = self.cell(row, start)
+            && let glyph = self.glyph_text(row, cell)
+            && let style = self.style(*style_id)
             && !style.is_empty()
             && !glyph.starts_with(ESC)
         {
@@ -215,7 +321,7 @@ impl Frame {
         for column in start..end {
             match self.cell(row, column).expect("span is inside frame") {
                 Cell::Empty => text.push(' '),
-                Cell::Glyph { text: glyph, .. } => text.push_str(glyph),
+                cell @ Cell::Glyph { .. } => text.push_str(self.glyph_text(row, cell)),
                 Cell::Continuation => {}
             }
         }
@@ -223,6 +329,19 @@ impl Frame {
             text.push_str(RESET);
         }
         text
+    }
+
+    #[cfg(test)]
+    fn resident_payload_bytes(&self) -> usize {
+        self.cells.capacity() * std::mem::size_of::<Cell>()
+            + self.rows.capacity() * std::mem::size_of::<Row>()
+            + self
+                .rows
+                .iter()
+                .map(|row| row.text.capacity())
+                .sum::<usize>()
+            + self.styles.capacity() * std::mem::size_of::<String>()
+            + self.styles.iter().map(String::capacity).sum::<usize>()
     }
 }
 
@@ -314,8 +433,11 @@ fn full_spans(frame: &Frame) -> Vec<Span> {
 fn diff_spans(previous: &Frame, next: &Frame) -> Vec<Span> {
     let mut spans = Vec::new();
     for row in 0..next.height {
+        if previous.rows[row].hash == next.rows[row].hash {
+            continue;
+        }
         let mut changed = (0..next.width)
-            .map(|column| previous.cell(row, column) != next.cell(row, column))
+            .map(|column| !cells_equal(previous, next, row, column))
             .collect::<Vec<_>>();
         expand_wide_glyph_changes(&mut changed, previous, next, row);
         let mut column = 0;
@@ -336,6 +458,37 @@ fn diff_spans(previous: &Frame, next: &Frame) -> Vec<Span> {
         }
     }
     spans
+}
+
+fn cells_equal(previous: &Frame, next: &Frame, row: usize, column: usize) -> bool {
+    match (previous.cell(row, column), next.cell(row, column)) {
+        (Some(Cell::Empty), Some(Cell::Empty))
+        | (Some(Cell::Continuation), Some(Cell::Continuation)) => true,
+        (
+            Some(
+                previous_cell @ Cell::Glyph {
+                    scalar: previous_scalar,
+                    width: previous_width,
+                    style_id: previous_style,
+                    ..
+                },
+            ),
+            Some(
+                next_cell @ Cell::Glyph {
+                    scalar: next_scalar,
+                    width: next_width,
+                    style_id: next_style,
+                    ..
+                },
+            ),
+        ) => {
+            previous_scalar == next_scalar
+                && previous_width == next_width
+                && previous.glyph_text(row, previous_cell) == next.glyph_text(row, next_cell)
+                && previous.style(*previous_style) == next.style(*next_style)
+        }
+        _ => false,
+    }
 }
 
 fn expand_wide_glyph_changes(changed: &mut [bool], previous: &Frame, next: &Frame, row: usize) {
@@ -362,16 +515,22 @@ fn expand_wide_glyph_changes(changed: &mut [bool], previous: &Frame, next: &Fram
     }
 }
 
-fn ansi_sequence(chars: &[char]) -> (String, usize) {
-    if chars.len() < 2 || chars[1] != '[' {
-        return (chars[0].to_string(), 1);
+fn ansi_sequence(text: &str) -> (&str, usize) {
+    let mut chars = text.char_indices();
+    let (_, first) = chars.next().expect("ANSI parser starts at ESC");
+    let Some((_, second)) = chars.next() else {
+        return (&text[..first.len_utf8()], first.len_utf8());
+    };
+    if second != '[' {
+        return (&text[..first.len_utf8()], first.len_utf8());
     }
-    for (index, character) in chars.iter().enumerate().skip(2) {
-        if ('\u{40}'..='\u{7e}').contains(character) {
-            return (chars[..=index].iter().collect(), index + 1);
+    for (index, character) in chars {
+        if ('\u{40}'..='\u{7e}').contains(&character) {
+            let consumed = index + character.len_utf8();
+            return (&text[..consumed], consumed);
         }
     }
-    (chars.iter().collect(), chars.len())
+    (text, text.len())
 }
 
 /// Reflect an ANSI SGR sequence in the state used for frame diffing. The
@@ -392,26 +551,96 @@ fn update_active_style(active_style: &mut String, sequence: &str) {
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell as CounterCell;
+
     use super::{
         Cell, Frame, FrameRenderer, INPUT_CURSOR_MARKER, Span, TERMINAL_CURSOR_MARKER,
         update_active_style,
     };
 
+    struct CountingAllocator;
+
+    thread_local! {
+        static COUNT_ALLOCATIONS: CounterCell<bool> = const { CounterCell::new(false) };
+        static ALLOCATION_COUNT: CounterCell<usize> = const { CounterCell::new(0) };
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: forwarding the unchanged allocation request to the system allocator.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                record_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: forwarding the unchanged allocation request to the system allocator.
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            if !pointer.is_null() {
+                record_allocation();
+            }
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            // SAFETY: `pointer` and `layout` came from the system allocator above.
+            unsafe { System.dealloc(pointer, layout) };
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: forwarding the unchanged reallocation request to the system allocator.
+            let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+            if !pointer.is_null() {
+                record_allocation();
+            }
+            pointer
+        }
+    }
+
+    fn record_allocation() {
+        COUNT_ALLOCATIONS.with(|enabled| {
+            if enabled.get() {
+                ALLOCATION_COUNT.with(|count| count.set(count.get() + 1));
+            }
+        });
+    }
+
+    fn count_allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_COUNT.with(|count| count.set(0));
+        COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+        let value = operation();
+        COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+        let count = ALLOCATION_COUNT.with(CounterCell::get);
+        (value, count)
+    }
+
     fn frame(width: usize, height: usize, lines: &[&str]) -> Frame {
         Frame::from_lines(width, height, lines)
+    }
+
+    fn cell_text(frame: &Frame, row: usize, column: usize) -> &str {
+        let cell = frame.cell(row, column).expect("cell exists");
+        frame.glyph_text(row, cell)
     }
 
     #[test]
     fn golden_frame_uses_display_columns_and_never_splits_wide_glyphs() {
         let rendered = frame(5, 2, &["A\u{1b}[31mあ\u{1b}[0mB", "界x"]);
-        assert_eq!(
+        assert_eq!(rendered, frame(5, 2, &["A\u{1b}[31mあ\u{1b}[0mB", "界x"]));
+        assert!(matches!(
             rendered.cell(0, 0),
-            Some(&Cell::Glyph {
-                text: "A".into(),
+            Some(Cell::Glyph {
+                scalar: 'A',
                 width: 1,
-                style: String::new(),
+                ..
             })
-        );
+        ));
         assert!(matches!(
             rendered.cell(0, 1),
             Some(Cell::Glyph { width: 2, .. })
@@ -458,7 +687,7 @@ mod tests {
     fn input_cursor_marker_is_not_drawn_and_tracks_its_display_cell() {
         let rendered = frame(8, 2, &[&format!("aあ{INPUT_CURSOR_MARKER}b"), ""]);
         assert_eq!(rendered.input_cursor(), Some((0, 3)));
-        assert!(matches!(rendered.cell(0, 3), Some(Cell::Glyph { text, .. }) if text == "b"));
+        assert_eq!(cell_text(&rendered, 0, 3), "b");
 
         let diff = FrameRenderer::new().render(rendered);
         assert_eq!(diff.input_cursor, Some((0, 3)));
@@ -497,19 +726,24 @@ mod tests {
         let combining = frame(2, 1, &["e\u{301}x"]);
         assert!(matches!(
             combining.cell(0, 0),
-            Some(Cell::Glyph { text, width: 1, .. }) if text == "e\u{301}"
+            Some(Cell::Glyph { width: 1, .. })
         ));
+        assert_eq!(cell_text(&combining, 0, 0), "e\u{301}");
         let leading_combining = frame(2, 1, &["\u{301}x"]);
         assert!(matches!(
             leading_combining.cell(0, 0),
-            Some(Cell::Glyph { text, width: 1, .. }) if text == "\u{301}x"
+            Some(Cell::Glyph { width: 1, .. })
         ));
+        assert_eq!(cell_text(&leading_combining, 0, 0), "\u{301}x");
 
         let malformed = frame(2, 1, &["\u{1b}X"]);
         assert!(matches!(
             malformed.cell(0, 0),
-            Some(Cell::Glyph { text, width: 1, .. }) if text == "\u{1b}X"
+            Some(Cell::Glyph { width: 1, .. })
         ));
+        assert_eq!(cell_text(&malformed, 0, 0), "\u{1b}X");
+        assert_eq!(malformed.glyph_text(0, &Cell::Empty), "");
+        assert_eq!(frame(2, 1, &["\u{1b}"]).cell(0, 0), Some(&Cell::Empty));
         assert_eq!(frame(2, 1, &["\u{1b}[31"]).cell(0, 0), Some(&Cell::Empty));
     }
 
@@ -652,5 +886,73 @@ mod tests {
                 text: "\u{1b}[0mok\u{1b}[0m".into(),
             }]
         );
+    }
+
+    #[test]
+    fn frame_allocations_scale_with_rows_and_style_runs_instead_of_glyphs() {
+        let plain_120 = vec!["x".repeat(120); 40];
+        let plain_240 = vec!["x".repeat(240); 40];
+        let styled_120 = vec![format!("\u{1b}[31m{}\u{1b}[0m", "x".repeat(120)); 40];
+        let styled_240 = vec![format!("\u{1b}[31m{}\u{1b}[0m", "x".repeat(240)); 40];
+
+        let (_, plain_120_allocations) =
+            count_allocations(|| Frame::from_lines(120, 40, &plain_120));
+        let (_, plain_240_allocations) =
+            count_allocations(|| Frame::from_lines(240, 40, &plain_240));
+        let (_, styled_120_allocations) =
+            count_allocations(|| Frame::from_lines(120, 40, &styled_120));
+        let (_, styled_240_allocations) =
+            count_allocations(|| Frame::from_lines(240, 40, &styled_240));
+
+        assert!(
+            plain_120_allocations <= 50,
+            "plain: {plain_120_allocations}"
+        );
+        assert!(
+            styled_120_allocations <= 140,
+            "styled: {styled_120_allocations}"
+        );
+        assert!(plain_240_allocations <= plain_120_allocations + 2);
+        assert!(styled_240_allocations <= styled_120_allocations + 2);
+    }
+
+    #[test]
+    fn two_frame_resident_payload_is_less_than_half_the_per_cell_string_model() {
+        #[allow(dead_code)]
+        enum LegacyCell {
+            Empty,
+            Glyph {
+                text: String,
+                width: u8,
+                style: String,
+            },
+            Continuation,
+        }
+
+        let lines = vec![format!("\u{1b}[31m{}\u{1b}[0m", "x".repeat(120)); 40];
+        let previous = Frame::from_lines(120, 40, &lines);
+        let next = Frame::from_lines(120, 40, &lines);
+        let current_payload = previous.resident_payload_bytes() + next.resident_payload_bytes();
+        let legacy_cell_storage = 2 * 120 * 40 * std::mem::size_of::<LegacyCell>();
+
+        assert!(
+            current_payload * 2 < legacy_cell_storage,
+            "current pair: {current_payload} bytes, legacy cell storage: {legacy_cell_storage} bytes"
+        );
+    }
+
+    #[test]
+    fn canonical_style_equality_does_not_depend_on_frame_local_ids() {
+        let mut renderer = FrameRenderer::new();
+        let _ = renderer.render(frame(
+            4,
+            2,
+            &["\u{1b}[31mred\u{1b}[0m", "\u{1b}[34mblue\u{1b}[0m"],
+        ));
+
+        let diff = renderer.render(frame(4, 2, &["new", "\u{1b}[34mblue\u{1b}[0m"]));
+
+        assert_eq!(diff.spans.len(), 1);
+        assert_eq!(diff.spans[0].row, 0);
     }
 }
