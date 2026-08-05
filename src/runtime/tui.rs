@@ -66,7 +66,8 @@ use usagi_tui::presentation::{
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
     EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
     RestoreConnectionPort, SerializedPaneLaunchPort, SessionCommandPort, SessionCommandResult,
-    SessionRefreshPort, Start, WorkspaceLoader, WorkspaceSnapshot,
+    SessionRefreshPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -3525,14 +3526,20 @@ fn load_workspace_state(
 
 struct FsWorkspaceLoader {
     storage: Storage,
+    create_completion: Option<mpsc::Receiver<WorkspaceCreateCompletion>>,
 }
 
 impl FsWorkspaceLoader {
+    fn new(storage: Storage) -> Self {
+        Self {
+            storage,
+            create_completion: None,
+        }
+    }
+
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=direct_workspace_production_composition_contract
     fn open_default() -> std::io::Result<Self> {
-        Ok(Self {
-            storage: Storage::open_default().map_err(io_error)?,
-        })
+        Ok(Self::new(Storage::open_default().map_err(io_error)?))
     }
 
     fn initialize_workspace_settings(&self, path: &Path) -> std::io::Result<()> {
@@ -3604,51 +3611,94 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .collect())
     }
 
-    fn create_workspace(&mut self, request: &NewRequest) -> std::io::Result<WorkspaceSnapshot> {
-        // 副作用（create_dir_all / git clone / registry 書き込み）の前に事前検証する。
-        // 既存 workspace・不正パスはここで安全な 1 行メッセージにして返し、何も作らないまま
-        // 呼び出し側（NewStep::Create 失敗枝）が draft を保って同画面で再試行できるようにする。
-        let (kind, target): (workspace_usecase::NewWorkspaceKind, &Path) = match request {
-            NewRequest::Clone { destination, .. } => {
-                (workspace_usecase::NewWorkspaceKind::Clone, destination)
-            }
-            NewRequest::Existing { path, .. } => {
-                (workspace_usecase::NewWorkspaceKind::Existing, path)
-            }
-        };
-        let registered = workspace_usecase::is_registered(
-            &self.storage.load_workspaces().map_err(io_error)?,
-            target,
-        );
-        workspace_usecase::preflight_new_workspace(kind, registered, probe_path(target))
-            .map_err(|error| io_error(error.message()))?;
+    fn dispatch_create(&mut self, effect: WorkspaceCreateEffect) -> std::io::Result<()> {
+        if self.create_completion.is_some() {
+            return Err(io_error("a workspace creation is already running"));
+        }
+        let storage_dir = self.storage.dir().to_path_buf();
+        let (completion_tx, completion_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("workspace-create".to_owned())
+            .spawn(move || {
+                let mut loader = FsWorkspaceLoader::new(Storage::new(storage_dir));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // Validate before directory, clone, or registry side effects.
+                    let (kind, target): (workspace_usecase::NewWorkspaceKind, &Path) =
+                        match &effect.request {
+                            NewRequest::Clone { destination, .. } => {
+                                (workspace_usecase::NewWorkspaceKind::Clone, destination)
+                            }
+                            NewRequest::Existing { path, .. } => {
+                                (workspace_usecase::NewWorkspaceKind::Existing, path)
+                            }
+                        };
+                    let registered = workspace_usecase::is_registered(
+                        &loader.storage.load_workspaces().map_err(io_error)?,
+                        target,
+                    );
+                    workspace_usecase::preflight_new_workspace(
+                        kind,
+                        registered,
+                        probe_path(target),
+                    )
+                    .map_err(|error| io_error(error.message()))?;
 
-        let path = match request {
-            NewRequest::Clone {
-                repository,
-                destination,
-                branch,
-            } => {
-                let parent = destination
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."));
-                let directory = destination
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| io_error("clone destination is not a valid directory name"))?;
-                std::fs::create_dir_all(parent)?;
-                git_clone(&SystemGit, parent, repository, directory, branch.as_deref())
-                    .map_err(io_error)?
+                    let path = match &effect.request {
+                        NewRequest::Clone {
+                            repository,
+                            destination,
+                            branch,
+                        } => {
+                            let parent = destination
+                                .parent()
+                                .filter(|parent| !parent.as_os_str().is_empty())
+                                .unwrap_or_else(|| Path::new("."));
+                            let directory = destination
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .ok_or_else(|| {
+                                    io_error("clone destination is not a valid directory name")
+                                })?;
+                            std::fs::create_dir_all(parent)?;
+                            git_clone(&SystemGit, parent, repository, directory, branch.as_deref())
+                                .map_err(io_error)?
+                        }
+                        NewRequest::Existing { path, name } => {
+                            workspace_usecase::register(&loader.storage, path, name, Utc::now())
+                                .map_err(io_error)?;
+                            path.clone()
+                        }
+                    };
+                    // Both modes finish through the same snapshot path as Open.
+                    loader.open(&path)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(io_error("workspace creation worker stopped unexpectedly"))
+                });
+                let _ = completion_tx.send(WorkspaceCreateCompletion {
+                    token: effect.token,
+                    request: effect.request,
+                    result,
+                });
+            })
+            .map_err(io_error)?;
+        self.create_completion = Some(completion_rx);
+        Ok(())
+    }
+
+    fn take_create_completion(&mut self) -> Option<WorkspaceCreateCompletion> {
+        let receiver = self.create_completion.as_ref()?;
+        match receiver.try_recv() {
+            Ok(completion) => {
+                self.create_completion = None;
+                Some(completion)
             }
-            NewRequest::Existing { path, name } => {
-                workspace_usecase::register(&self.storage, path, name, Utc::now())
-                    .map_err(io_error)?;
-                path.clone()
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.create_completion = None;
+                None
             }
-        };
-        // Clone / Existing どちらも、作成後は他の workspace と同じ open 経路で snapshot を得る。
-        self.open(&path)
+        }
     }
 }
 
@@ -3734,7 +3784,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let storage = Storage::open_default().map_err(io_error)?;
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
-        let mut loader = FsWorkspaceLoader { storage };
+        let mut loader = FsWorkspaceLoader::new(storage);
         let mut settings = PersistentSettingsPort::open()?;
         let mut backend_factory = ProductionBackendFactory;
         let mut splash = presentation::StartupSplash::new();
@@ -4099,12 +4149,12 @@ mod tests {
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{
         ControllerBackendFactory, ControllerHost, ControllerHostAction, RestoreConnectionPort,
-        WorkspaceSnapshot,
+        WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
         BackendEvent, Effect, EntryEvent, EntryState, EntryWorkspace, EnvironmentEntry, NewEvent,
-        NewForm, NewMode, NewState, Notice, Target, update_entry, update_new,
+        NewForm, NewMode, NewRequest, NewState, Notice, Target, update_entry, update_new,
     };
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
@@ -7406,7 +7456,7 @@ mod tests {
         };
         let storage = Storage::new(&global_dir);
         storage.save_settings(&initial).unwrap();
-        let loader = FsWorkspaceLoader { storage };
+        let loader = FsWorkspaceLoader::new(storage);
 
         loader.initialize_workspace_settings(&workspace).unwrap();
         let saved = WorkspaceSettingsStore::new(&workspace).load().unwrap();
@@ -7418,6 +7468,41 @@ mod tests {
             WorkspaceSettingsStore::new(&workspace).load().unwrap(),
             saved
         );
+    }
+
+    #[test]
+    fn workspace_loader_admits_one_create_worker_and_refluxes_its_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path().join("global")));
+        let request = NewRequest::Existing {
+            path: temporary.path().join("missing"),
+            name: "missing".to_owned(),
+        };
+        loader
+            .dispatch_create(WorkspaceCreateEffect {
+                token: WorkspaceCreateToken::new(7),
+                request: request.clone(),
+            })
+            .unwrap();
+        let busy = loader
+            .dispatch_create(WorkspaceCreateEffect {
+                token: WorkspaceCreateToken::new(8),
+                request: request.clone(),
+            })
+            .unwrap_err();
+        assert_eq!(busy.to_string(), "a workspace creation is already running");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let completion = loop {
+            if let Some(completion) = loader.take_create_completion() {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "create worker did not complete");
+            std::thread::yield_now();
+        };
+        assert_eq!(completion.token, WorkspaceCreateToken::new(7));
+        assert_eq!(completion.request, request);
+        assert!(completion.result.is_err());
     }
 
     #[test]

@@ -166,8 +166,8 @@ pub trait WorkspaceLoader {
     /// Returns an error when the registry cannot be mutated.
     fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>>;
 
-    /// Create a new workspace from a validated New-project request and return
-    /// the snapshot used to open it.
+    /// Dispatch one validated New-project operation without blocking the entry
+    /// loop. Implementations admit at most one operation at a time.
     ///
     /// A [`Clone`](controller::NewRequest::Clone) request fetches the repository
     /// into the destination directory; an
@@ -178,13 +178,47 @@ pub trait WorkspaceLoader {
     ///
     /// # Errors
     ///
-    /// Returns an error when cloning, registration, or opening the resulting
-    /// workspace fails. Callers keep the user's form draft so the operation can
-    /// be corrected and retried.
-    fn create_workspace(
-        &mut self,
-        request: &controller::NewRequest,
-    ) -> io::Result<WorkspaceSnapshot>;
+    /// Returns an error only when the operation cannot be dispatched. Clone,
+    /// registration, and open failures arrive through
+    /// [`take_create_completion`](Self::take_create_completion), correlated by
+    /// both token and request identity.
+    fn dispatch_create(&mut self, effect: WorkspaceCreateEffect) -> io::Result<()>;
+
+    /// Take the next completed New-project operation without waiting.
+    fn take_create_completion(&mut self) -> Option<WorkspaceCreateCompletion>;
+}
+
+/// Identity assigned by the entry loop to one workspace creation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorkspaceCreateToken(u64);
+
+impl WorkspaceCreateToken {
+    /// Build the next token owned by the entry loop.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the raw token for adapters and diagnostics.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Typed request sent from the New screen to its single background worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceCreateEffect {
+    pub token: WorkspaceCreateToken,
+    pub request: controller::NewRequest,
+}
+
+/// Background result refluxed to the entry loop.
+#[derive(Debug)]
+pub struct WorkspaceCreateCompletion {
+    pub token: WorkspaceCreateToken,
+    pub request: controller::NewRequest,
+    pub result: io::Result<WorkspaceSnapshot>,
 }
 
 /// entry 画面が [`WorkspaceLoader::open`] の失敗をその場で提示できるか判定する。

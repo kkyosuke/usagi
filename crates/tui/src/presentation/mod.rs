@@ -91,7 +91,10 @@ use crate::usecase::overview::SessionCommand;
 use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
 use usagi_core::usecase::settings::SettingsPort;
 
-pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
+pub use crate::usecase::application::{
+    WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader,
+    WorkspaceSnapshot,
+};
 
 /// Daemon-authoritative Agent launch boundary for the workspace runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1182,6 +1185,15 @@ enum NewStep {
     Back,
     /// 検証済みの入力で workspace 作成を実行する。screen graph が backend を 1 回呼ぶ。
     Create(NewRequest),
+}
+
+/// One create admitted by the entry loop. `cancelled` is a navigation fence:
+/// the worker may still finish, but its completion can no longer open a
+/// workspace after the user leaves New.
+struct PendingWorkspaceCreate {
+    token: WorkspaceCreateToken,
+    request: NewRequest,
+    cancelled: bool,
 }
 
 /// Open 画面のキー処理結果。
@@ -2532,6 +2544,17 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// フォームの確定（作成）は作成処理が入るまで留まる。
 #[allow(clippy::needless_pass_by_value)]
 fn step_new(form: &mut New, key: Key) -> NewStep {
+    if form.is_creating() {
+        return match key {
+            Key::Escape => NewStep::Back,
+            Key::Quit | Key::CtrlQ => NewStep::Quit,
+            Key::Other | Key::Resize => {
+                form.advance_create_animation();
+                NewStep::Stay
+            }
+            _ => NewStep::Stay,
+        };
+    }
     match key {
         Key::Up => {
             form.focus_prev();
@@ -6063,7 +6086,45 @@ pub fn run_screen_graph_with_backend(
     // background lane here — so a tick that leaves both unchanged draws
     // nothing (#554).
     let mut drawn_material: Option<EntryFrameMaterial> = None;
+    let mut next_create_token = 1_u64;
+    let mut pending_create: Option<PendingWorkspaceCreate> = None;
     loop {
+        let mut created_snapshot = None;
+        while let Some(completion) = loader.take_create_completion() {
+            let Some(pending) = pending_create.take_if(|pending| {
+                pending.token == completion.token && pending.request == completion.request
+            }) else {
+                continue;
+            };
+            new_form.finish_create();
+            if pending.cancelled {
+                let notice = match completion.result {
+                    Ok(_) => "creation finished after leaving; workspace was not opened".to_owned(),
+                    Err(error) => new_project_notice(&error),
+                };
+                new_form.set_notice(Some(notice));
+                continue;
+            }
+            match completion.result {
+                Ok(snapshot) => {
+                    new_form.set_notice(None);
+                    created_snapshot = Some(snapshot);
+                }
+                Err(error) => new_form.set_notice(Some(new_project_notice(&error))),
+            }
+        }
+        if let Some(snapshot) = created_snapshot {
+            welcome.record_opened(&snapshot.workspace);
+            open.record_opened(&snapshot.workspace);
+            if let Some(exit) =
+                enter_workspace(term, snapshot, settings, backend_factory, available_models)?
+            {
+                return Ok(exit);
+            }
+            screen = Screen::Welcome;
+            drawn_material = None;
+            continue;
+        }
         let (height, width) = term.size()?;
         let material = EntryFrameMaterial::new(
             height,
@@ -6084,7 +6145,16 @@ pub fn run_screen_graph_with_backend(
                 WelcomeStep::Stay => {}
                 WelcomeStep::Quit => return Ok(Exit::Quit),
                 WelcomeStep::OpenList => screen = Screen::Open,
-                WelcomeStep::NewForm => screen = Screen::New,
+                WelcomeStep::NewForm => {
+                    if pending_create
+                        .as_ref()
+                        .is_some_and(|pending| pending.cancelled)
+                    {
+                        new_form
+                            .set_notice(Some("previous creation is still finishing".to_owned()));
+                    }
+                    screen = Screen::New;
+                }
                 WelcomeStep::ConfigScreen => {
                     config_form = Config::load_with_available_models(settings, available_models);
                     screen = Screen::Config;
@@ -6171,26 +6241,39 @@ pub fn run_screen_graph_with_backend(
             Screen::New => match step_new(&mut new_form, key) {
                 NewStep::Stay => {}
                 NewStep::Quit => return Ok(Exit::Quit),
-                NewStep::Back => screen = Screen::Welcome,
-                NewStep::Create(request) => match loader.create_workspace(&request) {
-                    Ok(snapshot) => {
-                        new_form.set_notice(None);
-                        welcome.record_opened(&snapshot.workspace);
-                        open.record_opened(&snapshot.workspace);
-                        if let Some(exit) = enter_workspace(
-                            term,
-                            snapshot,
-                            settings,
-                            backend_factory,
-                            available_models,
-                        )? {
-                            return Ok(exit);
-                        }
-                        screen = Screen::Welcome;
+                NewStep::Back => {
+                    if let Some(pending) = pending_create.as_mut() {
+                        pending.cancelled = true;
+                        new_form.finish_create();
                     }
-                    // 失敗時は入力中の draft を保持したまま notice を出して同画面に留まる。
-                    Err(error) => new_form.set_notice(Some(new_project_notice(&error))),
-                },
+                    screen = Screen::Welcome;
+                }
+                NewStep::Create(request) => {
+                    if pending_create.is_some() {
+                        new_form
+                            .set_notice(Some("previous creation is still finishing".to_owned()));
+                        continue;
+                    }
+                    let token = WorkspaceCreateToken::new(next_create_token);
+                    next_create_token = next_create_token.wrapping_add(1);
+                    let effect = WorkspaceCreateEffect {
+                        token,
+                        request: request.clone(),
+                    };
+                    match loader.dispatch_create(effect) {
+                        Ok(()) => {
+                            pending_create = Some(PendingWorkspaceCreate {
+                                token,
+                                request,
+                                cancelled: false,
+                            });
+                            new_form.begin_create();
+                        }
+                        Err(error) => {
+                            new_form.set_notice(Some(new_project_notice(&error)));
+                        }
+                    }
+                }
             },
             Screen::Config => match step_config(&mut config_form, key, settings) {
                 ConfigStep::Stay => {}
@@ -6421,6 +6504,7 @@ mod tests {
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
+        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken,
         WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
         WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
         copy_terminal_selection, drain_session_completions, foreground_terminal_geometry,
@@ -17954,6 +18038,12 @@ mod tests {
         /// loader starts succeeding, standing in for a pre-flight rejection
         /// (e.g. the workspace already exists) that the user then corrects.
         create_failures: usize,
+        create_completions: VecDeque<WorkspaceCreateCompletion>,
+        held_create: Option<WorkspaceCreateCompletion>,
+        hold_create: bool,
+        dispatch_error: Option<&'static str>,
+        release_after_polls: Option<usize>,
+        completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
     }
 
@@ -17993,23 +18083,81 @@ mod tests {
             Ok(paths.to_vec())
         }
 
-        fn create_workspace(&mut self, request: &NewRequest) -> io::Result<WorkspaceSnapshot> {
-            self.created.push(request.clone());
-            if self.create_failures > 0 {
+        fn dispatch_create(&mut self, effect: WorkspaceCreateEffect) -> io::Result<()> {
+            if let Some(error) = self.dispatch_error {
+                return Err(io::Error::other(error));
+            }
+            self.created.push(effect.request.clone());
+            let completion = if self.create_failures > 0 {
                 self.create_failures -= 1;
                 // Mirror the real loader's pre-flight rejection: no workspace is
                 // created, so the caller keeps the draft and can retry.
-                return Err(io::Error::other(
-                    "this directory is already a registered workspace",
-                ));
-            }
-            // Both modes resolve to a directory that is then opened like any
-            // other workspace, mirroring the real loader.
-            let path = match request {
-                NewRequest::Clone { destination, .. } => destination.clone(),
-                NewRequest::Existing { path, .. } => path.clone(),
+                WorkspaceCreateCompletion {
+                    token: effect.token,
+                    request: effect.request.clone(),
+                    result: Err(io::Error::other(
+                        "this directory is already a registered workspace",
+                    )),
+                }
+            } else {
+                // Both modes resolve to a directory that is then opened like any
+                // other workspace, mirroring the real loader.
+                let path = match &effect.request {
+                    NewRequest::Clone { destination, .. } => destination.clone(),
+                    NewRequest::Existing { path, .. } => path.clone(),
+                };
+                let result = self.open(&path);
+                WorkspaceCreateCompletion {
+                    token: effect.token,
+                    request: effect.request.clone(),
+                    result,
+                }
             };
-            self.open(&path)
+            if self.completion_noise {
+                self.create_completions
+                    .push_back(WorkspaceCreateCompletion {
+                        token: WorkspaceCreateToken::new(effect.token.get() + 100),
+                        request: effect.request.clone(),
+                        result: Err(io::Error::other("stale completion")),
+                    });
+                self.create_completions
+                    .push_back(WorkspaceCreateCompletion {
+                        token: effect.token,
+                        request: NewRequest::Existing {
+                            path: PathBuf::from("wrong-request"),
+                            name: "wrong-request".to_owned(),
+                        },
+                        result: Err(io::Error::other("mismatched completion")),
+                    });
+            }
+            if self.hold_create {
+                self.held_create = Some(completion);
+            } else {
+                self.create_completions.push_back(completion);
+            }
+            if self.completion_noise {
+                self.create_completions
+                    .push_back(WorkspaceCreateCompletion {
+                        token: effect.token,
+                        request: effect.request,
+                        result: Err(io::Error::other("duplicate completion")),
+                    });
+            }
+            Ok(())
+        }
+
+        fn take_create_completion(&mut self) -> Option<WorkspaceCreateCompletion> {
+            if self.held_create.is_some()
+                && let Some(remaining) = self.release_after_polls.as_mut()
+            {
+                if *remaining == 0 {
+                    self.create_completions
+                        .push_back(self.held_create.take().expect("held create"));
+                } else {
+                    *remaining -= 1;
+                }
+            }
+            self.create_completions.pop_front()
         }
     }
 
@@ -18815,6 +18963,178 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hung_new_create_keeps_ticks_resize_escape_and_quit_responsive() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Other,
+            Key::Resize,
+            Key::Enter,
+            Key::Escape,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            hold_create: true,
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        // The second Enter is coalesced while the sole operation is pending.
+        assert_eq!(loader.created.len(), 1);
+        // Wake-up and resize each advance the spinner and redraw the New frame.
+        let loading_frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .filter(|frame| frame.contains("creating workspace"))
+            .collect::<Vec<_>>();
+        assert!(loading_frames.len() >= 3, "{loading_frames:?}");
+        assert_ne!(loading_frames[0], loading_frames[1]);
+        // Escape left the hung operation behind and Welcome processed Quit.
+        assert!(term.frames.last().unwrap().join("\n").contains("Menu"));
+    }
+
+    #[test]
+    fn loading_new_can_quit_without_waiting_for_create_completion() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            hold_create: true,
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.created.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_create_completion_after_reentry_never_opens_the_workspace() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Escape,
+            Key::Char('e'),
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            hold_create: true,
+            release_after_polls: Some(2),
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.created.len(), 1);
+        assert!(
+            term.frames
+                .iter()
+                .all(|frame| !frame.join("\n").contains("Overview"))
+        );
+        let last_new = term
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.join("\n").contains("New Project"))
+            .expect("re-entered New frame");
+        assert!(last_new.join("\n").contains('x'));
+    }
+
+    #[test]
+    fn reentered_new_refuses_resubmit_until_cancelled_failure_completes() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Escape,
+            Key::Char('e'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            fail: true,
+            hold_create: true,
+            release_after_polls: Some(3),
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.created.len(), 1);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("previous creation is still finishing"))
+        );
+        assert!(frames.iter().any(|frame| frame.contains("open failed")));
+    }
+
+    #[test]
+    fn stale_and_duplicate_create_completions_open_success_exactly_once() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        let mut loader = FakeLoader {
+            completion_noise: true,
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(loader.created.len(), 1);
+        assert_eq!(factory.drops_at_create.len(), 1);
+    }
+
     /// A workspace the daemon does not serve must not be shown: its session list
     /// would be the daemon's workspace under the opened workspace's name (#549).
     /// Both switcher entries stay up with the refusal instead of tearing the TUI
@@ -18963,6 +19283,83 @@ mod tests {
         let text = last_new.join("\n");
         assert!(text.contains("open failed")); // the failure notice
         assert!(text.contains('x')); // the draft path is retained
+    }
+
+    #[test]
+    fn new_form_keeps_the_draft_when_worker_dispatch_fails() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('e'),
+            Key::Right,
+            Key::Down,
+            Key::Char('x'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut loader = FakeLoader {
+            dispatch_error: Some("worker dispatch failed"),
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert!(loader.created.is_empty());
+        let last_new = term
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.join("\n").contains("New Project"))
+            .expect("still on the New screen after dispatch failed");
+        let text = last_new.join("\n");
+        assert!(text.contains("worker dispatch failed"));
+        assert!(text.contains('x'));
+    }
+
+    #[test]
+    fn failed_clone_retains_every_clone_draft_field_and_mode() {
+        let mut keys = vec![Key::Char('e'), Key::Down];
+        keys.extend("https://example.com/acme/app.git".chars().map(Key::Char));
+        keys.push(Key::Down);
+        keys.extend("/tmp".chars().map(Key::Char));
+        keys.push(Key::Down); // derived directory `app`
+        keys.push(Key::Down);
+        keys.extend("feature".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Quit]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            fail: true,
+            ..FakeLoader::default()
+        };
+
+        assert_eq!(
+            run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(
+            loader.created,
+            [NewRequest::Clone {
+                repository: "https://example.com/acme/app.git".to_owned(),
+                destination: PathBuf::from("/tmp/app"),
+                branch: Some("feature".to_owned()),
+            }]
+        );
+        let failed = term
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame.join("\n").contains("open failed"))
+            .expect("failed Clone frame");
+        let failed = crate::presentation::widgets::strip_ansi(&failed.join("\n"));
+        for value in [
+            "Clone",
+            "https://example.com/acme/app.git",
+            "/tmp",
+            "app",
+            "feature",
+        ] {
+            assert!(failed.contains(value), "missing {value}: {failed}");
+        }
     }
 
     #[test]
