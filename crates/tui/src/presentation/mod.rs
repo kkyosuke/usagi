@@ -625,6 +625,9 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
+        Key::Management { passthrough, .. } => {
+            return (!passthrough.is_empty()).then_some(passthrough);
+        }
         // Forward a paste as one bracketed-paste block so an agent that requested
         // the mode inserts the multi-line text instead of submitting on every
         // embedded newline (the fix for pasting clipboard into the agent).
@@ -2516,6 +2519,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
+        | Key::Management { .. }
         | Key::Paste(_)
         | Key::TerminalCopy { .. }
         | Key::Resize
@@ -2611,6 +2615,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
+        | Key::Management { .. }
         | Key::TerminalCopy { .. }
         | Key::Resize
         | Key::Other => NewStep::Stay,
@@ -2774,6 +2779,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         | Key::Click { .. }
         | Key::Pointer(_)
         | Key::Passthrough(_)
+        | Key::Management { .. }
         | Key::TerminalCopy { .. }
         | Key::Resize
         | Key::Other => OpenStep::Stay,
@@ -3166,6 +3172,7 @@ fn run_pane_launch(
 #[allow(clippy::needless_pass_by_value)]
 pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
     let app_key = match key {
+        Key::Management { action, .. } => return Some(AppEvent::Key(action)),
         Key::Live(action) => return live_action_to_app_key(action).map(AppEvent::Key),
         Key::Resize | Key::Other => return Some(AppEvent::Tick),
         Key::Up => AppKey::Up,
@@ -6576,6 +6583,13 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::CtrlQ),
             Some(AppEvent::Key(AppKey::CtrlQ))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            }),
+            Some(AppEvent::Key(AppKey::SaveRoles))
         );
     }
 
@@ -19544,6 +19558,13 @@ mod tests {
         assert_eq!(
             key_to_terminal_bytes(Key::Passthrough(vec![0xff])),
             Some(vec![0xff])
+        );
+        assert_eq!(
+            key_to_terminal_bytes(Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            }),
+            Some(vec![0x13])
         );
         // A paste is wrapped in bracketed-paste markers so the agent inserts the
         // multi-line text as one block; an empty paste sends nothing.

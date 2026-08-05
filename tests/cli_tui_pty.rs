@@ -1200,6 +1200,65 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     stop_daemon(&home);
 }
 
+#[test]
+fn real_pty_roles_editor_ctrl_s_persists_workspace_catalog() {
+    let _serial = serial();
+    let home = short_home();
+    let roots = tempfile::tempdir().unwrap();
+    let workspace = roots.path().join("roles-editor-workspace");
+    fs::create_dir(&workspace).unwrap();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .output()
+        .expect("workspace registers before the TUI opens it");
+    assert!(registered.status.success());
+    let roles = workspace.join(".usagi/roles.toml");
+    fs::create_dir_all(roles.parent().unwrap()).unwrap();
+    fs::write(&roles, "version = 1\n").unwrap();
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut child = spawn_hop(&home, &workspace, &slave).expect("TUI starts on the PTY");
+    open_registered_workspace(&mut master, &captured, baseline);
+
+    send(&mut master, b":");
+    wait_for_screen_since(&captured, baseline, "workspace commands");
+    send(&mut master, b"roles workspace\r");
+    wait_for_screen_since(&captured, baseline, "version = 1");
+    send(&mut master, b"# saved through ctrl-s");
+    send(&mut master, b"\x13");
+
+    let expected = "version = 1\n# saved through ctrl-s";
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if fs::read_to_string(&roles).ok().as_deref() == Some(expected) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Ctrl-S did not persist the Roles editor source"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    send(&mut master, b"\x1b");
+    assert!(quit_from_switch(&mut master, &mut child, &captured, baseline).success());
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+    stop_daemon(&home);
+}
+
 /// #556: leaving a workspace returns to Welcome inside the same process, and
 /// re-entering it from there completes instead of hanging. The workspace's ports
 /// are dropped on the way out, so the second entry establishes a fresh daemon

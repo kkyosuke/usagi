@@ -261,6 +261,13 @@ pub enum Key {
     /// Exact bytes classified as ordinary live-pane input.  This preserves
     /// backend-native key encodings for the focused daemon terminal.
     Passthrough(Vec<u8>),
+    /// A management chord with the exact bytes needed when a focused live pane
+    /// owns the same input. Home overlays reduce `action`; Closeup forwards
+    /// `passthrough` unchanged to the daemon terminal.
+    Management {
+        action: controller::AppKey,
+        passthrough: Vec<u8>,
+    },
     /// A bracketed paste delivered as one block. A focused live pane wraps it in
     /// bracketed-paste markers before forwarding it to the PTY so a multi-line
     /// paste is inserted as one block instead of submitting on every embedded
@@ -557,6 +564,10 @@ mod tests {
             Key::Click { column: 3, row: 4 },
             Key::Live(LiveTerminalAction::Switch),
             Key::Passthrough(b"passthrough".to_vec()),
+            Key::Management {
+                action: crate::usecase::application::controller::AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            },
             Key::Paste("multi\nline".to_owned()),
             Key::Other,
         ];

@@ -74,8 +74,9 @@ use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit,
 };
 use usagi_tui::usecase::application::controller::{
-    AppEvent, BackendEvent, EnvironmentEntry, NewRequest, Notice, RoleChoice, RoleEditorScope,
-    SafeError, SafeMessage, SessionRoleCatalog, SessionRoleProjection, Target,
+    AppEvent, AppKey, BackendEvent, EnvironmentEntry, NewRequest, Notice, RoleChoice,
+    RoleEditorScope, SafeError, SafeMessage, SessionRoleCatalog, SessionRoleProjection, Target,
+    classify_management_input,
 };
 use usagi_tui::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DecisionPort as BackendDecisionPort,
@@ -3455,6 +3456,12 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     if key.modifiers != Modifiers::default()
         && !(shift_only && matches!(key.code, KeyCode::Char(_)))
     {
+        if let Some(action @ AppKey::SaveRoles) = classify_management_input(input.clone()) {
+            return Key::Management {
+                action,
+                passthrough: bytes,
+            };
+        }
         return Key::Passthrough(bytes);
     }
     match key.code {
@@ -4005,7 +4012,7 @@ mod tests {
     const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
-        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, BackendTargetStorePort,
+        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, AppKey, BackendTargetStorePort,
         Completions, DaemonAgentCommandPort, DaemonDecisionCommandPort, DaemonReply, DaemonRequest,
         DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort, FsWorkspaceLoader, Geometry,
         LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
@@ -6610,6 +6617,22 @@ mod tests {
 
     #[test]
     fn modified_non_leader_keys_keep_their_terminal_bytes() {
+        let ctrl_s = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&ctrl_s, vec![0x13]),
+            Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            }
+        );
+
         let ctrl_r = LiveInput::Key(KeyEvent::new(
             KeyCode::Char('r'),
             Modifiers {
