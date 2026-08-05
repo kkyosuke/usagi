@@ -10,10 +10,10 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -64,8 +64,9 @@ use usagi_daemon::presentation::{
     DaemonCommand as PresentationDaemonCommand, DaemonEnv, ServeRole,
 };
 use usagi_daemon::usecase::agent_ipc::{
-    AGENT_RUNTIME_LIMIT, AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError,
-    SessionScopeResolver, SharedTerminalOwner, TerminalOutcome,
+    AGENT_RUNTIME_LIMIT, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor,
+    ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
+    TerminalOutcome,
 };
 use usagi_daemon::usecase::authority::activation::{
     AuthorityClaim, claim_authority, release_authority,
@@ -470,7 +471,6 @@ impl OutputJournal for DiscardJournal {
 /// session writer, so agents never receive a client supplied path.
 struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
-    readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
     /// The executable this profile launches: `codex`, or `codex-fugu` for the
@@ -489,9 +489,6 @@ impl CodexProvisioner for RootCodexProvisioner {
         &mut self,
         context: &ProvisionContext,
     ) -> Result<CodexProvision, CodexProvisionFailure> {
-        self.readiness
-            .ready(self.program)
-            .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let mode = sandbox_mode(context);
@@ -607,7 +604,6 @@ fn root_agent_writable_roots(
 }
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
-    readiness: Arc<dyn AgentReadinessProbe>,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
     /// daemon bootstrap の trusted environment から一度だけ確定した backend。
@@ -627,9 +623,6 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         &mut self,
         context: &ProvisionContext,
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
-        self.readiness
-            .ready(CLAUDE_PROGRAM)
-            .map_err(|()| ClaudeProvisionFailure::ExecutableUnavailable)?;
         let (working_directory, workspace_root) = working_directories(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
@@ -1296,7 +1289,42 @@ trait AgentReadinessProbe: Send + Sync {
     fn ready(&self, product: &str) -> Result<(), ()>;
 }
 
-struct SystemAgentReadiness;
+const AGENT_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+const AGENT_READINESS_TERMINATE_GRACE: Duration = Duration::from_millis(250);
+const AGENT_READINESS_POLL: Duration = Duration::from_millis(10);
+
+#[derive(Default)]
+struct ReadinessSlot {
+    running: bool,
+    result: Option<Result<(), ()>>,
+}
+
+#[derive(Default)]
+struct ReadinessState {
+    providers: BTreeMap<String, ReadinessSlot>,
+}
+
+/// Runs at most one bounded status child per provider. Callers arriving during
+/// that run share its safe success/failure result instead of creating another
+/// process or reader thread.
+struct SystemAgentReadiness {
+    state: Mutex<ReadinessState>,
+    completed: Condvar,
+    timeout: Duration,
+    terminate_grace: Duration,
+}
+
+impl Default for SystemAgentReadiness {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ReadinessState::default()),
+            completed: Condvar::new(),
+            timeout: AGENT_READINESS_TIMEOUT,
+            terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
+        }
+    }
+}
+
 impl AgentReadinessProbe for SystemAgentReadiness {
     fn ready(&self, product: &str) -> Result<(), ()> {
         // Which products exist, and which status command proves each one usable,
@@ -1305,14 +1333,95 @@ impl AgentReadinessProbe for SystemAgentReadiness {
         // `codex-fugu` behind the `sakana-ai` profile is recognised without a
         // second table here (#609). An unmodelled product still fails closed.
         let probe = DefaultModel::readiness_command_for(product).ok_or(())?;
-        Command::new(probe.program())
-            .args(probe.arguments())
-            .status()
-            .ok()
-            .filter(std::process::ExitStatus::success)
-            .map(|_| ())
-            .ok_or(())
+        self.ready_command(product, probe.program(), probe.arguments())
     }
+}
+
+impl SystemAgentReadiness {
+    fn ready_command(&self, product: &str, program: &str, arguments: &[&str]) -> Result<(), ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        let slot = state.providers.entry(product.to_owned()).or_default();
+        if slot.running {
+            let (state_after_wait, timeout) = self
+                .completed
+                .wait_timeout_while(state, self.timeout + self.terminate_grace, |state| {
+                    state
+                        .providers
+                        .get(product)
+                        .is_some_and(|slot| slot.running)
+                })
+                .map_err(|_| ())?;
+            if timeout.timed_out() {
+                return Err(());
+            }
+            return state_after_wait
+                .providers
+                .get(product)
+                .and_then(|slot| slot.result)
+                .unwrap_or(Err(()));
+        }
+        slot.running = true;
+        slot.result = None;
+        drop(state);
+
+        let result =
+            bounded_readiness_command(program, arguments, self.timeout, self.terminate_grace);
+        let mut state = self.state.lock().map_err(|_| ())?;
+        let slot = state
+            .providers
+            .get_mut(product)
+            .expect("running readiness provider remains registered");
+        slot.running = false;
+        slot.result = Some(result);
+        self.completed.notify_all();
+        result
+    }
+}
+
+fn bounded_readiness_command(
+    program: &str,
+    arguments: &[&str],
+    timeout: Duration,
+    terminate_grace: Duration,
+) -> Result<(), ()> {
+    let mut child = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().map_err(|_| ())? {
+            Some(status) => return status.success().then_some(()).ok_or(()),
+            None if Instant::now() < deadline => std::thread::sleep(AGENT_READINESS_POLL),
+            None => return terminate_readiness_child(&mut child, terminate_grace),
+        }
+    }
+}
+
+fn terminate_readiness_child(child: &mut Child, grace: Duration) -> Result<(), ()> {
+    #[cfg(unix)]
+    // SAFETY: `Child::id` is the exact process spawned above. SIGTERM is only a
+    // best-effort grace signal; the same Child handle is killed and reaped below.
+    unsafe {
+        libc::kill(child.id().try_into().map_err(|_| ())?, libc::SIGTERM);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait().map_err(|_| ())? {
+            Some(_) => return Err(()),
+            None if Instant::now() < deadline => std::thread::sleep(AGENT_READINESS_POLL),
+            None => break,
+        }
+    }
+    child.kill().map_err(|_| ())?;
+    child.wait().map(|_| ()).map_err(|_| ())?;
+    Err(())
 }
 fn working_directories(
     sessions: &SharedSessionRuntime,
@@ -1471,7 +1580,18 @@ fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Optio
 }
 
 type RootAgentRuntime = AgentRuntime;
-type SharedAgentRuntime = Arc<Mutex<RootAgentRuntime>>;
+struct SharedAgentState {
+    owner: Mutex<RootAgentRuntime>,
+    readiness: Arc<dyn AgentReadinessProbe>,
+}
+
+impl SharedAgentState {
+    fn lock(&self) -> LockResult<MutexGuard<'_, RootAgentRuntime>> {
+        self.owner.lock()
+    }
+}
+
+type SharedAgentRuntime = Arc<SharedAgentState>;
 type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 
 struct DeferredDecisionWaker;
@@ -2961,7 +3081,7 @@ fn open_agent_runtime(
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
-    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::default());
     // Agent MCP children receive the mode-neutral base. They apply the same
     // selected runtime mode themselves, so every mode reaches the daemon's
     // already-selected directory without adding that child twice. Production
@@ -2994,7 +3114,6 @@ fn open_agent_runtime(
     let _ = registry.register_supported(
         CodexAdapter::new(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
-            readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
             program: DefaultModel::OpenAi.command(),
@@ -3006,7 +3125,6 @@ fn open_agent_runtime(
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
-            readiness: Arc::clone(&readiness),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
             program: DefaultModel::SakanaAi.command(),
@@ -3018,7 +3136,6 @@ fn open_agent_runtime(
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
-            readiness,
             mcp_command,
             data_home,
             sandbox_backend,
@@ -3052,7 +3169,10 @@ fn open_agent_runtime(
     // Bind before the runtime is shared, so the metrics broker never observes an
     // unpublished level for a runtime that already hydrated interrupted records.
     runtime.bind_concurrency_gauge(concurrency);
-    Ok(Arc::new(Mutex::new(runtime)))
+    Ok(Arc::new(SharedAgentState {
+        owner: Mutex::new(runtime),
+        readiness,
+    }))
 }
 
 fn start_agent_observer(
@@ -3900,22 +4020,24 @@ fn dispatch_agent_tool(
                             "created session is not available",
                         )
                     })?;
-                runtime = agent.lock().map_err(|_| {
-                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
-                })?;
                 let scope = SharedScopeResolver(Arc::clone(sessions));
-                let admission = runtime.dispatch(
+                let dispatch_intent = DispatchIntent {
+                    workspace,
+                    session_name: session_name.clone(),
+                    caller,
+                    agent: selected,
+                    prompt: input.prompt,
+                };
+                let admission = dispatch_agent_after_preflight(
+                    agent,
                     &operation_id,
-                    &DispatchIntent {
-                        workspace,
-                        session_name: session_name.clone(),
-                        caller,
-                        agent: selected,
-                        prompt: input.prompt,
-                    },
+                    &dispatch_intent,
                     session_id,
                     &scope,
                 )?;
+                runtime = agent.lock().map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })?;
                 let run_id = OperationId::parse(&admission.operation_id)
                     .map_err(|_| ProtocolError::new(ErrorCode::Internal, "invalid admitted run"))?;
                 let run = runtime
@@ -4810,10 +4932,7 @@ fn dispatch_dispatch(
     })();
     let result = session_id.and_then(|session_id| {
         let scope = SharedScopeResolver(Arc::clone(sessions));
-        agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
-            .dispatch(&operation_id, &intent, session_id, &scope)
+        dispatch_agent_after_preflight(agent, &operation_id, &intent, session_id, &scope)
     });
     match result {
         Ok(admission) => envelope(
@@ -5273,17 +5392,14 @@ fn dispatch_session_action(
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_scope_by_id(id)?;
             let resolver = SharedScopeResolver(Arc::clone(sessions));
-            let admission = if let Some(exact_target) = exact_target {
-                agent
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .resume_exact(operation_id, &exact_target, &resolver)
-            } else {
-                agent
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .resume_legacy(operation_id, target.workspace_id, Some(id), &resolver)
-            }
+            let admission = resume_agent_after_preflight(
+                agent,
+                operation_id,
+                exact_target.as_ref(),
+                target.workspace_id,
+                Some(id),
+                &resolver,
+            )
             .map_err(|error| SessionRuntimeError::AgentFailure {
                 code: error.code,
                 message: error.message,
@@ -5669,21 +5785,15 @@ fn delegate_brief(
         .map_err(|_| SessionRuntimeError::Storage)?
         .session_id(&name)?;
     let scope = SharedScopeResolver(Arc::clone(sessions));
-    let admission = agent
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .dispatch(
-            operation_id,
-            &DispatchIntent {
-                workspace,
-                session_name: name.clone(),
-                caller,
-                agent: DispatchAgentIntent::New { runtime, model },
-                prompt,
-            },
-            id,
-            &scope,
-        );
+    let dispatch_intent = DispatchIntent {
+        workspace,
+        session_name: name.clone(),
+        caller,
+        agent: DispatchAgentIntent::New { runtime, model },
+        prompt,
+    };
+    let admission =
+        dispatch_agent_after_preflight(agent, operation_id, &dispatch_intent, id, &scope);
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
@@ -5790,6 +5900,48 @@ fn reconcile_orphan_delegations(
         .count()
 }
 
+enum AgentDispatchRequest {
+    Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
+    Inventory(WorkspaceId),
+    Resume(String, usagi_core::domain::agent::AgentResumeTarget),
+}
+
+fn admit_agent_dispatch_request(
+    agent: &SharedAgentRuntime,
+    scope: &dyn SessionScopeResolver,
+    request: &AgentDispatchRequest,
+) -> Result<
+    usagi_daemon::usecase::agent_ipc::AgentAdmission,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    let preflight = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|owner| match request {
+            AgentDispatchRequest::Launch(operation_id, intent) => {
+                owner.prepare_launch_readiness(operation_id, intent)
+            }
+            AgentDispatchRequest::Resume(operation_id, target) => {
+                owner.prepare_resume_readiness(operation_id, target)
+            }
+            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+        })?;
+    run_agent_readiness(agent, preflight.as_ref())?;
+    agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|mut owner| match request {
+            AgentDispatchRequest::Launch(operation_id, intent) => {
+                owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
+            }
+            AgentDispatchRequest::Resume(operation_id, target) => {
+                owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
+            }
+            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+        })
+}
+
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
     scope_sessions: &SharedSessionRuntime,
@@ -5799,33 +5951,30 @@ fn dispatch_agent(
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     use usagi_core::usecase::client::DaemonRequest;
-    enum Request {
-        Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
-        Inventory(usagi_core::domain::id::WorkspaceId),
-        Resume(String, usagi_core::domain::agent::AgentResumeTarget),
-    }
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
             DaemonRequest::Agent {
                 operation_id,
                 intent,
-            } => Some(Request::Launch(operation_id, intent)),
-            DaemonRequest::AgentInventory { workspace } => Some(Request::Inventory(workspace)),
+            } => Some(AgentDispatchRequest::Launch(operation_id, intent)),
+            DaemonRequest::AgentInventory { workspace } => {
+                Some(AgentDispatchRequest::Inventory(workspace))
+            }
             DaemonRequest::ResumeAgent {
                 operation_id,
                 target,
-            } => Some(Request::Resume(operation_id, target)),
+            } => Some(AgentDispatchRequest::Resume(operation_id, target)),
             _ => None,
         });
     let Some(request) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let scope = SharedScopeResolver(Arc::clone(scope_sessions));
-    let result = agent
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"));
-    if let Request::Inventory(workspace) = &request {
+    if let AgentDispatchRequest::Inventory(workspace) = &request {
+        let result = agent
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"));
         return match result {
             Ok(agent) => envelope(
                 hello,
@@ -5842,11 +5991,9 @@ fn dispatch_agent(
             ),
         };
     }
-    let result = result.and_then(|mut agent| match &request {
-        Request::Launch(operation_id, intent) => agent.launch(operation_id, intent, &scope),
-        Request::Resume(operation_id, target) => agent.resume_exact(operation_id, target, &scope),
-        Request::Inventory(_) => unreachable!("inventory returned above"),
-    });
+    // The first owner visit captures immutable facts, the provider command runs
+    // after its guard is dropped, and the second visit repeats every fence.
+    let result = admit_agent_dispatch_request(agent, &scope, &request);
     match result {
         Ok(admission) => {
             // `Ok` is the durable final — direct or replayed after a reconnect —
@@ -5886,6 +6033,80 @@ fn dispatch_agent(
             serde_json::json!(null),
         ),
     }
+}
+
+fn run_agent_readiness(
+    agent: &SharedAgentRuntime,
+    preflight: Option<&AgentReadinessPreflight>,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    let Some(preflight) = preflight else {
+        return Ok(());
+    };
+    agent.readiness.ready(preflight.product()).map_err(|()| {
+        usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+            "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
+        )
+    })
+}
+
+fn dispatch_agent_after_preflight(
+    agent: &SharedAgentRuntime,
+    operation_id: &str,
+    intent: &usagi_core::usecase::client::DispatchIntent,
+    session: SessionId,
+    scope: &dyn SessionScopeResolver,
+) -> Result<
+    usagi_daemon::usecase::agent_ipc::AgentAdmission,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    let preflight = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
+        .prepare_dispatch_readiness(operation_id, intent)?;
+    run_agent_readiness(agent, preflight.as_ref())?;
+    agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
+        .dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
+}
+
+fn resume_agent_after_preflight(
+    agent: &SharedAgentRuntime,
+    operation_id: &str,
+    target: Option<&usagi_core::domain::agent::AgentResumeTarget>,
+    workspace: WorkspaceId,
+    session: Option<SessionId>,
+    scope: &dyn SessionScopeResolver,
+) -> Result<
+    usagi_daemon::usecase::agent_ipc::AgentAdmission,
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    let preflight = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|owner| match target {
+            Some(target) => owner.prepare_resume_readiness(operation_id, target),
+            None => owner.prepare_legacy_resume_readiness(operation_id, workspace, session),
+        })?;
+    run_agent_readiness(agent, preflight.as_ref())?;
+    agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|mut owner| match target {
+            Some(target) => {
+                owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
+            }
+            None => owner.resume_legacy_after_readiness(
+                operation_id,
+                workspace,
+                session,
+                scope,
+                preflight.as_ref(),
+            ),
+        })
 }
 
 fn dispatch_codex_session_capture(
@@ -9468,6 +9689,60 @@ mod tests {
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
     use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
+
+    #[cfg(unix)]
+    #[test]
+    fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let program = fixture.path().join("codex");
+        let pid_file = fixture.path().join("pid");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\necho $$ >> '{}'\ntrap '' TERM\nwhile :; do :; done\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = program.to_string_lossy().into_owned();
+        let readiness = Arc::new(SystemAgentReadiness {
+            state: Mutex::new(ReadinessState::default()),
+            completed: Condvar::new(),
+            timeout: Duration::from_millis(150),
+            terminate_grace: Duration::from_millis(50),
+        });
+        let first = {
+            let readiness = Arc::clone(&readiness);
+            let script = script.clone();
+            std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script]))
+        };
+        let started = Instant::now();
+        while !pid_file.is_file() && started.elapsed() < Duration::from_secs(1) {
+            std::thread::yield_now();
+        }
+        assert!(pid_file.is_file(), "fixture readiness child started");
+        let second = {
+            let readiness = Arc::clone(&readiness);
+            std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script]))
+        };
+        assert_eq!(first.join().unwrap(), Err(()));
+        assert_eq!(second.join().unwrap(), Err(()));
+
+        let pids = std::fs::read_to_string(pid_file).unwrap();
+        let pids = pids.lines().collect::<Vec<_>>();
+        assert_eq!(pids.len(), 1, "concurrent callers share one provider child");
+        let pid = pids[0].parse::<libc::pid_t>().unwrap();
+        // SAFETY: signal 0 only observes whether the fixture PID remains.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "timed-out readiness child was reaped"
+        );
+    }
 
     fn request_terminal_json(
         owner: &mut dyn TerminalOwner,

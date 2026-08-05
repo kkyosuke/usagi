@@ -320,7 +320,260 @@ impl AgentRuntime {
 /// ([`crate::usecase::resources::allocator::CapacityPolicy`]).
 pub const AGENT_RUNTIME_LIMIT: usize = 16;
 
+/// Immutable facts proved before an Agent readiness command runs outside the
+/// owner lock. Admission compares them with current owner state after the probe;
+/// the ticket is evidence of a completed check, never authority by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReadinessPreflight {
+    profile: AgentProfileId,
+    profile_revision: u32,
+    generation: DaemonGeneration,
+}
+
+impl AgentReadinessPreflight {
+    /// Provider token consumed by the shared readiness-command vocabulary.
+    #[must_use]
+    pub fn product(&self) -> &str {
+        self.profile.as_str()
+    }
+}
+
 impl AgentRuntime {
+    /// Captures the current immutable launch facts needed for an owner-external
+    /// readiness probe. Replays need no new process and therefore return none.
+    pub fn prepare_launch_readiness(
+        &self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        let semantic = semantic_key(intent);
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing
+                .semantic_key
+                .as_ref()
+                .is_some_and(|key| key != &semantic)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different agent launch",
+                ));
+            }
+            return Ok(None);
+        }
+        OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent operation id must be a canonical operation identifier",
+            )
+        })?;
+        let profile = intent
+            .profile
+            .clone()
+            .unwrap_or_else(|| self.default_profile.clone());
+        self.readiness_ticket(profile).map(Some)
+    }
+
+    /// Captures the provider and owner generation for one exact resume without
+    /// invoking an adapter or mutating durable state.
+    pub fn prepare_resume_readiness(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        let semantic = resume_semantic_key(target);
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing
+                .semantic_key
+                .as_ref()
+                .is_some_and(|key| key != &semantic)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different agent resume",
+                ));
+            }
+            return Ok(None);
+        }
+        OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent resume operation id must be canonical",
+            )
+        })?;
+        let record = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
+            .ok_or_else(|| {
+                ProtocolError::new(ErrorCode::StaleTarget, "agent resume target is stale")
+            })?;
+        self.readiness_ticket(record.launch.plan.profile_id)
+            .map(Some)
+    }
+
+    /// Captures readiness facts for a dispatch-selected worker. The dispatch
+    /// method still re-resolves the worker, configuration, executable, scope,
+    /// and durable operation after the owner-external probe.
+    pub fn prepare_dispatch_readiness(
+        &self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        if self.operations.contains_key(operation_id) {
+            return Ok(None);
+        }
+        OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        let profile = match &intent.agent {
+            DispatchAgentIntent::New { runtime, .. } => runtime.clone(),
+            DispatchAgentIntent::Existing { agent_id } => {
+                self.dispatch
+                    .agent(*agent_id)
+                    .map_err(map_dispatch_storage_error)?
+                    .ok_or_else(dispatch_agent_not_found)?
+                    .runtime
+            }
+        };
+        self.readiness_ticket(profile).map(Some)
+    }
+
+    /// Captures readiness facts for the legacy session-scoped resume selector.
+    pub fn prepare_legacy_resume_readiness(
+        &self,
+        operation_id: &str,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        if self.operations.contains_key(operation_id) {
+            return Ok(None);
+        }
+        OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent resume operation id must be canonical",
+            )
+        })?;
+        let records = self.coordinator.snapshot().records;
+        let eligible = records
+            .iter()
+            .filter(|record| {
+                record.runtime.terminal.workspace_id == workspace
+                    && record.runtime.session_id == session
+                    && is_resume_source_state(record.state)
+                    && self.resume_source_availability(record, &records).0
+            })
+            .collect::<Vec<_>>();
+        let [source] = eligible.as_slice() else {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "legacy agent resume did not resolve one eligible exact target",
+            ));
+        };
+        self.readiness_ticket(source.launch.plan.profile_id.clone())
+            .map(Some)
+    }
+
+    /// Admits only if the facts observed before readiness are still current.
+    /// All ordinary generation, scope, concurrency, executable, and idempotency
+    /// checks still run after this comparison and before reservation/spawn.
+    pub fn launch_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_launch_readiness(operation_id, intent)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.launch(operation_id, intent, scope)
+    }
+
+    /// Exact-resume counterpart of [`Self::launch_after_readiness`].
+    pub fn resume_exact_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_resume_readiness(operation_id, target)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_exact(operation_id, target, scope)
+    }
+
+    /// Dispatch counterpart of [`Self::launch_after_readiness`].
+    pub fn dispatch_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_dispatch_readiness(operation_id, intent)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.dispatch(operation_id, intent, session, scope)
+    }
+
+    /// Legacy resume counterpart of [`Self::launch_after_readiness`].
+    pub fn resume_legacy_after_readiness(
+        &mut self,
+        operation_id: &str,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_legacy_resume_readiness(operation_id, workspace, session)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_legacy(operation_id, workspace, session, scope)
+    }
+
+    fn readiness_ticket(
+        &self,
+        profile_id: AgentProfileId,
+    ) -> Result<AgentReadinessPreflight, ProtocolError> {
+        let profile = self
+            .registry
+            .profile(&profile_id)
+            .map_err(|_| ProtocolError::new(ErrorCode::InvalidArgument, "unknown agent profile"))?;
+        Ok(AgentReadinessPreflight {
+            profile: profile.id,
+            profile_revision: profile.revision,
+            generation: self.active_generation()?,
+        })
+    }
+
+    fn validate_readiness(
+        &self,
+        supplied: Option<&AgentReadinessPreflight>,
+        current: Option<&AgentReadinessPreflight>,
+    ) -> Result<(), ProtocolError> {
+        // A concurrent identical admission turns the second caller into a
+        // replay; it is safe without consuming its now-redundant ticket.
+        if current.is_none() {
+            return Ok(());
+        }
+        if supplied != current {
+            return Err(ProtocolError::new(
+                ErrorCode::RevisionConflict,
+                "agent readiness preflight became stale",
+            ));
+        }
+        let current = current.expect("checked above");
+        if !self
+            .locator
+            .is_available(runtime_executable(current.profile.as_str()))
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
+            ));
+        }
+        Ok(())
+    }
+
     /// Constructs an Agent runtime with an injected current executable locator.
     ///
     /// # Panics
@@ -3278,6 +3531,53 @@ mod tests {
         assert_eq!(gauge.observe(), Some(runtime.concurrency()));
         assert_eq!(gauge.observe().unwrap().in_use, 1);
         assert!(!gauge.observe().unwrap().is_saturated());
+    }
+
+    #[test]
+    fn readiness_ticket_is_revalidated_before_launch_effects() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let intent = intent(Some("claude"));
+        let operation = OperationId::new().to_string();
+        let ticket = runtime
+            .prepare_launch_readiness(&operation, &intent)
+            .unwrap()
+            .unwrap();
+
+        let stale = AgentReadinessPreflight {
+            profile: ticket.profile.clone(),
+            profile_revision: ticket.profile_revision + 1,
+            generation: ticket.generation,
+        };
+        let error = runtime
+            .launch_after_readiness(
+                &operation,
+                &intent,
+                &FakeScope(Ok(ResolvedAgentScope {
+                    worktree_id: WorktreeId::new(),
+                    working_directory: PathBuf::from("/worktree"),
+                })),
+                Some(&stale),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::RevisionConflict);
+        assert!(runtime.coordinator.snapshot().records.is_empty());
+
+        std::fs::remove_file(fixture.path().join("claude")).unwrap();
+        let error = runtime
+            .launch_after_readiness(
+                &operation,
+                &intent,
+                &FakeScope(Ok(ResolvedAgentScope {
+                    worktree_id: WorktreeId::new(),
+                    working_directory: PathBuf::from("/worktree"),
+                })),
+                Some(&ticket),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        assert!(runtime.coordinator.snapshot().records.is_empty());
     }
 
     #[test]
