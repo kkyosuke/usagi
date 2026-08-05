@@ -31,6 +31,22 @@ use usagi_tui::usecase::application::pane::{
 use usagi_tui::usecase::application::pane_runtime::{
     Geometry, PaneRuntime, TerminalError, TerminalInventory, TerminalPort, TerminalSnapshot,
 };
+use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
+
+#[test]
+fn selected_terminal_window_rejects_empty_reversed_and_out_of_bounds_ranges() {
+    let mut screen = TerminalScreen::new(2, 8);
+    screen.advance(b"one\r\ntwo");
+    let anchor = (0, 0);
+    let focus = (1, 2);
+    for (start, end) in [(1, 1), (2, 1), (usize::MAX, usize::MAX)] {
+        assert!(
+            screen
+                .rows_with_scrollback_window_selection(start, end, anchor, focus)
+                .is_empty()
+        );
+    }
+}
 
 /// Fake lifecycle adapter: records requests and replays daemon events in the
 /// explicit order supplied by a scenario.  New parity cases can reuse this
