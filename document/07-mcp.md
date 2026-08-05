@@ -31,8 +31,9 @@ MCP 入口の文法・usage error・終了 status は
 [2. アーキテクチャの process argv contract](02-architecture.md#process-argv-contract) を正本とする。
 
 daemon-provisioned MCP child は起動直後の同じ IPC connection で一度だけ caller slot を claim する。daemon は
-Unix peer PID、親 PID、process group を kernel から取得し、live Agent provider の直系 child かつ同じ process group で、
-まだ別 PID に claim されていない場合だけ process-local credential を返す。credential は MCP child の memory と
+Unix peer PID、親 PID、process group を kernel から取得し、live Agent provider の直系 child で、process group が
+provider を継承するか child 自身を leader とする独立 group であり、まだ別 PID に claim されていない場合だけ
+process-local credential を返す。credential は MCP child の memory と
 daemon の memory にだけ置き、Agent の environment / argv / terminal stream には渡さない。以後の
 dispatch/agent tool と `user_decision_*` は credential に加えて claim 済み peer PID、live runtime、generation、
 dispatch binding を照合する。手動の `usagi mcp`、sibling PID、偽造 token、exit/restart 後の caller は

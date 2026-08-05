@@ -1018,7 +1018,8 @@ network の permission model は通常どおり維持され、無効化・緩和
 
 daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
 caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と
-未使用 caller slot を照合し、credential を Agent environment、provider argv、terminal output へ置かない。
+未使用 caller slot を照合する。MCP child の process group は provider を継承する形と、Codex が child 自身を leader にする
+独立 group の両方を認める。credential を Agent environment、provider argv、terminal output へ置かない。
 `user_decision_*` はこの credential、claim 済み PID、daemon generation、terminal incarnation、dispatch binding を
 照合して owner を再構成し、workspace root は `session_id: None` の root scope として保存する。
 手動起動した `usagi mcp`、credential の欠落・偽造・失効、または stale runtime は owner を推測せず
