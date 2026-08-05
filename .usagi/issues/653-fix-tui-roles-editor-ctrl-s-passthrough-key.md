@@ -1,13 +1,13 @@
 ---
 number: 653
 title: fix(tui): Roles editor の Ctrl-S 保存が passthrough_key で握り潰される
-status: in-progress
+status: done
 priority: high
 labels: [review, v2, tui, input]
 dependson: []
 related: []
 created_at: 2026-08-05T01:01:22.696632+00:00
-updated_at: 2026-08-05T08:27:54.964524+00:00
+updated_at: 2026-08-05T08:35:38.017675+00:00
 ---
 
 ## 出典
