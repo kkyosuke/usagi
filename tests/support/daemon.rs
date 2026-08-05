@@ -351,7 +351,12 @@ pub fn usagi_command(home: &Path, channel: Channel, cwd: &Path, args: &[&OsStr])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE");
+        .env_remove("GIT_INDEX_FILE")
+        // A fixture process is an independent root client, not a daemon-owned
+        // MCP child. The outer usagi session may inject its own trusted root;
+        // carrying that value into the fixture would override `current_dir`
+        // and make the fixture daemon reject its restart client.
+        .env_remove(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
     channel.apply(&mut command);
     command
 }
