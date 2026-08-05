@@ -56,7 +56,6 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::vt_screen::ScreenCheckpoint;
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::session_worktree::SystemGit;
-use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::pr_modal::PrModal;
@@ -2474,8 +2473,8 @@ fn spawn_session_refresh_pump(workspace: Workspace) -> RefreshPump<SessionComman
     })
 }
 
-/// Spawns the mascot's resident metrics lane. Display-only, so like
-/// `observation_client` before it, it never cold-starts a daemon (#551).
+/// Spawns the mascot's resident metrics lane. Display-only, so it never
+/// cold-starts a daemon (#551).
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
 fn spawn_metrics_pump() -> RefreshPump<Option<DaemonMetrics>> {
     let mut lane = LaneConnection::observing();
@@ -3728,31 +3727,6 @@ fn run_in_terminal(
     result
 }
 
-/// Keeps the daemon metrics observer alive for exactly one interactive TUI
-/// lifetime.  A fresh connection-local subscription is created on every TUI
-/// launch; orderly teardown explicitly unregisters it.
-///
-/// The subscription is display-only diagnostics, so it uses the observation
-/// client: it declares no workspace and never starts a daemon. An entry screen
-/// has not chosen a workspace yet, and cold-starting one here would bind the
-/// daemon to the launch directory and make every later open refuse. For the same
-/// reason a missing or refusing daemon only means "no metrics" — never a TUI that
-/// will not start.
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=metrics_hook_registration_contract
-fn run_with_metrics_hook(run: impl FnOnce() -> std::io::Result<Exit>) -> std::io::Result<Exit> {
-    let mut observer = crate::runtime::daemon::observation_client(ClientPolicy::tui())
-        .ok()
-        .and_then(|mut client| {
-            let mut hook = MetricsHook::default();
-            hook.connect(&mut client).ok().map(|()| (hook, client))
-        });
-    let result = run();
-    if let Some((hook, client)) = observer.as_mut() {
-        let _ = hook.shutdown(client);
-    }
-    result
-}
-
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
 fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
     let now = Utc::now();
@@ -3763,26 +3737,24 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut settings = PersistentSettingsPort::open()?;
         let mut backend_factory = ProductionBackendFactory;
         let mut splash = presentation::StartupSplash::new();
-        run_with_metrics_hook(|| {
-            run_in_terminal(|terminal| {
-                if start == Start::Welcome {
-                    splash.play(terminal)?;
-                }
-                // The graph resolves "leave this workspace" into its own Welcome
-                // screen, so it only returns when the process is ending. The
-                // splash therefore plays once per launch, not once per Welcome.
-                presentation::run_screen_graph_with_backend(
-                    terminal,
-                    workspaces,
-                    recent,
-                    now,
-                    start,
-                    &mut loader,
-                    &mut settings,
-                    &mut backend_factory,
-                    available_agent_models(),
-                )
-            })
+        run_in_terminal(|terminal| {
+            if start == Start::Welcome {
+                splash.play(terminal)?;
+            }
+            // The graph resolves "leave this workspace" into its own Welcome
+            // screen, so it only returns when the process is ending. The
+            // splash therefore plays once per launch, not once per Welcome.
+            presentation::run_screen_graph_with_backend(
+                terminal,
+                workspaces,
+                recent,
+                now,
+                start,
+                &mut loader,
+                &mut settings,
+                &mut backend_factory,
+                available_agent_models(),
+            )
         })?;
     } else {
         let frame = match start {
@@ -3895,41 +3867,39 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut settings = PersistentSettingsPort::open()?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut backend_factory = ProductionBackendFactory;
-        run_with_metrics_hook(|| {
-            run_in_terminal(|terminal| {
-                // A direct workspace entry has no Welcome behind it, so leaving
-                // continues into the entry screens in this same process rather
-                // than ending it: `usagi <path>` switches workspaces too (#556).
-                // The workspace's ports are already dropped by the time the
-                // controller returns, so the switcher starts with no connection
-                // to the workspace that was left.
-                match presentation::run_workspace_controller_with_backend_and_config(
-                    terminal,
-                    snapshot,
-                    &mut backend_factory,
-                    &mut settings,
-                    available_agent_models(),
-                )? {
-                    Exit::Quit => Ok(Exit::Quit),
-                    Exit::Welcome => {
-                        // Read Recent now, not at launch: the workspace that was
-                        // just left is the most recent one and belongs at the top.
-                        let (workspaces, recent) =
-                            load_screen_graph_data(&loader.storage, Start::Welcome)?;
-                        presentation::run_screen_graph_with_backend(
-                            terminal,
-                            workspaces,
-                            recent,
-                            Utc::now(),
-                            Start::Welcome,
-                            &mut loader,
-                            &mut settings,
-                            &mut backend_factory,
-                            available_agent_models(),
-                        )
-                    }
+        run_in_terminal(|terminal| {
+            // A direct workspace entry has no Welcome behind it, so leaving
+            // continues into the entry screens in this same process rather
+            // than ending it: `usagi <path>` switches workspaces too (#556).
+            // The workspace's ports are already dropped by the time the
+            // controller returns, so the switcher starts with no connection
+            // to the workspace that was left.
+            match presentation::run_workspace_controller_with_backend_and_config(
+                terminal,
+                snapshot,
+                &mut backend_factory,
+                &mut settings,
+                available_agent_models(),
+            )? {
+                Exit::Quit => Ok(Exit::Quit),
+                Exit::Welcome => {
+                    // Read Recent now, not at launch: the workspace that was
+                    // just left is the most recent one and belongs at the top.
+                    let (workspaces, recent) =
+                        load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                    presentation::run_screen_graph_with_backend(
+                        terminal,
+                        workspaces,
+                        recent,
+                        Utc::now(),
+                        Start::Welcome,
+                        &mut loader,
+                        &mut settings,
+                        &mut backend_factory,
+                        available_agent_models(),
+                    )
                 }
-            })
+            }
         })?;
     } else {
         for line in presentation::render_home_snapshot(0, 0, &snapshot) {

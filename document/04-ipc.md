@@ -20,7 +20,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [client の失敗処理](#client-の失敗処理)
   - [stream connection の共有と subscription の無効化](#stream-connection-の共有と-subscription-の無効化)
 - [managed session request](#managed-session-request)
-- [daemon metrics subscription](#daemon-metrics-subscription)
+- [daemon metrics](#daemon-metrics)
   - [agent concurrency projection](#agent-concurrency-projection)
 - [PR inventory snapshot](#pr-inventory-snapshot)
 - [agent launch request](#agent-launch-request)
@@ -190,7 +190,6 @@ daemon はどの workspace の client も admit してしまうため、capabili
 | 経路 | 理由 |
 |---|---|
 | client readiness（`usagi open <path>` の起動前確認） | daemon の存在確認だけで workspace state を読まない |
-| daemon metrics subscription（[daemon metrics subscription](#daemon-metrics-subscription)） | daemon process の表示専用 sample であり、workspace の state を読まない。加えてこの接続は daemon を起動しない（entry 画面が workspace を選ぶ前に、起動 directory へ束縛された daemon を作らないため） |
 | `usagi daemon replace` | 広告された build identity を読む lifecycle 操作であり、workspace に紐づかない |
 
 この fence は**同一 UID の協調する peer 同士の一貫性 fence**であり、authorization boundary ではない
@@ -314,12 +313,12 @@ idempotency evidence を持たない。
 error ID を返す。resource/ownership を証明できない場合は `ownership_unknown`、resume が成立しない
 場合は `resync_required` を使う。OS error、secret、raw launch provision は error detail に含めない。
 
-## daemon metrics subscription
+## daemon metrics
 
-`metrics` request は TUI が daemon の観測用 stream を登録または解除するための control
-vocabulary である。`subscribe` は TUI 起動時および接続を回復した後に送り、正常終了時には
-`unsubscribe` を送る。接続が切れた subscription は connection-local であり、再接続で resume
-せず新しく登録する。
+`metrics` request は daemon の観測用 snapshot を取得し、必要な client が stream を登録または
+解除するための control vocabulary である。TUI は `snapshot` を周期的に取得し、push queue を
+登録しない。`subscribe` を使う client は受信 queue を drain し、正常終了時には `unsubscribe` を
+送る。接続が切れた subscription は connection-local であり、再接続で resume せず新しく登録する。
 
 daemon が送る snapshot は次の versioned schema である。これは表示・診断専用で、TUI が
 session / terminal の所有権や local fallback を判断する根拠にはしない。TUI がこの sample 列から作る
