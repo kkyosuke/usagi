@@ -3064,7 +3064,7 @@ mod tests {
     use crate::usecase::terminal::SnapshotWire;
     use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
     use serde_json::{Value, json};
-    use usagi_core::domain::id::{ClientId, RequestId};
+    use usagi_core::domain::id::{AgentId, AgentResumeSourceId, ClientId, RequestId};
     use usagi_core::usecase::client::TerminalAction;
 
     trait JsonAgentTerminalActor {
@@ -3578,6 +3578,299 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Unavailable);
         assert!(runtime.coordinator.snapshot().records.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One table-like sweep covers every secret-free preflight refusal/replay branch.
+    fn readiness_preparation_covers_replay_conflict_and_safe_refusals() {
+        let mut runtime = runtime();
+        let launch = intent(None);
+        assert_eq!(
+            runtime
+                .prepare_launch_readiness("invalid", &launch)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        let unknown = intent(Some("unknown"));
+        assert_eq!(
+            runtime
+                .prepare_launch_readiness(&OperationId::new().to_string(), &unknown)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        let launch_operation = OperationId::new().to_string();
+        runtime.operations.insert(
+            launch_operation.clone(),
+            AgentOperation {
+                semantic_key: Some(semantic_key(&launch)),
+                outcome: Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+            },
+        );
+        assert!(
+            runtime
+                .prepare_launch_readiness(&launch_operation, &launch)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .prepare_launch_readiness(&launch_operation, &intent(Some("claude")))
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+
+        let stale_target = AgentResumeTarget {
+            continuation: AgentContinuationRef::new(),
+            source: AgentResumeSourceId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+            runtime_id: AgentRuntimeId::new(),
+            adapter_revision: 1,
+        };
+        assert_eq!(
+            runtime
+                .prepare_resume_readiness("invalid", &stale_target)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .prepare_resume_readiness(&OperationId::new().to_string(), &stale_target)
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+        let resume_operation = OperationId::new().to_string();
+        runtime.operations.insert(
+            resume_operation.clone(),
+            AgentOperation {
+                semantic_key: Some(resume_semantic_key(&stale_target)),
+                outcome: Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+            },
+        );
+        assert!(
+            runtime
+                .prepare_resume_readiness(&resume_operation, &stale_target)
+                .unwrap()
+                .is_none()
+        );
+        let mut conflicting = stale_target.clone();
+        conflicting.source = AgentResumeSourceId::new();
+        assert_eq!(
+            runtime
+                .prepare_resume_readiness(&resume_operation, &conflicting)
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+
+        let dispatch_operation = OperationId::new().to_string();
+        let dispatch = DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: None,
+                agent_id: AgentId::new(),
+            },
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: ModelSelector::new("test").unwrap(),
+            },
+            prompt: "work".into(),
+        };
+        assert_eq!(
+            runtime
+                .prepare_dispatch_readiness("invalid", &dispatch)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert!(
+            runtime
+                .prepare_dispatch_readiness(&dispatch_operation, &dispatch)
+                .unwrap()
+                .is_some()
+        );
+        let existing = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                None,
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("test").unwrap(),
+            )
+            .unwrap();
+        let existing_dispatch = DispatchIntent {
+            agent: DispatchAgentIntent::Existing {
+                agent_id: existing.agent_id,
+            },
+            ..dispatch.clone()
+        };
+        assert!(
+            runtime
+                .prepare_dispatch_readiness(&OperationId::new().to_string(), &existing_dispatch,)
+                .unwrap()
+                .is_some()
+        );
+        runtime.operations.insert(
+            dispatch_operation.clone(),
+            AgentOperation {
+                semantic_key: None,
+                outcome: Err(ProtocolError::new(ErrorCode::Unavailable, "fixture")),
+            },
+        );
+        assert!(
+            runtime
+                .prepare_dispatch_readiness(&dispatch_operation, &dispatch)
+                .unwrap()
+                .is_none()
+        );
+        let missing = DispatchIntent {
+            agent: DispatchAgentIntent::Existing {
+                agent_id: AgentId::new(),
+            },
+            ..dispatch
+        };
+        assert_eq!(
+            runtime
+                .prepare_dispatch_readiness(&OperationId::new().to_string(), &missing)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .prepare_legacy_resume_readiness("invalid", WorkspaceId::new(), None)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            runtime
+                .prepare_legacy_resume_readiness(
+                    &OperationId::new().to_string(),
+                    WorkspaceId::new(),
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn readiness_admission_wrappers_cover_launch_exact_legacy_and_dispatch() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let resolved = scope();
+        let launch = AgentLaunchIntent {
+            workspace,
+            session: Some(session),
+            profile: Some(AgentProfileId::new("claude").unwrap()),
+        };
+        let operation = OperationId::new().to_string();
+        let ticket = runtime
+            .prepare_launch_readiness(&operation, &launch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ticket.product(), "claude");
+        let admitted = runtime
+            .launch_after_readiness(
+                &operation,
+                &launch,
+                &FakeScope(Ok(resolved.clone())),
+                Some(&ticket),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .launch_after_readiness(
+                    &operation,
+                    &launch,
+                    &FakeScope(Ok(resolved.clone())),
+                    None,
+                )
+                .is_ok(),
+            "a concurrent completed admission replays without a ticket"
+        );
+        runtime.exit(&admitted.terminal, 0).unwrap();
+        let target = runtime.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let resume_operation = OperationId::new().to_string();
+        let resume_ticket = runtime
+            .prepare_resume_readiness(&resume_operation, &target)
+            .unwrap()
+            .unwrap();
+        let resumed = runtime
+            .resume_exact_after_readiness(
+                &resume_operation,
+                &target,
+                &FakeScope(Ok(resolved.clone())),
+                Some(&resume_ticket),
+            )
+            .unwrap();
+        runtime.exit(&resumed.terminal, 0).unwrap();
+        let legacy_operation = OperationId::new().to_string();
+        let legacy_ticket = runtime
+            .prepare_legacy_resume_readiness(&legacy_operation, workspace, Some(session))
+            .unwrap()
+            .unwrap();
+        runtime
+            .resume_legacy_after_readiness(
+                &legacy_operation,
+                workspace,
+                Some(session),
+                &FakeScope(Ok(resolved)),
+                Some(&legacy_ticket),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .prepare_legacy_resume_readiness(&legacy_operation, workspace, Some(session))
+                .unwrap()
+                .is_none()
+        );
+
+        let worktree = tempfile::tempdir().unwrap();
+        let mut dispatch_runtime =
+            runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let dispatch = DispatchIntent {
+            workspace,
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: None,
+                agent_id: AgentId::new(),
+            },
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: ModelSelector::new("test").unwrap(),
+            },
+            prompt: "work".into(),
+        };
+        let dispatch_operation = OperationId::new().to_string();
+        let dispatch_ticket = dispatch_runtime
+            .prepare_dispatch_readiness(&dispatch_operation, &dispatch)
+            .unwrap()
+            .unwrap();
+        dispatch_runtime
+            .dispatch_after_readiness(
+                &dispatch_operation,
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+                Some(&dispatch_ticket),
+            )
+            .unwrap();
     }
 
     #[test]
