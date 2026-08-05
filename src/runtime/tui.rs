@@ -101,6 +101,7 @@ use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
 use crate::runtime::daemon::LaneClient;
 use crate::runtime::inventory_pump::TerminalInventoryPump;
+use crate::runtime::platform_child_reaper::PlatformChildReaper;
 use crate::runtime::refresh_pump::{RefreshCadence, RefreshPump};
 use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
@@ -117,7 +118,9 @@ struct DaemonDecisionCommandPort;
 /// Platform delivery is deliberately best-effort.  Fixed executable names and
 /// argument-vector spawning keep decision text out of a shell; a missing
 /// notification service must never stop the TUI.
-struct PlatformDesktopNotifier;
+struct PlatformDesktopNotifier {
+    reaper: PlatformChildReaper,
+}
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl DesktopNotificationPort for PlatformDesktopNotifier {
@@ -138,7 +141,7 @@ impl DesktopNotificationPort for PlatformDesktopNotifier {
         } else {
             return;
         };
-        let _ = command.spawn();
+        let _ = self.reaper.spawn(&mut command);
     }
 }
 
@@ -709,7 +712,10 @@ impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
     }
 }
 
-struct ProductionBackendFactory;
+#[derive(Default)]
+struct ProductionBackendFactory {
+    helper_reaper: PlatformChildReaper,
+}
 
 type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
 type OverlaySessions = Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>;
@@ -754,7 +760,9 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         )
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
-            notifier: PlatformDesktopNotifier,
+            notifier: PlatformDesktopNotifier {
+                reaper: self.helper_reaper.clone(),
+            },
             notified: std::collections::BTreeSet::new(),
             workspace: snapshot.workspace_id,
             pump: spawn_decision_pump(),
@@ -765,7 +773,9 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             root: snapshot.workspace.path.clone(),
             sessions,
             prs: DaemonPrSnapshotPort,
-            browser: PlatformBrowserOpener,
+            browser: PlatformBrowserOpener {
+                reaper: self.helper_reaper.clone(),
+            },
         }));
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
@@ -798,9 +808,13 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             ),
             restore_connection: Box::new(restore_connection),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
-            external_terminal: Box::new(PlatformExternalTerminalPort),
+            external_terminal: Box::new(PlatformExternalTerminalPort {
+                reaper: self.helper_reaper.clone(),
+            }),
             metrics: Box::new(DaemonMetricsPort::new()),
-            browser: Box::new(PlatformBrowserOpener),
+            browser: Box::new(PlatformBrowserOpener {
+                reaper: self.helper_reaper.clone(),
+            }),
             // Off the frame budget: the inline create form is the only reader,
             // so the scan runs only while that form owns input (#554).
             session_worktrees: Box::new(presentation::FsSessionWorktreeScanPort),
@@ -941,7 +955,9 @@ impl MetricsPort for DaemonMetricsPort {
 ///
 /// This mirrors v1's detached platform launcher: `terminal new` must still
 /// work while an embedded terminal's daemon port is owned by a launch worker.
-struct PlatformExternalTerminalPort;
+struct PlatformExternalTerminalPort {
+    reaper: PlatformChildReaper,
+}
 
 impl ExternalTerminalPort for PlatformExternalTerminalPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=presentation::tests::external_terminal_launch_does_not_require_agent_port
@@ -961,13 +977,14 @@ impl ExternalTerminalPort for PlatformExternalTerminalPort {
         let (command, arguments) = argv
             .split_first()
             .expect("external terminal command is never empty");
-        Command::new(command)
+        let mut command = Command::new(command);
+        command
             .args(arguments)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|_| ())
+            .stderr(std::process::Stdio::null());
+        self.reaper
+            .spawn(&mut command)
             .map_err(|error| format!("failed to open external terminal: {error}"))
     }
 }
@@ -3736,7 +3753,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader { storage };
         let mut settings = PersistentSettingsPort::open()?;
-        let mut backend_factory = ProductionBackendFactory;
+        let mut backend_factory = ProductionBackendFactory::default();
         let mut splash = presentation::StartupSplash::new();
         run_in_terminal(|terminal| {
             if start == Start::Welcome {
@@ -3876,7 +3893,9 @@ impl PrSnapshotPort for DaemonPrSnapshotPort {
 
 /// OS adapter for the browser effect. `Command` receives separate argv items; no
 /// URL is ever interpolated into a shell command.
-struct PlatformBrowserOpener;
+struct PlatformBrowserOpener {
+    reaper: PlatformChildReaper,
+}
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BrowserOpener for PlatformBrowserOpener {
@@ -3900,9 +3919,8 @@ impl BrowserOpener for PlatformBrowserOpener {
         } else {
             return Err("browser opening is unsupported on this platform".to_owned());
         };
-        command
-            .spawn()
-            .map(|_| ())
+        self.reaper
+            .spawn(&mut command)
             .map_err(|_| "browser launch failed".to_owned())
     }
 }
@@ -3913,7 +3931,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let snapshot = loader.open(path)?;
     let mut settings = PersistentSettingsPort::open()?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let mut backend_factory = ProductionBackendFactory;
+        let mut backend_factory = ProductionBackendFactory::default();
         run_in_terminal(|terminal| {
             // A direct workspace entry has no Welcome behind it, so leaving
             // continues into the entry screens in this same process rather
@@ -7485,7 +7503,7 @@ mod tests {
             session_ids,
         );
         let (host, actions) = ControllerHost::channel();
-        let mut factory = ProductionBackendFactory;
+        let mut factory = ProductionBackendFactory::default();
         let mut composition = factory.create(&snapshot, host);
         let operation_id = OperationId::new();
 
