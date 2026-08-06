@@ -251,9 +251,9 @@ fn click_director_button(master: &mut File) {
     send(master, b"\x1b[<0;91;1M\x1b[<0;91;1m");
 }
 
-/// Click `[ New ]` in the 100-column drawer selector row.
+/// Click `[ New ]` in the 100-column drawer selector row below the top padding.
 fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;3M\x1b[<0;96;3m");
+    send(master, b"\x1b[<0;96;4M\x1b[<0;96;4m");
 }
 
 fn toggle_director_with_key(master: &mut File) {

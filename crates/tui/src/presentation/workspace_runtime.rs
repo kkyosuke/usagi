@@ -238,6 +238,24 @@ impl WorkspaceRuntime {
         }
     }
 
+    /// The selected managed-session terminal drawn behind an open Director
+    /// drawer. It remains detached and read-only while the root conversation
+    /// owns the sole foreground subscription.
+    #[must_use]
+    pub fn director_background_terminal(&self) -> Option<TerminalRef> {
+        if !self.state.director_drawer_open() {
+            return None;
+        }
+        match self.preview_pane().selected() {
+            PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal.clone()),
+            PaneSelection::Tab(
+                TabSelection::Pending(_) | TabSelection::Ready(_) | TabSelection::Interrupted(_),
+            )
+            | PaneSelection::Target(_)
+            | PaneSelection::None => None,
+        }
+    }
+
     /// Bypass runtime admission in tests so presentation tests can prove their
     /// independent Agent-only filter against an impossible registry state.
     #[cfg(test)]
@@ -1477,11 +1495,7 @@ impl WorkspaceRuntime {
                 .with_pane(self.preview_pane())
                 .with_metrics(metrics)
                 .with_git_diffs(git_diffs)
-                .with_terminal_view(
-                    (!self.state.director_drawer_open())
-                        .then_some(terminal_view)
-                        .flatten(),
-                )
+                .with_terminal_view(terminal_view)
                 .with_director_drawer(self.director_projection.clone())
                 .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
@@ -1511,6 +1525,7 @@ mod tests {
         AgentResumeRelation, CloseOutcome, PaneEvent, PaneKind, PaneRegistryEffect,
         PaneRestoreTarget, PaneTab, ResumeRejection, TabSelection, WorkspaceRuntime, tab_selection,
     };
+    use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, BackendEvent, Effect, HomeMode, Overlay, Route, Selection, TabDirection,
@@ -2775,7 +2790,7 @@ mod tests {
                         terminal: managed.clone(),
                         kind: PaneKind::Terminal,
                     }],
-                    selected: Some(managed),
+                    selected: Some(managed.clone()),
                     selected_interrupted: None,
                     interrupted: Vec::new(),
                 },
@@ -2794,6 +2809,7 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.panes().active(), Some(Target::Root(workspace)));
+        assert_eq!(runtime.director_background_terminal(), Some(managed));
         let frame = runtime.render(
             24,
             200,
@@ -2802,10 +2818,17 @@ mod tests {
             &[],
             None,
             &BTreeMap::new(),
-            None,
+            Some(TerminalViewProjection {
+                rows: vec!["managed Agent stays visible".to_owned()],
+                row_offset: 0,
+                total_rows: 1,
+                scroll: 0,
+                feedback: None,
+            }),
         );
         let text = frame.join("\n");
         assert!(text.contains("Terminal"), "{text}");
+        assert!(text.contains("managed Agent stays visible"), "{text}");
     }
 
     #[test]
