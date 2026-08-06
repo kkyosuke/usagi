@@ -7,15 +7,13 @@ use crate::presentation::widgets::{display_width, modal};
 const LABEL_WIDTH: usize = 16;
 /// Fixed value column so changing `dark` to `light` does not move a centred row.
 const VALUE_WIDTH: usize = 6;
-/// Shared visible width keeps every Config chevron on one vertical rail.
-const ROW_WIDTH: usize = 34;
+/// Shared visible width accommodates the widest Config environment count.
+const ROW_WIDTH: usize = 40;
 /// Place the unsaved marker two cells after the chevron on the Config rail.
 const CHANGE_MARKER_OFFSET: usize = 2;
 /// Preserve the existing centred position of the action button while its
 /// chevron moves onto the same rail as the select rows.
 const ACTION_BUTTON_OFFSET: usize = 15;
-/// Visible column where select controls begin after marker and label columns.
-const VALUE_OFFSET: usize = CHANGE_MARKER_OFFSET + 2 + LABEL_WIDTH;
 
 /// Render a labelled select row. The selected value is bracketed so a static
 /// frame remains understandable without colour. Focus uses the accent colour,
@@ -71,17 +69,9 @@ pub fn action(label: &str, focused: bool, enabled: bool) -> String {
     row
 }
 
-/// Render quiet supporting text directly below a select control.
-#[must_use]
-pub fn detail(value: &str) -> String {
-    let mut row = format!("{}{value}", " ".repeat(VALUE_OFFSET));
-    row.push_str(&" ".repeat(ROW_WIDTH.saturating_sub(display_width(&row))));
-    Style::new().dim().paint(&row)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ROW_WIDTH, action, detail, disabled, render};
+    use super::{ROW_WIDTH, action, disabled, render};
     use crate::presentation::widgets::display_width;
 
     #[test]
@@ -98,8 +88,6 @@ mod tests {
             ROW_WIDTH
         );
         assert_eq!(display_width(&action("Save", true, true)), ROW_WIDTH);
-        assert!(detail("3 variables").contains("                    3 variables"));
-        assert_eq!(display_width(&detail("3 variables")), ROW_WIDTH);
     }
 
     #[test]

@@ -15,9 +15,9 @@ use crate::presentation::widgets::{self, TextInput, modal, select};
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 const MODAL_INNER_WIDTH: usize = 64;
-const MODAL_BODY_HEIGHT: usize = 10;
+const MODAL_BODY_HEIGHT: usize = 9;
 const MODAL_FOOTER: &str = "↑↓: select  ←→: change  Enter: save  Esc: back";
-const SECTION_HEADING_WIDTH: usize = 35;
+const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
 const ENVIRONMENT_MAX_ROWS: usize = 10;
 const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
@@ -674,7 +674,7 @@ fn global_rows(config: &Config) -> Vec<String> {
             config.settings().modal_selection_mode != config.current().saved.modal_selection_mode,
         ),
     ];
-    lines.extend(environment_rows(config));
+    lines.push(environment_row(config));
     lines.push(String::new());
     lines.push(section_heading("Workspace init"));
     lines.extend(workspace_setting_rows(config));
@@ -734,18 +734,17 @@ fn render_environment_over(
 fn workspace_rows(config: &Config) -> Vec<String> {
     let mut lines = workspace_setting_rows(config);
     let environment_index = usize::from(!config.available_models.is_empty());
-    lines.splice(
-        environment_index..environment_index,
-        environment_rows(config),
-    );
+    lines.insert(environment_index, environment_row(config));
     lines
 }
 
-fn environment_rows(config: &Config) -> [String; 2] {
-    [
-        select::render("Env", "action", config.field() == Field::Environment, false),
-        select::detail(&format!("{} variables", config.settings().env.len())),
-    ]
+fn environment_row(config: &Config) -> String {
+    select::render(
+        "Env",
+        &format!("{} variables", config.settings().env.len()),
+        config.field() == Field::Environment,
+        false,
+    )
 }
 
 fn environment_textarea(editor: &ConfigEnvironmentEditor) -> Vec<String> {
@@ -768,20 +767,24 @@ fn environment_textarea(editor: &ConfigEnvironmentEditor) -> Vec<String> {
     for (line_index, line) in source[viewport_start..viewport_end].iter().enumerate() {
         let absolute_line = viewport_start + line_index;
         let prefix = format!("{:>2} ", absolute_line + 1);
-        let padding = " ".repeat(
-            ENVIRONMENT_TEXTAREA_WIDTH
-                .saturating_sub(widgets::display_width(&prefix) + widgets::display_width(line)),
-        );
-        let content = if !editor.save_focused && absolute_line == cursor_line {
-            format!(
-                "{}{}{}",
-                textarea.paint(&prefix),
-                widgets::block_caret(line, cursor - cursor_line_start, &textarea),
-                textarea.paint(&padding)
-            )
-        } else {
-            textarea.paint(&format!("{prefix}{line}{padding}"))
-        };
+        let content =
+            if !editor.save_focused && absolute_line == cursor_line {
+                let caret = widgets::block_caret(line, cursor - cursor_line_start, &textarea);
+                let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
+                    widgets::display_width(&prefix) + widgets::display_width(&caret),
+                ));
+                format!(
+                    "{}{}{}",
+                    textarea.paint(&prefix),
+                    caret,
+                    textarea.paint(&padding)
+                )
+            } else {
+                let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
+                    widgets::display_width(&prefix) + widgets::display_width(line),
+                ));
+                textarea.paint(&format!("{prefix}{line}{padding}"))
+            };
         lines.push(modal::content_line(&content, ENVIRONMENT_INNER_WIDTH));
     }
     while lines.len() < ENVIRONMENT_MAX_ROWS {
@@ -865,10 +868,11 @@ fn enabled_name(enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, Field, parse_environment_text, render,
+        AvailableAgentModels, Config, ConfigEnvironmentEditor, ENVIRONMENT_MAX_ROWS,
+        ENVIRONMENT_TEXTAREA_WIDTH, Field, environment_textarea, parse_environment_text, render,
         render_over,
     };
-    use crate::presentation::widgets::{display_width, strip_ansi};
+    use crate::presentation::widgets::{TextInput, display_width, modal, strip_ansi};
     use std::io;
     use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -1014,8 +1018,7 @@ mod tests {
         assert_eq!(port.global.env["A"], "1");
         assert_eq!(port.global.env["B"], "2");
         let frame = render(24, 80, &config).join("\n");
-        assert!(frame.contains("Env") && frame.contains("< action >"));
-        assert!(frame.contains("3 variables"));
+        assert!(frame.contains("Env") && frame.contains("< 3 variables >"));
 
         assert!(config.open_environment(&mut port));
         assert!(
@@ -1028,6 +1031,23 @@ mod tests {
         config.type_environment("ignored");
         config.backspace_environment();
         assert!(!config.save_environment(&mut port));
+    }
+
+    #[test]
+    fn focused_environment_rows_keep_the_textarea_background_width() {
+        for value in ["", "A=1"] {
+            let editor = ConfigEnvironmentEditor {
+                scope: SettingsScope::Global,
+                input: TextInput::with_value(value.to_owned()),
+                error: None,
+                save_focused: false,
+            };
+            let rows = environment_textarea(&editor);
+            assert_eq!(
+                display_width(&rows[0]),
+                ENVIRONMENT_TEXTAREA_WIDTH + modal::BODY_INDENT_WIDTH
+            );
+        }
     }
 
     #[test]
@@ -1207,8 +1227,7 @@ mod tests {
         assert!(frame.contains("Global"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
-        assert!(frame.contains("Env") && frame.contains("< action >"));
-        assert!(frame.contains("0 variables"));
+        assert!(frame.contains("Env") && frame.contains("< 0 variables >"));
         assert!(frame.contains("Workspace init"));
         assert!(frame.contains("Agent") && frame.contains("OpenAI"));
         assert!(frame.contains("Issue") && frame.contains("on"));
@@ -1237,19 +1256,10 @@ mod tests {
         };
         assert_eq!(column(theme, "Theme"), column(modal, "Modal mode"));
         assert_eq!(column(theme, "Theme"), column(environment, "Env"));
-        let action_column = environment.find("< action >").unwrap();
-        let count = plain
-            .iter()
-            .find(|line| line.contains("0 variables"))
-            .unwrap();
-        assert_eq!(
-            display_width(&environment[..action_column]),
-            column(count, "0 variables")
-        );
     }
 
     #[test]
-    fn global_chevrons_align_with_the_heading_without_moving_controls() {
+    fn global_chevrons_and_controls_align_with_the_heading() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
         let plain = render(24, 80, &config)
@@ -1268,7 +1278,7 @@ mod tests {
 
         assert_eq!(column_of(theme, "›"), chevron_column);
         assert_eq!(column_of(theme, "Theme"), label_column);
-        assert_eq!(column_of(theme, "<"), 43);
+        assert_eq!(column_of(theme, "<"), 40);
 
         config.cycle_theme(true);
         let dirty = render(24, 80, &config)
@@ -1290,7 +1300,7 @@ mod tests {
             .find(|line| line.contains("[ Save ]"))
             .unwrap();
         assert_eq!(column_of(save, "›"), chevron_column);
-        assert_eq!(column_of(save, "["), 38);
+        assert_eq!(column_of(save, "["), 35);
     }
 
     #[test]
@@ -1317,8 +1327,7 @@ mod tests {
         assert!(frame.contains("Agent"));
         assert!(frame.contains("Issue"));
         assert!(frame.contains("Memory"));
-        assert!(frame.contains("Env") && frame.contains("< action >"));
-        assert!(frame.contains("0 variables"));
+        assert!(frame.contains("Env") && frame.contains("< 0 variables >"));
         assert!(!frame.contains("Scope:"));
         assert!(!frame.contains("Theme"));
         assert!(!frame.contains("Modal mode"));

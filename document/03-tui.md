@@ -753,8 +753,8 @@ Closeup は**引数を取らず workspace スコープだけ**を編集し、`Ta
 保存場所・スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の
 操作だけを述べる。
 
-Global / Workspace Config は Theme や Modal mode と同じラベル列にある `Env  < action >` を選んで Enter を押すと、
-その Config scope の editor を開く。binding 数は action の直下に `N variables` と表示する。
+Global / Workspace Config は Theme や Modal mode と同じラベル列にある `Env  < N variables >` を選んで Enter を押すと、
+その Config scope の editor を開く。
 開く直前に対象 scope の最新 binding を読み、`NAME=value` を 1 行 1 binding とする複数行 textarea に表示する。
 textarea は背景色で入力領域を示し、空行には placeholder を表示しない。Enter は textarea 内で改行する。
 Global Config は `Ctrl-S`、Workspace Config は `Tab` で Save action へ移動して Enter を押すと、編集中 scope の

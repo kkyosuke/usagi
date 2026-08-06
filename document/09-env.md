@@ -72,7 +72,7 @@ Overview / Closeup の workspace editor は、この継承関係を隠さない�
 Workspace Config は scope の誤編集を避けるため workspace binding だけを表示する
 （[3. TUI#env editor](03-tui.md#env-editor)）。
 
-global binding は Welcome の Config にある `Env  < action >` から編集でき、binding 数は直下の `N variables` で確認できる。
+global binding は Welcome の Config にある `Env  < N variables >` から編集できる。
 Overview の `env global` も同じ global settings を編集する。workspace binding は Workspace Config の同じ行、Overview、
 Closeup の `env` から編集する。
 Config は editor を開く直前に対象 scope の最新値を複数行 textarea へ読み、対象 scope の `env` だけを全置換保存する。
