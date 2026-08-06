@@ -1575,8 +1575,10 @@ serving generation は accept した connection ごとに、worker の JoinHandl
 pre-handshake の thread / FD 上限と absolute frame deadline は
 [4. IPC#frame と handshake](04-ipc.md#frame-と-handshake) が正本である。permit は complete hello response の直後に返すため、
 この worker barrier は pre-handshake と admit 済み connection の両方を回収する。pre-handshake permit は hello 後に返すが、
-pre-handshake と established を合わせた worker 総数は generation ごとに 32 へ制限する。これは connection の idle timeout
-ではなく、同一 UID の正規 hello を使う peer による thread / FD 枯渇も有界にする admission limit である。
+pre-handshake と established を合わせた worker 総数は generation ごとに process の descriptor soft limit から算出した上限へ
+制限する（算出規則は [4. daemon IPC](04-ipc.md#frame-と-handshake) が正本）。これは connection の idle timeoutではなく、
+同一 UID の正規 hello を使う peer による thread / FD 枯渇も有界にする admission limit である。Agent runtime 上限までの
+長寿命 MCP connection と複数 TUI の resident lane は、process に十分な descriptor 予算がある限り固定値 32 を奪い合わない。
 
 descriptor を複製できなかった connection は worker を起動せず、**request を読む前に close する**。unblock 手段の無い thread を
 serve させると retirement が join できず、資源枯渇時に未回収 worker を増やすためである。長命な generation が歴史上の全 connection を持ち続けない

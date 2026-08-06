@@ -505,6 +505,10 @@ pub struct TerminalSession {
     fenced_bytes: usize,
     retry_attempt: u32,
     retry_at: Option<Instant>,
+    /// Independent retry budget for the stateless resize lane. A failed resize
+    /// must not be retried by every 16 ms frame while the daemon is saturated.
+    resize_retry_attempt: u32,
+    resize_retry_at: Option<Instant>,
 }
 
 impl TerminalSession {
@@ -535,6 +539,8 @@ impl TerminalSession {
             fenced_bytes: 0,
             retry_attempt: 0,
             retry_at: None,
+            resize_retry_attempt: 0,
+            resize_retry_at: None,
         }
     }
 
@@ -706,6 +712,7 @@ impl TerminalSession {
             } else {
                 let error = port.resize(&self.terminal, self.geometry).err();
                 self.synchronized_geometry = error.is_none().then_some(self.geometry);
+                self.record_resize_result(error, now);
                 error
             };
             let attach = match port.attach(&self.terminal, self.geometry) {
@@ -790,37 +797,27 @@ impl TerminalSession {
     /// Resizes the daemon PTY and decoded terminal cells without replaying
     /// historical cursor movement sequences at the new width.
     pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
+        self.resize_at(port, geometry, Instant::now());
+    }
+
+    fn resize_at<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry, now: Instant) {
         if self.geometry != geometry {
-            match port.resize(&self.terminal, geometry) {
-                Ok(()) => {
-                    self.geometry = geometry;
-                    self.synchronized_geometry = Some(geometry);
-                    self.screen
-                        .resize(geometry.rows as usize, geometry.cols as usize);
-                    self.set_current_error(None);
-                }
-                Err(error) => {
-                    self.synchronized_geometry = None;
-                    self.set_current_error(Some(format!(
-                        "terminal viewport synchronization failed: {}",
-                        error_message(error)
-                    )));
-                }
-            }
-        } else if self.synchronized_geometry != Some(geometry) {
-            match port.resize(&self.terminal, geometry) {
-                Ok(()) => {
-                    self.synchronized_geometry = Some(geometry);
-                    self.set_current_error(None);
-                }
-                Err(error) => {
-                    self.set_current_error(Some(format!(
-                        "terminal viewport synchronization failed: {}",
-                        error_message(error)
-                    )));
-                }
-            }
+            self.geometry = geometry;
+            self.screen
+                .resize(geometry.rows as usize, geometry.cols as usize);
+            self.synchronized_geometry = None;
+            self.resize_retry_attempt = 0;
+            self.resize_retry_at = None;
         }
+        if self.synchronized_geometry == Some(geometry)
+            || self.state != SessionState::Live
+            || self.resize_retry_at.is_some_and(|retry_at| now < retry_at)
+        {
+            return;
+        }
+        let error = port.resize(&self.terminal, geometry).err();
+        self.synchronized_geometry = error.is_none().then_some(geometry);
+        self.record_resize_result(error, now);
     }
 
     /// Sends input bytes to the terminal exactly once.
@@ -1159,6 +1156,24 @@ impl TerminalSession {
             (self.subscription, port.connection_epoch()),
             (Some(subscription), Some(current)) if subscription.epoch != current
         )
+    }
+
+    fn record_resize_result(&mut self, error: Option<TerminalError>, now: Instant) {
+        match error {
+            None => {
+                self.resize_retry_attempt = 0;
+                self.resize_retry_at = None;
+                self.set_current_error(None);
+            }
+            Some(error) => {
+                self.resize_retry_at = Some(now + retry_delay(self.resize_retry_attempt));
+                self.resize_retry_attempt = self.resize_retry_attempt.saturating_add(1);
+                self.set_current_error(Some(format!(
+                    "terminal viewport synchronization failed: {}",
+                    error_message(error)
+                )));
+            }
+        }
     }
 
     /// Falls back to a typed resync after a refused snapshot: the previous
@@ -1659,8 +1674,9 @@ mod tests {
             ..FakePort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
+        let now = Instant::now();
 
-        session.connect(&mut port);
+        session.connect_at(&mut port, now);
 
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "reply");
@@ -1672,19 +1688,22 @@ mod tests {
             )
         );
 
-        // The outer terminal has not changed size, but the first resize did
-        // not reach the daemon. Retry it on the next redraw so an enlarged
-        // pane cannot remain stuck at its earlier PTY width.
-        session.resize(&mut port, geometry());
+        // Frame redraws inside the backoff do not open another connection.
+        session.resize_at(&mut port, geometry(), now);
+        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL / 2);
+        assert_eq!(port.resized, vec![geometry()]);
+
+        // The retry is admitted at the backoff boundary.
+        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL);
         assert_eq!(port.resized, vec![geometry(), geometry()]);
         assert_eq!(session.error(), None);
 
         let changed = Geometry { cols: 30, rows: 4 };
         port.resize_error = Some(TerminalError::Stale);
-        session.resize(&mut port, changed);
+        session.resize_at(&mut port, changed, now + RETRY_INITIAL);
         assert!(session.error().unwrap().contains("no longer available"));
         port.resize_error = Some(TerminalError::Unavailable);
-        session.resize(&mut port, geometry());
+        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL);
         assert!(session.error().unwrap().contains("reconnecting"));
     }
 

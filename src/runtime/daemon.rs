@@ -2117,12 +2117,15 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(10);
 /// subject to this deadline.
 const PRE_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
 
-/// Maximum accepted connections retained by one active or standby generation.
-///
-/// Each worker owns a reader, writer, and shutdown descriptor. Thirty-two keeps
-/// that set below 96 socket descriptors, leaving the rest of a 256-fd process
-/// budget for the bounded Agent/generic PTYs, stores, wake pipes, and children.
-const CLIENT_CONNECTION_LIMIT: usize = 32;
+/// Fallback when the process soft descriptor limit cannot be observed.
+const CLIENT_CONNECTION_LIMIT_FALLBACK: usize = 32;
+/// Established connections remain bounded even when the process has a very
+/// large descriptor allowance: each one also owns a worker thread.
+const CLIENT_CONNECTION_LIMIT_CEILING: usize = 256;
+/// Descriptors reserved for PTYs, stores, wake pipes, listeners, and children.
+const CLIENT_CONNECTION_RESERVED_FDS: u64 = 128;
+/// Reader, writer, and retirement/shutdown descriptor retained per worker.
+const CLIENT_CONNECTION_FDS: u64 = 3;
 
 /// How often the decision maintenance worker makes due expiries durable and
 /// drains the resolved-decision outbox.
@@ -2512,7 +2515,7 @@ fn spawn_ipc_server(
     // Socket workers only enqueue connection-local ledger cleanup. The single
     // consumer prevents a disconnect storm from retaining one accepted socket
     // triplet per worker while all of them contend on the terminal owners.
-    let (disconnected, disconnects) = mpsc::sync_channel(CLIENT_CONNECTION_LIMIT);
+    let (disconnected, disconnects) = mpsc::sync_channel(client_connection_limit());
     let connection_cleanup =
         start_connection_cleanup_worker(Arc::clone(&agent), Arc::clone(&terminal), disconnects)?;
     background_workers.push(start_pr_projection_worker(
@@ -2669,6 +2672,52 @@ fn client_connection_capacity_available(workers: &ClientWorkers, limit: usize) -
         ));
     }
     workers.outstanding() < limit
+}
+
+#[derive(Default)]
+struct CapacityRefusalLog {
+    reported: bool,
+}
+
+impl CapacityRefusalLog {
+    /// Report one transition into saturation, not every reconnect accepted and
+    /// immediately refused while all established slots remain occupied.
+    fn should_record(&mut self, available: bool) -> bool {
+        if available {
+            self.reported = false;
+            return false;
+        }
+        !std::mem::replace(&mut self.reported, true)
+    }
+}
+
+/// Derive the established-worker bound from the process's actual descriptor
+/// allowance instead of assuming the smallest commonly configured macOS soft
+/// limit. The old fixed value of 32 was lower than two TUIs plus the supported
+/// sixteen long-lived Agent MCP connections, so a healthy workspace eventually
+/// refused every reconnect even while thousands of descriptors were available.
+fn client_connection_limit_from_nofile(soft_limit: u64) -> usize {
+    let descriptor_bound =
+        soft_limit.saturating_sub(CLIENT_CONNECTION_RESERVED_FDS) / CLIENT_CONNECTION_FDS;
+    usize::try_from(descriptor_bound)
+        .unwrap_or(usize::MAX)
+        .clamp(1, CLIENT_CONNECTION_LIMIT_CEILING)
+}
+
+fn client_connection_limit() -> usize {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: `limit` points to writable storage for one `rlimit`, and the
+    // successful call initializes it before `assume_init`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return CLIENT_CONNECTION_LIMIT_FALLBACK;
+    }
+    // SAFETY: the successful `getrlimit` above initialized the value.
+    let limit = unsafe { limit.assume_init() };
+    if limit.rlim_cur == libc::RLIM_INFINITY {
+        CLIENT_CONNECTION_LIMIT_CEILING
+    } else {
+        client_connection_limit_from_nofile(limit.rlim_cur)
+    }
 }
 
 fn bind_ipc_listener(
@@ -3549,6 +3598,7 @@ fn start_ipc_accept_loop(
     mut background_workers: DaemonBackgroundWorkers,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
+    let connection_limit = client_connection_limit();
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
         .spawn(move || {
@@ -3566,6 +3616,7 @@ fn start_ipc_accept_loop(
                 usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility::new();
             let pre_handshake =
                 PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
+            let mut capacity_log = CapacityRefusalLog::default();
             // Waiting on the listening descriptor replaces a non-blocking accept
             // that retried every 10 ms. The wake pipe is what lets one wait cover
             // both a new connection and a shutdown request.
@@ -3591,13 +3642,14 @@ fn start_ipc_accept_loop(
                         if shutdown.is_requested() {
                             break;
                         }
-                        if !client_connection_capacity_available(
-                            &workers,
-                            CLIENT_CONNECTION_LIMIT,
-                        ) {
+                        let capacity_available =
+                            client_connection_capacity_available(&workers, connection_limit);
+                        if capacity_log.should_record(capacity_available) {
                             ErrorLog::record(
                                 "daemon connection refused: client capacity exhausted",
                             );
+                        }
+                        if !capacity_available {
                             drop(stream);
                             continue;
                         }
@@ -7673,6 +7725,7 @@ fn spawn_standby_ipc_server(
     gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
+    let connection_limit = client_connection_limit();
     std::thread::Builder::new()
         .name("usagi-ipc-standby".to_string())
         .spawn(move || {
@@ -7681,6 +7734,7 @@ fn spawn_standby_ipc_server(
             };
             let workers = Arc::new(ClientWorkers::new());
             let pre_handshake = PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
+            let mut capacity_log = CapacityRefusalLog::default();
             let wake = match ShutdownPipe::mirroring(&shutdown) {
                 Ok(wake) => wake,
                 Err(error) => {
@@ -7698,13 +7752,16 @@ fn spawn_standby_ipc_server(
                             if shutdown.is_requested() {
                                 break;
                             }
-                            if !client_connection_capacity_available(
+                            let capacity_available = client_connection_capacity_available(
                                 &workers,
-                                CLIENT_CONNECTION_LIMIT,
-                            ) {
+                                connection_limit,
+                            );
+                            if capacity_log.should_record(capacity_available) {
                                 ErrorLog::record(
                                     "daemon standby connection refused: client capacity exhausted",
                                 );
+                            }
+                            if !capacity_available {
                                 drop(stream);
                                 continue;
                             }
@@ -16340,6 +16397,23 @@ instructions = "{instructions}"
         }
         assert!(client_connection_capacity_available(&workers, 1));
         assert_eq!(workers.outstanding(), 0);
+    }
+
+    #[test]
+    fn established_client_capacity_uses_the_process_descriptor_budget() {
+        assert_eq!(client_connection_limit_from_nofile(32), 1);
+        assert_eq!(client_connection_limit_from_nofile(256), 42);
+        assert_eq!(client_connection_limit_from_nofile(2_560), 256);
+        assert_eq!(client_connection_limit_from_nofile(u64::MAX), 256);
+    }
+
+    #[test]
+    fn capacity_refusal_is_logged_once_per_saturated_interval() {
+        let mut log = CapacityRefusalLog::default();
+        assert!(log.should_record(false));
+        assert!(!log.should_record(false));
+        assert!(!log.should_record(true));
+        assert!(log.should_record(false));
     }
 
     #[test]

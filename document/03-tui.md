@@ -1136,7 +1136,9 @@ drain** するだけである。daemon が一時的に応答できない間（�
 （reconnect / resync）では新しい snapshot offset で登録し直してバッファと fetch offset をリセットする。`Resume` は daemon 側で
 接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once
 ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから
-同期送信でよい）。attach / input / detach は従来どおり単一接続に載せる。この共有接続の epoch と subscription 無効化は
+同期送信でよい）。失敗した geometry 同期は 100ms から 2s 上限の指数 backoff で再試行し、frame tick ごとに socket を
+開き直さない。成功した resize だけが foreground poll pump を interactive cadence へ wake する。attach / input / detach は
+従来どおり単一接続に載せる。この共有接続の epoch と subscription 無効化は
 [connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化) が正本である。
 
 #### 背景 observation lane
