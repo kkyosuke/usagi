@@ -745,8 +745,8 @@ worker が続けるため（[5. daemon の session teardown worker](05-daemon.md
 
 ### env editor
 
-Overview の `env [workspace|global]` と Closeup の `env` は同じ環境変数 editor を開く。Overview は引数なし
-（または `workspace`）でこの workspace のスコープ、`global` で全 workspace 共通のスコープを編集する。
+Overview の `env [workspace|global]` と Closeup の `env` は Config と同じ複数行 textarea の環境変数 editor を開く。
+Overview は引数なし（または `workspace`）でこの workspace のスコープ、`global` で全 workspace 共通のスコープを編集する。
 Closeup は**引数を取らず workspace スコープだけ**を編集し、Workspace Config と同じ複数行 textarea を表示する。
 `env global` など引数付きの Closeup 入力は editor を開かず安全な notice で拒否する。Closeup から開いた場合も
 対象 session 固有の環境を作らず、この workspace に属する root / session の次回 pane 起動へ共通して効く。
@@ -759,9 +759,9 @@ Global / Workspace Config は Theme や Modal mode と同じラベル列にあ�
 textarea は背景色で入力領域を示し、空行には placeholder を表示しない。Enter は textarea 内で改行する。
 Global Config は `Ctrl-S`、Workspace Config は `Tab` で Save action へ移動して Enter を押すと、編集中 scope の
 `env` だけを全置換保存する。Global Config の `Tab` は何もしない。
-行を取り除くと binding を削除できる。Esc は未保存の environment draft を破棄して Config に戻る。
+行を取り除くと binding を削除できる。Esc は未保存の environment draft を破棄して元の画面に戻る。
 
-Config と Closeup textarea の入力は次のとおりである。
+Config、Overview、Closeup textarea の入力は次のとおりである。
 
 | 入力 | 動作 |
 |---|---|

@@ -438,9 +438,9 @@ pub struct EnvironmentEditor {
     /// The `NAME=value` line being typed. Committing it upserts a binding, and
     /// an empty value removes one.
     draft: String,
-    /// Byte cursor used by the Closeup multiline source editor.
+    /// Byte cursor used by the Config-style multiline source editor.
     cursor: usize,
-    /// Closeup workspace editor focus.
+    /// Config-style source editor focus.
     focus: EnvironmentEditorFocus,
     error: Option<SafeError>,
     /// `true` while the initial read is in flight, before any values have
@@ -449,10 +449,9 @@ pub struct EnvironmentEditor {
     /// `true` while a save is in flight. Local edits and re-saves are ignored
     /// until the owning port refluxes, so a save can never be double-submitted.
     saving: bool,
-    /// `true` when this editor is pinned to a single scope and the workspace ⇄
-    /// global toggle is inert. Closeup opens the editor locked to the workspace
-    /// scope, so the session/root surface only ever edits this workspace; the
-    /// Overview palette opens it unlocked to reach the global scope too.
+    /// `true` when this editor uses the Config-style multiline source UI and is
+    /// pinned to the scope chosen before opening it. Closeup always chooses the
+    /// workspace scope; Overview chooses from its command argument.
     locked: bool,
 }
 
@@ -3843,6 +3842,9 @@ fn update_locked_environment_key(
     match key {
         AppKey::Tab => {
             if let Some(editor) = editable_environment(state, environment_open) {
+                if editor.scope == EnvScope::Global {
+                    return Some(Vec::new());
+                }
                 editor.focus = if editor.is_save_focused() {
                     EnvironmentEditorFocus::Source
                 } else {
@@ -3878,6 +3880,14 @@ fn update_locked_environment_key(
             Some(Vec::new())
         }
         AppKey::SaveEnvironment => Some(save_locked_environment(state, environment_open)),
+        AppKey::SaveRoles
+            if state
+                .environment_editor
+                .as_ref()
+                .is_some_and(|editor| editor.scope == EnvScope::Global) =>
+        {
+            Some(save_locked_environment(state, environment_open))
+        }
         _ => None,
     }
 }
@@ -4084,14 +4094,17 @@ fn open_environment(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
     vec![Effect::LoadEnvironment { scope }]
 }
 
-/// Open the workspace-only environment editor used by Closeup.
-fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
+/// Open the Config-style environment source editor pinned to `scope`.
+fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
     state.overlay = Some(Overlay::Environment);
     state.note_editor = None;
-    state.environment_editor = Some(EnvironmentEditor::loading_locked(EnvScope::Workspace));
-    vec![Effect::LoadEnvironment {
-        scope: EnvScope::Workspace,
-    }]
+    state.environment_editor = Some(EnvironmentEditor::loading_locked(scope));
+    vec![Effect::LoadEnvironment { scope }]
+}
+
+/// Open the workspace-only environment editor used by Closeup.
+fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
+    open_environment_source(state, EnvScope::Workspace)
 }
 
 fn open_prs(state: &mut AppState) -> Vec<Effect> {
@@ -4234,7 +4247,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
         Ok(overview::Command::Env { arguments }) => {
             if let Some(scope) = environment_scope(&arguments) {
-                open_environment(state, scope)
+                open_environment_source(state, scope)
             } else {
                 state.notice = Some(Notice::new(
                     "env takes an optional scope (usage: env [workspace|global])",
@@ -8111,6 +8124,7 @@ mod tests {
             }]
         );
         assert_eq!(state.overlay(), Some(Overlay::Environment));
+        assert!(state.environment_editor().unwrap().is_scope_locked());
 
         // Whitespace-only arguments are still treated as no arguments.
         let mut state = AppState::home(workspace, Vec::new());
@@ -8139,6 +8153,7 @@ mod tests {
             );
             assert_eq!(effects, vec![Effect::LoadEnvironment { scope }]);
             assert_eq!(state.environment_editor().unwrap().scope(), scope);
+            assert!(state.environment_editor().unwrap().is_scope_locked());
         }
 
         // An unknown scope is rejected safely: the editor never opens, the
@@ -8152,6 +8167,36 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(state.overlay(), Some(Overlay::Overview));
         assert!(state.environment_editor().is_none());
+    }
+
+    #[test]
+    fn overview_global_env_uses_ctrl_s_source_save_and_ignores_tab() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env global".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Global,
+                entries: vec![entry("TOKEN", "secret")],
+                inherited: Vec::new(),
+            }),
+        );
+
+        assert_eq!(state.environment_editor().unwrap().draft(), "TOKEN=secret");
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert!(!state.environment_editor().unwrap().is_save_focused());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::SaveRoles)),
+            vec![Effect::SaveEnvironment {
+                scope: EnvScope::Global,
+                entries: vec![entry("TOKEN", "secret")],
+            }]
+        );
     }
 
     #[test]

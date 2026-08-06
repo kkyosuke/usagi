@@ -236,12 +236,16 @@ pub fn render_environment_over(
     editor: &EnvironmentEditor,
 ) -> Vec<String> {
     if editor.is_scope_locked() {
+        let scope = match editor.scope() {
+            EnvScope::Global => usagi_core::usecase::settings::SettingsScope::Global,
+            EnvScope::Workspace => usagi_core::usecase::settings::SettingsScope::Workspace,
+        };
         return super::config::render_environment_source_over(
             height,
             width,
             base,
             super::config::EnvironmentSource {
-                scope: usagi_core::usecase::settings::SettingsScope::Workspace,
+                scope,
                 value: editor.draft(),
                 cursor: editor.cursor(),
                 error: editor.error().map(|error| error.message.as_str()),
@@ -524,6 +528,57 @@ mod tests {
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Enter: newline/save   Tab: switch   Esc: cancel"));
         assert!(frame.contains("\u{1b}[37;48;5;236m"));
+    }
+
+    #[test]
+    fn overview_environment_overlays_match_config_editors() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: vec![EnvironmentEntry {
+                    name: "RUST_LOG".to_owned(),
+                    value: "debug".to_owned(),
+                }],
+                inherited: Vec::new(),
+            }),
+        );
+        let workspace_frame =
+            render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+                .join("\n");
+        assert!(workspace_frame.contains("workspace env only (global values stay unchanged)"));
+        assert!(workspace_frame.contains("RUST_LOG=debug"));
+        assert!(workspace_frame.contains("[ Save ]"));
+        assert!(!workspace_frame.contains("Tab: global"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env global".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Global,
+                entries: Vec::new(),
+                inherited: Vec::new(),
+            }),
+        );
+        let global_frame =
+            render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+                .join("\n");
+        assert!(global_frame.contains("global env (inherited by every workspace)"));
+        assert!(global_frame.contains("Ctrl-S: save"));
+        assert!(global_frame.contains("[ Save ]"));
+        assert!(!global_frame.contains("Tab: workspace"));
     }
 
     #[test]
