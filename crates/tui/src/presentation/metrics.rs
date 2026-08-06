@@ -7,8 +7,8 @@
 //! frame and stashed the result on the legacy `Workspace` view; that coupled the
 //! material to a view the strangler migration is deleting.
 //!
-//! [`MetricsBackend`] instead owns the port and refluxes each observation as a
-//! [`MetricsUpdate`] through a drain the shell consumes into a
+//! [`MetricsBackend`] instead owns the port and accepts change-only
+//! [`MetricsUpdate`] values through a drain the shell consumes into a
 //! [`MetricsProjection`] cache — the same one-way discipline
 //! (`poll -> drain -> apply -> render`) as
 //! [`crate::usecase::application::daemon_backend::DaemonBackend`].  The event
@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 
 use usagi_core::domain::id::SessionId;
 use usagi_core::usecase::client::DaemonMetrics;
@@ -29,12 +29,10 @@ use usagi_core::usecase::daemon_health::DaemonHealthTracker;
 use crate::presentation::MetricsPort;
 use crate::presentation::views::workspace::GitDiff;
 
-/// One metrics / git-diff observation refluxed by [`MetricsBackend`].
+/// One changed metrics / git-diff observation returned by [`MetricsBackend`].
 ///
-/// Each frame's poll yields a `Metrics` update (possibly `None` when the daemon
-/// is unavailable) followed by a `GitDiffs` update carrying whatever the git
-/// worker has completed.  The shell applies them to a [`MetricsProjection`]; no
-/// variant touches the reducer or `AppState`.
+/// A poll may yield neither, either, or both variants. The shell applies them to
+/// a [`MetricsProjection`]; no variant touches the reducer or `AppState`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetricsUpdate {
     /// The latest safe daemon metrics snapshot, or `None` when unavailable.
@@ -55,7 +53,7 @@ pub enum MetricsUpdate {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MetricsProjection {
     metrics: Option<DaemonMetrics>,
-    git_diffs: BTreeMap<SessionId, GitDiff>,
+    git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
     /// Diagnostic-only daemon health, folded from the same drained samples.
     ///
     /// It lives beside the metrics cache because health is a projection *of*
@@ -63,13 +61,17 @@ pub struct MetricsProjection {
     /// read. Sample deltas need the sample sequence, and this drain is the only
     /// place that sees every observation exactly once.
     health: DaemonHealthTracker,
+    generation: u64,
 }
 
 impl MetricsProjection {
     /// Fold one drained observation into the cache.
     pub fn apply(&mut self, update: MetricsUpdate) {
-        match update {
+        let changed = match update {
             MetricsUpdate::Metrics(metrics) => {
+                if self.metrics == metrics {
+                    return;
+                }
                 // An absent observation is not evidence about the daemon: the
                 // production port replays its last sample while the lane fails,
                 // and a daemon-less workspace never observes at all. Folding
@@ -79,8 +81,18 @@ impl MetricsProjection {
                     self.health.observe(metrics);
                 }
                 self.metrics = metrics;
+                true
             }
-            MetricsUpdate::GitDiffs(git_diffs) => self.git_diffs = git_diffs,
+            MetricsUpdate::GitDiffs(git_diffs) => {
+                if self.git_diffs.as_ref() == &git_diffs {
+                    return;
+                }
+                self.git_diffs = Arc::new(git_diffs);
+                true
+            }
+        };
+        if changed {
+            self.generation = self.generation.saturating_add(1);
         }
     }
 
@@ -98,13 +110,24 @@ impl MetricsProjection {
 
     /// The latest per-session git diffs, for `HomeProjection::with_git_diffs`.
     #[must_use]
-    pub const fn git_diffs(&self) -> &BTreeMap<SessionId, GitDiff> {
+    pub fn git_diffs(&self) -> &BTreeMap<SessionId, GitDiff> {
         &self.git_diffs
+    }
+
+    #[must_use]
+    pub fn shared_git_diffs(&self) -> Arc<BTreeMap<SessionId, GitDiff>> {
+        Arc::clone(&self.git_diffs)
+    }
+
+    /// Monotonic generation of material that actually changed.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
-/// Polls a [`MetricsPort`] and refluxes each observation through a drain the
-/// controller frame loop consumes.
+/// Polls a [`MetricsPort`] and exposes changed observations through a drain the
+/// controller frame loop consumes, without a same-thread self-channel.
 ///
 /// The port owns the sampling cadence (a one-second metrics cache and a git-diff
 /// worker thread in the composition root), so a per-frame [`poll`] preserves the
@@ -115,30 +138,23 @@ impl MetricsProjection {
 /// [`poll`]: Self::poll
 pub struct MetricsBackend {
     port: Box<dyn MetricsPort>,
-    updates_tx: Sender<MetricsUpdate>,
-    updates_rx: Receiver<MetricsUpdate>,
+    updates: Vec<MetricsUpdate>,
 }
 
 impl MetricsBackend {
     /// Wrap a metrics port behind the reflux drain.
     #[must_use]
     pub fn new(port: Box<dyn MetricsPort>) -> Self {
-        let (updates_tx, updates_rx) = mpsc::channel();
         Self {
             port,
-            updates_tx,
-            updates_rx,
+            updates: Vec::new(),
         }
     }
 
-    /// Sample the port once for `sessions` and reflux the metrics snapshot and
-    /// the completed git diffs.  A dropped receiver (the TUI exited) makes each
-    /// send a harmless no-op.
-    pub fn poll(&mut self, sessions: &[(SessionId, PathBuf)]) {
-        let metrics = self.port.latest();
-        let _ = self.updates_tx.send(MetricsUpdate::Metrics(metrics));
-        let git_diffs = self.port.git_diffs(sessions);
-        let _ = self.updates_tx.send(MetricsUpdate::GitDiffs(git_diffs));
+    /// Sample the port once. Session paths are provided only when their
+    /// authoritative projection changed.
+    pub fn poll(&mut self, sessions: Option<&[(SessionId, PathBuf)]>) {
+        self.updates.extend(self.port.poll_updates(sessions));
     }
 
     /// Drain every observation refluxed since the last call, without blocking.
@@ -146,7 +162,7 @@ impl MetricsBackend {
     /// the frame.
     #[must_use]
     pub fn drain_events(&mut self) -> Vec<MetricsUpdate> {
-        self.updates_rx.try_iter().collect()
+        std::mem::take(&mut self.updates)
     }
 }
 
@@ -169,16 +185,25 @@ mod tests {
         metrics: Option<DaemonMetrics>,
         git_diffs: BTreeMap<SessionId, GitDiff>,
         polled_sessions: Rc<RefCell<Vec<(SessionId, PathBuf)>>>,
+        emitted: bool,
     }
 
     impl MetricsPort for FakeMetricsPort {
-        fn latest(&mut self) -> Option<DaemonMetrics> {
-            self.metrics.clone()
-        }
-
-        fn git_diffs(&mut self, sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
-            *self.polled_sessions.borrow_mut() = sessions.to_vec();
-            self.git_diffs.clone()
+        fn poll_updates(
+            &mut self,
+            sessions: Option<&[(SessionId, PathBuf)]>,
+        ) -> Vec<MetricsUpdate> {
+            if let Some(sessions) = sessions {
+                *self.polled_sessions.borrow_mut() = sessions.to_vec();
+            }
+            if std::mem::replace(&mut self.emitted, true) {
+                Vec::new()
+            } else {
+                vec![
+                    MetricsUpdate::Metrics(self.metrics.clone()),
+                    MetricsUpdate::GitDiffs(self.git_diffs.clone()),
+                ]
+            }
         }
     }
 
@@ -220,9 +245,10 @@ mod tests {
             metrics: Some(metrics()),
             git_diffs: diffs,
             polled_sessions: Rc::new(RefCell::new(Vec::new())),
+            emitted: false,
         }));
 
-        backend.poll(&[(session, PathBuf::from("/work/alpha"))]);
+        backend.poll(Some(&[(session, PathBuf::from("/work/alpha"))]));
         let events = backend.drain_events();
         assert!(matches!(
             events.as_slice(),
@@ -243,9 +269,10 @@ mod tests {
             metrics: None,
             git_diffs: BTreeMap::new(),
             polled_sessions: Rc::clone(&polled),
+            emitted: false,
         }));
 
-        backend.poll(&[(session, PathBuf::from("/work/beta"))]);
+        backend.poll(Some(&[(session, PathBuf::from("/work/beta"))]));
         assert!(matches!(
             backend.drain_events().as_slice(),
             [MetricsUpdate::Metrics(None), MetricsUpdate::GitDiffs(g)] if g.is_empty()
@@ -287,10 +314,11 @@ mod tests {
             metrics: Some(metrics()),
             git_diffs: diffs,
             polled_sessions: Rc::new(RefCell::new(Vec::new())),
+            emitted: false,
         }));
         let mut projection = MetricsProjection::default();
 
-        backend.poll(&[(session, PathBuf::from("/work/alpha"))]);
+        backend.poll(Some(&[(session, PathBuf::from("/work/alpha"))]));
         for update in backend.drain_events() {
             projection.apply(update);
         }
@@ -319,6 +347,29 @@ mod tests {
         // git diff だけの update も health を動かさない。
         projection.apply(MetricsUpdate::GitDiffs(BTreeMap::new()));
         assert_eq!(projection.health(), expected);
+    }
+
+    #[test]
+    fn one_changed_git_map_is_moved_once_across_one_thousand_idle_polls() {
+        let session = SessionId::new();
+        let mut backend = MetricsBackend::new(Box::new(FakeMetricsPort {
+            metrics: None,
+            git_diffs: BTreeMap::from([(session, git_diff())]),
+            polled_sessions: Rc::new(RefCell::new(Vec::new())),
+            emitted: false,
+        }));
+        let mut projection = MetricsProjection::default();
+        let paths = [(session, PathBuf::from("/work/alpha"))];
+
+        for tick in 0..1_000 {
+            backend.poll((tick == 0).then_some(paths.as_slice()));
+            for update in backend.drain_events() {
+                projection.apply(update);
+            }
+        }
+
+        assert_eq!(projection.generation(), 1);
+        assert_eq!(projection.git_diffs().get(&session), Some(&git_diff()));
     }
 
     #[test]

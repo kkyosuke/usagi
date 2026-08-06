@@ -95,6 +95,8 @@ pub struct WorkspaceRuntime {
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
     director_projection: DirectorDrawerProjection,
+    material_revision: u64,
+    material_size: Option<(u16, u16)>,
 }
 
 impl WorkspaceRuntime {
@@ -124,6 +126,8 @@ impl WorkspaceRuntime {
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             director_projection: DirectorDrawerProjection::default(),
+            material_revision: 0,
+            material_size: None,
         }
     }
 
@@ -272,6 +276,13 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn director_projection(&self) -> &DirectorDrawerProjection {
         &self.director_projection
+    }
+
+    /// Cache fence for controller/modal projection inputs. Pane state has its
+    /// own registry revision and is intentionally returned separately.
+    #[must_use]
+    pub const fn material_key(&self) -> (u64, u64) {
+        (self.material_revision, self.panes.revision())
     }
 
     /// Apply one completed inventory projection. Only a result matching both
@@ -457,6 +468,9 @@ impl WorkspaceRuntime {
     /// reducer as [`AppKey::SubmitOverview`], and Escape closes the overlay.
     /// Every other key falls through to the reducer so global chords still work.
     fn handle_overview_key(&mut self, key: Key) -> Vec<Effect> {
+        if !matches!(key, Key::Other | Key::Resize) {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
         let modal = self
             .overview_modal
             .as_mut()
@@ -545,6 +559,9 @@ impl WorkspaceRuntime {
     /// the persisted modal; Enter submits the selected action or typed command as
     /// [`AppKey::SubmitCloseup`], and Escape closes the overlay.
     fn handle_closeup_key(&mut self, key: Key) -> Vec<Effect> {
+        if !matches!(key, Key::Other | Key::Resize) {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
         let modal = self
             .closeup_modal
             .as_mut()
@@ -641,6 +658,19 @@ impl WorkspaceRuntime {
     /// live-pane flag in sync with the resulting controller state.
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
+        let advances_material = match &event {
+            AppEvent::Tick => false,
+            AppEvent::Resize { width, height } => {
+                let size = (*width, *height);
+                let changed = self.material_size != Some(size);
+                self.material_size = Some(size);
+                changed
+            }
+            _ => true,
+        };
+        if advances_material {
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
         let effects = update(&mut self.state, event);
         self.follow_active_target();
         self.sync_overlay_modals();

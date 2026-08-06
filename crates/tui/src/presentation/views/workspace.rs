@@ -8,8 +8,9 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{AgentInventory, ProviderResumeProjection, ProviderResumeReason};
@@ -182,7 +183,7 @@ fn short_id(id: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomeProjection {
     workspace_name: String,
-    sessions: Vec<ProjectedSession>,
+    sessions: Arc<[ProjectedSession]>,
     selected: Selection,
     active: Option<SessionId>,
     /// Session drawn in the right pane. Switch previews the row under the
@@ -211,10 +212,10 @@ pub struct HomeProjection {
     health: DaemonHealthTracker,
     /// sidebar の git 差分列。stable `SessionId` で session 行に結合する非永続の描画素材で、
     /// controller state には持たせない。空なら差分列を描かず metrics 導入前の frame を保つ。
-    git_diffs: BTreeMap<SessionId, GitDiff>,
+    git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
     /// 選択中 live terminal の viewport 素材。`None` は live terminal 非表示で、右ペインは
     /// 既存の pane strip をそのまま描く。
-    terminal_view: Option<TerminalViewProjection>,
+    terminal_view: Option<Arc<TerminalViewProjection>>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
@@ -313,21 +314,37 @@ impl HomeProjection {
         snapshot_sessions: &[ProjectedSession],
     ) -> Self {
         let _ = root_cwd;
-        let mut sessions = Vec::new();
-        for id in state.sessions() {
-            for session in snapshot_sessions {
-                if session.id == *id {
-                    let mut session = session.clone();
-                    session.role_id = state
-                        .session_roles()
-                        .get(id)
-                        .and_then(|projection| projection.role_id.as_ref())
-                        .map(ToString::to_string);
-                    sessions.push(session);
-                    break;
-                }
-            }
-        }
+        // Build one stable-identity index, then retain the controller's order.
+        // The former nested scan made a rebuild O(state sessions × snapshot
+        // sessions), even though both sides already carry the authoritative ID.
+        let snapshot_by_id = snapshot_sessions
+            .iter()
+            .map(|session| (session.id, session))
+            .collect::<HashMap<_, _>>();
+        let sessions = state
+            .sessions()
+            .iter()
+            .filter_map(|id| {
+                let mut session = (*snapshot_by_id.get(id)?).clone();
+                session.role_id = state
+                    .session_roles()
+                    .get(id)
+                    .and_then(|projection| projection.role_id.as_ref())
+                    .map(ToString::to_string);
+                Some(session)
+            })
+            .collect::<Vec<_>>();
+        Self::from_ordered_state(state, workspace_name, Arc::from(sessions))
+    }
+
+    /// Build from an already ordered, stable-ID joined row projection. This is
+    /// the frame loop's change-driven path: unrelated metrics, clock, overlay or
+    /// terminal updates retain the same owned rows without cloning label/path.
+    pub(crate) fn from_ordered_state(
+        state: &AppState,
+        workspace_name: &str,
+        sessions: Arc<[ProjectedSession]>,
+    ) -> Self {
         let create_draft = state.create_session_form().map(CreateDraft::from);
         let create_role = state
             .create_session_form()
@@ -355,7 +372,7 @@ impl HomeProjection {
             mascot_speech: None,
             metrics: None,
             health: DaemonHealthTracker::default(),
-            git_diffs: BTreeMap::new(),
+            git_diffs: Arc::new(BTreeMap::new()),
             terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
@@ -520,7 +537,16 @@ impl HomeProjection {
     /// pre-diff form.
     #[must_use]
     pub fn with_git_diffs(mut self, diffs: &BTreeMap<SessionId, GitDiff>) -> Self {
-        self.git_diffs = diffs.clone();
+        self.git_diffs = Arc::new(diffs.clone());
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_shared_git_diffs(
+        mut self,
+        diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    ) -> Self {
+        self.git_diffs = diffs;
         self
     }
 
@@ -529,6 +555,15 @@ impl HomeProjection {
     /// `None` keeps the right pane on its existing tab strip.
     #[must_use]
     pub fn with_terminal_view(mut self, view: Option<TerminalViewProjection>) -> Self {
+        self.terminal_view = view.map(Arc::new);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_shared_terminal_view(
+        mut self,
+        view: Option<Arc<TerminalViewProjection>>,
+    ) -> Self {
         self.terminal_view = view;
         self
     }
@@ -536,8 +571,8 @@ impl HomeProjection {
     /// Borrow the focused live terminal projection for a shell-owned overlay
     /// that needs to rebuild the current Home frame.
     #[must_use]
-    pub(crate) const fn terminal_view(&self) -> Option<&TerminalViewProjection> {
-        self.terminal_view.as_ref()
+    pub(crate) fn terminal_view(&self) -> Option<&TerminalViewProjection> {
+        self.terminal_view.as_deref()
     }
 
     /// Replace the open drawer's presentation material without changing its
@@ -739,6 +774,9 @@ pub struct Workspace {
     session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     /// Non-persistent safe role metadata from the daemon snapshot.
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
+    /// Monotonic generation of daemon-derived row material. It is a cache key,
+    /// never an authority; the records and stable IDs above remain the `SSoT`.
+    material_revision: u64,
 }
 
 impl Workspace {
@@ -773,6 +811,7 @@ impl Workspace {
             git_diffs: BTreeMap::new(),
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
+            material_revision: 0,
         }
     }
 
@@ -822,10 +861,17 @@ impl Workspace {
         sessions: Vec<SessionRecord>,
         session_ids: Option<Vec<SessionId>>,
     ) {
+        let changed = self.state.sessions != sessions
+            || session_ids
+                .as_ref()
+                .is_some_and(|ids| self.session_ids != *ids);
         self.state.sessions = sessions;
         if let Some(session_ids) = session_ids {
             debug_assert_eq!(session_ids.len(), self.state.sessions.len());
             self.session_ids = session_ids;
+        }
+        if changed {
+            self.material_revision = self.material_revision.saturating_add(1);
         }
     }
 
@@ -858,7 +904,10 @@ impl Workspace {
         &mut self,
         lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     ) {
-        self.session_lifecycles = lifecycles;
+        if self.session_lifecycles != lifecycles {
+            self.session_lifecycles = lifecycles;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
     }
 
     /// The lifecycle projection keyed by stable ID, joined onto each sidebar row
@@ -869,12 +918,20 @@ impl Workspace {
     }
 
     pub fn set_session_roles(&mut self, roles: BTreeMap<SessionId, SessionRoleProjection>) {
-        self.session_roles = roles;
+        if self.session_roles != roles {
+            self.session_roles = roles;
+            self.material_revision = self.material_revision.saturating_add(1);
+        }
     }
 
     #[must_use]
     pub fn session_roles(&self) -> &BTreeMap<SessionId, SessionRoleProjection> {
         &self.session_roles
+    }
+
+    #[must_use]
+    pub const fn material_revision(&self) -> u64 {
+        self.material_revision
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -2266,6 +2323,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use usagi_core::domain::agent::{
         AgentInventory, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
         ProviderResumeProjection, ProviderResumeReason,
@@ -2286,6 +2344,53 @@ mod tests {
     use usagi_core::usecase::daemon_health::{DaemonHealth, DaemonHealthTracker, HealthReason};
     use usagi_core::usecase::session_state::SessionStateCounts;
 
+    #[test]
+    fn ordered_frame_projection_reuses_owned_session_git_and_terminal_components() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/work/alpha"),
+            created_at: Utc::now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions: Arc<[ProjectedSession]> =
+            Arc::from([ProjectedSession::from_record(session, &record)]);
+        let git = Arc::new(BTreeMap::from([(
+            session,
+            GitDiff {
+                base: "main".to_owned(),
+                ahead: 1,
+                behind: 0,
+                added: 2,
+                removed: 0,
+            },
+        )]));
+        let terminal = Arc::new(TerminalViewProjection {
+            rows: vec!["https://example.com".to_owned()],
+            row_offset: 0,
+            total_rows: 1,
+            scroll: 0,
+            feedback: None,
+        });
+
+        let projection = HomeProjection::from_ordered_state(&state, "work", Arc::clone(&sessions))
+            .with_shared_git_diffs(Arc::clone(&git))
+            .with_shared_terminal_view(Some(Arc::clone(&terminal)));
+
+        assert!(Arc::ptr_eq(&projection.sessions, &sessions));
+        assert!(Arc::ptr_eq(&projection.git_diffs, &git));
+        assert!(Arc::ptr_eq(
+            projection.terminal_view.as_ref().unwrap(),
+            &terminal
+        ));
+    }
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()

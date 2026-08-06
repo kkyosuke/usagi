@@ -1,14 +1,14 @@
 ---
 number: 660
 title: perf(tui): frame material の全 clone / link scan を change-driven cache にする
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, performance, rendering, memory, ssot]
 dependson: []
 related: [554, 587, 637]
 parent: 654
 created_at: 2026-08-05T13:49:12.068615+00:00
-updated_at: 2026-08-05T13:49:12.068615+00:00
+updated_at: 2026-08-05T23:24:13.154211+00:00
 ---
 
 ## Finding（P2 rendering / allocation）

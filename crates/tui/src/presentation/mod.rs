@@ -19,6 +19,7 @@ pub mod workspace_runtime;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use chrono::{DateTime, Timelike, Utc};
@@ -816,12 +817,30 @@ fn route_workspace_input_before_reducer(
 
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
 pub trait MetricsPort {
-    fn latest(&mut self) -> Option<DaemonMetrics>;
+    /// Compatibility observation hook for simple embedders. Production ports
+    /// override [`Self::poll_updates`] to avoid materializing unchanged values.
+    fn latest(&mut self) -> Option<DaemonMetrics> {
+        None
+    }
 
-    /// Poll non-blocking session Git observations. The port owns any workers;
-    /// rendering only receives completed values.
+    /// Compatibility Git snapshot hook. Change-driven ports should override
+    /// [`Self::poll_updates`] and move only changed material instead.
     fn git_diffs(&mut self, _sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
         BTreeMap::new()
+    }
+
+    /// Return only observations that changed since the previous poll. `sessions`
+    /// is supplied only when the daemon session projection changed, so an idle
+    /// frame neither clones cwd paths nor rescans active IDs.
+    fn poll_updates(
+        &mut self,
+        sessions: Option<&[(SessionId, PathBuf)]>,
+    ) -> Vec<metrics::MetricsUpdate> {
+        let mut updates = vec![metrics::MetricsUpdate::Metrics(self.latest())];
+        if let Some(sessions) = sessions {
+            updates.push(metrics::MetricsUpdate::GitDiffs(self.git_diffs(sessions)));
+        }
+        updates
     }
 }
 
@@ -831,11 +850,7 @@ pub trait MetricsPortFactory {
 }
 
 struct NoMetrics;
-impl MetricsPort for NoMetrics {
-    fn latest(&mut self) -> Option<DaemonMetrics> {
-        None
-    }
-}
+impl MetricsPort for NoMetrics {}
 
 struct NoMetricsFactory;
 impl MetricsPortFactory for NoMetricsFactory {
@@ -1527,6 +1542,7 @@ struct WorkspaceUi {
     /// Latest coherent workspace-wide Agent inventory received by the restore
     /// lane. Kept as draw material for the read-only daemon status modal.
     agent_inventory: Option<AgentInventory>,
+    material_revision: u64,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     /// Monotonic fence for the one admitted session command. A delayed or
@@ -1916,6 +1932,7 @@ impl WorkspaceUi {
             last_session_revision: 0,
             agent_resumes: BTreeMap::new(),
             agent_inventory: None,
+            material_revision: 0,
             session_completions,
             session_completion_sender,
             next_session_command: 1,
@@ -2265,6 +2282,7 @@ impl WorkspaceUi {
     /// asks the existing coalesced restore lane for one fresh coherent snapshot.
     fn refresh_agent_inventory(&mut self) {
         self.agent_inventory = None;
+        self.material_revision = self.material_revision.saturating_add(1);
         self.request_agent_observation();
     }
 
@@ -2349,6 +2367,13 @@ impl WorkspaceUi {
                 Some(selection) => session.display_row_count_selection(selection),
                 None => session.display_row_count(),
             })
+    }
+
+    fn terminal_projection_key(&self, terminal: &TerminalRef) -> Option<u64> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(TerminalSession::projection_key)
     }
 
     fn terminal_row_window(
@@ -3361,9 +3386,31 @@ fn recent_path(recent: &Recent) -> Option<&Path> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static SESSION_PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TERMINAL_PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_projection_build_counts() {
+    SESSION_PROJECTION_BUILDS.set(0);
+    TERMINAL_PROJECTION_BUILDS.set(0);
+}
+
+#[cfg(test)]
+fn projection_build_counts() -> (usize, usize) {
+    (
+        SESSION_PROJECTION_BUILDS.get(),
+        TERMINAL_PROJECTION_BUILDS.get(),
+    )
+}
+
 /// Project the daemon-authoritative session records into the controller's Home
 /// row material, in the same order the runtime holds their IDs.
 fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
+    #[cfg(test)]
+    SESSION_PROJECTION_BUILDS.set(SESSION_PROJECTION_BUILDS.get() + 1);
     ui.workspace
         .sessions()
         .iter()
@@ -3384,6 +3431,12 @@ fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
                 // the daemon says so, not only until the local command returns.
                 projected.removing |= projection.lifecycle == SessionLifecycle::Deleting;
             }
+            projected.role_id = ui
+                .workspace
+                .session_roles()
+                .get(id)
+                .and_then(|role| role.role_id.as_ref())
+                .map(ToString::to_string);
             projected
         })
         .collect()
@@ -3585,6 +3638,8 @@ fn controller_terminal_view(
     controls: &mut LiveTerminalControls,
     viewport_rows: usize,
 ) -> Option<TerminalViewProjection> {
+    #[cfg(test)]
+    TERMINAL_PROJECTION_BUILDS.set(TERMINAL_PROJECTION_BUILDS.get() + 1);
     let terminal = runtime.preview_terminal();
     let mut live_terminals = runtime.background_terminals();
     if let Some(terminal) = &terminal {
@@ -3710,6 +3765,7 @@ fn director_drawer_projection(
 /// auto-close it if exited, then project its freshly polled viewport. Returns
 /// the projection plus its `(rows_len, scroll)` so a later pointer drag maps back
 /// to the exact retained cell.
+#[cfg(test)]
 fn poll_and_project_terminals(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
@@ -4096,6 +4152,7 @@ fn apply_restore_completion(
     let terminals = terminals.expect("coherent restore checked terminal transport");
     let agents = agents.expect("coherent restore checked Agent transport");
     ui.agent_inventory = Some(agents.clone());
+    ui.material_revision = ui.material_revision.saturating_add(1);
     // The interrupted projection reads the same coherent observation as the live
     // one, before the intent mutation consumes it.
     let interrupted = crate::usecase::application::interrupted_tab::project(
@@ -4572,6 +4629,41 @@ struct HomeFrameMaterial {
     now: DateTime<Utc>,
 }
 
+/// Cheap dependency vector for the owned Home projection. Equality is the
+/// admission gate to projection construction; each revision is advanced by its
+/// authoritative controller/daemon source, never by this cache.
+#[derive(Debug, PartialEq, Eq)]
+struct FrameMaterialKey {
+    height: usize,
+    width: usize,
+    controller: (u64, u64),
+    sessions: (u64, Option<SessionId>),
+    shell: u64,
+    metrics: u64,
+    terminal: u64,
+    animation: u64,
+    create_pending: Option<String>,
+    now: DateTime<Utc>,
+}
+
+impl FrameMaterialKey {
+    /// Only controller admission can conservatively advance for a reducer no-op
+    /// (for example Escape on the base route). Every other generation denotes
+    /// changed draw material and can bypass an owned-projection equality scan.
+    fn differs_only_by_controller(&self, other: &Self) -> bool {
+        self.controller != other.controller
+            && self.height == other.height
+            && self.width == other.width
+            && self.sessions == other.sessions
+            && self.shell == other.shell
+            && self.metrics == other.metrics
+            && self.terminal == other.terminal
+            && self.animation == other.animation
+            && self.create_pending == other.create_pending
+            && self.now == other.now
+    }
+}
+
 impl HomeFrameMaterial {
     fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
         self.projection = self.projection.with_agent_inventory(inventory);
@@ -4585,7 +4677,7 @@ fn home_frame_material(
     width: usize,
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
-    root_cwd: &Path,
+    _root_cwd: &Path,
     sessions: &[ProjectedSession],
     metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
     health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
@@ -4594,27 +4686,55 @@ fn home_frame_material(
     create_pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> HomeFrameMaterial {
-    let projection =
-        HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
-            .with_pane(runtime.preview_pane())
-            .with_metrics(metrics)
-            // Diagnostic-only material. It rides the frame material like every
-            // other renderer input, so an idle Home still skips redraws.
-            .with_health(health)
-            .with_git_diffs(git_diffs)
-            .with_terminal_view(
-                (!runtime.state().director_drawer_open())
-                    .then_some(terminal_view)
-                    .flatten(),
-            )
-            .with_director_drawer(runtime.director_projection().clone())
-            .with_create_pending(create_pending.map(str::to_owned))
-            .with_overlay_modals(
-                runtime.overview_modal().cloned(),
-                runtime.closeup_modal().cloned(),
-            )
-            // Last, once every surface that reads the animation clock is known.
-            .collapse_animation_clock();
+    home_frame_material_shared(
+        height,
+        width,
+        runtime,
+        workspace_name,
+        Arc::from(sessions.to_vec()),
+        metrics,
+        health,
+        Arc::new(git_diffs.clone()),
+        terminal_view.map(Arc::new),
+        create_pending,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn home_frame_material_shared(
+    height: usize,
+    width: usize,
+    runtime: &WorkspaceRuntime,
+    workspace_name: &str,
+    sessions: Arc<[ProjectedSession]>,
+    metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
+    health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
+    git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    terminal_view: Option<Arc<TerminalViewProjection>>,
+    create_pending: Option<&str>,
+    now: DateTime<Utc>,
+) -> HomeFrameMaterial {
+    let projection = HomeProjection::from_ordered_state(runtime.state(), workspace_name, sessions)
+        .with_pane(runtime.preview_pane())
+        .with_metrics(metrics)
+        // Diagnostic-only material. It rides the frame material like every
+        // other renderer input, so an idle Home still skips redraws.
+        .with_health(health)
+        .with_shared_git_diffs(git_diffs)
+        .with_shared_terminal_view(
+            (!runtime.state().director_drawer_open())
+                .then_some(terminal_view)
+                .flatten(),
+        )
+        .with_director_drawer(runtime.director_projection().clone())
+        .with_create_pending(create_pending.map(str::to_owned))
+        .with_overlay_modals(
+            runtime.overview_modal().cloned(),
+            runtime.closeup_modal().cloned(),
+        )
+        // Last, once every surface that reads the animation clock is known.
+        .collapse_animation_clock();
     HomeFrameMaterial {
         height,
         width,
@@ -5229,6 +5349,18 @@ fn drive_workspace_controller(
     // it draws nothing: the frame build and the terminal diff are both skipped.
     // Everything else in this loop — drains, admission, input — runs regardless.
     let mut drawn_material: Option<HomeFrameMaterial> = None;
+    // Owned daemon row/path material is rebuilt only when its authoritative
+    // inputs change. The cache never feeds commands back into the controller.
+    let mut session_material_key: Option<(u64, Option<SessionId>)> = None;
+    let mut sessions: Arc<[ProjectedSession]> = Arc::from([]);
+    let mut metrics_sessions = Vec::new();
+    let mut terminal_material_key: Option<(Option<TerminalRef>, u64, u64, Geometry)> = None;
+    let mut terminal_view: Option<Arc<TerminalViewProjection>> = None;
+    let mut terminal_rows_len = 0;
+    let mut terminal_scroll = 0;
+    let mut terminal_generation = 0_u64;
+    let mut director_material_key = None;
+    let mut frame_material_key: Option<FrameMaterialKey> = None;
     loop {
         for event in backend.drain_events() {
             let _ = runtime.apply_event(event);
@@ -5299,50 +5431,127 @@ fn drive_workspace_controller(
         // the previewed terminal: Switch's hover, Closeup's focus.
         ui.sync_foreground_terminal(runtime.preview_terminal().as_ref(), geometry);
         ui.resize_terminals(geometry);
-        let (terminal_view, terminal_rows_len, terminal_scroll) =
-            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
-        let drawer_projection = director_drawer_projection(&ui, &runtime, terminal_view.as_ref());
-        runtime.set_director_projection(drawer_projection);
+        // Polling still runs every tick so output/admission progresses, but row
+        // String creation and URL scanning run only behind the projection key.
+        close_exited_panes(&mut ui, &mut runtime);
+        let focused_terminal = runtime.preview_terminal();
+        let mut live_terminals = runtime.background_terminals();
+        if let Some(terminal) = &focused_terminal {
+            live_terminals.push(terminal.clone());
+        }
+        controls.retain_terminals(&live_terminals);
+        controls.sync_focus(focused_terminal.as_ref());
+        let screen_revision = focused_terminal
+            .as_ref()
+            .and_then(|terminal| ui.terminal_projection_key(terminal))
+            .unwrap_or(0);
+        let next_terminal_key = (
+            focused_terminal,
+            screen_revision,
+            controls.revision(),
+            geometry,
+        );
+        if terminal_material_key.as_ref() != Some(&next_terminal_key) {
+            terminal_view =
+                controller_terminal_view(&ui, &runtime, &mut controls, usize::from(geometry.rows))
+                    .map(Arc::new);
+            (terminal_rows_len, terminal_scroll) = match &terminal_view {
+                Some(view) => (view.total_rows, controls.scroll()),
+                None => (0, 0),
+            };
+            terminal_material_key = Some(next_terminal_key);
+            terminal_generation = terminal_generation.saturating_add(1);
+        }
+        let next_director_key = (
+            runtime.material_key(),
+            ui.material_revision,
+            terminal_generation,
+        );
+        if director_material_key != Some(next_director_key) {
+            let drawer_projection =
+                director_drawer_projection(&ui, &runtime, terminal_view.as_deref());
+            runtime.set_director_projection(drawer_projection);
+            director_material_key = Some(next_director_key);
+        }
         if ui.take_terminal_reconnected() {
             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Feedback(
                 Feedback::Reconnected,
             )));
         }
-        let sessions = project_controller_sessions(&ui);
+        let next_session_key = (ui.workspace.material_revision(), ui.removing_session);
+        let sessions_changed = session_material_key != Some(next_session_key);
+        if sessions_changed {
+            sessions = Arc::from(project_controller_sessions(&ui));
+            metrics_sessions = sessions
+                .iter()
+                .map(|session| (session.id, session.cwd.clone()))
+                .collect();
+            session_material_key = Some(next_session_key);
+        }
         // Reflux daemon metrics / git diffs through the backend drain instead of
         // polling the port inline: the shell folds the updates into its own
         // projection cache, so the material no longer rides on the legacy view.
-        let metrics_sessions = sessions
-            .iter()
-            .map(|session| (session.id, session.cwd.clone()))
-            .collect::<Vec<_>>();
-        metrics_backend.poll(&metrics_sessions);
+        metrics_backend.poll(sessions_changed.then_some(metrics_sessions.as_slice()));
         for update in metrics_backend.drain_events() {
             metrics_projection.apply(update);
         }
-        let material = home_frame_material(
+        let now = Utc::now();
+        let now = now.with_nanosecond(0).unwrap_or(now);
+        let drives_tick_animation = ui.creating_session.is_some()
+            || sessions.iter().any(|session| session.removing)
+            || runtime
+                .preview_pane()
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Pending(_)));
+        let animation = if drives_tick_animation {
+            runtime.state().mascot_tick()
+        } else {
+            widgets::mascot::canonical_tick(runtime.state().mascot_tick())
+        };
+        let next_frame_key = FrameMaterialKey {
             height,
             width,
-            &runtime,
-            &workspace_name,
-            &root_cwd,
-            &sessions,
-            metrics_projection.metrics(),
-            metrics_projection.health(),
-            metrics_projection.git_diffs(),
-            terminal_view,
-            ui.creating_session
+            controller: runtime.material_key(),
+            sessions: next_session_key,
+            shell: ui.material_revision,
+            metrics: metrics_projection.generation(),
+            terminal: terminal_generation,
+            animation,
+            create_pending: ui
+                .creating_session
                 .as_ref()
-                .map(|create| create.name.as_str()),
-            Utc::now(),
-        )
-        .with_agent_inventory(ui.agent_inventory());
-        // Skip only the drawing. A skipped tick has already run every drain
-        // above and still runs restore admission, pane launches, and input
-        // below, so nothing that makes progress depends on the redraw.
-        if drawn_material.as_ref() != Some(&material) {
-            term.draw(&render_home_material(&material))?;
-            drawn_material = Some(material);
+                .map(|create| create.name.clone()),
+            now,
+        };
+        if frame_material_key.as_ref() != Some(&next_frame_key) {
+            let controller_may_be_noop = frame_material_key
+                .as_ref()
+                .is_some_and(|previous| previous.differs_only_by_controller(&next_frame_key));
+            let material = home_frame_material_shared(
+                height,
+                width,
+                &runtime,
+                &workspace_name,
+                Arc::clone(&sessions),
+                metrics_projection.metrics(),
+                metrics_projection.health(),
+                metrics_projection.shared_git_diffs(),
+                terminal_view.as_ref().map(Arc::clone),
+                ui.creating_session
+                    .as_ref()
+                    .map(|create| create.name.as_str()),
+                now,
+            )
+            .with_agent_inventory(ui.agent_inventory());
+            // Skip only the drawing. A skipped tick has already run every drain
+            // above and still runs restore admission, pane launches, and input
+            // below, so nothing that makes progress depends on the redraw.
+            if !controller_may_be_noop || drawn_material.as_ref() != Some(&material) {
+                term.draw(&render_home_material(&material))?;
+                drawn_material = Some(material);
+            }
+            frame_material_key = Some(next_frame_key);
         }
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
@@ -5458,6 +5667,7 @@ fn drive_workspace_controller(
                 // The modal drew over the frame the gate remembers, so the next
                 // tick must redraw even if no material changed underneath it.
                 drawn_material = None;
+                frame_material_key = None;
                 let effective =
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
                 runtime.set_modal_selection_mode(effective.modal_selection_mode);
@@ -6510,10 +6720,10 @@ mod tests {
         copy_terminal_selection, drain_session_completions, foreground_terminal_geometry,
         forward_live_terminal_input, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, poll_and_project_terminals, render_controller_frame,
-        render_home_snapshot, restore_open_panes, retarget_director_chords,
-        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
-        run_with_settings,
+        play_startup_splash, poll_and_project_terminals, projection_build_counts,
+        render_controller_frame, render_home_snapshot, reset_projection_build_counts,
+        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -6635,6 +6845,25 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop_front()
+        }
+    }
+
+    /// Publish one daemon snapshot on an exact drain observation. The frame
+    /// loop itself advances `takes`; no wall-clock delay or worker scheduling is
+    /// involved, so cache invalidation tests can put the change between two
+    /// already-rendered frames deterministically.
+    struct ScheduledSessionRefreshPort {
+        publish_on_take: usize,
+        takes: usize,
+        update: Option<SessionCommandResult>,
+    }
+
+    impl SessionRefreshPort for ScheduledSessionRefreshPort {
+        fn take(&mut self) -> Option<Result<SessionCommandResult, String>> {
+            self.takes += 1;
+            (self.takes == self.publish_on_take)
+                .then(|| self.update.take().map(Ok))
+                .flatten()
         }
     }
 
@@ -9554,10 +9783,11 @@ mod tests {
     /// while every drain still runs on exactly those ticks.
     #[test]
     fn idle_ticks_skip_the_worktree_scan_and_the_redraw_but_never_a_drain() {
+        reset_projection_build_counts();
         let scans = Arc::new(AtomicUsize::new(0));
         let lane_drains = Arc::new(AtomicUsize::new(0));
 
-        let ticks = 80;
+        let ticks = 1_000;
         let mut keys = vec![Key::Other; ticks];
         keys.extend([Key::CtrlQ, Key::Char('y')]);
         let mut term = FakeTerminal::with_keys(&keys);
@@ -9603,6 +9833,309 @@ mod tests {
         // Every iteration still drained the resident lane, including the ones
         // that drew nothing.
         assert!(lane_drains.load(Ordering::SeqCst) >= ticks);
+        let (session_builds, terminal_builds) = projection_build_counts();
+        assert_eq!(
+            session_builds, 1,
+            "session rows/cwd were rebuilt on idle ticks"
+        );
+        assert_eq!(
+            terminal_builds, 1,
+            "terminal viewport/link projection was rebuilt on idle ticks"
+        );
+    }
+
+    /// A terminal harness that records the projection generations visible at
+    /// every actual draw. With `wait_for_builds`, it drives neutral ticks until
+    /// the requested cache invalidation has happened, then quits. The condition
+    /// is observable loop state rather than elapsed time; the finite ceiling is
+    /// only a failure guard for a broken wiring under test.
+    struct CacheInvalidationTerminal {
+        keys: VecDeque<Key>,
+        wait_for_builds: Option<(usize, usize)>,
+        quit_started: bool,
+        neutral_ticks: usize,
+        frames: Vec<Vec<String>>,
+        builds_at_draw: Vec<(usize, usize)>,
+    }
+
+    impl CacheInvalidationTerminal {
+        fn scripted(keys: impl IntoIterator<Item = Key>) -> Self {
+            Self {
+                keys: keys.into_iter().collect(),
+                wait_for_builds: None,
+                quit_started: false,
+                neutral_ticks: 0,
+                frames: Vec::new(),
+                builds_at_draw: Vec::new(),
+            }
+        }
+
+        fn until_builds(keys: impl IntoIterator<Item = Key>, builds: (usize, usize)) -> Self {
+            Self {
+                wait_for_builds: Some(builds),
+                ..Self::scripted(keys)
+            }
+        }
+    }
+
+    impl Terminal for CacheInvalidationTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((20, 80))
+        }
+
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.frames.push(frame.to_vec());
+            self.builds_at_draw.push(projection_build_counts());
+            Ok(())
+        }
+
+        fn wait(&mut self, _duration: std::time::Duration) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            if let Some(key) = self.keys.pop_front() {
+                return Ok(key);
+            }
+            let Some(expected) = self.wait_for_builds else {
+                return Err(io::Error::other("no more cache-invalidation keys"));
+            };
+            let observed = projection_build_counts();
+            if observed.0 >= expected.0 && observed.1 >= expected.1 {
+                if self.quit_started {
+                    return Ok(Key::Char('y'));
+                }
+                self.quit_started = true;
+                return Ok(Key::Live(LiveTerminalAction::QuitConfirmation));
+            }
+            self.neutral_ticks += 1;
+            if self.neutral_ticks >= 10_000 {
+                return Err(io::Error::other(format!(
+                    "cache invalidation was not observed: expected {expected:?}, got {observed:?}"
+                )));
+            }
+            std::thread::yield_now();
+            Ok(Key::Other)
+        }
+
+        fn copy_text(&mut self, _text: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// The session revision must cross both cache gates in the real composition
+    /// loop: first rebuild the owned row/path projection, then rebuild and draw
+    /// the frame that contains it.
+    #[test]
+    fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
+        reset_projection_build_counts();
+        let snapshot = snapshot("session-cache");
+        let original = snapshot.session_ids[0];
+        let added = SessionId::new();
+        let mut added_record = snapshot.state.sessions[0].clone();
+        added_record.name = "cache-added".to_owned();
+        added_record.root = PathBuf::from("/tmp/session-cache/cache-added");
+        let update = SessionCommandResult {
+            message: "daemon snapshot changed".to_owned(),
+            sessions: Some(vec![snapshot.state.sessions[0].clone(), added_record]),
+            session_ids: Some(vec![original, added]),
+            agent_resumes: None,
+            session_lifecycles: None,
+            session_roles: None,
+            revision: Some(1),
+        };
+        let mut term = CacheInvalidationTerminal::scripted([
+            Key::Other,
+            Key::Other,
+            Key::Other,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: Some(Box::new(ScheduledSessionRefreshPort {
+                publish_on_take: 3,
+                takes: 0,
+                update: Some(update),
+            })),
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+            Exit::Quit
+        );
+
+        let (session_builds, terminal_builds) = projection_build_counts();
+        assert_eq!(session_builds, 2, "the changed session key did not rebuild");
+        assert_eq!(terminal_builds, 1, "a session change rebuilt the terminal");
+        assert!(
+            term.builds_at_draw.contains(&(2, 1)),
+            "the frame key did not redraw after the session material rebuild"
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("cache-added")),
+            "the redrawn frame did not contain the changed session projection"
+        );
+    }
+
+    struct ImmediateTerminalLaunchPort(TerminalRef);
+
+    impl PaneLaunchCommandPort for ImmediateTerminalLaunchPort {
+        fn launch(
+            &self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent launch is not scripted".to_owned())
+        }
+
+        fn resume(
+            &self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _operation: OperationId,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent resume is not scripted".to_owned())
+        }
+
+        fn resume_exact(
+            &self,
+            _target: usagi_core::domain::agent::AgentResumeTarget,
+            _operation: OperationId,
+        ) -> Result<super::ExactAgentResume, String> {
+            Err("exact agent resume is not scripted".to_owned())
+        }
+
+        fn launch_terminal(
+            &self,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _geometry: Geometry,
+            _arguments: &str,
+            _operation: OperationId,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The resident stream starts with one checkpoint and publishes exactly one
+    /// later output chunk. This changes the authoritative `TerminalSession` screen
+    /// revision after the pane itself has already been projected once.
+    struct ChangingTerminalPort {
+        replay: Vec<u8>,
+        empty_polls_before_update: usize,
+        update: Option<Vec<u8>>,
+    }
+
+    impl AgentCommandPort for ChangingTerminalPort {
+        fn launch(
+            &mut self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Err("agent launch is not scripted".to_owned())
+        }
+
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
+                revision: 1,
+                output_offset: self.replay.len() as u64,
+                next_input_seq: None,
+                screen: attach_checkpoint(&self.replay, geometry),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            if self.empty_polls_before_update > 0 {
+                self.empty_polls_before_update -= 1;
+                return Ok(Vec::new());
+            }
+            let Some(data) = self.update.take() else {
+                return Ok(Vec::new());
+            };
+            Ok(vec![TerminalChunk {
+                start_offset: after_offset,
+                end_offset: after_offset + data.len() as u64,
+                data,
+            }])
+        }
+    }
+
+    /// The actual controller path must propagate both a focused-pane change and
+    /// a later terminal screen revision through `terminal_material_key` and the
+    /// aggregate `FrameMaterialKey`. Each invalidation owes one viewport/link
+    /// rebuild and one draw containing the new owned projection.
+    #[test]
+    fn terminal_output_change_invalidates_the_joined_material_and_redraws() {
+        reset_projection_build_counts();
+        let snapshot = snapshot("terminal-cache");
+        let terminal = live_terminal_ref(snapshot.workspace_id, snapshot.session_ids[0]);
+        let mut keys = vec![Key::Enter, Key::Live(LiveTerminalAction::OpenCloseupModal)];
+        keys.extend("terminal open".chars().map(Key::Char));
+        keys.push(Key::Enter);
+        let mut term = CacheInvalidationTerminal::until_builds(keys, (1, 3));
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(ChangingTerminalPort {
+                replay: b"cache-before".to_vec(),
+                empty_polls_before_update: 1,
+                update: Some(b"\r\ncache-after".to_vec()),
+            })),
+            launch: Some(Box::new(ImmediateTerminalLaunchPort(terminal))),
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+            Exit::Quit
+        );
+
+        let (session_builds, terminal_builds) = projection_build_counts();
+        assert_eq!(session_builds, 1, "a terminal change rebuilt session rows");
+        assert_eq!(
+            terminal_builds, 3,
+            "focused pane and screen revision did not each invalidate the terminal key"
+        );
+        for generation in [2, 3] {
+            assert!(
+                term.builds_at_draw.contains(&(1, generation)),
+                "frame key did not redraw terminal generation {generation}"
+            );
+        }
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("cache-after")),
+            "the redraw did not contain output from the changed terminal screen"
+        );
     }
 
     /// One admitted restore job and what the frame gate did on the tick that

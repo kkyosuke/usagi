@@ -62,6 +62,7 @@ pub struct LiveTerminalControls {
     focused: Option<TerminalRef>,
     active: TerminalViewState,
     retained: VecDeque<(TerminalRef, TerminalViewState)>,
+    revision: u64,
 }
 
 impl LiveTerminalControls {
@@ -72,6 +73,7 @@ impl LiveTerminalControls {
         if self.focused.as_ref() == terminal {
             return;
         }
+        self.revision = self.revision.saturating_add(1);
         if let Some(previous) = self.focused.take() {
             self.active.pointer_press = None;
             self.active.dragging = false;
@@ -100,6 +102,8 @@ impl LiveTerminalControls {
     /// Forget view state for terminals no longer represented by a live tab.
     /// Foreground detach does not call this; logical close and exit do.
     pub fn retain_terminals(&mut self, terminals: &[TerminalRef]) {
+        let retained_len = self.retained.len();
+        let focused = self.focused.clone();
         let is_live =
             |candidate: &TerminalRef| terminals.iter().any(|terminal| terminal.fences(candidate));
         self.retained.retain(|(terminal, _)| is_live(terminal));
@@ -111,6 +115,9 @@ impl LiveTerminalControls {
             self.focused = None;
             self.active = TerminalViewState::default();
         }
+        if retained_len != self.retained.len() || focused != self.focused {
+            self.revision = self.revision.saturating_add(1);
+        }
     }
 
     fn trim_retained(&mut self, limit: usize) {
@@ -121,21 +128,30 @@ impl LiveTerminalControls {
 
     /// Scroll one line toward older output, clamped to the last projected extent.
     pub fn scroll_up(&mut self) {
+        let before = self.active.scroll;
         self.active.scroll = self
             .active
             .scroll
             .saturating_add(1)
             .min(self.active.max_scroll);
+        self.revision = self
+            .revision
+            .saturating_add(u64::from(before != self.active.scroll));
     }
 
     /// Scroll one line back toward the live bottom.
     pub fn scroll_down(&mut self) {
+        let before = self.active.scroll;
         self.active.scroll = self.active.scroll.saturating_sub(1);
+        self.revision = self
+            .revision
+            .saturating_add(u64::from(before != self.active.scroll));
     }
 
     /// Begin a drag selection, replacing any earlier (including finished) one,
     /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {
+        self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = None;
         self.active.selection = Some(selection);
         self.active.dragging = true;
@@ -146,6 +162,7 @@ impl LiveTerminalControls {
     /// drag promotes the snapshotted viewport and anchor into `selection`; a
     /// release before that remains a plain click.
     pub fn press_pointer(&mut self, selection: TerminalSelection) {
+        self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = Some(selection);
         self.active.dragging = false;
     }
@@ -162,6 +179,7 @@ impl LiveTerminalControls {
             self.active.feedback = Some("terminal selection started".to_owned());
         }
         self.extend_selection(focus);
+        self.revision = self.revision.saturating_add(1);
         true
     }
 
@@ -170,6 +188,7 @@ impl LiveTerminalControls {
     /// A press released before any drag is a click. A promoted drag returns its
     /// selected text for copying. A release without a matching press is inert.
     pub fn release_pointer(&mut self) -> PointerRelease {
+        self.revision = self.revision.saturating_add(1);
         if self.active.dragging {
             return self
                 .finish_drag()
@@ -185,6 +204,7 @@ impl LiveTerminalControls {
     pub fn extend_selection(&mut self, focus: TerminalPoint) {
         if let Some(selection) = &mut self.active.selection {
             selection.extend(focus);
+            self.revision = self.revision.saturating_add(1);
         }
     }
 
@@ -219,6 +239,7 @@ impl LiveTerminalControls {
         if !self.active.dragging {
             return None;
         }
+        self.revision = self.revision.saturating_add(1);
         self.active.dragging = false;
         let text = self.active.selection.as_ref()?.text();
         if text.is_empty() {
@@ -233,6 +254,7 @@ impl LiveTerminalControls {
     /// Explicitly drop a retained selection while preserving scroll position
     /// and the focused terminal.
     pub fn clear_selection(&mut self) {
+        self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = None;
         self.active.selection = None;
         self.active.dragging = false;
@@ -241,6 +263,7 @@ impl LiveTerminalControls {
 
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
     pub fn record_copy(&mut self, text: &str, result: Result<(), String>) {
+        self.revision = self.revision.saturating_add(1);
         self.active.feedback = Some(match result {
             Ok(()) => {
                 let lines = text.lines().count().max(1);
@@ -249,6 +272,12 @@ impl LiveTerminalControls {
             }
             Err(message) => message,
         });
+    }
+
+    /// Monotonic cache fence for scroll, selection, focus and feedback.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Open the `http(s)` URL under a plain terminal click through the injected
@@ -276,6 +305,7 @@ impl LiveTerminalControls {
         else {
             return false;
         };
+        self.revision = self.revision.saturating_add(1);
         self.active.feedback = Some(match browser.open(&url) {
             Ok(()) => format!("opened {url}"),
             Err(message) => format!("Could not open browser: {message}"),
@@ -286,6 +316,7 @@ impl LiveTerminalControls {
     /// Replace the feedback line with a presentation-safe message.
     pub fn set_feedback(&mut self, message: impl Into<String>) {
         self.active.feedback = Some(message.into());
+        self.revision = self.revision.saturating_add(1);
     }
 
     /// Project `rows` into the right-pane viewport at the current scroll offset,
