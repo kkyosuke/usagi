@@ -686,17 +686,52 @@ fn render_environment_over(
     base: &[String],
     editor: &ConfigEnvironmentEditor,
 ) -> Vec<String> {
-    let scope = match editor.scope {
+    render_environment_source_over(
+        height,
+        width,
+        base,
+        EnvironmentSource {
+            scope: editor.scope,
+            value: editor.input.value(),
+            cursor: editor.input.cursor(),
+            error: editor.error.as_deref(),
+            save_focused: editor.save_focused,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct EnvironmentSource<'a> {
+    pub(super) scope: SettingsScope,
+    pub(super) value: &'a str,
+    pub(super) cursor: usize,
+    pub(super) error: Option<&'a str>,
+    pub(super) save_focused: bool,
+}
+
+/// Render the shared multiline environment source modal used by Config and Closeup.
+#[must_use]
+pub(super) fn render_environment_source_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    source: EnvironmentSource<'_>,
+) -> Vec<String> {
+    let scope_caption = match source.scope {
         SettingsScope::Global => "global env (inherited by every workspace)",
         SettingsScope::Workspace => "workspace env only (global values stay unchanged)",
     };
     let mut lines = vec![
-        modal::caption(scope),
+        modal::caption(scope_caption),
         modal::caption("one NAME=value binding per line"),
         String::new(),
     ];
-    lines.extend(environment_textarea(editor));
-    if let Some(error) = &editor.error {
+    lines.extend(environment_textarea(
+        source.value,
+        source.cursor,
+        source.save_focused,
+    ));
+    if let Some(error) = source.error {
         lines.push(String::new());
         lines.push(
             Role::Danger
@@ -705,7 +740,7 @@ fn render_environment_over(
         );
     }
     lines.push(String::new());
-    match editor.scope {
+    match source.scope {
         SettingsScope::Global => {
             let button = Role::Success.style().bold().paint("[ Save ]");
             let padding =
@@ -714,7 +749,7 @@ fn render_environment_over(
             lines.push(modal::footer("Ctrl-S: save   Enter: newline   Esc: cancel"));
         }
         SettingsScope::Workspace => {
-            lines.push(select::action("Save", editor.save_focused, true));
+            lines.push(select::action("Save", source.save_focused, true));
             lines.push(modal::footer(
                 "Enter: newline/save   Tab: switch   Esc: cancel",
             ));
@@ -746,9 +781,7 @@ fn environment_row(config: &Config) -> String {
     )
 }
 
-fn environment_textarea(editor: &ConfigEnvironmentEditor) -> Vec<String> {
-    let value = editor.input.value();
-    let cursor = editor.input.cursor();
+fn environment_textarea(value: &str, cursor: usize, save_focused: bool) -> Vec<String> {
     let source = value.split('\n').collect::<Vec<_>>();
     let cursor_line = value[..cursor]
         .bytes()
@@ -765,7 +798,7 @@ fn environment_textarea(editor: &ConfigEnvironmentEditor) -> Vec<String> {
         let absolute_line = viewport_start + line_index;
         let prefix = format!("{:>2} ", absolute_line + 1);
         let content =
-            if !editor.save_focused && absolute_line == cursor_line {
+            if !save_focused && absolute_line == cursor_line {
                 let caret = widgets::block_caret(line, cursor - cursor_line_start, &textarea);
                 let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
                     widgets::display_width(&prefix) + widgets::display_width(&caret),
@@ -1039,7 +1072,11 @@ mod tests {
                 error: None,
                 save_focused: false,
             };
-            let rows = environment_textarea(&editor);
+            let rows = environment_textarea(
+                editor.input.value(),
+                editor.input.cursor(),
+                editor.save_focused,
+            );
             assert_eq!(
                 display_width(&rows[0]),
                 ENVIRONMENT_TEXTAREA_WIDTH + modal::BODY_INDENT_WIDTH

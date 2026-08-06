@@ -9246,7 +9246,8 @@ mod tests {
         )
         .join("\n");
         assert!(frame.contains("Environment"));
-        assert!(frame.contains("this workspace's environment"));
+        assert!(frame.contains("workspace env only (global values stay unchanged)"));
+        assert!(frame.contains("one NAME=value binding per line"));
     }
 
     #[test]

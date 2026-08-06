@@ -240,6 +240,20 @@ pub fn render_environment_over(
     base: &[String],
     editor: &EnvironmentEditor,
 ) -> Vec<String> {
+    if editor.is_scope_locked() {
+        return super::config::render_environment_source_over(
+            height,
+            width,
+            base,
+            super::config::EnvironmentSource {
+                scope: usagi_core::usecase::settings::SettingsScope::Workspace,
+                value: editor.draft(),
+                cursor: editor.cursor(),
+                error: editor.error().map(|error| error.message.as_str()),
+                save_focused: editor.is_save_focused(),
+            },
+        );
+    }
     modal::render_over(
         height,
         width,
@@ -472,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn closeup_environment_overlay_is_workspace_only_and_hides_the_scope_toggle() {
+    fn closeup_environment_overlay_matches_workspace_config_editor() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, vec![SessionId::new()]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
@@ -497,12 +511,13 @@ mod tests {
 
         let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
             .join("\n");
-        assert!(frame.contains("this workspace's environment"));
+        assert!(frame.contains("workspace env only (global values stay unchanged)"));
+        assert!(frame.contains("one NAME=value binding per line"));
         assert!(frame.contains("RUST_LOG=debug"));
-        assert!(frame.contains("inherited from global"));
-        assert!(!frame.contains("Tab: global"));
-        assert!(!frame.contains("Tab: workspace"));
-        assert!(frame.contains("Enter: NAME=value / save   Esc: close"));
+        assert!(!frame.contains("GLOBAL_TOKEN"));
+        assert!(frame.contains("[ Save ]"));
+        assert!(frame.contains("Enter: newline/save   Tab: switch   Esc: cancel"));
+        assert!(frame.contains("\u{1b}[37;48;5;236m"));
     }
 
     #[test]

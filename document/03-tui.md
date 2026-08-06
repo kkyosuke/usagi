@@ -747,7 +747,7 @@ worker が続けるため（[5. daemon の session teardown worker](05-daemon.md
 
 Overview の `env [workspace|global]` と Closeup の `env` は同じ環境変数 editor を開く。Overview は引数なし
 （または `workspace`）でこの workspace のスコープ、`global` で全 workspace 共通のスコープを編集する。
-Closeup は**引数を取らず workspace スコープだけ**を編集し、`Tab` の scope 切り替えも表示・受理しない。
+Closeup は**引数を取らず workspace スコープだけ**を編集し、Workspace Config と同じ複数行 textarea を表示する。
 `env global` など引数付きの Closeup 入力は editor を開かず安全な notice で拒否する。Closeup から開いた場合も
 対象 session 固有の環境を作らず、この workspace に属する root / session の次回 pane 起動へ共通して効く。
 保存場所・スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の
@@ -761,23 +761,25 @@ Global Config は `Ctrl-S`、Workspace Config は `Tab` で Save action へ移�
 `env` だけを全置換保存する。Global Config の `Tab` は何もしない。
 行を取り除くと binding を削除できる。Esc は未保存の environment draft を破棄して Config に戻る。
 
-Config textarea の入力は次のとおりである。
+Config と Closeup textarea の入力は次のとおりである。
 
 | 入力 | 動作 |
 |---|---|
-| 文字 / `Backspace` / `Delete` / `←→` | textarea を編集する |
+| 文字 / `Backspace` / `←→` | textarea を編集する |
+| `Delete` / `Home` / `End`（Config） | caret の位置または端を基準に編集する |
 | `Enter`（textarea） | 改行する |
 | `Ctrl-S`（Global Config） | global `env` を保存する |
-| `Tab`（Workspace Config） | textarea と Save action の focus を切り替える |
-| `Enter`（Workspace Config の Save） | workspace `env` を保存する |
+| `Tab`（Workspace Config / Closeup） | textarea と Save action の focus を切り替える |
+| `Enter`（Workspace Config / Closeup の Save） | workspace `env` を保存する |
 | `Esc` | editor を閉じる |
 
-Overview / Closeup editor は従来どおり 1 行入力を使い、`NAME=value` の Enter で追加・置換、`NAME=` で削除する。
+Overview editor は従来どおり 1 行入力を使い、`NAME=value` の Enter で追加・置換、`NAME=` で削除する。
 入力行は Config textarea と同じ背景色付きの編集領域で表示する。空の入力で Enter を押すと保存する。
-Overview の `Tab` は workspace ⇄ global を切り替え、Closeup の `Tab` は何もしない。
+Overview の `Tab` は workspace ⇄ global を切り替える。Closeup は Workspace Config と同様に `Tab` で Save action へ移り、
+Enter で workspace binding 全体を保存する。
 
-- Config の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、保存時も
-  global settings を変更しない。Overview / Closeup editor は workspace 編集時に global binding を read-only で併記する。
+- Config と Closeup の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、保存時も
+  global settings を変更しない。Overview editor は workspace 編集時に global binding を read-only で併記する。
 - 保存は差分ではなく編集中スコープの全置換で、消した変数は取り除かれる。相手スコープの binding は
   変わらない。
 - 読み込み中と保存中はその状態を表示し、保存中の再保存・編集・スコープ切り替えは受け付けない
