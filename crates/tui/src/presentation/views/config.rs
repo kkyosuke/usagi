@@ -954,6 +954,10 @@ mod tests {
         let mut config = Config::load(&mut port);
         let initial = render(24, 80, &config).join("\n");
         assert!(initial.contains("Theme") && initial.contains("light"));
+        config.cycle_theme(false);
+        assert_eq!(config.settings().theme, Theme::Dark);
+        config.cycle_theme(true);
+        assert_eq!(config.settings().theme, Theme::Light);
         config.cycle_theme(true);
         config.commit_save(&mut port);
         assert_eq!(port.global.theme, Theme::System);
@@ -1044,6 +1048,8 @@ mod tests {
         assert!(workspace.open_environment(&mut port));
         workspace.toggle_environment_focus();
         assert!(workspace.is_environment_save_focused());
+        workspace.move_environment(true);
+        workspace.move_environment_edge(true);
         workspace.toggle_environment_focus();
         let base = vec!["home background".to_owned(); 24];
         let composited = render_over(24, 80, &base, &workspace);

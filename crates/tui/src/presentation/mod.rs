@@ -18851,7 +18851,14 @@ mod tests {
             step_config(&mut config, Key::Tab, &mut settings),
             ConfigStep::Stay
         ));
-        for key in [Key::Up, Key::Down, Key::Left, Key::Right, Key::CtrlQ] {
+        for key in [
+            Key::Up,
+            Key::Down,
+            Key::Char('j'),
+            Key::Left,
+            Key::Right,
+            Key::CtrlQ,
+        ] {
             let _ = step_config(&mut config, key, &mut settings);
         }
     }
@@ -18903,6 +18910,25 @@ mod tests {
         assert!(config.is_editing_environment());
         step_config(&mut config, Key::Escape, &mut settings);
         assert!(!config.is_editing_environment());
+    }
+
+    #[test]
+    fn step_config_saves_the_workspace_environment_from_its_save_action() {
+        let mut settings = DefaultSettingsPort;
+        let mut config = Config::load_workspace_with_available_models(
+            &mut settings,
+            AvailableAgentModels::all(),
+        );
+        step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Enter, &mut settings);
+        step_config(&mut config, Key::Char('A'), &mut settings);
+        step_config(&mut config, Key::Paste("=1".to_owned()), &mut settings);
+        step_config(&mut config, Key::Tab, &mut settings);
+        assert!(config.is_environment_save_focused());
+        step_config(&mut config, Key::Enter, &mut settings);
+
+        assert!(!config.is_editing_environment());
+        assert_eq!(config.settings().env["A"], "1");
     }
 
     #[test]
