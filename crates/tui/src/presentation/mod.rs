@@ -2372,8 +2372,33 @@ impl WorkspaceUi {
     fn terminal_projection_key(&self, terminal: &TerminalRef) -> Option<u64> {
         self.terminals
             .iter()
+            .chain(self.detached_terminals.iter())
             .find(|session| session.terminal().fences(terminal))
             .map(TerminalSession::projection_key)
+    }
+
+    /// Snapshot the retained rows of a detached background terminal without
+    /// attaching or polling it. Director owns the one live subscription; this
+    /// projection keeps the managed right pane visible behind the drawer.
+    fn retained_terminal_view(
+        &self,
+        terminal: &TerminalRef,
+        viewport_rows: usize,
+    ) -> Option<TerminalViewProjection> {
+        let session = self
+            .terminals
+            .iter()
+            .chain(self.detached_terminals.iter())
+            .find(|session| session.terminal().fences(terminal))?;
+        let total_rows = session.display_row_count();
+        let start = total_rows.saturating_sub(viewport_rows);
+        Some(TerminalViewProjection {
+            rows: session.display_row_window(start, total_rows),
+            row_offset: start,
+            total_rows,
+            scroll: 0,
+            feedback: session.error().map(str::to_owned),
+        })
     }
 
     fn terminal_row_window(
@@ -4640,7 +4665,7 @@ struct FrameMaterialKey {
     sessions: (u64, Option<SessionId>),
     shell: u64,
     metrics: u64,
-    terminal: u64,
+    terminal: (u64, u64),
     animation: u64,
     create_pending: Option<String>,
     now: DateTime<Utc>,
@@ -4722,11 +4747,7 @@ fn home_frame_material_shared(
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
         .with_shared_git_diffs(git_diffs)
-        .with_shared_terminal_view(
-            (!runtime.state().director_drawer_open())
-                .then_some(terminal_view)
-                .flatten(),
-        )
+        .with_shared_terminal_view(terminal_view)
         .with_director_drawer(runtime.director_projection().clone())
         .with_create_pending(create_pending.map(str::to_owned))
         .with_overlay_modals(
@@ -5359,6 +5380,9 @@ fn drive_workspace_controller(
     let mut terminal_rows_len = 0;
     let mut terminal_scroll = 0;
     let mut terminal_generation = 0_u64;
+    let mut background_terminal_material_key = None;
+    let mut background_terminal_view: Option<Arc<TerminalViewProjection>> = None;
+    let mut background_terminal_generation = 0_u64;
     let mut director_material_key = None;
     let mut frame_material_key: Option<FrameMaterialKey> = None;
     loop {
@@ -5462,6 +5486,25 @@ fn drive_workspace_controller(
             terminal_material_key = Some(next_terminal_key);
             terminal_generation = terminal_generation.saturating_add(1);
         }
+        let background_terminal = runtime.director_background_terminal();
+        let background_revision = background_terminal
+            .as_ref()
+            .and_then(|terminal| ui.terminal_projection_key(terminal))
+            .unwrap_or(0);
+        let background_rows = workspace::terminal_viewport(height, width).0;
+        let next_background_key = (
+            background_terminal.clone(),
+            background_revision,
+            background_rows,
+        );
+        if background_terminal_material_key.as_ref() != Some(&next_background_key) {
+            background_terminal_view = background_terminal
+                .as_ref()
+                .and_then(|terminal| ui.retained_terminal_view(terminal, background_rows))
+                .map(Arc::new);
+            background_terminal_material_key = Some(next_background_key);
+            background_terminal_generation = background_terminal_generation.saturating_add(1);
+        }
         let next_director_key = (
             runtime.material_key(),
             ui.material_revision,
@@ -5516,7 +5559,7 @@ fn drive_workspace_controller(
             sessions: next_session_key,
             shell: ui.material_revision,
             metrics: metrics_projection.generation(),
-            terminal: terminal_generation,
+            terminal: (terminal_generation, background_terminal_generation),
             animation,
             create_pending: ui
                 .creating_session
@@ -5537,7 +5580,11 @@ fn drive_workspace_controller(
                 metrics_projection.metrics(),
                 metrics_projection.health(),
                 metrics_projection.shared_git_diffs(),
-                terminal_view.as_ref().map(Arc::clone),
+                if runtime.state().director_drawer_open() {
+                    background_terminal_view.as_ref().map(Arc::clone)
+                } else {
+                    terminal_view.as_ref().map(Arc::clone)
+                },
                 ui.creating_session
                     .as_ref()
                     .map(|create| create.name.as_str()),
@@ -12825,13 +12872,13 @@ mod tests {
         let drawer = super::director_drawer::geometry(20, 80);
         let new_click = Key::Click {
             column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
-            row: u16::try_from(drawer.top + 1).unwrap(),
+            row: u16::try_from(drawer.top + 2).unwrap(),
         };
         assert!(super::is_director_new_click(&new_click, &runtime, 20, 80));
         let new_pointer = Key::Pointer(PointerEvent {
             kind: PointerKind::Down,
             column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
-            row: u16::try_from(drawer.top + 1).unwrap(),
+            row: u16::try_from(drawer.top + 2).unwrap(),
         });
         assert!(super::is_director_new_click(&new_pointer, &runtime, 20, 80));
         assert!(!intercept_live_terminal_control(
@@ -12898,7 +12945,7 @@ mod tests {
             &Key::Pointer(PointerEvent {
                 kind: PointerKind::Up,
                 column: u16::try_from(drawer.left + drawer.width - 3).unwrap(),
-                row: u16::try_from(drawer.top + 1).unwrap(),
+                row: u16::try_from(drawer.top + 2).unwrap(),
             }),
             &mut ui,
             &mut runtime,
@@ -13366,7 +13413,7 @@ mod tests {
             PointerEvent {
                 kind: PointerKind::Down,
                 column: 26,
-                row: 4,
+                row: 5,
             },
         ));
     }
@@ -15823,6 +15870,8 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
         ui.sync_foreground_terminal(Some(&root), drawer_geometry);
         ui.resize_terminals(drawer_geometry);
+        let retained = ui.retained_terminal_view(&managed, 1).unwrap();
+        assert_eq!(retained.rows, vec!["three"]);
         let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         controls.scroll_up();
         controls.scroll_up();
@@ -20569,7 +20618,7 @@ mod tests {
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, true),
-            Geometry { cols: 56, rows: 18 }
+            Geometry { cols: 56, rows: 16 }
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, false),

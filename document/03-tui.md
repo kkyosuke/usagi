@@ -309,7 +309,8 @@ active を変えないのは [Home と target](#home-と-target) のとおりで
 未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
 追従するため、同時に attach する live terminal は従来どおり 1 つである。Director drawer が開いている間だけは、
 背景の右ペインが Switch の cursor に追従したまま、foreground terminal の attach と入力を drawer で選択中の
-root conversation が所有する。
+root conversation が所有する。右ペインは detach 前に保持した managed terminal の viewport を dim のまま描き、
+root conversation へ foreground attach を移しても背景の Agent content を空にしない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
