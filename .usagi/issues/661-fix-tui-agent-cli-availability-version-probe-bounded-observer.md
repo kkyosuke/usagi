@@ -1,14 +1,14 @@
 ---
 number: 661
 title: fix(tui): Agent CLI availability と version probe を bounded な共通 observer にする
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, core, agent, process, freeze, ssot]
 dependson: []
 related: [545, 609, 656]
 parent: 654
 created_at: 2026-08-05T13:49:12.484517+00:00
-updated_at: 2026-08-05T13:49:12.484517+00:00
+updated_at: 2026-08-05T23:17:53.547243+00:00
 ---
 
 ## Finding（P2 startup freeze / SSoT drift）

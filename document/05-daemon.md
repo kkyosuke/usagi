@@ -1052,10 +1052,13 @@ Codex 互換の `sakana-ai` は launch する `codex-fugu` の `login status` �
 Claude は `claude auth status` を使う。vocabulary に無い product は probe を得られず fail closed で `unavailable` になる。
 probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
-差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。同じ provider の同時
-probe は 1 child に coalesce する。timeout 時はその exact child を TERM、bounded grace、KILL の順で停止して reap し、
-pipe や reader thread を作らない。preflight 後に owner lock を取り直し、operation idempotency、generation、scope、
-profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。
+差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。status command は 2 秒で
+timeout し、同じ provider の同時 probe は 1 child に coalesce する。timeout 時はその exact child を TERM、bounded grace、KILL の順で停止して reap し、
+stdout / stderr は各 16 KiB に制限し、nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential や raw output を
+含まない `unavailable` に正規化する。共通の bounded child runner は独立 process group を TERM、bounded grace、KILL の
+順で停止して reap し、pipe reader も join する。preflight 後に owner lock を取り直し、operation idempotency、generation、
+scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の
+`--version` は readiness とは別の typed probe であり、1 秒の deadline と同じ child lifecycle / output bound を使う。
 
 ### Agent phase の投影
 

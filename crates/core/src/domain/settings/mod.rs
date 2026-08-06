@@ -243,10 +243,10 @@ impl DefaultModel {
 
 /// The model providers whose CLI is installed on this machine.
 ///
-/// Availability is observed by the composition root (a PATH / `--version`
-/// probe) and injected, so every surface that offers a provider — the Config
-/// screen and the Closeup `agent -m` picker and completion — offers exactly the
-/// providers that can actually run.
+/// Availability is observed by the composition root as one PATH lookup snapshot
+/// (without executing provider CLIs) and injected, so every surface that offers
+/// a provider — the Config screen and the Closeup `agent -m` picker and
+/// completion — offers exactly the providers that can actually run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AvailableModels {
     claude: bool,

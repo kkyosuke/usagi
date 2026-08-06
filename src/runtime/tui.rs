@@ -36,6 +36,7 @@ use usagi_core::domain::terminal_launch::{
 };
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
+use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
 use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotMode};
@@ -3794,6 +3795,9 @@ fn run_in_terminal(
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
 fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
     let now = Utc::now();
+    // Capture once before raw mode and retain it across Config reopens and
+    // workspace leave/entry transitions for this process.
+    let available_models = available_agent_models();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let storage = Storage::open_default().map_err(io_error)?;
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
@@ -3817,7 +3821,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 &mut loader,
                 &mut settings,
                 &mut backend_factory,
-                available_agent_models(),
+                available_models,
             )
         })?;
     } else {
@@ -3836,7 +3840,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 config::render(
                     0,
                     0,
-                    &Config::load_with_available_models(&mut settings, available_agent_models()),
+                    &Config::load_with_available_models(&mut settings, available_models),
                 )
             }
         };
@@ -3847,43 +3851,66 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
     Ok(())
 }
 
-/// Probe every model provider in the shared vocabulary, so the Config screen and
-/// the Closeup `agent -m` picker offer exactly the CLIs installed here.
+/// Observe every model provider from PATH without executing a provider CLI.
 fn available_agent_models() -> AvailableAgentModels {
-    AvailableAgentModels::new(
-        usagi_core::domain::settings::DefaultModel::ALL
-            .into_iter()
-            .filter(|model| cli_is_available(model.command())),
+    usagi_core::infrastructure::runtime_model::observe_available_models(
+        &usagi_core::infrastructure::runtime_model::PathExecutableLocator,
     )
 }
 
 struct RuntimeDoctorPort;
 
+const VERSION_PROBE_POLICY: ChildPolicy = ChildPolicy {
+    timeout: Duration::from_secs(1),
+    terminate_grace: Duration::from_millis(100),
+    output_limit: 16 * 1024,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionProbeResult {
+    Version(String),
+    Unavailable,
+    Failed,
+    TimedOut,
+    InvalidOutput,
+    OutputTooLarge,
+    EmptyOutput,
+}
+
+fn probe_version(executable: &str) -> VersionProbeResult {
+    version_result_from_observation(observe(executable, &["--version"], VERSION_PROBE_POLICY))
+}
+
+fn version_result_from_observation(observation: ChildObservation) -> VersionProbeResult {
+    match observation {
+        ChildObservation::Success(version) => VersionProbeResult::Version(version),
+        ChildObservation::SpawnFailed => VersionProbeResult::Unavailable,
+        ChildObservation::ExitFailure | ChildObservation::ObservationFailed => {
+            VersionProbeResult::Failed
+        }
+        ChildObservation::TimedOut => VersionProbeResult::TimedOut,
+        ChildObservation::InvalidOutput => VersionProbeResult::InvalidOutput,
+        ChildObservation::OutputTooLarge => VersionProbeResult::OutputTooLarge,
+        ChildObservation::EmptyOutput => VersionProbeResult::EmptyOutput,
+    }
+}
+
+fn version_detail(result: VersionProbeResult) -> Result<String, String> {
+    match result {
+        VersionProbeResult::Version(version) => Ok(version),
+        VersionProbeResult::Unavailable => Err("version command is unavailable".to_owned()),
+        VersionProbeResult::Failed => Err("version command failed".to_owned()),
+        VersionProbeResult::TimedOut => Err("version probe timed out".to_owned()),
+        VersionProbeResult::InvalidOutput => Err("version output is invalid".to_owned()),
+        VersionProbeResult::OutputTooLarge => Err("version output is too large".to_owned()),
+        VersionProbeResult::EmptyOutput => Err("version output is empty".to_owned()),
+    }
+}
+
 impl DoctorPort for RuntimeDoctorPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
     fn tool_version(&mut self, executable: &str) -> Result<String, String> {
-        let output = Command::new(executable)
-            .arg("--version")
-            .output()
-            .map_err(|error| error.to_string())?;
-        let text = if output.stdout.is_empty() {
-            &output.stderr
-        } else {
-            &output.stdout
-        };
-        let detail = String::from_utf8_lossy(text)
-            .lines()
-            .next()
-            .unwrap_or("version output is empty")
-            .trim()
-            .to_owned();
-        if output.status.success() {
-            Ok(detail)
-        } else if detail.is_empty() {
-            Err(format!("exited with {}", output.status))
-        } else {
-            Err(detail)
-        }
+        version_detail(probe_version(executable))
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
@@ -3901,10 +3928,6 @@ impl DoctorPort for RuntimeDoctorPort {
             .map(|()| "daemon is reachable".to_owned())
             .map_err(|error| error.to_string())
     }
-}
-
-fn cli_is_available(program: &str) -> bool {
-    Command::new(program).arg("--version").output().is_ok()
 }
 
 /// Composition adapter for the daemon-owned PR snapshot. It deliberately has no
@@ -3972,6 +3995,8 @@ impl BrowserOpener for PlatformBrowserOpener {
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=direct_workspace_production_composition_contract
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
+    // Direct entry and its later Welcome graph share one immutable snapshot.
+    let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     let mut settings = PersistentSettingsPort::open()?;
@@ -3989,7 +4014,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                 snapshot,
                 &mut backend_factory,
                 &mut settings,
-                available_agent_models(),
+                available_models,
             )? {
                 Exit::Quit => Ok(Exit::Quit),
                 Exit::Welcome => {
@@ -4006,7 +4031,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                         &mut loader,
                         &mut settings,
                         &mut backend_factory,
-                        available_agent_models(),
+                        available_models,
                     )
                 }
             }
@@ -4100,18 +4125,84 @@ mod tests {
         PersistentSettingsPort, ProductionBackendFactory, RepoEnvironmentStore, RoleEditorScope,
         SessionRoleCatalog, SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen,
         TerminalChunk, TerminalError, TerminalInputOutcome, TerminalSnapshotMode,
-        TerminalSubscription, agent_inventory_request, agent_launch_request,
+        TerminalSubscription, VersionProbeResult, agent_inventory_request, agent_launch_request,
         classify_terminal_input, correlate_agent_launch, created_session_hook, daemon_error_reason,
         decision_cadence, decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, probe_path,
         provider_resume_projection, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, workspace_open_error,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
+    use usagi_core::infrastructure::bounded_process::ChildObservation;
+
+    #[test]
+    fn doctor_version_probe_keeps_failure_states_typed_and_safe() {
+        assert_eq!(
+            version_result_from_observation(ChildObservation::Success("tool 1.0".to_owned())),
+            VersionProbeResult::Version("tool 1.0".to_owned())
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::ExitFailure),
+            VersionProbeResult::Failed
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::ObservationFailed),
+            VersionProbeResult::Failed
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::SpawnFailed),
+            VersionProbeResult::Unavailable
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::TimedOut),
+            VersionProbeResult::TimedOut
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::InvalidOutput),
+            VersionProbeResult::InvalidOutput
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::OutputTooLarge),
+            VersionProbeResult::OutputTooLarge
+        );
+        assert_eq!(
+            version_result_from_observation(ChildObservation::EmptyOutput),
+            VersionProbeResult::EmptyOutput
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::Version("tool 1.0".to_owned())),
+            Ok("tool 1.0".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::Failed),
+            Err("version command failed".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::TimedOut),
+            Err("version probe timed out".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::InvalidOutput),
+            Err("version output is invalid".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::OutputTooLarge),
+            Err("version output is too large".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::Unavailable),
+            Err("version command is unavailable".to_owned())
+        );
+        assert_eq!(
+            version_detail(VersionProbeResult::EmptyOutput),
+            Err("version output is empty".to_owned())
+        );
+    }
 
     /// The contract of Home's three background observation lanes (#551).
     ///
