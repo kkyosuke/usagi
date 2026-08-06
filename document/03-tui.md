@@ -777,7 +777,7 @@ Overview と Closeup は Config と同じ背景色付き textarea と中央の S
 Overview の scope は開くコマンドで決まり editor 内では切り替えない。Overview workspace と Closeup は `Tab` で Save action へ移り、
 Enter または `Ctrl-S` で workspace binding 全体を保存する。Overview global は Global Config と同様に `Tab` を受け付けず、
 `Ctrl-S` で保存する。
-Closeup は保存成功の応答を受けると environment editor を閉じる。保存エラー時は editor を開いたまま入力とエラーを保持する。
+Closeup は有効な environment source を保存送信した時点で editor を閉じる。入力の検証エラー時は editor を開いたまま入力とエラーを保持する。
 
 - Config、Overview、Closeup の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、
   保存時も global settings を変更しない。
