@@ -540,6 +540,16 @@ mod tests {
             40,
             "Closeup Save must be centered in an 80-column frame"
         );
+        let rows = frame.lines().map(strip_ansi).collect::<Vec<_>>();
+        let save_index = rows
+            .iter()
+            .position(|line| line.contains("[ Save ]"))
+            .unwrap();
+        let footer_index = rows
+            .iter()
+            .position(|line| line.contains("Ctrl-S: save"))
+            .unwrap();
+        assert_eq!(footer_index, save_index + 2);
     }
 
     #[test]

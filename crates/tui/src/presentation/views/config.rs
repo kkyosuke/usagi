@@ -748,6 +748,7 @@ pub(super) fn render_environment_source_over(
             let padding =
                 widgets::centered_padding(ENVIRONMENT_INNER_WIDTH, widgets::display_width(&button));
             lines.push(format!("{}{}", " ".repeat(padding), button));
+            lines.push(String::new());
             lines.push(modal::footer("Ctrl-S: save   Enter: newline   Esc: cancel"));
         }
         SettingsScope::Workspace => {
@@ -761,6 +762,7 @@ pub(super) fn render_environment_source_over(
                 marker,
                 button
             ));
+            lines.push(String::new());
             let footer = if source.ctrl_s_save {
                 "Ctrl-S: save   Enter: newline/save   Tab: switch   Esc: cancel"
             } else {
