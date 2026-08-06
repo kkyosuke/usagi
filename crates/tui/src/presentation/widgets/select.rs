@@ -20,6 +20,23 @@ const ACTION_BUTTON_OFFSET: usize = 15;
 /// while an unsaved value uses the warning colour across its whole row.
 #[must_use]
 pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String {
+    render_control(label, value, focused, changed, '<', '>')
+}
+
+/// Render a labelled action-like value with square brackets.
+#[must_use]
+pub fn bracketed(label: &str, value: &str, focused: bool, changed: bool) -> String {
+    render_control(label, value, focused, changed, '[', ']')
+}
+
+fn render_control(
+    label: &str,
+    value: &str,
+    focused: bool,
+    changed: bool,
+    open: char,
+    close: char,
+) -> String {
     let marker = modal::selection_marker(focused);
     let changed_marker = if changed {
         Role::Warning.style().bold().paint("●")
@@ -34,7 +51,7 @@ pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String 
         Style::new()
     };
     let label = style.paint(&format!("{label:<LABEL_WIDTH$}"));
-    let control = style.paint(&format!("< {value:<VALUE_WIDTH$} >"));
+    let control = style.paint(&format!("{open} {value:<VALUE_WIDTH$} {close}"));
     let mut row = format!(
         "{marker}{}{changed_marker} {label}{control}",
         " ".repeat(CHANGE_MARKER_OFFSET - 1)
@@ -71,7 +88,7 @@ pub fn action(label: &str, focused: bool, enabled: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ROW_WIDTH, action, disabled, render};
+    use super::{ROW_WIDTH, action, bracketed, disabled, render};
     use crate::presentation::widgets::display_width;
 
     #[test]
@@ -88,6 +105,11 @@ mod tests {
             ROW_WIDTH
         );
         assert_eq!(display_width(&action("Save", true, true)), ROW_WIDTH);
+        assert!(bracketed("Env", "0 variables", false, false).contains("[ 0 variables ]"));
+        assert_eq!(
+            display_width(&bracketed("Env", "128 variables", false, false)),
+            ROW_WIDTH
+        );
     }
 
     #[test]

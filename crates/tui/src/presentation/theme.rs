@@ -17,6 +17,8 @@ const INFO_256: u8 = 75;
 /// `feature` 役割（マスコット）の ANSI-256 インデックス。うさぎを表すはっきりしたピンク
 /// （`#ff87af` 相当）。16 色の magenta より柔らかく、ピンクとして読める。
 const FEATURE_PINK_256: u8 = 211;
+/// Editable textarea surfaces use a quiet dark background distinct from the modal body.
+const EDITOR_SURFACE_256: u8 = 236;
 
 /// 端末色。ANSI 16 色の名前付き色と、256 色キューブのインデックスを表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +169,14 @@ impl Style {
     }
 }
 
+/// Shared style for editable textarea and environment-input surfaces.
+#[must_use]
+pub fn editor_surface_style() -> Style {
+    Style::new()
+        .fg(Color::White)
+        .bg(Color::Ansi256(EDITOR_SURFACE_256))
+}
+
 /// ANSI パレット上に写した意味的な色役割。UI は役割で色を要求し、[`Role::color`] /
 /// [`Role::style`] が具体色を返す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +266,14 @@ mod tests {
                 format!("\u{1b}[{code}mx\u{1b}[0m")
             );
         }
+    }
+
+    #[test]
+    fn editor_surface_has_a_distinct_background() {
+        assert_eq!(
+            super::editor_surface_style().paint(" field "),
+            "\u{1b}[37;48;5;236m field \u{1b}[0m"
+        );
     }
 
     #[test]

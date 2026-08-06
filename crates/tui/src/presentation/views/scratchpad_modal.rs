@@ -4,8 +4,8 @@
 //! persistence is deliberately handled by controller effects, keeping the
 //! workspace state and settings owners outside presentation.
 
-use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::modal;
+use crate::presentation::theme::{Role, Style, editor_surface_style};
+use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::{
     EnvironmentEditor, EnvironmentEntry, NoteEditor, NoteSection, ROLE_EDITOR_VIEWPORT_LINES,
     RoleEditor, RoleEditorScope,
@@ -21,6 +21,7 @@ const NOTES_BODY_HEIGHT: usize = 16;
 const ENVIRONMENT_BODY_HEIGHT: usize = 18;
 const ENVIRONMENT_MAX_ROWS: usize = 6;
 const ENVIRONMENT_MAX_INHERITED_ROWS: usize = 3;
+const ENVIRONMENT_INPUT_WIDTH: usize = INNER_WIDTH - 4;
 
 fn error_line(error: Option<&str>) -> Option<String> {
     error.map(|message| {
@@ -129,10 +130,7 @@ fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
         lines.push(line);
     }
     lines.push(String::new());
-    lines.push(modal::content_line(
-        &format!("> {}", editor.draft()),
-        INNER_WIDTH,
-    ));
+    lines.push(environment_draft_row(editor.draft()));
     // While a save is in flight the footer reflects it, and the reducer rejects
     // a second Save until the owning port refluxes — no double-submit.
     let footer = if editor.is_saving() {
@@ -144,6 +142,16 @@ fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     };
     lines.push(modal::footer(&footer));
     modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
+}
+
+fn environment_draft_row(draft: &str) -> String {
+    let content = format!("> {draft}");
+    let padding =
+        " ".repeat(ENVIRONMENT_INPUT_WIDTH.saturating_sub(widgets::display_width(&content)));
+    modal::content_line(
+        &editor_surface_style().paint(&format!("{content}{padding}")),
+        INNER_WIDTH,
+    )
 }
 
 /// The bindings the edited scope owns itself.
@@ -291,8 +299,12 @@ pub fn render_roles_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_environment_over, render_notes_over, render_roles_over};
+    use super::{
+        ENVIRONMENT_INPUT_WIDTH, environment_draft_row, render_environment_over, render_notes_over,
+        render_roles_over,
+    };
     use crate::presentation::widgets::display_width;
+    use crate::presentation::widgets::modal::BODY_INDENT_WIDTH;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, EnvironmentEntry, NoteSection, RoleEditorScope,
         SafeError, SafeMessage, Target, update,
@@ -306,6 +318,18 @@ mod tests {
         (0..24)
             .map(|row| format!("home-row-{row}-{}", ".".repeat(72)))
             .collect()
+    }
+
+    #[test]
+    fn environment_draft_uses_the_shared_fixed_width_surface() {
+        for draft in ["", "RUST_LOG=debug"] {
+            let row = environment_draft_row(draft);
+            assert!(row.contains("\u{1b}[37;48;5;236m"));
+            assert_eq!(
+                display_width(&row),
+                ENVIRONMENT_INPUT_WIDTH + BODY_INDENT_WIDTH
+            );
+        }
     }
 
     #[test]

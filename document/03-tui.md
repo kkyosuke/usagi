@@ -753,7 +753,7 @@ Closeup は**引数を取らず workspace スコープだけ**を編集し、`Ta
 保存場所・スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の
 操作だけを述べる。
 
-Global / Workspace Config は Theme や Modal mode と同じラベル列にある `Env  < N variables >` を選んで Enter を押すと、
+Global / Workspace Config は Theme や Modal mode と同じラベル列にある `Env  [ N variables ]` を選んで Enter を押すと、
 その Config scope の editor を開く。
 開く直前に対象 scope の最新 binding を読み、`NAME=value` を 1 行 1 binding とする複数行 textarea に表示する。
 textarea は背景色で入力領域を示し、空行には placeholder を表示しない。Enter は textarea 内で改行する。
@@ -773,7 +773,8 @@ Config textarea の入力は次のとおりである。
 | `Esc` | editor を閉じる |
 
 Overview / Closeup editor は従来どおり 1 行入力を使い、`NAME=value` の Enter で追加・置換、`NAME=` で削除する。
-空の入力で Enter を押すと保存する。Overview の `Tab` は workspace ⇄ global を切り替え、Closeup の `Tab` は何もしない。
+入力行は Config textarea と同じ背景色付きの編集領域で表示する。空の入力で Enter を押すと保存する。
+Overview の `Tab` は workspace ⇄ global を切り替え、Closeup の `Tab` は何もしない。
 
 - Config の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、保存時も
   global settings を変更しない。Overview / Closeup editor は workspace 編集時に global binding を read-only で併記する。

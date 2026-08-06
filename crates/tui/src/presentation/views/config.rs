@@ -9,7 +9,7 @@ use usagi_core::domain::settings::{
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
-use crate::presentation::theme::{Color, Role, Style};
+use crate::presentation::theme::{Role, Style, editor_surface_style};
 use crate::presentation::widgets::{self, TextInput, modal, select};
 
 const TITLE: &str = "Config";
@@ -21,7 +21,6 @@ const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
 const ENVIRONMENT_MAX_ROWS: usize = 10;
 const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
-const ENVIRONMENT_TEXTAREA_BACKGROUND: u8 = 236;
 
 /// Time between frames while the Save button's highlight wave is moving.
 pub const SAVE_WAVE_TICK: Duration = Duration::from_millis(60);
@@ -739,7 +738,7 @@ fn workspace_rows(config: &Config) -> Vec<String> {
 }
 
 fn environment_row(config: &Config) -> String {
-    select::render(
+    select::bracketed(
         "Env",
         &format!("{} variables", config.settings().env.len()),
         config.field() == Field::Environment,
@@ -760,9 +759,7 @@ fn environment_textarea(editor: &ConfigEnvironmentEditor) -> Vec<String> {
         .map_or(0, |position| position + 1);
     let viewport_start = cursor_line.saturating_sub(ENVIRONMENT_MAX_ROWS - 1);
     let viewport_end = (viewport_start + ENVIRONMENT_MAX_ROWS).min(source.len());
-    let textarea = Style::new()
-        .fg(Color::White)
-        .bg(Color::Ansi256(ENVIRONMENT_TEXTAREA_BACKGROUND));
+    let textarea = editor_surface_style();
     let mut lines = Vec::new();
     for (line_index, line) in source[viewport_start..viewport_end].iter().enumerate() {
         let absolute_line = viewport_start + line_index;
@@ -1018,7 +1015,7 @@ mod tests {
         assert_eq!(port.global.env["A"], "1");
         assert_eq!(port.global.env["B"], "2");
         let frame = render(24, 80, &config).join("\n");
-        assert!(frame.contains("Env") && frame.contains("< 3 variables >"));
+        assert!(frame.contains("Env") && frame.contains("[ 3 variables ]"));
 
         assert!(config.open_environment(&mut port));
         assert!(
@@ -1227,7 +1224,7 @@ mod tests {
         assert!(frame.contains("Global"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
-        assert!(frame.contains("Env") && frame.contains("< 0 variables >"));
+        assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
         assert!(frame.contains("Workspace init"));
         assert!(frame.contains("Agent") && frame.contains("OpenAI"));
         assert!(frame.contains("Issue") && frame.contains("on"));
@@ -1327,7 +1324,7 @@ mod tests {
         assert!(frame.contains("Agent"));
         assert!(frame.contains("Issue"));
         assert!(frame.contains("Memory"));
-        assert!(frame.contains("Env") && frame.contains("< 0 variables >"));
+        assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
         assert!(!frame.contains("Scope:"));
         assert!(!frame.contains("Theme"));
         assert!(!frame.contains("Modal mode"));
