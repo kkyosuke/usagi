@@ -509,6 +509,11 @@ pub struct TerminalSession {
     /// must not be retried by every 16 ms frame while the daemon is saturated.
     resize_retry_attempt: u32,
     resize_retry_at: Option<Instant>,
+    /// Latest viewport requested by the shell but not yet acknowledged by the
+    /// daemon. The decoded grid stays at `geometry` until that ACK arrives:
+    /// shrinking it early would irreversibly clip cells while the PTY still
+    /// uses the old width.
+    pending_geometry: Option<Geometry>,
 }
 
 impl TerminalSession {
@@ -541,6 +546,7 @@ impl TerminalSession {
             retry_at: None,
             resize_retry_attempt: 0,
             resize_retry_at: None,
+            pending_geometry: None,
         }
     }
 
@@ -704,18 +710,23 @@ impl TerminalSession {
             // subscription was released. A refused snapshot is different: its
             // immediate retry must reassert geometry because capture raced a
             // resize after the preceding synchronization.
+            let target_geometry = self.pending_geometry.unwrap_or(self.geometry);
             let resize_error = if attempt == 0
                 && reuse_detached_geometry
-                && self.synchronized_geometry == Some(self.geometry)
+                && self.synchronized_geometry == Some(target_geometry)
             {
                 None
             } else {
-                let error = port.resize(&self.terminal, self.geometry).err();
-                self.synchronized_geometry = error.is_none().then_some(self.geometry);
+                let error = port.resize(&self.terminal, target_geometry).err();
+                if error.is_none() {
+                    self.commit_resize(target_geometry);
+                } else {
+                    self.pending_geometry = Some(target_geometry);
+                }
                 self.record_resize_result(error, now);
                 error
             };
-            let attach = match port.attach(&self.terminal, self.geometry) {
+            let attach = match port.attach(&self.terminal, target_geometry) {
                 Ok(attach) => attach,
                 Err(error) => return self.fail_at(error, now),
             };
@@ -801,22 +812,26 @@ impl TerminalSession {
     }
 
     fn resize_at<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry, now: Instant) {
-        if self.geometry != geometry {
-            self.geometry = geometry;
-            self.screen
-                .resize(geometry.rows as usize, geometry.cols as usize);
-            self.synchronized_geometry = None;
+        if self.geometry == geometry && self.synchronized_geometry == Some(geometry) {
+            if self.pending_geometry.take().is_some() {
+                self.record_resize_result(None, now);
+            }
+            return;
+        }
+        if self.pending_geometry != Some(geometry) {
+            self.pending_geometry = Some(geometry);
             self.resize_retry_attempt = 0;
             self.resize_retry_at = None;
         }
-        if self.synchronized_geometry == Some(geometry)
-            || self.state != SessionState::Live
+        if self.state != SessionState::Live
             || self.resize_retry_at.is_some_and(|retry_at| now < retry_at)
         {
             return;
         }
         let error = port.resize(&self.terminal, geometry).err();
-        self.synchronized_geometry = error.is_none().then_some(geometry);
+        if error.is_none() {
+            self.commit_resize(geometry);
+        }
         self.record_resize_result(error, now);
     }
 
@@ -1156,6 +1171,14 @@ impl TerminalSession {
             (self.subscription, port.connection_epoch()),
             (Some(subscription), Some(current)) if subscription.epoch != current
         )
+    }
+
+    fn commit_resize(&mut self, geometry: Geometry) {
+        self.geometry = geometry;
+        self.screen
+            .resize(geometry.rows as usize, geometry.cols as usize);
+        self.synchronized_geometry = Some(geometry);
+        self.pending_geometry = None;
     }
 
     fn record_resize_result(&mut self, error: Option<TerminalError>, now: Instant) {
@@ -1703,8 +1726,35 @@ mod tests {
         session.resize_at(&mut port, changed, now + RETRY_INITIAL);
         assert!(session.error().unwrap().contains("no longer available"));
         port.resize_error = Some(TerminalError::Unavailable);
-        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL);
+        session.resize_at(&mut port, changed, now + RETRY_INITIAL * 2);
         assert!(session.error().unwrap().contains("reconnecting"));
+    }
+
+    #[test]
+    fn failed_resize_preserves_cells_until_the_daemon_acknowledges_the_geometry() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 16, b"abcdefghijklmnop", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        let now = Instant::now();
+        session.connect_at(&mut port, now);
+        assert_eq!(session.rows()[0], "abcdefghijklmnop");
+
+        let narrow = Geometry { cols: 4, rows: 3 };
+        port.resize_error = Some(TerminalError::Unavailable);
+        session.resize_at(&mut port, narrow, now);
+
+        // VtScreen::resize truncates cells outside the new width. Keep the
+        // authoritative old grid until the daemon confirms it uses `narrow`.
+        assert_eq!(session.geometry, geometry());
+        assert_eq!(session.pending_geometry, Some(narrow));
+        assert_eq!(session.rows()[0], "abcdefghijklmnop");
+
+        session.resize_at(&mut port, narrow, now + RETRY_INITIAL);
+        assert_eq!(session.geometry, narrow);
+        assert_eq!(session.pending_geometry, None);
+        assert_eq!(session.rows()[0], "abcd");
     }
 
     #[test]

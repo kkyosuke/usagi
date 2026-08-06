@@ -1137,7 +1137,9 @@ drain** するだけである。daemon が一時的に応答できない間（�
 接続にも subscription にも紐づかない stateless な操作なので、この専用接続の破棄・再接続は input の subscription・exactly-once
 ledger・input sequence に影響しない。`Resize` は attach / input とは別の deadline 付き接続で送る（低頻度なので描画スレッドから
 同期送信でよい）。失敗した geometry 同期は 100ms から 2s 上限の指数 backoff で再試行し、frame tick ごとに socket を
-開き直さない。成功した resize だけが foreground poll pump を interactive cadence へ wake する。attach / input / detach は
+開き直さない。要求 geometry は pending として保持し、daemon の ACK までは decoded local screen を最後に同期済みの
+geometry から破壊的に縮めない。成功した resize だけが local screen の geometry を確定し、foreground poll pump を
+interactive cadence へ wake する。attach / input / detach は
 従来どおり単一接続に載せる。この共有接続の epoch と subscription 無効化は
 [connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化) が正本である。
 
@@ -1310,8 +1312,8 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry の
-変化時に送り、失敗した場合は同じ geometry でも次フレームで再試行して、PTY と右ペインの VT screen を
-同じ viewport に保つ。detach はこの client の
+変化時に送り、失敗した場合は同じ pending geometry を capped exponential backoff で再試行する。ACK 後にだけ
+右ペインの VT screen を resize して PTY と同じ viewport に確定する。detach はこの client の
 subscription を外すだけで、PTY を kill しない。daemon が exit を報告した terminal または Agent は、その
 live tab と client subscription を直ちに外し、残る tab または Closeup の空状態へ戻る。
 
