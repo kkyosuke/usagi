@@ -1,14 +1,14 @@
 ---
 number: 659
 title: perf(core): VT scrollback の先頭 eviction を O(1) にする
-status: todo
+status: done
 priority: medium
 labels: [review, v2, core, terminal, performance, memory]
 dependson: []
 related: [637, 534]
 parent: 654
 created_at: 2026-08-05T13:49:11.598201+00:00
-updated_at: 2026-08-05T13:50:15.231315+00:00
+updated_at: 2026-08-05T23:11:27.183255+00:00
 ---
 
 ## Finding（P2 CPU / owner-lock latency）

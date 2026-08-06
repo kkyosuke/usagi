@@ -15,11 +15,11 @@
 //! This is the single VT parser authority for v2: the TUI wraps it to render
 //! (selection / links / cursor marker are presentation vocabulary and stay in
 //! `usagi-tui`), and the daemon feeds and checkpoints it as terminal grid
-//! authority. The type exposes a read-only cell API (`grid` / `scrollback` /
-//! `cursor` / `cursor_style` and [`Cell`] accessors) that those faces build on
-//! without reaching into parser state.
+//! authority. The type exposes a read-only cell API (`grid` / ordered
+//! `scrollback` iteration and indexing / `cursor` / `cursor_style` and [`Cell`]
+//! accessors) that those faces build on without reaching into parser state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 
 use unicode_width::UnicodeWidthChar;
@@ -100,7 +100,7 @@ impl Cell {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScreenBuffer {
     grid: Vec<Vec<Cell>>,
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: VecDeque<Vec<Cell>>,
     cursor_row: usize,
     cursor_col: usize,
     style: String,
@@ -118,7 +118,7 @@ pub struct VtScreen {
     /// Rows pushed off the visible grid. Keeping this at the terminal decoder
     /// layer preserves the exact terminal semantics for both agent and shell
     /// panes while the view chooses which rows to project.
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: VecDeque<Vec<Cell>>,
     cursor_row: usize,
     cursor_col: usize,
     phase: Phase,
@@ -300,7 +300,7 @@ impl VtScreen {
             rows,
             cols,
             grid: vec![vec![Cell::blank(); cols]; rows],
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             cursor_row: 0,
             cursor_col: 0,
             phase: Phase::Ground,
@@ -373,10 +373,25 @@ impl VtScreen {
         &self.grid
     }
 
-    /// Rows pushed off the top of the visible grid, oldest first.
+    /// Iterates rows pushed off the top of the visible grid, oldest first.
+    ///
+    /// The iterator follows logical history order without requiring the ring
+    /// buffer to be made contiguous.
     #[must_use]
-    pub fn scrollback(&self) -> &[Vec<Cell>] {
-        &self.scrollback
+    pub fn scrollback(&self) -> impl DoubleEndedIterator<Item = &[Cell]> + ExactSizeIterator {
+        self.scrollback.iter().map(Vec::as_slice)
+    }
+
+    /// Number of rows retained in scrollback.
+    #[must_use]
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Returns a retained scrollback row by its oldest-first logical index.
+    #[must_use]
+    pub fn scrollback_row(&self, row: usize) -> Option<&[Cell]> {
+        self.scrollback.get(row).map(Vec::as_slice)
     }
 
     /// The number of cells this screen retains: both buffers' visible grid and
@@ -685,10 +700,7 @@ impl VtScreen {
             // Mirror v1's vt100 policy: a region anchored at row zero is
             // transcript history; a lower region is a transient full-screen UI.
             if self.primary_screen.is_none() && self.scroll_top == 0 {
-                self.scrollback.push(row);
-                if self.scrollback.len() > SCROLLBACK_MAX {
-                    self.scrollback.remove(0);
-                }
+                append_scrollback(&mut self.scrollback, row, SCROLLBACK_MAX);
             }
             self.grid
                 .insert(self.scroll_bottom, vec![Cell::blank(); self.cols]);
@@ -1058,7 +1070,7 @@ impl VtScreen {
 /// A [`BufferCheckpoint`] decoded and validated into owned parser fields.
 struct DecodedBuffer {
     grid: Vec<Vec<Cell>>,
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: VecDeque<Vec<Cell>>,
     cursor_row: usize,
     cursor_col: usize,
     style: String,
@@ -1136,7 +1148,7 @@ fn decode_buffer(
         .scrollback
         .iter()
         .map(|row| decode_row(row, cols, styles))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<VecDeque<_>, _>>()?;
 
     Ok(DecodedBuffer {
         grid,
@@ -1171,10 +1183,25 @@ fn row_text(row: &[Cell]) -> String {
 }
 
 /// Drops the oldest rows so at most `keep_rows` remain, returning the count.
-fn trim_rows(rows: &mut Vec<Vec<Cell>>, keep_rows: usize) -> usize {
+fn trim_rows(rows: &mut VecDeque<Vec<Cell>>, keep_rows: usize) -> usize {
     let dropped = rows.len().saturating_sub(keep_rows);
     rows.drain(..dropped);
     dropped
+}
+
+/// Appends one history row and evicts at most one oldest row in O(1).
+fn append_scrollback(rows: &mut VecDeque<Vec<Cell>>, row: Vec<Cell>, max_rows: usize) -> bool {
+    if max_rows == 0 {
+        return false;
+    }
+    let evicted = if rows.len() >= max_rows {
+        rows.pop_front();
+        true
+    } else {
+        false
+    };
+    rows.push_back(row);
+    evicted
 }
 
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
@@ -1248,8 +1275,7 @@ mod tests {
     fn rows_with_scrollback(screen: &VtScreen) -> Vec<String> {
         let mut out: Vec<String> = screen
             .scrollback()
-            .iter()
-            .chain(screen.grid())
+            .chain(screen.grid().iter().map(Vec::as_slice))
             .map(|row| row_text(row).trim_end().to_owned())
             .collect();
         while out.last().is_some_and(String::is_empty) {
@@ -1320,7 +1346,7 @@ mod tests {
         assert!(!row[1].continuation);
         let mut buffer = ScreenBuffer {
             grid: vec![vec![Cell::blank(); 2]; 3],
-            scrollback: vec![Vec::new()],
+            scrollback: VecDeque::from([Vec::new()]),
             cursor_row: 2,
             cursor_col: 1,
             style: String::new(),
@@ -1470,7 +1496,57 @@ mod tests {
         for _ in 0..10_001 {
             screen.advance(b"x\r\n");
         }
-        assert_eq!(screen.scrollback().len(), 10_000);
+        assert_eq!(screen.scrollback_len(), SCROLLBACK_MAX);
+
+        let restored = VtScreen::from_checkpoint(&screen.checkpoint()).expect("valid checkpoint");
+        assert_eq!(restored, screen);
+    }
+
+    #[test]
+    fn steady_scrollback_append_evicts_one_row_independent_of_history_length() {
+        const APPENDS: usize = 20_000;
+        let row = |ch| {
+            vec![Cell {
+                ch,
+                style: String::new(),
+                continuation: false,
+            }]
+        };
+
+        let mut disabled = VecDeque::new();
+        assert!(!append_scrollback(&mut disabled, Vec::new(), 0));
+        assert!(disabled.is_empty());
+        let mut retained_while_disabled = VecDeque::from([row('a')]);
+        assert!(!append_scrollback(
+            &mut retained_while_disabled,
+            row('b'),
+            0
+        ));
+        assert_eq!(retained_while_disabled, VecDeque::from([row('a')]));
+
+        for retained_rows in [100, 1_000, SCROLLBACK_MAX] {
+            let mut history = (0..retained_rows)
+                .map(|_| Vec::new())
+                .collect::<VecDeque<_>>();
+            let capacity = history.capacity();
+            let eviction_visits = (0..APPENDS)
+                .filter(|_| append_scrollback(&mut history, Vec::new(), retained_rows))
+                .count();
+
+            assert_eq!(history.len(), retained_rows);
+            assert_eq!(history.capacity(), capacity);
+            assert_eq!(eviction_visits, APPENDS);
+        }
+
+        let mut history = VecDeque::from([row('a'), row('b'), row('c')]);
+        assert!(append_scrollback(&mut history, row('d'), 3));
+        assert_eq!(
+            history
+                .iter()
+                .map(|cells| cells[0].ch())
+                .collect::<String>(),
+            "bcd"
+        );
     }
 
     #[test]
@@ -1879,7 +1955,7 @@ mod tests {
         reference.advance(&stream);
         // Output far exceeds any 64 KiB raw tail, so real history accumulated —
         // a raw-tail snapshot could not reconstruct it.
-        assert!(!reference.scrollback().is_empty());
+        assert!(reference.scrollback_len() > 0);
 
         let check = |i: usize| {
             let mut restored = VtScreen::new(rows, cols);
@@ -2256,8 +2332,8 @@ mod tests {
         // The visible grid is the floor: a budget below it drops all history and
         // stops there.
         assert_eq!(screen.trim_to_cells(0), 2);
-        assert!(screen.scrollback().is_empty());
-        assert!(screen.scrollback().is_empty());
+        assert_eq!(screen.scrollback_len(), 0);
+        assert_eq!(screen.scrollback_len(), 0);
         assert_eq!(screen.retained_cells(), 3 * 8);
         assert_eq!(screen.trim_to_cells(0), 0);
     }
@@ -2284,7 +2360,7 @@ mod tests {
 
         // Below the two grids, all history in both buffers is gone.
         screen.trim_to_cells(0);
-        assert!(screen.scrollback().is_empty());
+        assert_eq!(screen.scrollback_len(), 0);
         assert_eq!(screen.retained_cells(), 4 * 6);
     }
 
