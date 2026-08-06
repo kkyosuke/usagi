@@ -22,9 +22,9 @@ const MIN_BACKGROUND_WIDTH: usize = 24;
 /// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
 pub const DIRECTOR_ICON: char = '\u{f06a9}';
 /// Rows of drawer chrome the New picker's candidate rows never get: the Home
-/// header row above the drawer, the panel's two borders, the conversation
-/// selector, its separator, and the footer hint.
-const PICKER_CHROME_ROWS: usize = 6;
+/// header row above the drawer, the panel's two borders and two vertical padding
+/// rows, the conversation selector, its separator, and the footer hint.
+const PICKER_CHROME_ROWS: usize = 8;
 const _: () = assert!(
     PICKER_CHROME_ROWS == crate::usecase::application::controller::DIRECTOR_PICKER_CHROME_ROWS
 );
@@ -124,8 +124,8 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> DirectorDrawerGeometry {
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> DirectorTerminalViewport {
     let drawer = geometry(raw_height, raw_width);
     DirectorTerminalViewport {
-        // top/bottom borders + selector + separator/breathing row + footer
-        rows: drawer.height.saturating_sub(5),
+        // top/bottom borders + vertical padding + selector + separator + footer
+        rows: drawer.height.saturating_sub(7),
         // left/right borders and one cell of padding on both sides
         cols: drawer.width.saturating_sub(4),
     }
@@ -155,7 +155,7 @@ pub fn terminal_point_at(
     let drawer = geometry(raw_height, raw_width);
     let viewport = terminal_viewport(raw_height, raw_width);
     let column = usize::from(column).checked_sub(drawer.left.saturating_add(2))?;
-    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(3))?;
+    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(4))?;
     if column >= viewport.cols || content_row >= viewport.rows {
         return None;
     }
@@ -180,7 +180,7 @@ pub fn new_button_at(
         return false;
     }
     let drawer = geometry(raw_height, raw_width);
-    if usize::from(row) != drawer.top.saturating_add(1) {
+    if usize::from(row) != drawer.top.saturating_add(2) {
         return false;
     }
     let right = drawer.left.saturating_add(drawer.width).saturating_sub(2);
@@ -214,7 +214,9 @@ pub fn render_over(
     }
 
     let inner_width = drawer.width.saturating_sub(4);
-    let body_height = drawer.height.saturating_sub(2);
+    // `modal::boxed` adds the top/bottom borders and one padding row inside
+    // each border. Reserve all four rows so the bottom border stays on-screen.
+    let body_height = drawer.height.saturating_sub(4);
     let body = drawer_body(inner_width, body_height, projection);
     let title = Role::Accent
         .style()
@@ -406,7 +408,7 @@ mod tests {
         assert_eq!(zero, geometry(24, 80));
         assert_eq!(
             terminal_viewport(0, 0),
-            DirectorTerminalViewport { rows: 18, cols: 52 }
+            DirectorTerminalViewport { rows: 16, cols: 52 }
         );
         assert_eq!(
             terminal_viewport(1, 1),
@@ -418,7 +420,7 @@ mod tests {
     fn terminal_viewport_is_independent_from_the_closeup_right_pane() {
         assert_eq!(
             terminal_viewport(24, 100),
-            DirectorTerminalViewport { rows: 18, cols: 56 }
+            DirectorTerminalViewport { rows: 16, cols: 56 }
         );
         assert_ne!(
             (
@@ -439,9 +441,9 @@ mod tests {
                 30,
                 0,
                 u16::try_from(drawer.left + 2).unwrap(),
-                u16::try_from(drawer.top + 3).unwrap(),
+                u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 12, column: 0 })
+            Some(TerminalPoint { row: 14, column: 0 })
         );
         assert_eq!(terminal_point_at(24, 100, 30, 0, 0, 0), None);
         assert_eq!(
@@ -451,7 +453,7 @@ mod tests {
                 30,
                 0,
                 u16::try_from(drawer.left + 2).unwrap(),
-                u16::try_from(drawer.top + 3 + terminal_viewport(24, 100).rows).unwrap(),
+                u16::try_from(drawer.top + 4 + terminal_viewport(24, 100).rows).unwrap(),
             ),
             None
         );
@@ -460,7 +462,7 @@ mod tests {
     #[test]
     fn new_button_hit_test_matches_selector_row_and_is_inert_while_launching() {
         let drawer = geometry(24, 100);
-        let row = u16::try_from(drawer.top + 1).unwrap();
+        let row = u16::try_from(drawer.top + 2).unwrap();
         let right = u16::try_from(drawer.left + drawer.width - 3).unwrap();
         assert!(new_button_at(24, 100, right, row, false));
         assert!(!new_button_at(24, 100, right, row, true));
@@ -488,6 +490,8 @@ mod tests {
         assert!(text.contains("Ctrl-O n / New: choose CLI"));
         assert!(frame[1].contains("\u{1b}[2m"));
         assert!(!frame[0].contains("\u{1b}[2m"));
+        assert!(strip_ansi(&frame[23]).contains('└'));
+        assert!(strip_ansi(&frame[23]).ends_with('┘'));
     }
 
     #[test]
@@ -620,9 +624,9 @@ mod tests {
                 10,
                 0,
                 u16::try_from(drawer.left + 2).unwrap(),
-                u16::try_from(drawer.top + 3).unwrap(),
+                u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 4, column: 0 })
+            Some(TerminalPoint { row: 6, column: 0 })
         );
     }
 
@@ -709,8 +713,8 @@ mod tests {
     #[test]
     fn picker_viewport_follows_the_selection_on_short_terminals() {
         let candidates = ["claude", "codex", "sakana.ai"];
-        // 8 rows leave two candidate rows, 7 leave one, 6 leave none.
-        for height in 6..=8 {
+        // 10 rows leave two candidate rows, 9 leave one, 8 leave none.
+        for height in 8..=10 {
             for selected in 0..candidates.len() {
                 let label = format!("height {height}, selected {selected}");
                 let frame = render_over(height, 80, &[], &picker_of(&candidates, selected));
@@ -727,7 +731,7 @@ mod tests {
                     .filter(|line| line.contains('›'))
                     .collect::<Vec<_>>();
 
-                if height == 6 {
+                if height == 8 {
                     // No content row survives the chrome, so nothing is
                     // highlighted and the footer stops offering Enter — the
                     // reducer refuses the same launch at this height.

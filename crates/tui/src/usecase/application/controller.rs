@@ -3094,10 +3094,11 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
 /// Rows the director drawer spends on chrome around the New picker's candidate
 /// rows: the Home header row the drawer hangs under, the panel's top and bottom
-/// borders, the conversation selector, its separator, and the footer hint.
+/// borders, two vertical padding rows, the conversation selector, its separator,
+/// and the footer hint.
 /// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
 /// keeps the launch gate and the render agreeing on the geometry.
-pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 6;
+pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 8;
 
 /// Candidate rows the New picker can draw at `height` terminal rows.
 ///
@@ -5719,10 +5720,10 @@ mod tests {
 
     #[test]
     fn director_picker_enter_is_inert_while_the_terminal_hides_every_candidate() {
-        // The drawer draws its first candidate row at 7 terminal rows; 6 rows
+        // The drawer draws its first candidate row at 9 terminal rows; 8 rows
         // reach the footer without one, so nothing highlighted is on screen.
-        assert_eq!(director_picker_capacity(7), 1);
-        assert_eq!(director_picker_capacity(6), 0);
+        assert_eq!(director_picker_capacity(9), 1);
+        assert_eq!(director_picker_capacity(8), 0);
         // An unmeasured terminal falls back to the renderer's normalized size
         // rather than locking the picker out before the first resize.
         assert_eq!(
@@ -5731,7 +5732,7 @@ mod tests {
         );
 
         let workspace = WorkspaceId::new();
-        for (height, launches) in [(6_u16, 0_usize), (7, 1)] {
+        for (height, launches) in [(8_u16, 0_usize), (9, 1)] {
             let mut state = AppState::home(workspace, Vec::new());
             state.set_agent_models(
                 AvailableModels::new([DefaultModel::Claude]),
