@@ -2161,9 +2161,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         terminal: &usagi_core::domain::id::TerminalRef,
         geometry: Geometry,
     ) -> Result<(), TerminalError> {
-        // A resize reflows the screen immediately, so restore the interactive
-        // fetch cadence rather than waiting out an idle backoff.
-        self.pump.wake();
         self.poll_request(
             TerminalAction::Resize,
             TerminalRequest::Resize {
@@ -2174,6 +2171,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 },
             },
         )?;
+        // Only a delivered resize can produce a redraw. Waking before a failed
+        // connect made every frame restart the foreground pump while capacity
+        // was exhausted, amplifying one outage into a reconnect storm.
+        self.pump.wake();
         Ok(())
     }
 
@@ -5443,6 +5444,7 @@ mod tests {
             Err(TerminalError::Unavailable)
         );
 
+        assert_eq!(port.pump.metrics().wakes, 0);
         assert!(port.polls.is_empty());
         assert!(!port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(1));

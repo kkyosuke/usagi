@@ -65,9 +65,12 @@ active / standby daemon は accept 後から `ServerHello` または handshake e
 close する。hello をまだ読んでいない相手へ新しい error frame は送らないため wire state は増えず、daemon の error log には
 peer data・credential・workspace を含まない `capacity exhausted` を記録する。
 
-handshake 成否にかかわらず、accept 済み worker の総数は generation ごとに最大 32 とする。finished worker を先に reap し、
+handshake 成否にかかわらず、accept 済み worker の総数は generation ごとに process の `RLIMIT_NOFILE` から算出した上限に収める。
+128 descriptor を PTY・store・wake pipe・listener・child 用に予約し、worker 1 件の reader / writer / retirement descriptor を 3 件として
+残りから上限を求め、thread 数を守るため最大 256 とする（limit を取得できない場合は 32）。finished worker を先に reap し、
 上限中は新しい socket を thread 作成前に close する。したがって正しい hello を送った後に idle し続ける同一 UID client も
 thread / socket descriptor を無制限には保持できない。この総数上限は established connection の時間制限ではなく、接続終了で枠を返す。
+capacity refusal の error log は飽和区間ごとに 1 回だけ記録し、reconnecting client 自身が log / disk pressure を増幅しない。
 
 admit した pre-handshake connection は、prefix read、body read、hello validation、reply write を合わせて 2 秒の単一の
 monotonic completion deadline を持つ。各 socket read / write はその絶対時刻までの残量だけで待つため、partial prefix や
