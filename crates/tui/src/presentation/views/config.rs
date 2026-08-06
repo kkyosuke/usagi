@@ -731,14 +731,14 @@ pub(super) fn render_environment_source_over(
         source.cursor,
         source.save_focused,
     ));
-    if let Some(error) = source.error {
-        lines.push(String::new());
-        lines.push(
-            Role::Danger
-                .style()
-                .paint(&modal::content_line(error, ENVIRONMENT_INNER_WIDTH)),
-        );
-    }
+    // Reserve the error area even before validation fails. Otherwise Ctrl-S
+    // grows the modal by two rows and shifts the entire editor upward.
+    lines.push(String::new());
+    lines.push(source.error.map_or_else(String::new, |error| {
+        Role::Danger
+            .style()
+            .paint(&modal::content_line(error, ENVIRONMENT_INNER_WIDTH))
+    }));
     lines.push(String::new());
     match source.scope {
         SettingsScope::Global => {
@@ -1143,6 +1143,29 @@ mod tests {
                 .join("\n")
                 .contains("cannot contain NUL")
         );
+    }
+
+    #[test]
+    fn global_environment_validation_error_does_not_shift_the_modal() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        assert!(config.open_environment(&mut port));
+        config.type_environment("MISSING_EQUALS");
+
+        let before = render(24, 80, &config);
+        assert!(!config.save_environment(&mut port));
+        let after = render(24, 80, &config);
+        assert!(after.join("\n").contains("expected NAME=value"));
+
+        for marker in ["Environment", "[ Save ]", "Ctrl-S: save"] {
+            assert_eq!(
+                before.iter().position(|line| line.contains(marker)),
+                after.iter().position(|line| line.contains(marker)),
+                "{marker} must stay on the same row when the error appears"
+            );
+        }
     }
 
     #[test]
