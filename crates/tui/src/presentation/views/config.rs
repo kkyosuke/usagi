@@ -696,6 +696,7 @@ fn render_environment_over(
             cursor: editor.input.cursor(),
             error: editor.error.as_deref(),
             save_focused: editor.save_focused,
+            ctrl_s_save: editor.scope == SettingsScope::Global,
         },
     )
 }
@@ -707,6 +708,7 @@ pub(super) struct EnvironmentSource<'a> {
     pub(super) cursor: usize,
     pub(super) error: Option<&'a str>,
     pub(super) save_focused: bool,
+    pub(super) ctrl_s_save: bool,
 }
 
 /// Render the shared multiline environment source modal used by Config and Closeup.
@@ -749,10 +751,22 @@ pub(super) fn render_environment_source_over(
             lines.push(modal::footer("Ctrl-S: save   Enter: newline   Esc: cancel"));
         }
         SettingsScope::Workspace => {
-            lines.push(select::action("Save", source.save_focused, true));
-            lines.push(modal::footer(
-                "Enter: newline/save   Tab: switch   Esc: cancel",
+            let marker = modal::selection_marker(source.save_focused);
+            let button = Role::Success.style().bold().paint("[ Save ]");
+            let padding =
+                widgets::centered_padding(ENVIRONMENT_INNER_WIDTH, widgets::display_width(&button));
+            lines.push(format!(
+                "{}{}{}",
+                " ".repeat(padding.saturating_sub(widgets::display_width(&marker))),
+                marker,
+                button
             ));
+            let footer = if source.ctrl_s_save {
+                "Ctrl-S: save   Enter: newline/save   Tab: switch   Esc: cancel"
+            } else {
+                "Enter: newline/save   Tab: switch   Esc: cancel"
+            };
+            lines.push(modal::footer(footer));
         }
     }
     modal::render_over(

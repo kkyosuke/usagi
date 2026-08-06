@@ -250,6 +250,7 @@ pub fn render_environment_over(
                 cursor: editor.cursor(),
                 error: editor.error().map(|error| error.message.as_str()),
                 save_focused: editor.is_save_focused(),
+                ctrl_s_save: true,
             },
         );
     }
@@ -316,8 +317,8 @@ mod tests {
         ENVIRONMENT_INPUT_WIDTH, environment_draft_row, render_environment_over, render_notes_over,
         render_roles_over,
     };
-    use crate::presentation::widgets::display_width;
     use crate::presentation::widgets::modal::BODY_INDENT_WIDTH;
+    use crate::presentation::widgets::{display_width, strip_ansi};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, EnvironmentEntry, NoteSection, RoleEditorScope,
         SafeError, SafeMessage, Target, update,
@@ -526,8 +527,19 @@ mod tests {
         assert!(frame.contains("Could not save environment"));
         assert!(!frame.contains("GLOBAL_TOKEN"));
         assert!(frame.contains("[ Save ]"));
+        assert!(frame.contains("Ctrl-S: save"));
         assert!(frame.contains("Enter: newline/save   Tab: switch   Esc: cancel"));
         assert!(frame.contains("\u{1b}[37;48;5;236m"));
+        let save_row = frame
+            .lines()
+            .map(strip_ansi)
+            .find(|line| line.contains("[ Save ]"))
+            .unwrap();
+        assert_eq!(
+            display_width(&save_row[..save_row.find("[ Save ]").unwrap()]) + 4,
+            40,
+            "Closeup Save must be centered in an 80-column frame"
+        );
     }
 
     #[test]

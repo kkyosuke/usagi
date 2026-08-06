@@ -768,18 +768,18 @@ Config、Overview、Closeup textarea の入力は次のとおりである。
 | 文字 / `Backspace` / `←→` | textarea を編集する |
 | `Delete` / `Home` / `End`（Config） | caret の位置または端を基準に編集する |
 | `Enter`（textarea） | 改行する |
-| `Ctrl-S`（Global Config） | global `env` を保存する |
-| `Tab`（Workspace Config / Closeup） | textarea と Save action の focus を切り替える |
-| `Enter`（Workspace Config / Closeup の Save） | workspace `env` を保存する |
+| `Ctrl-S`（Global Config / Overview / Closeup） | 編集中の `env` を保存する |
+| `Tab`（Workspace Config / Overview workspace / Closeup） | textarea と Save action の focus を切り替える |
+| `Enter`（workspace editor の Save） | workspace `env` を保存する |
 | `Esc` | editor を閉じる |
 
-Overview editor は従来どおり 1 行入力を使い、`NAME=value` の Enter で追加・置換、`NAME=` で削除する。
-入力行は Config textarea と同じ背景色付きの編集領域で表示する。空の入力で Enter を押すと保存する。
-Overview の `Tab` は workspace ⇄ global を切り替える。Closeup は Workspace Config と同様に `Tab` で Save action へ移り、
-Enter で workspace binding 全体を保存する。
+Overview と Closeup は Config と同じ背景色付き textarea と中央の Save action を表示する。
+Overview の scope は開くコマンドで決まり editor 内では切り替えない。Overview workspace と Closeup は `Tab` で Save action へ移り、
+Enter または `Ctrl-S` で workspace binding 全体を保存する。Overview global は Global Config と同様に `Tab` を受け付けず、
+`Ctrl-S` で保存する。
 
-- Config と Closeup の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、保存時も
-  global settings を変更しない。Overview editor は workspace 編集時に global binding を read-only で併記する。
+- Config、Overview、Closeup の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、
+  保存時も global settings を変更しない。
 - 保存は差分ではなく編集中スコープの全置換で、消した変数は取り除かれる。相手スコープの binding は
   変わらない。
 - 読み込み中と保存中はその状態を表示し、保存中の再保存・編集・スコープ切り替えは受け付けない

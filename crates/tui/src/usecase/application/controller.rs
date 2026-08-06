@@ -3879,13 +3879,7 @@ fn update_locked_environment_key(
             }
             Some(Vec::new())
         }
-        AppKey::SaveEnvironment => Some(save_locked_environment(state, environment_open)),
-        AppKey::SaveRoles
-            if state
-                .environment_editor
-                .as_ref()
-                .is_some_and(|editor| editor.scope == EnvScope::Global) =>
-        {
+        AppKey::SaveEnvironment | AppKey::SaveRoles => {
             Some(save_locked_environment(state, environment_open))
         }
         _ => None,
@@ -7486,6 +7480,34 @@ mod tests {
         );
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
         assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+    }
+
+    #[test]
+    fn closeup_environment_ctrl_s_saves_the_workspace_source() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+                inherited: Vec::new(),
+            }),
+        );
+
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::SaveRoles)),
+            vec![Effect::SaveEnvironment {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+            }]
+        );
     }
 
     #[test]
