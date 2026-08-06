@@ -503,12 +503,23 @@ mod tests {
                 }],
             }),
         );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentError {
+                scope: EnvScope::Workspace,
+                error: SafeError {
+                    message: SafeMessage::new("Could not save environment"),
+                    error_id: "safe-closeup-environment".to_owned(),
+                },
+            }),
+        );
 
         let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
             .join("\n");
         assert!(frame.contains("workspace env only (global values stay unchanged)"));
         assert!(frame.contains("one NAME=value binding per line"));
         assert!(frame.contains("RUST_LOG=debug"));
+        assert!(frame.contains("Could not save environment"));
         assert!(!frame.contains("GLOBAL_TOKEN"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Enter: newline/save   Tab: switch   Esc: cancel"));
