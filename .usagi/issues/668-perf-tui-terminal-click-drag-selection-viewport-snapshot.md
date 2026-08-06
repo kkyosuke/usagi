@@ -8,7 +8,7 @@ dependson: []
 related: [307, 389, 637, 660]
 parent: 664
 created_at: 2026-08-06T20:39:26.700393+00:00
-updated_at: 2026-08-06T20:39:26.700393+00:00
+updated_at: 2026-08-06T22:16:15.188518+00:00
 ---
 
 ## Finding（P2 interaction latency / allocation）
@@ -24,6 +24,8 @@ latest mainのrelease probeでは約10,024 retained rowsの `cells_with_scrollba
 - plain clickのURL hit-testは既に描画用に計算したvisible logical-line/link materialを再利用し、up時に全historyを再snapshotしない。wrapped URLはviewport境界に接するlogical lineだけを拡張する。
 - pointer gestureはTerminalRef、screen/material revision、row origin、geometryでfenceする。output/resync/focus changeでfenceが変わった場合、別cellのURLを開いたり別textをcopyせずgestureをsafe cancelする。
 - final copy textはdrag開始時のimmutable snapshotに基づく既存契約を維持する。ANSI除去、CJK display columns、blank padding、multi-row selection parityを保つ。
+- pointer captureはDownがterminal content内で成立したgestureだけに付与する。stray Drag/Up、content外release、focus lost、overlay open、terminal close、cache evictionはcopy/link open無しで解除し、次gestureへpress stateを持ち越さない。
+- viewport外auto-scroll/row-window拡張は1 event・1 frameあたりのrow/time budgetを持ち、高頻度Drag eventや端へのpointer固定でhistory全体を一度にcopy/scanしない。
 
 ## 受入条件
 
@@ -31,11 +33,13 @@ latest mainのrelease probeでは約10,024 retained rowsの `cells_with_scrollba
 - pointer down/upの間にoutput、scroll、resize、focus switch、resyncが起きてもwrong link open / wrong copyがない。
 - wrapped URL click、CJK、wide glyph、blank line/padding、reverse drag、copy shortcutの既存挙動を維持する。
 - viewport外dragの拡張量とmemoryはhard boundを持ち、巨大selectionはtyped feedback/backpressureへ縮退する。
+- click開始後に同じcell内容へ戻った場合もrevisionが変わっていれば古いgestureを再利用せずcancelする。stale completion/feedbackが新しいgestureのselectionを消さない。
 
 ## 必須テスト・計測
 
 - visited-row counterで10,000行historyのplain clickがviewport+wrapped neighborsだけを読むことをassertする。
 - output/revision changeをdownとupの間へ挟み、gesture cancelを固定する。
+- stray Up/Drag、content外release、overlay/focus/terminal close、同内容だが異revision、drag event stormを固定する。
 - release benchmarkでplain click / small drag / large dragを100/1,000/10,000 rowsで比較する。
 
 ## 根拠箇所

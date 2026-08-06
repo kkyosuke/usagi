@@ -8,7 +8,7 @@ dependson: []
 related: [553, 662, 665]
 parent: 664
 created_at: 2026-08-06T20:48:58.111610+00:00
-updated_at: 2026-08-06T20:48:58.111610+00:00
+updated_at: 2026-08-06T22:16:15.188518+00:00
 ---
 
 ## Finding（P2 responsiveness / input reflection）
@@ -37,9 +37,11 @@ frame loop
 ## 修正方針
 
 - clipboard write を render thread から外す。専用 worker/thread へ最新の copy request を渡し、frame loop は enqueue と結果 drain だけを行う。
-- 1 request = 1 end-to-end deadline を持たせ、超過・spawn 失敗・helper 失敗はいずれも safe feedback（例 `clipboard is unavailable` / `clipboard timed out`）へ投影する。成功を先行表示しない。
+- 1 request = 1 end-to-end deadline を持たせ、stdinへの全量write・close・wait・terminate/reapまで同じbudgetへ含める。超過・spawn 失敗・pipe write失敗・helper失敗はいずれも safe feedback（例 `clipboard is unavailable` / `clipboard timed out`）へ投影する。成功を先行表示しない。
 - copy request は最新 1 件へ coalesce し、helper が遅い間に大量の pending child を生まない。in-flight は高々 1、child / pipe / thread は bounded にし、timeout 時は child を terminate → reap して zombie を残さない。
 - 既存の copy 契約（drag release と保持選択の再 copy、空選択の拒否で clipboard を消さない、feedback 文言）を維持する。selection snapshot の immutability も変えない。
+- request/completionはTerminalRef、view/selection revision、copy operation idでfenceする。focus/terminal close後のlate success/errorは別terminalのfooterや新しいcopyのfeedbackを上書きしない。
+- coalesce policyは「pending最新1件」を置換し、in-flight内容は途中で混ぜない。置換されたrequestには必要ならtyped superseded outcomeを返し、silent successにしない。copy text byte数にもhard capを置き、巨大selectionでworker memoryを無制限に増やさない。
 
 ## 受入条件
 
@@ -47,12 +49,14 @@ frame loop
 - copy の成否・タイムアウトが safe feedback として一度だけ表示され、未確定を成功と誤表示しない。
 - helper が遅い間に copy を連打しても、spawn される child は bounded（coalesce 済み）で、timeout 後に zombie / 残留 pipe が無い。
 - 空選択で clipboard を消さない、保持選択の再 copy、macOS `pbcopy` / Wayland `wl-copy` / X11 `xclip`・`xsel` の fallback 選択という既存挙動を維持する。
+- fallbackは各helperへ同じ残りdeadlineを引き継ぎ、1 backendごとにdeadlineをリセットしない。TUI shutdownは新規copyを拒否し、boundedなcleanup後に戻る。
 
 ## 必須テスト
 
 - fake clock + fake clipboard port で、hang / 遅延 / 失敗 / 成功の各 fixture が deadline 内に feedback へ収束し、render 相当の loop を block しないことを assert する。
 - copy 連打が最新 1 件へ coalesce され、in-flight child 数が bound を超えないことを固定する。
-- timeout 後に child terminate / reap が行われ、後続 copy が成功へ復帰できることを検証する。
+- spawn前、partial stdin write、stdin close、wait、terminate graceの各hang後に child terminate / reap が行われ、後続 copy が成功へ復帰できることを検証する。
+- focus/terminal/selection revision変更後のlate completion、fallback全失敗、巨大copy cap、shutdown中copyを固定する。
 - 空選択・保持選択再 copy・platform fallback の既存 unit test を維持する。
 
 ## 根拠箇所

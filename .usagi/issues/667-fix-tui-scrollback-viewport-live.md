@@ -8,7 +8,7 @@ dependson: []
 related: [304, 597, 637, 659]
 parent: 664
 created_at: 2026-08-06T20:39:26.170496+00:00
-updated_at: 2026-08-06T20:39:26.170496+00:00
+updated_at: 2026-08-06T22:16:15.188518+00:00
 ---
 
 ## Finding（P2 scroll UX / visibility）
@@ -27,6 +27,8 @@ updated_at: 2026-08-06T20:39:26.170496+00:00
 - anchored中の新規出力件数をterminal identityごとに集計し、footerへ例 `↓ 17 new · End: live` を表示する。0へ戻る操作でcountをclearする。
 - wheel down / `Ctrl-O d`は従来どおり1行live方向へ進み、0到達でFollowingLiveへ戻す。`End`または明示chordで一度にlive bottomへ戻る。`PageUp` / `PageDown`はviewport単位で移動できるようにする。
 - focus切替後もmode/anchor/new-countをbounded cacheで復元する。selection / pointer hit-testは固定viewportのrow originと一致させる。
+- new countは受信chunk数やraw改行数でなくretained logical row originの増分から求め、CR上書き・cursor移動・alternate screen更新・resize reflowで水増ししない。`usize`/表示幅を超える場合はsaturating countと省略表示にする。
+- follow modeでhistoryが縮む/resyncされる場合は常に新しいlive bottomへ追従し、anchored modeだけがclamp/truncation feedbackを持つ。0行・viewportより短いhistory・height 0/1でもmodeが反転しない。
 
 ## 受入条件
 
@@ -35,12 +37,14 @@ updated_at: 2026-08-06T20:39:26.170496+00:00
 - retention eviction、history shrink、resize、checkpoint resync、alternate screen切替でstale rowを同じanchorとして表示しない。
 - tab/focus切替で各terminalのscroll mode、anchor、new countを独立保持する。
 - footerが狭幅/CJKでもclipし、terminal content rowsとpointer geometryをずらさない。
+- `End`/live復帰はretained selectionを意図せず消さず、selection snapshotがevictionで表示不能になった場合だけtyped feedbackとともに安全にclear/clampする。
 
 ## 必須テスト
 
 - total rows増加、cap eviction、resync shrink、focus切替をfake revision/originで固定する。
-- continuous output中のwheel/PageUp/PageDown/Endとnew countを検証する。
+- continuous output中のwheel/PageUp/PageDown/End、CR overwrite、alternate screen、resize reflowとnew countを検証する。
 - selection/clickのrow mappingがanchored viewportと一致することを確認する。
+- 0/1-row viewport、`usize`上限近傍のorigin/count、cache eviction後の再focusを固定する。
 
 ## 根拠箇所
 
