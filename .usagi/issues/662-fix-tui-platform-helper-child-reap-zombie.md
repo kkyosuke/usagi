@@ -1,14 +1,14 @@
 ---
 number: 662
 title: fix(tui): platform helper child を非同期に reap して zombie を残さない
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, process, resource, reliability]
 dependson: []
 related: [391]
 parent: 654
 created_at: 2026-08-05T13:49:12.964021+00:00
-updated_at: 2026-08-05T13:49:12.964021+00:00
+updated_at: 2026-08-05T23:15:21.995249+00:00
 ---
 
 ## Finding（P2 process / resource leak）

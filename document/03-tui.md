@@ -331,7 +331,11 @@ TUI は tick の resync で初回 snapshot 後に新規 ID を観測したとき
 session identity と title のみで、prompt・option・freeform answer は OS notification に送らない。port の配信失敗は safe に
 無視し、TUI の banner / modal を継続する。合成ルートは macOS では `osascript`、Linux では `notify-send` を固定の
 実行ファイルと引数ベクトルで spawn する。その他の OS、実行ファイル不在、headless notification service の失敗は
-非対応として no-op である。
+非対応として no-op である。notification、browser、external terminal の helper process は合成ルートの共通 reaper が
+上限付きで追跡し、TUI thread では待たずに `try_wait` で非同期に回収する。追跡枠が満杯なら新しい helper は spawn
+せず、notification は no-op、browser と external terminal は既存の safe feedback として扱う。長寿命の external
+terminal launcher が残っていても、短命 helper の回収は独立して進む。終了時は新規受付を止め、終了済み child を
+回収するが、起動中の外部 application は kill しない。
 
 Home 背景の dim は各 ANSI span の reset（`0` / 省略形）と通常輝度指定（`22`）の後にも維持し、行末で必ず
 reset する。入力を所有しない右ペインでは terminal 内 UI の focus 表現である bold、blink、reverse、背景色と
