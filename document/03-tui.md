@@ -753,9 +753,12 @@ Closeup は**引数を取らず workspace スコープだけ**を編集し、`Ta
 保存場所・スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の
 操作だけを述べる。
 
-Global / Workspace Config は `env  N variables set` を選んで Enter を押すと、その Config scope の editor を開く。
+Global / Workspace Config は Theme や Modal mode と同じラベル列にある `Env  < action >` を選んで Enter を押すと、
+その Config scope の editor を開く。binding 数は action の直下に `N variables` と表示する。
 開く直前に対象 scope の最新 binding を読み、`NAME=value` を 1 行 1 binding とする複数行 textarea に表示する。
-Enter は textarea 内で改行する。`Tab` で Save action へ移動し、Enter で編集中 scope の `env` だけを全置換保存する。
+textarea は背景色で入力領域を示し、空行には placeholder を表示しない。Enter は textarea 内で改行する。
+Global Config は `Ctrl-S`、Workspace Config は `Tab` で Save action へ移動して Enter を押すと、編集中 scope の
+`env` だけを全置換保存する。Global Config の `Tab` は何もしない。
 行を取り除くと binding を削除できる。Esc は未保存の environment draft を破棄して Config に戻る。
 
 Config textarea の入力は次のとおりである。
@@ -764,8 +767,9 @@ Config textarea の入力は次のとおりである。
 |---|---|
 | 文字 / `Backspace` / `Delete` / `←→` | textarea を編集する |
 | `Enter`（textarea） | 改行する |
-| `Tab` | textarea と Save action の focus を切り替える |
-| `Enter`（Save） | Config が対象とするスコープの `env` だけを保存する |
+| `Ctrl-S`（Global Config） | global `env` を保存する |
+| `Tab`（Workspace Config） | textarea と Save action の focus を切り替える |
+| `Enter`（Workspace Config の Save） | workspace `env` を保存する |
 | `Esc` | editor を閉じる |
 
 Overview / Closeup editor は従来どおり 1 行入力を使い、`NAME=value` の Enter で追加・置換、`NAME=` で削除する。

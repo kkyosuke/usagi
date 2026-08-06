@@ -2426,6 +2426,12 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     if config.is_editing_environment() {
         match key {
+            Key::Management {
+                action: AppKey::SaveRoles,
+                ..
+            } if config.scope() == usagi_core::usecase::settings::SettingsScope::Global => {
+                config.save_environment(settings);
+            }
             Key::Enter if config.is_environment_save_focused() => {
                 config.save_environment(settings);
             }
@@ -18878,8 +18884,16 @@ mod tests {
         step_config(&mut config, Key::LineEnd, &mut settings);
         step_config(&mut config, Key::LineStart, &mut settings);
         step_config(&mut config, Key::Tab, &mut settings);
+        assert!(!config.is_environment_save_focused());
         step_config(&mut config, Key::Other, &mut settings);
-        step_config(&mut config, Key::Enter, &mut settings);
+        step_config(
+            &mut config,
+            Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![19],
+            },
+            &mut settings,
+        );
         assert!(!config.is_editing_environment());
         assert_eq!(config.settings().env["A"], "1");
         assert_eq!(config.settings().env["B"], "2");

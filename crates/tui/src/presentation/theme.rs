@@ -51,6 +51,20 @@ impl Color {
             Color::Ansi256(n) => format!("38;5;{n}"),
         }
     }
+
+    /// この色を背景に選ぶ SGR パラメータ。
+    #[must_use]
+    fn bg_params(self) -> String {
+        match self {
+            Color::White => "47".to_string(),
+            Color::Cyan => "46".to_string(),
+            Color::Green => "42".to_string(),
+            Color::Red => "41".to_string(),
+            Color::Yellow => "43".to_string(),
+            Color::Magenta => "45".to_string(),
+            Color::Ansi256(n) => format!("48;5;{n}"),
+        }
+    }
 }
 
 /// 文字装飾のビットマスク。SGR パラメータ（bold=1 / dim=2 / italic=3 / underline=4 /
@@ -64,11 +78,12 @@ const ATTRS: [(u8, &str); 5] = [
     (1 << 4, "7"),
 ];
 
-/// 前景色と文字装飾の組。色そのものは [`Color`]、色でない属性（bold / dim / italic /
-/// underline / reverse）はビットマスクで持つ。[`Style::paint`] でテキストを SGR で包む。
+/// 前景色・背景色と文字装飾の組。色そのものは [`Color`]、色でない属性（bold / dim /
+/// italic / underline / reverse）はビットマスクで持つ。[`Style::paint`] でテキストを SGR で包む。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Style {
     fg: Option<Color>,
+    bg: Option<Color>,
     /// [`ATTRS`] のビットの論理和。
     attrs: u8,
 }
@@ -84,6 +99,13 @@ impl Style {
     #[must_use]
     pub fn fg(mut self, color: Color) -> Self {
         self.fg = Some(color);
+        self
+    }
+
+    /// 背景色を設定する。
+    #[must_use]
+    pub fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
         self
     }
 
@@ -134,6 +156,9 @@ impl Style {
             .collect();
         if let Some(color) = self.fg {
             params.push(color.fg_params());
+        }
+        if let Some(color) = self.bg {
+            params.push(color.bg_params());
         }
         if params.is_empty() {
             return text.to_string();
@@ -207,6 +232,30 @@ mod tests {
             Style::new().fg(Color::Magenta).bold().paint("x"),
             "\u{1b}[1;35mx\u{1b}[0m"
         );
+    }
+
+    #[test]
+    fn paint_supports_a_background_colour() {
+        assert_eq!(
+            Style::new()
+                .fg(Color::White)
+                .bg(Color::Ansi256(236))
+                .paint(" field "),
+            "\u{1b}[37;48;5;236m field \u{1b}[0m"
+        );
+        for (color, code) in [
+            (Color::White, 47),
+            (Color::Cyan, 46),
+            (Color::Green, 42),
+            (Color::Red, 41),
+            (Color::Yellow, 43),
+            (Color::Magenta, 45),
+        ] {
+            assert_eq!(
+                Style::new().bg(color).paint("x"),
+                format!("\u{1b}[{code}mx\u{1b}[0m")
+            );
+        }
     }
 
     #[test]
