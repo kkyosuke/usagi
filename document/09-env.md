@@ -67,13 +67,15 @@ workspace settings.json  env: {              RUST_LOG: debug, PROJECT: usagi }
 実効 binding            { GH_TOKEN: op://…, RUST_LOG: debug, PROJECT: usagi }
 ```
 
-workspace の editor は、この継承関係を隠さない。編集中のスコープ自身の binding とは別に
-**global の binding を read-only で併記**し、workspace 側が同名を持つものは上書き済みとして示す
+Overview / Closeup の workspace editor は、この継承関係を隠さない。編集中のスコープ自身の binding とは別に
+**global の binding を read-only で併記**し、workspace 側が同名を持つものは上書き済みとして示す。
+Workspace Config は scope の誤編集を避けるため workspace binding だけを表示する
 （[3. TUI#env editor](03-tui.md#env-editor)）。
 
-global binding は Welcome の Config にある `Environment (N vars)` から編集できる。Overview の `env global` も同じ
-global settings を編集する。Config は editor を開く直前に最新値をスナップショットとして読み、編集中の外部変更を
-全置換で失う可能性を確認してから編集を始める。workspace binding は Overview または Closeup の `env` から編集する。
+global binding は Welcome の Config にある `env  N variables set` から編集できる。Overview の `env global` も同じ
+global settings を編集する。workspace binding は Workspace Config の同じ行、Overview、Closeup の `env` から編集する。
+Config は editor を開く直前に対象 scope の最新値を複数行 textarea へ読み、対象 scope の `env` だけを全置換保存する。
+Workspace Config は global binding を表示・変更しない。
 
 ## secret の解決
 
