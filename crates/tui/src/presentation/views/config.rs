@@ -738,10 +738,7 @@ fn environment_summary(count: usize) -> String {
 fn environment_textarea(editor: &ConfigEnvironmentEditor) -> Vec<String> {
     let value = editor.input.value();
     let cursor = editor.input.cursor();
-    let mut source = value.split('\n').collect::<Vec<_>>();
-    if source.is_empty() {
-        source.push("");
-    }
+    let source = value.split('\n').collect::<Vec<_>>();
     let cursor_line = value[..cursor]
         .bytes()
         .filter(|byte| *byte == b'\n')
@@ -844,7 +841,10 @@ fn enabled_name(enabled: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, Field, render, render_over};
+    use super::{
+        AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, Field, parse_environment_text, render,
+        render_over,
+    };
     use crate::presentation::widgets::{display_width, strip_ansi};
     use std::io;
     use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
@@ -902,6 +902,23 @@ mod tests {
     }
 
     #[test]
+    fn environment_text_parser_normalizes_blank_and_duplicate_lines() {
+        let bindings = parse_environment_text("\n A = first \nA=last\nB=two\n").unwrap();
+        assert_eq!(bindings["A"], "last");
+        assert_eq!(bindings["B"], "two");
+
+        let over_limit = (0..=usagi_core::domain::settings::MAX_ENV_BINDINGS)
+            .map(|index| format!("VALUE_{index}=set"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            parse_environment_text(&over_limit)
+                .unwrap_err()
+                .contains("binding limit")
+        );
+    }
+
+    #[test]
     fn global_and_workspace_entries_save_only_their_own_target() {
         let mut port = FakeSettingsPort {
             global: Settings {
@@ -940,9 +957,15 @@ mod tests {
         assert_eq!(config.field(), Field::Environment);
         assert!(config.open_environment(&mut port));
         assert!(config.is_editing_environment());
+        config.toggle_environment_focus();
+        assert!(render(24, 80, &config).join("\n").contains('·'));
+        config.move_environment(false);
+        config.move_environment_edge(false);
+        config.toggle_environment_focus();
         config.type_environment("RUST_LOG=debuX");
         config.backspace_environment();
         config.type_environment("g");
+        config.newline_environment();
         config.newline_environment();
         config.paste_environment("A=1\r\nB=2");
         assert!(config.save_environment(&mut port));
@@ -1065,6 +1088,26 @@ mod tests {
         assert!(frame.contains("D=4"));
         assert!(frame.contains("expected NAME=value"));
         assert!(frame.contains("E=5"));
+
+        config.cancel_environment();
+        assert!(config.open_environment(&mut port));
+        config.type_environment("1BAD=value");
+        assert!(!config.save_environment(&mut port));
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("invalid variable name")
+        );
+
+        config.cancel_environment();
+        assert!(config.open_environment(&mut port));
+        config.type_environment("EMPTY=");
+        assert!(!config.save_environment(&mut port));
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("remove the line")
+        );
     }
 
     #[test]
@@ -1082,6 +1125,9 @@ mod tests {
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
+        config.move_environment_edge(false);
+        assert!(render(24, 80, &config).join("\n").contains("↓ 1 more"));
+        config.move_environment_edge(true);
         assert!(render(24, 80, &config).join("\n").contains("↑ 1 more"));
     }
 

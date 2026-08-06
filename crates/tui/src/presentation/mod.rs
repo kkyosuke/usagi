@@ -18861,7 +18861,9 @@ mod tests {
         assert_eq!(config.field(), ConfigField::Environment);
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(config.is_editing_environment());
-        step_config(&mut config, Key::Paste("C=3x".to_owned()), &mut settings);
+        step_config(&mut config, Key::Char('C'), &mut settings);
+        step_config(&mut config, Key::Paste("=3xy".to_owned()), &mut settings);
+        step_config(&mut config, Key::Backspace, &mut settings);
         step_config(&mut config, Key::Left, &mut settings);
         step_config(&mut config, Key::Delete, &mut settings);
         step_config(&mut config, Key::End, &mut settings);
