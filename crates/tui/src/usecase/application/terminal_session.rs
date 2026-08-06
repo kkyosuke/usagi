@@ -1758,6 +1758,30 @@ mod tests {
     }
 
     #[test]
+    fn returning_to_the_synchronized_geometry_cancels_a_failed_pending_resize() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 0, b"", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        let now = Instant::now();
+        session.connect_at(&mut port, now);
+
+        let changed = Geometry { cols: 30, rows: 4 };
+        port.resize_error = Some(TerminalError::Unavailable);
+        session.resize_at(&mut port, changed, now);
+        assert_eq!(session.pending_geometry, Some(changed));
+        assert!(session.error().is_some());
+        let resize_count = port.resized.len();
+
+        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL / 2);
+
+        assert_eq!(session.pending_geometry, None);
+        assert_eq!(session.error(), None);
+        assert_eq!(port.resized.len(), resize_count);
+    }
+
+    #[test]
     fn input_is_sent_once_with_a_monotonic_sequence() {
         let mut port = FakePort {
             attach: vec![Ok(attach(9, 0, b"", false))],
