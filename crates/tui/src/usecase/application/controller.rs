@@ -7372,6 +7372,7 @@ mod tests {
         assert_eq!(editor.scope(), EnvScope::Workspace);
         assert!(editor.is_scope_locked());
         assert!(editor.is_save_focused());
+        assert!(update(&mut state, AppEvent::Key(AppKey::ToggleEnvironmentScope),).is_empty());
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Enter)),
             vec![Effect::SaveEnvironment {
@@ -7443,6 +7444,9 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
         let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert!(!state.environment_editor().unwrap().is_save_focused());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         let editor = state.environment_editor().unwrap();
         assert_eq!(editor.draft(), "MISSING_EQUALS");
@@ -7467,6 +7471,8 @@ mod tests {
             update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).is_empty(),
             "a save in flight must not be submitted twice"
         );
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
     }
 
     #[test]

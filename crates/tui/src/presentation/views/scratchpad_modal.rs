@@ -108,13 +108,10 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
 }
 
 fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
-    let (caption, scope_hint) = match (editor.scope(), editor.is_scope_locked()) {
-        (EnvScope::Workspace, true) => ("this workspace's environment", None),
-        (EnvScope::Workspace, false) => ("this workspace's environment", Some("Tab: global")),
-        (EnvScope::Global, _) => (
-            "global environment · every workspace",
-            Some("Tab: workspace"),
-        ),
+    debug_assert!(!editor.is_scope_locked());
+    let (caption, scope_hint) = match editor.scope() {
+        EnvScope::Workspace => ("this workspace's environment", "Tab: global"),
+        EnvScope::Global => ("global environment · every workspace", "Tab: workspace"),
     };
     let mut lines = vec![modal::caption(caption)];
     if editor.is_loading() {
@@ -135,10 +132,8 @@ fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     // a second Save until the owning port refluxes — no double-submit.
     let footer = if editor.is_saving() {
         "Esc: close   Saving…".to_owned()
-    } else if let Some(scope_hint) = scope_hint {
-        format!("Enter: NAME=value / save   {scope_hint}   Esc: close")
     } else {
-        "Enter: NAME=value / save   Esc: close".to_owned()
+        format!("Enter: NAME=value / save   {scope_hint}   Esc: close")
     };
     lines.push(modal::footer(&footer));
     modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
