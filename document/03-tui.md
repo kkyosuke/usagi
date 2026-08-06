@@ -39,7 +39,8 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 Welcome は Open / Recent / New / Config の入口である。Open は登録済み workspace を名前の
 大文字・小文字を区別しない alphabet 順に並べる。常時表示する Filter 欄は編集位置に cursor を
 示し、入力した文字で即座に名前を絞り込み、↑↓ で絞り込み結果を選ぶ。各 workspace は名前と、session 数・未完了 issue 数・
-最終更新の相対時刻を 2 行で表示する。Recent は同じ Workspace 画面を直接開く。New と Config は
+最終更新の相対時刻を 2 行で表示する。Recent は上下の内側余白を持たない compact card で表示し、
+同じ Workspace 画面を直接開く。New と Config は
 それぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 New は Clone（リポジトリを新しいディレクトリへ clone）と Existing（既存ディレクトリを登録）の

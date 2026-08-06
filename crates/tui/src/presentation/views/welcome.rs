@@ -290,7 +290,7 @@ fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<S
                 overview.pr_count,
                 overview.open_issue_count,
             )];
-            modal::boxed(&title, RECENT_INNER_WIDTH, &body)
+            modal::compact_boxed(&title, RECENT_INNER_WIDTH, &body)
         }
         Some(Recent::Unite(unite)) => {
             let title = format!(
@@ -317,9 +317,9 @@ fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<S
                     unite.open_issue_count(),
                 ),
             ];
-            modal::boxed(&title, RECENT_INNER_WIDTH, &body)
+            modal::compact_boxed(&title, RECENT_INNER_WIDTH, &body)
         }
-        None => modal::boxed(
+        None => modal::compact_boxed(
             &format!("{key} —"),
             RECENT_INNER_WIDTH,
             &[card_body_line("No recent workspace")],
@@ -410,7 +410,7 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::{MenuAction, Welcome, render};
+    use super::{MenuAction, Welcome, recent_card, render};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
     use usagi_core::domain::recent::{Recent, UniteOverview};
@@ -644,6 +644,16 @@ mod tests {
         assert!(joined.contains("∪ alpha · beta"));
         assert!(joined.contains("⎇ 4"));
         assert!(joined.contains("8min ago"));
+    }
+
+    #[test]
+    fn recent_cards_do_not_inherit_modal_vertical_padding() {
+        assert_eq!(recent_card(Some(&workspace("solo", 30)), 0, now()).len(), 3);
+        assert_eq!(
+            recent_card(Some(&unite(&[("alpha", 45), ("beta", 8)])), 1, now()).len(),
+            4
+        );
+        assert_eq!(recent_card(None, 2, now()).len(), 3);
     }
 
     #[test]
