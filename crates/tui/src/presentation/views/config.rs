@@ -986,9 +986,12 @@ mod tests {
         workspace.next_field();
         assert_eq!(workspace.field(), Field::Environment);
         assert!(workspace.open_environment(&mut port));
-        let frame = render(24, 80, &workspace).join("\n");
+        let base = vec!["home background".to_owned(); 24];
+        let composited = render_over(24, 80, &base, &workspace);
+        let frame = composited.join("\n");
         assert!(frame.contains("workspace env only"));
         assert!(!frame.contains("GLOBAL=kept"));
+        assert!(composited.iter().all(|line| display_width(line) <= 80));
         workspace.type_environment("LOCAL=only");
         assert!(workspace.save_environment(&mut port));
 
