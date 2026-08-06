@@ -625,11 +625,7 @@ impl EnvironmentEditor {
         Self::loading_with_options(scope, false, EnvironmentEditorSaveBehavior::KeepOpen)
     }
 
-    fn loading_locked(scope: EnvScope) -> Self {
-        Self::loading_with_options(scope, true, EnvironmentEditorSaveBehavior::KeepOpen)
-    }
-
-    fn loading_closeup(scope: EnvScope) -> Self {
+    fn loading_source(scope: EnvScope) -> Self {
         Self::loading_with_options(scope, true, EnvironmentEditorSaveBehavior::CloseAfterSave)
     }
 
@@ -4142,18 +4138,13 @@ fn open_environment(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
 fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
     state.overlay = Some(Overlay::Environment);
     state.note_editor = None;
-    state.environment_editor = Some(EnvironmentEditor::loading_locked(scope));
+    state.environment_editor = Some(EnvironmentEditor::loading_source(scope));
     vec![Effect::LoadEnvironment { scope }]
 }
 
 /// Open the workspace-only environment editor used by Closeup.
 fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
-    state.overlay = Some(Overlay::Environment);
-    state.note_editor = None;
-    state.environment_editor = Some(EnvironmentEditor::loading_closeup(EnvScope::Workspace));
-    vec![Effect::LoadEnvironment {
-        scope: EnvScope::Workspace,
-    }]
+    open_environment_source(state, EnvScope::Workspace)
 }
 
 fn open_prs(state: &mut AppState) -> Vec<Effect> {
@@ -8286,6 +8277,16 @@ mod tests {
                 entries: vec![entry("TOKEN", "secret")],
             }]
         );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentSaved {
+                scope: EnvScope::Global,
+                entries: vec![entry("TOKEN", "secret")],
+                inherited: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.environment_editor().is_none());
     }
 
     #[test]
