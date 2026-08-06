@@ -158,12 +158,14 @@ impl LiveTerminalControls {
         self.active.feedback = Some("terminal selection started".to_owned());
     }
 
-    /// Record a pointer press without starting a text selection. A subsequent
-    /// drag promotes the snapshotted viewport and anchor into `selection`; a
-    /// release before that remains a plain click.
+    /// Record a pointer press without starting a text selection, clearing any
+    /// retained selection immediately. A subsequent drag promotes the
+    /// snapshotted viewport and anchor into `selection`; a release before that
+    /// remains a plain click.
     pub fn press_pointer(&mut self, selection: TerminalSelection) {
         self.revision = self.revision.saturating_add(1);
         self.active.pointer_press = Some(selection);
+        self.active.selection = None;
         self.active.dragging = false;
     }
 
@@ -555,6 +557,22 @@ mod tests {
         assert!(controls.has_selection());
         assert!(!controls.is_dragging());
         assert_eq!(controls.release_pointer(), PointerRelease::None);
+    }
+
+    #[test]
+    fn a_plain_pointer_press_clears_a_finished_selection() {
+        let viewport = vec!["hello".to_owned()];
+        let anchor = TerminalPoint { row: 0, column: 0 };
+        let mut controls = LiveTerminalControls::default();
+        controls.begin_selection(TerminalSelection::begin(viewport.clone(), anchor));
+        controls.extend_selection(TerminalPoint { row: 0, column: 4 });
+        assert_eq!(controls.finish_drag().as_deref(), Some("hello"));
+        assert!(controls.has_selection());
+
+        controls.press_pointer(TerminalSelection::begin(viewport, anchor));
+
+        assert!(!controls.has_selection());
+        assert_eq!(controls.release_pointer(), PointerRelease::Click);
     }
 
     #[test]

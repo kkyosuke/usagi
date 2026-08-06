@@ -1265,7 +1265,7 @@ Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて�
 出力中の `http(s)` URL は左クリックで OS 既定ブラウザに開ける。URL が載るセルは下線で装飾し、クリック可能で
 あることを示す。drag で非空の選択が成立した release は**コピー**、選択が生じない素のクリックだけを**リンクオープン**として扱い、
 両者は排他である（選択中はリンクを開かない）。クリック位置のセルを保持中の行/列へ写し、行末で折り返した URL は 1 本に結合して
-開く。URL 上でないセルのクリックは何も開かない no-op で、選択・scrollback offset を乱さない。検出・検証は純粋コアが担い（`http(s)`
+開く。URL 上でないセルのクリックはブラウザを開かず、通常クリックとして保持中の選択だけを解除し、scrollback offset は変えない。検出・検証は純粋コアが担い（`http(s)`
 スキームのみ許可し、制御文字・ESC・空白・非 ASCII を拒否する）、起動直前にも再検証してから argv で spawn するため、ANSI/端末制御
 列がブラウザ引数へ渡らない。起動は [PR modal と browser effect](#pr-modal-と-browser-effect) と同じ browser effect（macOS `open` /
 Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platform・起動失敗は TUI を乱さず safe feedback にする。
