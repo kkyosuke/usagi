@@ -424,7 +424,7 @@ enum EnvironmentEditorFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvironmentEditorSaveBehavior {
     KeepOpen,
-    CloseOnSubmit,
+    CloseAfterSave,
 }
 
 /// Environment editor state for one settings scope.
@@ -459,7 +459,7 @@ pub struct EnvironmentEditor {
     /// pinned to the scope chosen before opening it. Closeup always chooses the
     /// workspace scope; Overview chooses from its command argument.
     locked: bool,
-    /// What the owning surface does after a valid save is submitted.
+    /// What the owning surface does after a save is confirmed.
     save_behavior: EnvironmentEditorSaveBehavior,
 }
 
@@ -630,7 +630,7 @@ impl EnvironmentEditor {
     }
 
     fn loading_closeup(scope: EnvScope) -> Self {
-        Self::loading_with_options(scope, true, EnvironmentEditorSaveBehavior::CloseOnSubmit)
+        Self::loading_with_options(scope, true, EnvironmentEditorSaveBehavior::CloseAfterSave)
     }
 
     fn loading_with_options(
@@ -1876,6 +1876,11 @@ pub enum BackendEvent {
         entries: Vec<EnvironmentEntry>,
         inherited: Vec<EnvironmentEntry>,
     },
+    EnvironmentSaved {
+        scope: EnvScope,
+        entries: Vec<EnvironmentEntry>,
+        inherited: Vec<EnvironmentEntry>,
+    },
     /// A safe environment read/save failure.
     EnvironmentError { scope: EnvScope, error: SafeError },
     RolesLoaded {
@@ -2771,6 +2776,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             event @ (BackendEvent::NotesLoaded { .. }
             | BackendEvent::NotesError { .. }
             | BackendEvent::EnvironmentLoaded { .. }
+            | BackendEvent::EnvironmentSaved { .. }
             | BackendEvent::EnvironmentError { .. }
             | BackendEvent::RolesLoaded { .. }
             | BackendEvent::RolesError { .. }
@@ -3039,6 +3045,33 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     editor.cursor = editor.draft.len();
                     editor.focus = EnvironmentEditorFocus::Source;
                 }
+                editor.error = None;
+                editor.loading = false;
+                editor.saving = false;
+            }
+        }
+        BackendEvent::EnvironmentSaved {
+            scope,
+            entries,
+            inherited,
+        } => {
+            let close_after_save = state
+                .environment_editor
+                .as_ref()
+                .filter(|editor| editor.scope == *scope && editor.saving)
+                .is_some_and(|editor| {
+                    editor.save_behavior == EnvironmentEditorSaveBehavior::CloseAfterSave
+                });
+            if close_after_save {
+                state.overlay = None;
+                state.environment_editor = None;
+            } else if let Some(editor) = state
+                .environment_editor
+                .as_mut()
+                .filter(|editor| editor.scope == *scope)
+            {
+                editor.entries.clone_from(entries);
+                editor.inherited.clone_from(inherited);
                 editor.error = None;
                 editor.loading = false;
                 editor.saving = false;
@@ -3943,16 +3976,10 @@ fn save_locked_environment(state: &mut AppState, environment_open: bool) -> Vec<
     };
     editor.entries = entries;
     editor.saving = true;
-    let effect = Effect::SaveEnvironment {
+    vec![Effect::SaveEnvironment {
         scope: editor.scope,
         entries: editor.entries.clone(),
-    };
-    let close_on_submit = editor.save_behavior == EnvironmentEditorSaveBehavior::CloseOnSubmit;
-    if close_on_submit {
-        state.overlay = None;
-        state.environment_editor = None;
-    }
-    vec![effect]
+    }]
 }
 
 fn parse_environment_source(source: &str) -> Result<Vec<EnvironmentEntry>, String> {
@@ -7536,6 +7563,15 @@ mod tests {
                 scope: EnvScope::Workspace,
                 entries: vec![entry("RUST_LOG", "debug")],
             }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentSaved {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+                inherited: Vec::new(),
+            }),
         );
         assert_eq!(state.overlay(), None);
         assert!(state.environment_editor().is_none());

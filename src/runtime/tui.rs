@@ -522,11 +522,19 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         entries: Vec<EnvironmentEntry>,
         completions: Completions,
     ) {
-        completions.emit(
-            usagi_tui::usecase::application::controller::AppEvent::Backend(
-                EnvironmentStorePort::save(&mut self.environment, scope, entries),
-            ),
-        );
+        let event = match EnvironmentStorePort::save(&mut self.environment, scope, entries) {
+            BackendEvent::EnvironmentLoaded {
+                scope,
+                entries,
+                inherited,
+            } => BackendEvent::EnvironmentSaved {
+                scope,
+                entries,
+                inherited,
+            },
+            event => event,
+        };
+        completions.emit(AppEvent::Backend(event));
     }
 }
 
@@ -7730,6 +7738,27 @@ mod tests {
                     BackendEvent::PreviewLoaded { .. }
                 )
             ]
+        ));
+
+        composition.backend.dispatch(Effect::SaveEnvironment {
+            scope: EnvScope::Workspace,
+            entries: vec![EnvironmentEntry {
+                name: "RUST_LOG".to_owned(),
+                value: "debug".to_owned(),
+            }],
+        });
+        assert!(matches!(
+            composition.backend.drain_events().as_slice(),
+            [usagi_tui::usecase::application::controller::AppEvent::Backend(
+                BackendEvent::EnvironmentSaved {
+                    scope: EnvScope::Workspace,
+                    entries,
+                    ..
+                }
+            )] if entries == &vec![EnvironmentEntry {
+                name: "RUST_LOG".to_owned(),
+                value: "debug".to_owned(),
+            }]
         ));
     }
 
