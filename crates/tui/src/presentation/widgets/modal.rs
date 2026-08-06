@@ -16,6 +16,22 @@ const RESET: &str = "\u{1b}[0m";
 /// 余白を付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_modal`] が中央寄せする）。
 #[must_use]
 pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
+    boxed_with_padding(title, inner_width, lines, true)
+}
+
+/// `lines` を上下の内側余白なしの枠に収める。Welcome の Recent カードのように、modal
+/// ではない小さな panel を固定行数へ収める用途で使う。
+#[must_use]
+pub fn compact_boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
+    boxed_with_padding(title, inner_width, lines, false)
+}
+
+fn boxed_with_padding(
+    title: &str,
+    inner_width: usize,
+    lines: &[String],
+    vertical_padding: bool,
+) -> Vec<String> {
     // 両角の間の桁数: 内容領域 + 左右 1 桁ずつの余白。
     let span = inner_width + 2;
     let label = if title.is_empty() {
@@ -29,9 +45,11 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     let bottom = format!("└{}┘", "─".repeat(span));
 
     let blank = format!("│ {} │", " ".repeat(inner_width));
-    let mut out = Vec::with_capacity(lines.len() + 4);
+    let mut out = Vec::with_capacity(lines.len() + if vertical_padding { 4 } else { 2 });
     out.push(top);
-    out.push(blank.clone());
+    if vertical_padding {
+        out.push(blank.clone());
+    }
     for line in lines {
         // 先に切って枠より広い行が右辺を押し出せないようにし、短い行は詰めて
         // 各行をちょうど `inner_width` にする。
@@ -39,7 +57,9 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
         let pad = inner_width.saturating_sub(display_width(&line));
         out.push(format!("│ {line}{} │", " ".repeat(pad)));
     }
-    out.push(blank);
+    if vertical_padding {
+        out.push(blank);
+    }
     out.push(bottom);
     out
 }
@@ -757,10 +777,10 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         ConfirmationModal, ConfirmationView, bounded_list_rows, boxed, caption, columns,
-        confirmation_buttons, content_line, empty_notice, fixed_body, footer, heading, list_window,
-        modal_inner_width, prompt_line, render_body, render_body_over, render_confirmation_over,
-        render_modal, render_over, scroll_above, scroll_below, scroll_window, selection_marker,
-        subcommand_row, viewport_window,
+        compact_boxed, confirmation_buttons, content_line, empty_notice, fixed_body, footer,
+        heading, list_window, modal_inner_width, prompt_line, render_body, render_body_over,
+        render_confirmation_over, render_modal, render_over, scroll_above, scroll_below,
+        scroll_window, selection_marker, subcommand_row, viewport_window,
     };
     use crate::presentation::theme::{Role, Style};
     use crate::presentation::widgets::{clip_to_width, strip_ansi};
@@ -873,6 +893,15 @@ mod tests {
         assert!(out[0].ends_with('┐'));
         // 上辺全体の表示幅は span + 両角 = (8+2) + 2 = 12。
         assert_eq!(display_width(&out[0]), 12);
+    }
+
+    #[test]
+    fn compact_boxed_omits_vertical_padding() {
+        let out = compact_boxed("Recent", 8, &["body".to_string()]);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].starts_with("┌─ Recent "));
+        assert_eq!(out[1], "│ body     │");
+        assert_eq!(out[2], "└──────────┘");
     }
 
     #[test]
