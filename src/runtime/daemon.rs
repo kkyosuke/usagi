@@ -13597,6 +13597,10 @@ instructions = "{instructions}"
             .save_settings(&Settings {
                 env: BTreeMap::from([
                     ("GLOBAL_ONLY".to_owned(), "global".to_owned()),
+                    (
+                        "OP_SERVICE_ACCOUNT_TOKEN".to_owned(),
+                        "daemon-only".to_owned(),
+                    ),
                     ("SHARED".to_owned(), "global".to_owned()),
                 ]),
                 ..Settings::default()
@@ -13639,6 +13643,7 @@ instructions = "{instructions}"
         assert_eq!(terminal_environment["GLOBAL_ONLY"], "global");
         assert_eq!(terminal_environment["SHARED"], "workspace");
         assert_eq!(terminal_environment["WORKSPACE_ONLY"], "workspace");
+        assert!(!terminal_environment.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
 
         let user = configured_environment(Some(&configured), workspace.path()).unwrap();
         let agent = SpawnProvision::new(launch_environment(&user, Vec::new()), Vec::new())
@@ -13646,6 +13651,7 @@ instructions = "{instructions}"
         assert_eq!(agent["GLOBAL_ONLY"], "global");
         assert_eq!(agent["SHARED"], "workspace");
         assert_eq!(agent["WORKSPACE_ONLY"], "workspace");
+        assert!(!agent.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
     }
 
     fn provision_context(session: Option<SessionId>) -> ProvisionContext {

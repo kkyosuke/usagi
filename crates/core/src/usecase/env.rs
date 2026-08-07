@@ -50,6 +50,21 @@ pub trait SecretResolver {
     /// Returns a description of why the secret could not be read. The text must
     /// not contain the secret.
     fn read(&self, reference: &str) -> Result<String, String>;
+
+    /// Resolve with an optional daemon-owned 1Password service-account token.
+    /// Resolvers other than the 1Password adapter ignore this credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of why the secret could not be read. The text must
+    /// not contain either the resolved secret or the service-account token.
+    fn read_with_service_account_token(
+        &self,
+        reference: &str,
+        _service_account_token: Option<&str>,
+    ) -> Result<String, String> {
+        self.read(reference)
+    }
 }
 
 /// One binding that could not be resolved, safe to log.
