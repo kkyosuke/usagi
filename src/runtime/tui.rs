@@ -637,26 +637,21 @@ impl BackendDecisionPort for ProductionDecisionPort {
 type PrSnapshotResult = Result<PrSnapshot, String>;
 type PrObservations = Vec<(SessionId, PrSnapshotResult)>;
 
-struct ProductionOverlayPort {
-    workspace_name: String,
-    root: PathBuf,
-    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
-    pr_sessions: Arc<Mutex<Vec<SessionId>>>,
-    pr_pump: RefreshPump<PrObservations>,
-    browser: PlatformBrowserOpener,
-}
-
-impl ProductionOverlayPort {
-    fn publish_prs(&mut self, result: Result<PrObservations, String>, completions: &Completions) {
-        let observations = result.unwrap_or_else(|error| {
-            lock_pr_sessions(&self.pr_sessions)
+fn pr_snapshot_events(
+    result: Result<PrObservations, String>,
+    sessions: &[SessionId],
+) -> Vec<AppEvent> {
+    result
+        .unwrap_or_else(|error| {
+            sessions
                 .iter()
                 .map(|session| (*session, Err(error.clone())))
                 .collect()
-        });
-        for (session, snapshot) in observations {
+        })
+        .into_iter()
+        .map(|(session, snapshot)| {
             let target = Target::Session(session);
-            let event = match snapshot {
+            AppEvent::Backend(match snapshot {
                 Ok(snapshot) => BackendEvent::PullRequestsLoaded {
                     target,
                     revision: snapshot.revision,
@@ -669,8 +664,25 @@ impl ProductionOverlayPort {
                         error_id: "pr-load".to_owned(),
                     },
                 },
-            };
-            completions.emit(AppEvent::Backend(event));
+            })
+        })
+        .collect()
+}
+
+struct ProductionOverlayPort {
+    workspace_name: String,
+    root: PathBuf,
+    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
+    pr_sessions: Arc<Mutex<Vec<SessionId>>>,
+    pr_pump: RefreshPump<PrObservations>,
+    browser: PlatformBrowserOpener,
+}
+
+impl ProductionOverlayPort {
+    fn publish_prs(&mut self, result: Result<PrObservations, String>, completions: &Completions) {
+        let sessions = lock_pr_sessions(&self.pr_sessions).clone();
+        for event in pr_snapshot_events(result, &sessions) {
+            completions.emit(event);
         }
     }
 }
@@ -4195,7 +4207,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use usagi_core::usecase::client::{ClientPolicy, TerminalLaneBudget};
+    use usagi_core::usecase::client::{ClientPolicy, PrSnapshot, TerminalLaneBudget};
 
     /// The lane clock counts whole milliseconds, so a deadline armed for `n` ms
     /// can elapse a fraction under `n`. Lane-budget assertions allow that much.
@@ -4215,14 +4227,64 @@ mod tests {
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        probe_path, provider_resume_projection, session_cadence, session_snapshot_result,
-        terminal_copy_key, terminal_inventory_matches_scope, validate_workspace_directory,
-        version_detail, version_result_from_observation, workspace_open_error,
+        pr_snapshot_events, probe_path, provider_resume_projection, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
+
+    #[test]
+    fn pr_snapshot_events_cover_success_scoped_and_lane_errors() {
+        let session = SessionId::new();
+        let failed = SessionId::new();
+        let events = pr_snapshot_events(
+            Ok(vec![
+                (
+                    session,
+                    Ok(PrSnapshot {
+                        session_id: session,
+                        revision: 7,
+                        entries: vec![],
+                    }),
+                ),
+                (failed, Err("invalid snapshot".to_owned())),
+            ]),
+            &[],
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target: Target::Session(loaded),
+                    revision: 7,
+                    prs,
+                }),
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(rejected),
+                    ..
+                })
+            ] if *loaded == session && prs.is_empty() && *rejected == failed
+        ));
+
+        let events = pr_snapshot_events(Err("daemon unavailable".to_owned()), &[session, failed]);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(first),
+                    ..
+                }),
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(second),
+                    ..
+                })
+            ] if *first == session && *second == failed
+        ));
+    }
 
     #[test]
     fn doctor_version_probe_keeps_failure_states_typed_and_safe() {
