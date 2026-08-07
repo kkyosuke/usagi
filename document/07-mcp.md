@@ -197,6 +197,7 @@ runtime の closed vocabulary は daemon の profile catalog と共通で、`cla
 workspace の `.usagi/config.toml` に対応する model allowlist があり、profile の実行コマンドが PATH 上にある runtime
 だけが MCP schema に現れる。daemon が provision した MCP child は `USAGI_WORKSPACE_ROOT` の trusted root から
 allowlist を読み、session worktree の cwd に machine-local config がなくても workspace と同じ schema を公開する。
+daemon の spawn 直前の再検証も同じ workspace root を権威とし、session worktree は worker の cwd としてだけ使う。
 `sakana-ai` の実行コマンドは `codex-fugu` である。
 
 ### delegation の atomicity

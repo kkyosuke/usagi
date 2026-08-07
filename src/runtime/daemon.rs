@@ -5914,10 +5914,9 @@ fn delegate_brief(
             .ok_or(SessionRuntimeError::Storage)?;
         (workspace, caller, sessions.repository_root().to_path_buf())
     };
-    // The workspace root's configuration is the one the new session inherits, so
-    // an unknown runtime/model or a missing executable is decided here rather
-    // than after the worktree build. `dispatch` still re-reads the created
-    // session's own configuration and stays the authority.
+    // Machine-local runtime/model policy belongs to the workspace root and is
+    // not copied into managed worktrees. Decide every read-only refusal here;
+    // `dispatch` still re-reads the same trusted root and stays the authority.
     agent
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?

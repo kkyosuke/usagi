@@ -1379,7 +1379,9 @@ impl AgentRuntime {
     /// only: the operation identity, the prompt, the workspace runtime/model
     /// allowlist, the runtime executable, and whether this operation already
     /// owns a durable admission. [`Self::dispatch`] stays the authority and
-    /// repeats them against the created session's own scope.
+    /// repeats them against the same trusted workspace-root authority. The
+    /// session scope remains the launch cwd, but machine-local policy is not
+    /// copied into managed worktrees and must never be read from them.
     ///
     /// An operation this daemon has already answered is deliberately admitted:
     /// its create replays from the lifecycle journal and its dispatch replays
@@ -1482,7 +1484,7 @@ impl AgentRuntime {
         if matches!(intent.agent, DispatchAgentIntent::New { .. }) {
             let config = WorkspaceAgentConfig::read(
                 &scope
-                    .resolve_available_scope(intent.workspace, Some(session))
+                    .resolve_available_scope(intent.workspace, None)
                     .map_err(map_scope_error)?
                     .working_directory,
             );
@@ -3309,6 +3311,24 @@ mod tests {
             _: Option<SessionId>,
         ) -> Result<ResolvedAgentScope, ScopeResolveError> {
             self.0.clone()
+        }
+    }
+
+    struct RootAndSessionScope {
+        root: ResolvedAgentScope,
+        session: ResolvedAgentScope,
+    }
+    impl SessionScopeResolver for RootAndSessionScope {
+        fn resolve_available_scope(
+            &self,
+            _: WorkspaceId,
+            session: Option<SessionId>,
+        ) -> Result<ResolvedAgentScope, ScopeResolveError> {
+            Ok(if session.is_some() {
+                self.session.clone()
+            } else {
+                self.root.clone()
+            })
         }
     }
 
@@ -6392,8 +6412,19 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let executable = fixture.path().join("claude");
         std::fs::write(&executable, "fixture").unwrap();
-        let worktree = tempfile::tempdir().unwrap();
-        let scope = configured_scope(worktree.path());
+        let workspace = tempfile::tempdir().unwrap();
+        let session_worktree = tempfile::tempdir().unwrap();
+        let root_scope = configured_scope(workspace.path());
+        let session_scope = configured_scope(session_worktree.path());
+        std::fs::write(
+            session_worktree.path().join(".usagi/config.toml"),
+            "[agents.claude]\nmodels = [\"session-only\"]\n",
+        )
+        .unwrap();
+        let scope = RootAndSessionScope {
+            root: root_scope,
+            session: session_scope,
+        };
         let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
         let session = SessionId::new();
         let dispatch = |model: &str| DispatchIntent {
@@ -6414,7 +6445,7 @@ mod tests {
                 &OperationId::new().to_string(),
                 &dispatch("test"),
                 session,
-                &FakeScope(Ok(scope.clone())),
+                &scope,
             )
             .unwrap();
         assert_eq!(accepted.terminal.session_id, Some(session));
@@ -6426,7 +6457,7 @@ mod tests {
                 &OperationId::new().to_string(),
                 &dispatch("test"),
                 session,
-                &FakeScope(Ok(scope.clone())),
+                &scope,
             )
             .unwrap_err();
         assert_eq!(unavailable.code, ErrorCode::Unavailable);
@@ -6434,7 +6465,7 @@ mod tests {
 
         std::fs::write(&executable, "fixture").unwrap();
         std::fs::write(
-            worktree.path().join(".usagi/config.toml"),
+            workspace.path().join(".usagi/config.toml"),
             "[agents.claude]\nmodels = [\"other\"]\n",
         )
         .unwrap();
@@ -6443,7 +6474,7 @@ mod tests {
                 &OperationId::new().to_string(),
                 &dispatch("test"),
                 session,
-                &FakeScope(Ok(scope)),
+                &scope,
             )
             .unwrap_err();
         assert_eq!(rejected.code, ErrorCode::InvalidArgument);
