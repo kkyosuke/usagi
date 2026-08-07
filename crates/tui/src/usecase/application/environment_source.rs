@@ -1,5 +1,6 @@
 //! Shared multiline environment-source editor used by Config and Home overlays.
 
+use unicode_width::UnicodeWidthChar;
 use usagi_core::domain::settings::{EnvBindings, is_valid_env_name, validate_env_limits};
 
 /// Terminal-independent editing state for `NAME=value` source.
@@ -8,7 +9,7 @@ pub struct EnvironmentSourceEditor {
     value: String,
     cursor: usize,
     save_focused: bool,
-    /// Character column retained while moving through shorter lines.
+    /// Terminal display column retained while moving through shorter lines.
     vertical_column: Option<usize>,
 }
 
@@ -114,8 +115,8 @@ impl EnvironmentSourceEditor {
         self.vertical_column = None;
     }
 
-    /// Move to the previous or next source line while retaining the character
-    /// column across shorter intermediate lines.
+    /// Move to the previous or next source line while retaining the terminal
+    /// display column across shorter intermediate lines.
     pub fn move_vertical(&mut self, down: bool) {
         if self.save_focused {
             return;
@@ -126,7 +127,7 @@ impl EnvironmentSourceEditor {
         let line_end = self.value[self.cursor..]
             .find('\n')
             .map_or(self.value.len(), |offset| self.cursor + offset);
-        let column = self.value[line_start..self.cursor].chars().count();
+        let column = display_width(&self.value[line_start..self.cursor]);
         let preferred = self.vertical_column.unwrap_or(column);
         let target = if down {
             if line_end == self.value.len() {
@@ -145,11 +146,8 @@ impl EnvironmentSourceEditor {
             let start = self.value[..end].rfind('\n').map_or(0, |index| index + 1);
             (start, end)
         };
-        self.cursor = target.0
-            + self.value[target.0..target.1]
-                .char_indices()
-                .nth(preferred)
-                .map_or(target.1 - target.0, |(index, _)| index);
+        self.cursor =
+            target.0 + byte_offset_at_display_column(&self.value[target.0..target.1], preferred);
         self.vertical_column = Some(preferred);
     }
 
@@ -170,6 +168,28 @@ impl EnvironmentSourceEditor {
     pub fn parse(&self) -> Result<EnvBindings, String> {
         parse_environment_source(&self.value)
     }
+}
+
+fn display_width(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+        .sum()
+}
+
+fn byte_offset_at_display_column(value: &str, column: usize) -> usize {
+    let mut width = 0;
+    for (index, character) in value.char_indices() {
+        if width >= column {
+            return index;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > column {
+            return index;
+        }
+        width += character_width;
+    }
+    value.len()
 }
 
 /// Parse and validate newline-delimited `NAME=value` source.
@@ -255,5 +275,36 @@ mod tests {
             0,
             "horizontal movement resets the preferred column"
         );
+    }
+
+    #[test]
+    fn vertical_movement_retains_the_terminal_column_across_wide_characters() {
+        let mut editor = EnvironmentSourceEditor::new("あX\nABCD");
+
+        editor.move_vertical(false);
+        editor.move_cursor(false);
+        assert_eq!(editor.cursor(), "あ".len());
+
+        editor.move_vertical(true);
+        assert_eq!(
+            editor.cursor(),
+            "あX\nAB".len(),
+            "a width-two character must map to two ASCII columns"
+        );
+        editor.move_vertical(false);
+        assert_eq!(editor.cursor(), "あ".len());
+
+        let mut editor = EnvironmentSourceEditor::new("A\nあX");
+        editor.move_vertical(false);
+        editor.move_cursor(false);
+        editor.move_cursor(true);
+        editor.move_vertical(true);
+        assert_eq!(
+            editor.cursor(),
+            "A\n".len(),
+            "a caret cannot split a width-two terminal cell"
+        );
+        editor.move_vertical(false);
+        assert_eq!(editor.cursor(), "A".len());
     }
 }
