@@ -2799,6 +2799,14 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if state.session_prs.len() != before {
                 state.session_pr_revision = state.session_pr_revision.saturating_add(1);
             }
+            if state.pr_overlay.as_ref().is_some_and(|overlay| {
+                matches!(overlay.target, Target::Session(session) if !state.sessions.contains(&session))
+            }) {
+                state.pr_overlay = None;
+                if state.overlay == Some(Overlay::Prs) {
+                    state.overlay = None;
+                }
+            }
             state.reconcile_sessions(&previous_sessions);
             vec![Effect::SyncPullRequestTargets {
                 sessions: state.sessions.clone(),
@@ -3025,8 +3033,8 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                         .get(session)
                         .map(|(revision, _)| *revision);
                     let accepted = state.sessions.contains(session)
-                        && current.is_none_or(|current| *revision >= current);
-                    if accepted && current.is_none_or(|current| *revision > current) {
+                        && current.is_none_or(|current| *revision > current);
+                    if accepted {
                         state.session_prs.insert(*session, (*revision, prs.clone()));
                         state.session_pr_revision = state.session_pr_revision.saturating_add(1);
                     }
@@ -8237,9 +8245,8 @@ mod tests {
         assert_eq!(state.overlay(), None);
         assert!(state.pr_overlay().is_none());
 
-        // Reopening from the cached revision is immediate, and a same-revision
-        // snapshot remains usable for the new overlay without advancing the
-        // sidebar material generation.
+        // Reopening from the cached revision is immediate. A duplicate response
+        // cannot make the modal diverge from that sidebar projection.
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('p'))),
             vec![Effect::LoadPullRequests { target }]
@@ -8251,7 +8258,7 @@ mod tests {
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
                 revision: 1,
-                prs: prs.clone(),
+                prs: vec![pr_link(55)],
             }),
         );
         assert_eq!(state.pr_overlay().unwrap().prs(), prs.as_slice());
@@ -8271,6 +8278,8 @@ mod tests {
         );
         assert!(state.session_prs(session).is_none());
         assert!(state.session_pr_revision() > revision);
+        assert!(state.pr_overlay().is_none());
+        assert_eq!(state.overlay(), None);
     }
 
     #[test]

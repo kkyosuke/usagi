@@ -798,7 +798,7 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない先頭 PR と残件数を
 sidebar の `PR #<number> +<count>` に投影する。`p` の PR modal は focused `SessionId` について同じ
 projection を即時表示し、resident PR lane を wake する。sidebar projection は新しい revision だけで進み、
-同じ revision は開き直した modal の完全な snapshot として利用し、古い revision または別 session の値は捨てる。
+開き直した modal は同じ cache を即時利用する。重複・古い revision または別 session の値は捨てる。
 
 resident PR lane は render thread の外で daemon との persistent connection を所有し、1 秒以下の bounded cadence で
 現在の session 集合を観測する。session の追加・削除は集合を全置換して即時 wake し、結果は frame loop の non-blocking

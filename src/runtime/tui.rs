@@ -651,6 +651,13 @@ fn pr_snapshot_events(
         .into_iter()
         .map(|(session, snapshot)| {
             let target = Target::Session(session);
+            let snapshot = snapshot.and_then(|snapshot| {
+                if snapshot.session_id == session {
+                    Ok(snapshot)
+                } else {
+                    Err("invalid PR snapshot identity".to_owned())
+                }
+            });
             AppEvent::Backend(match snapshot {
                 Ok(snapshot) => BackendEvent::PullRequestsLoaded {
                     target,
@@ -4241,6 +4248,7 @@ mod tests {
     fn pr_snapshot_events_cover_success_scoped_and_lane_errors() {
         let session = SessionId::new();
         let failed = SessionId::new();
+        let mismatched = SessionId::new();
         let events = pr_snapshot_events(
             Ok(vec![
                 (
@@ -4252,6 +4260,14 @@ mod tests {
                     }),
                 ),
                 (failed, Err("invalid snapshot".to_owned())),
+                (
+                    mismatched,
+                    Ok(PrSnapshot {
+                        session_id: SessionId::new(),
+                        revision: 8,
+                        entries: vec![],
+                    }),
+                ),
             ]),
             &[],
         );
@@ -4266,8 +4282,15 @@ mod tests {
                 AppEvent::Backend(BackendEvent::PullRequestsError {
                     target: Target::Session(rejected),
                     ..
+                }),
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(wrong_identity),
+                    ..
                 })
-            ] if *loaded == session && prs.is_empty() && *rejected == failed
+            ] if *loaded == session
+                && prs.is_empty()
+                && *rejected == failed
+                && *wrong_identity == mismatched
         ));
 
         let events = pr_snapshot_events(Err("daemon unavailable".to_owned()), &[session, failed]);
