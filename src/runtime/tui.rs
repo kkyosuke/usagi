@@ -5,8 +5,8 @@ use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{sync::mpsc, thread};
 
@@ -48,7 +48,7 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
+    DaemonRequest, MetricsAction, PrAction, PrRequest, PrSnapshot, SessionAction, TerminalAction,
     TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::env::EnvScope;
@@ -85,7 +85,7 @@ use usagi_tui::usecase::application::daemon_backend::{
     WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
-use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
+use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSubscription,
@@ -634,25 +634,34 @@ impl BackendDecisionPort for ProductionDecisionPort {
     }
 }
 
-struct ProductionOverlayPort {
-    workspace_name: String,
-    root: PathBuf,
-    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
-    prs: DaemonPrSnapshotPort,
-    browser: PlatformBrowserOpener,
-}
+type PrSnapshotResult = Result<PrSnapshot, String>;
+type PrObservations = Vec<(SessionId, PrSnapshotResult)>;
 
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
-impl BackendOverlayPort for ProductionOverlayPort {
-    fn load_pull_requests(&mut self, target: Target, completions: Completions) {
-        let event = match target {
-            Target::Root(_) => BackendEvent::PullRequestsLoaded {
-                target,
-                prs: Vec::new(),
-            },
-            Target::Session(session) => match self.prs.snapshot(session) {
+fn pr_snapshot_events(
+    result: Result<PrObservations, String>,
+    sessions: &[SessionId],
+) -> Vec<AppEvent> {
+    result
+        .unwrap_or_else(|error| {
+            sessions
+                .iter()
+                .map(|session| (*session, Err(error.clone())))
+                .collect()
+        })
+        .into_iter()
+        .map(|(session, snapshot)| {
+            let target = Target::Session(session);
+            let snapshot = snapshot.and_then(|snapshot| {
+                if snapshot.session_id == session {
+                    Ok(snapshot)
+                } else {
+                    Err("invalid PR snapshot identity".to_owned())
+                }
+            });
+            AppEvent::Backend(match snapshot {
                 Ok(snapshot) => BackendEvent::PullRequestsLoaded {
                     target,
+                    revision: snapshot.revision,
                     prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
                 },
                 Err(message) => BackendEvent::PullRequestsError {
@@ -662,9 +671,59 @@ impl BackendOverlayPort for ProductionOverlayPort {
                         error_id: "pr-load".to_owned(),
                     },
                 },
-            },
-        };
-        completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
+            })
+        })
+        .collect()
+}
+
+struct ProductionOverlayPort {
+    workspace_name: String,
+    root: PathBuf,
+    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
+    pr_sessions: Arc<Mutex<Vec<SessionId>>>,
+    pr_pump: RefreshPump<PrObservations>,
+    browser: PlatformBrowserOpener,
+}
+
+impl ProductionOverlayPort {
+    fn publish_prs(&mut self, result: Result<PrObservations, String>, completions: &Completions) {
+        let sessions = lock_pr_sessions(&self.pr_sessions).clone();
+        for event in pr_snapshot_events(result, &sessions) {
+            completions.emit(event);
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+impl BackendOverlayPort for ProductionOverlayPort {
+    fn poll(&mut self, completions: &Completions) {
+        if let Some(result) = self.pr_pump.take() {
+            self.publish_prs(result, completions);
+        }
+    }
+
+    fn sync_pull_request_targets(&mut self, sessions: Vec<SessionId>) {
+        let mut current = lock_pr_sessions(&self.pr_sessions);
+        if *current != sessions {
+            *current = sessions;
+        }
+        drop(current);
+        self.pr_pump.wake();
+    }
+
+    fn load_pull_requests(&mut self, target: Target, completions: Completions) {
+        if matches!(target, Target::Root(_)) {
+            completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 0,
+                prs: Vec::new(),
+            }));
+            return;
+        }
+        self.pr_pump.wake();
+        if let Some(result) = self.pr_pump.take() {
+            self.publish_prs(result, &completions);
+        }
     }
 
     fn load_preview(&mut self, target: Target, completions: Completions) {
@@ -762,6 +821,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             SettingsEnvironmentStore::new(environment_data_dir.clone(), &snapshot.workspace.path),
             environment_data_dir,
         );
+        let pr_sessions = Arc::new(Mutex::new(snapshot.session_ids.clone()));
+        let pr_pump = spawn_pr_pump(Arc::clone(&pr_sessions));
         let backend = DaemonBackend::new(
             Box::new(host.clone()),
             Box::new(host),
@@ -782,7 +843,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             workspace_name: snapshot.workspace.name.clone(),
             root: snapshot.workspace.path.clone(),
             sessions,
-            prs: DaemonPrSnapshotPort,
+            pr_sessions,
+            pr_pump,
             browser: PlatformBrowserOpener {
                 reaper: self.helper_reaper.clone(),
             },
@@ -2383,6 +2445,16 @@ fn session_cadence() -> RefreshCadence {
     )
 }
 
+/// Cadence of the daemon-authoritative PR projection. The daemon owns remote
+/// refresh/backoff; this lane only notices its cheap local revisioned snapshot.
+fn pr_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(1_000),
+        Duration::from_millis(1_000),
+        Duration::from_millis(8_000),
+    )
+}
+
 /// Cadence of the mascot's metrics lane. It matches the one-second throttle the
 /// inline port already applied, so the sampling rate is unchanged and only the
 /// thread it runs on differs.
@@ -2512,6 +2584,40 @@ fn spawn_session_refresh_pump(workspace: Workspace) -> RefreshPump<SessionComman
         // The `state.json` read this performs is workspace-local file IO; it
         // belongs on this thread with the request, not on the render thread.
         session_snapshot_result("daemon snapshot refreshed", &snapshot, &workspace)
+    })
+}
+
+fn lock_pr_sessions(sessions: &Mutex<Vec<SessionId>>) -> std::sync::MutexGuard<'_, Vec<SessionId>> {
+    sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Spawns the resident PR snapshot lane. It keeps one connection and observes
+/// every current stable session identity off the render thread; the shared set
+/// is replaced when lifecycle reconciliation adds or removes a session.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+fn spawn_pr_pump(sessions: Arc<Mutex<Vec<SessionId>>>) -> RefreshPump<PrObservations> {
+    let mut lane = LaneConnection::observing();
+    RefreshPump::spawn(pr_cadence(), move || {
+        let sessions = lock_pr_sessions(&sessions).clone();
+        let mut observations = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let reply = lane.request(DaemonRequest::Pr {
+                action: PrAction::Snapshot,
+                payload: PrRequest {
+                    session_id: session,
+                    revision: None,
+                },
+            })?;
+            let snapshot = match reply {
+                DaemonReply::Ok(value) => usagi_core::usecase::client::decode_pr_snapshot(value)
+                    .map_err(|_| "invalid PR snapshot".to_owned()),
+                DaemonReply::Accepted { .. } => Err("PR snapshot is unavailable".to_owned()),
+            };
+            observations.push((session, snapshot));
+        }
+        Ok(observations)
     })
 }
 
@@ -3956,36 +4062,6 @@ impl DoctorPort for RuntimeDoctorPort {
     }
 }
 
-/// Composition adapter for the daemon-owned PR snapshot. It deliberately has no
-/// local scanner or state fallback: a failed request remains a safe TUI message
-/// and a later snapshot retries convergence.
-struct DaemonPrSnapshotPort;
-
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
-impl PrSnapshotPort for DaemonPrSnapshotPort {
-    fn snapshot(
-        &mut self,
-        session_id: usagi_core::domain::id::SessionId,
-    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
-        let mut client = crate::runtime::daemon::policy_client(ClientPolicy::tui())
-            .map_err(|_| "daemon unavailable".to_owned())?;
-        let reply = client
-            .request(DaemonRequest::Pr {
-                action: PrAction::Snapshot,
-                payload: PrRequest {
-                    session_id,
-                    revision: None,
-                },
-            })
-            .map_err(|_| "daemon unavailable".to_owned())?;
-        match reply {
-            DaemonReply::Ok(value) => usagi_core::usecase::client::decode_pr_snapshot(value)
-                .map_err(|_| "invalid PR snapshot".to_owned()),
-            DaemonReply::Accepted { .. } => Err("PR snapshot is unavailable".to_owned()),
-        }
-    }
-}
-
 /// OS adapter for the browser effect. `Command` receives separate argv items; no
 /// URL is ever interpolated into a shell command.
 struct PlatformBrowserOpener {
@@ -4138,7 +4214,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use usagi_core::usecase::client::{ClientPolicy, TerminalLaneBudget};
+    use usagi_core::usecase::client::{ClientPolicy, PrSnapshot, TerminalLaneBudget};
 
     /// The lane clock counts whole milliseconds, so a deadline armed for `n` ms
     /// can elapse a fraction under `n`. Lane-budget assertions allow that much.
@@ -4157,15 +4233,81 @@ mod tests {
         decision_cadence, decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, probe_path,
-        provider_resume_projection, session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, workspace_open_error,
+        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
+        pr_snapshot_events, probe_path, provider_resume_projection, session_cadence,
+        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
+        validate_workspace_directory, version_detail, version_result_from_observation,
+        workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
+
+    #[test]
+    fn pr_snapshot_events_cover_success_scoped_and_lane_errors() {
+        let session = SessionId::new();
+        let failed = SessionId::new();
+        let mismatched = SessionId::new();
+        let events = pr_snapshot_events(
+            Ok(vec![
+                (
+                    session,
+                    Ok(PrSnapshot {
+                        session_id: session,
+                        revision: 7,
+                        entries: vec![],
+                    }),
+                ),
+                (failed, Err("invalid snapshot".to_owned())),
+                (
+                    mismatched,
+                    Ok(PrSnapshot {
+                        session_id: SessionId::new(),
+                        revision: 8,
+                        entries: vec![],
+                    }),
+                ),
+            ]),
+            &[],
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target: Target::Session(loaded),
+                    revision: 7,
+                    prs,
+                }),
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(rejected),
+                    ..
+                }),
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(wrong_identity),
+                    ..
+                })
+            ] if *loaded == session
+                && prs.is_empty()
+                && *rejected == failed
+                && *wrong_identity == mismatched
+        ));
+
+        let events = pr_snapshot_events(Err("daemon unavailable".to_owned()), &[session, failed]);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(first),
+                    ..
+                }),
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target: Target::Session(second),
+                    ..
+                })
+            ] if *first == session && *second == failed
+        ));
+    }
 
     #[test]
     fn doctor_version_probe_keeps_failure_states_typed_and_safe() {
@@ -4239,7 +4381,12 @@ mod tests {
     /// resident threads.
     #[test]
     fn refresh_pump_lane_contract() {
-        for cadence in [decision_cadence(), session_cadence(), metrics_cadence()] {
+        for cadence in [
+            decision_cadence(),
+            session_cadence(),
+            pr_cadence(),
+            metrics_cadence(),
+        ] {
             assert!(cadence.interval >= MIN_INTERVAL);
             assert!(cadence.interval <= MAX_INTERVAL);
             assert!(cadence.backoff_base >= cadence.interval / 2);
@@ -4248,6 +4395,7 @@ mod tests {
         // A pending decision should surface sooner than a foreign lifecycle
         // change, and the metrics sample keeps the rate it always had.
         assert!(decision_cadence().interval < session_cadence().interval);
+        assert_eq!(pr_cadence().interval, Duration::from_secs(1));
         assert_eq!(metrics_cadence().interval, Duration::from_secs(1));
 
         let observing = LaneConnection::observing();

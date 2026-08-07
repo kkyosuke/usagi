@@ -259,6 +259,12 @@ impl DecisionPort for NoDecisions {
 /// the open overlay instead of discarding it. Opening a URL is a fire-and-forget
 /// side effect; a launch failure reflues as a safe [`BackendEvent::Notice`].
 pub trait OverlayPort {
+    /// Non-blocking drain for resident PR observation workers. Ports without a
+    /// worker keep the default no-op.
+    fn poll(&mut self, _completions: &Completions) {}
+    /// Replace the resident observer's stable session set and wake it. The
+    /// default keeps fake/embedded ports inert.
+    fn sync_pull_request_targets(&mut self, _sessions: Vec<SessionId>) {}
     /// Read a target's Pull Request list.
     fn load_pull_requests(&mut self, target: Target, completions: Completions);
     /// Read a target's Markdown preview lines.
@@ -466,6 +472,9 @@ impl DaemonBackend {
             Effect::LoadPullRequests { target } => {
                 self.overlay.load_pull_requests(target, self.completions());
             }
+            Effect::SyncPullRequestTargets { sessions } => {
+                self.overlay.sync_pull_request_targets(sessions);
+            }
             Effect::LoadPreview { target } => {
                 self.overlay.load_preview(target, self.completions());
             }
@@ -497,6 +506,7 @@ impl DaemonBackend {
     pub fn drain_events(&mut self) -> Vec<AppEvent> {
         let completions = self.completions();
         self.decisions.poll(&completions);
+        self.overlay.poll(&completions);
         self.completions_rx.try_iter().collect()
     }
 
@@ -724,6 +734,7 @@ mod tests {
             self.pull_requests.push(target);
             completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
+                revision: 1,
                 prs: vec![usagi_core::domain::pullrequest::PrLink::new(
                     7,
                     "https://github.com/o/r/pull/7",
@@ -761,6 +772,36 @@ mod tests {
 
     fn backend_with_overlay() -> DaemonBackend {
         backend().with_overlay(Box::new(FakeOverlay::default()))
+    }
+
+    struct ResidentOverlay {
+        sessions: Vec<SessionId>,
+        published: bool,
+    }
+
+    impl OverlayPort for ResidentOverlay {
+        fn poll(&mut self, completions: &Completions) {
+            if self.published {
+                return;
+            }
+            let Some(session) = self.sessions.first().copied() else {
+                return;
+            };
+            self.published = true;
+            completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: Target::Session(session),
+                revision: 1,
+                prs: vec![],
+            }));
+        }
+
+        fn sync_pull_request_targets(&mut self, sessions: Vec<SessionId>) {
+            self.sessions = sessions;
+        }
+
+        fn load_pull_requests(&mut self, _: Target, _: Completions) {}
+        fn load_preview(&mut self, _: Target, _: Completions) {}
+        fn open_pull_request(&mut self, _: String, _: Completions) {}
     }
 
     fn intent() -> SessionCreateIntent {
@@ -974,7 +1015,7 @@ mod tests {
         );
         assert!(matches!(
             backend.drain_events().as_slice(),
-            [AppEvent::Backend(BackendEvent::PullRequestsLoaded { target: loaded, prs })]
+            [AppEvent::Backend(BackendEvent::PullRequestsLoaded { target: loaded, prs, .. })]
                 if *loaded == target && prs.len() == 1
         ));
         assert_eq!(
@@ -986,6 +1027,29 @@ mod tests {
             [AppEvent::Backend(BackendEvent::PreviewError { target: failed, .. })]
                 if *failed == target
         ));
+    }
+
+    #[test]
+    fn resident_pr_target_sync_is_non_blocking_and_poll_refluxes_snapshot() {
+        let session = SessionId::new();
+        let mut backend = backend().with_overlay(Box::new(ResidentOverlay {
+            sessions: vec![],
+            published: false,
+        }));
+        assert_eq!(
+            backend.dispatch(Effect::SyncPullRequestTargets {
+                sessions: vec![session]
+            }),
+            Flow::Continue
+        );
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: Target::Session(loaded),
+                ..
+            })] if *loaded == session
+        ));
+        assert!(backend.drain_events().is_empty());
     }
 
     #[test]
