@@ -5366,11 +5366,9 @@ fn drive_workspace_controller(
     let _ = backend.dispatch(Effect::RefreshDecisions {
         workspace: workspace_id,
     });
-    for session in runtime.state().sessions() {
-        let _ = backend.dispatch(Effect::LoadPullRequests {
-            target: Target::Session(*session),
-        });
-    }
+    let _ = backend.dispatch(Effect::SyncPullRequestTargets {
+        sessions: runtime.state().sessions().to_vec(),
+    });
     session_refresh.wake();
     // Start restore after the first frame. The controller owns retry admission
     // and a capped backoff across worker jobs; a frame tick never resets it.

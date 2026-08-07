@@ -1963,6 +1963,11 @@ pub enum Effect {
     LoadPullRequests {
         target: Target,
     },
+    /// Replace the resident PR observer's stable session set. The production
+    /// adapter performs no RPC on this call; it only wakes its background lane.
+    SyncPullRequestTargets {
+        sessions: Vec<SessionId>,
+    },
     /// Read a target's Markdown preview through the overlay data owner. The
     /// completion returns as [`BackendEvent::PreviewLoaded`] / `Error`.
     LoadPreview {
@@ -2795,14 +2800,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 state.session_pr_revision = state.session_pr_revision.saturating_add(1);
             }
             state.reconcile_sessions(&previous_sessions);
-            state
-                .sessions
-                .iter()
-                .filter(|session| !previous_sessions.contains(session))
-                .map(|session| Effect::LoadPullRequests {
-                    target: Target::Session(*session),
-                })
-                .collect()
+            vec![Effect::SyncPullRequestTargets {
+                sessions: state.sessions.clone(),
+            }]
         }
         AppEvent::Backend(BackendEvent::SessionNames(names)) => {
             state.session_names = names;
@@ -2857,13 +2857,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             let refresh_prs = matches!(feedback, Feedback::Reconnected | Feedback::ResyncRequired);
             state.feedback = Some(feedback);
             if refresh_prs {
-                state
-                    .sessions
-                    .iter()
-                    .map(|session| Effect::LoadPullRequests {
-                        target: Target::Session(*session),
-                    })
-                    .collect()
+                vec![Effect::SyncPullRequestTargets {
+                    sessions: state.sessions.clone(),
+                }]
             } else {
                 Vec::new()
             }
@@ -3024,12 +3020,13 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             let accepted = match target {
                 Target::Root(_) => true,
                 Target::Session(session) => {
+                    let current = state
+                        .session_prs
+                        .get(session)
+                        .map(|(revision, _)| *revision);
                     let accepted = state.sessions.contains(session)
-                        && state
-                            .session_prs
-                            .get(session)
-                            .is_none_or(|(current, _)| revision > current);
-                    if accepted {
+                        && current.is_none_or(|current| *revision >= current);
+                    if accepted && current.is_none_or(|current| *revision > current) {
                         state.session_prs.insert(*session, (*revision, prs.clone()));
                         state.session_pr_revision = state.session_pr_revision.saturating_add(1);
                     }
@@ -3908,7 +3905,13 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     };
     state.overlay = Some(Overlay::Prs);
-    state.pr_overlay = Some(PrOverlay::loading(target));
+    let mut overlay = PrOverlay::loading(target);
+    if let Target::Session(session) = target
+        && let Some(prs) = state.session_prs(session)
+    {
+        overlay.prs = prs.to_vec();
+    }
+    state.pr_overlay = Some(overlay);
     state.preview_overlay = None;
     vec![Effect::LoadPullRequests { target }]
 }
@@ -8234,15 +8237,37 @@ mod tests {
         assert_eq!(state.overlay(), None);
         assert!(state.pr_overlay().is_none());
 
+        // Reopening from the cached revision is immediate, and a same-revision
+        // snapshot remains usable for the new overlay without advancing the
+        // sidebar material generation.
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('p'))),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        assert_eq!(state.pr_overlay().unwrap().prs(), prs.as_slice());
+        let revision = state.session_pr_revision();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: prs.clone(),
+            }),
+        );
+        assert_eq!(state.pr_overlay().unwrap().prs(), prs.as_slice());
+        assert_eq!(state.session_pr_revision(), revision);
+
         // Removing the stable session identity also removes its cached PR rows;
         // a later session reusing display text cannot inherit the badge.
         let revision = state.session_pr_revision();
-        assert!(
+        assert_eq!(
             update(
                 &mut state,
                 AppEvent::Backend(BackendEvent::Sessions(Vec::new()))
-            )
-            .is_empty()
+            ),
+            vec![Effect::SyncPullRequestTargets {
+                sessions: Vec::new()
+            }]
         );
         assert!(state.session_prs(session).is_none());
         assert!(state.session_pr_revision() > revision);
