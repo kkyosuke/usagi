@@ -1,13 +1,13 @@
 ---
 number: 654
 title: backlog: origin/main 69e2ad71 最新コードレビュー
-status: todo
+status: done
 priority: high
 labels: [review, v2, backlog, epic]
 dependson: []
 related: []
 created_at: 2026-08-05T13:39:21.130662+00:00
-updated_at: 2026-08-05T13:54:03.930449+00:00
+updated_at: 2026-08-07T02:52:01.958771+00:00
 ---
 
 ## レビュー基点
