@@ -881,7 +881,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。session の書き込みは own worktree だけに閉じ込め、root coordinator は起動固有 root（cwd・
+  起動する。production daemon は native sandbox を持たない Claude にこの launcher を配線する。session の書き込みは
+  own worktree だけに閉じ込め、root coordinator は起動固有 root（cwd・
   workspace の `.usagi`・Git common dir・usagi state）と普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain / MDS cache）へ
   書ける。読み取りは許す。backend は macOS が
@@ -960,15 +961,19 @@ root mode の launcher は、**exec する program 自身の state directory** �
   Git common dir）と重なる構成を拒否する。
 - session mode はこの grant を使わない。writable root は own worktree だけで、state は daemon-issued
   environment（`CLAUDE_CONFIG_DIR` / `TMPDIR`）で worktree 内へ向ける。
+- production daemon がこの launcher を配線する provider は Claude だけである。Codex / sakana.ai は起動時に
+  `~/.codex*/tmp/arg0` の helper を初期化し、tool process に native sandbox を適用するため、外側の
+  `sandbox-exec` / `bwrap` では包まない。
 
 Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 root 起動は interactive/headless とも `--sandbox read-only --ask-for-approval never`、session 起動は interactive の
 `workspace-write` と headless の session 専用 bypass を使うため、root で approval/sandbox bypass を選ばない。さらに
-root Codex も daemon-owned OS sandbox launcher で包み、provider sandbox と独立に checkout を read-only にする。
-この外側の sandbox が許可する provider 固有 writable root は
-[agent state の writable root](#agent-state-の-writable-root)が正本である。
+root Codex は provider 自身の native `read-only` sandbox を使い、daemon-issued environment と
+`guard-workspace` で Git の process 起動・repository mutation を独立に拒否する。Codex process 自体を外側の
+OS sandbox で包むと、起動時の arg0 helper（symlink / lock / stale directory cleanup）と、tool process に適用する
+内側 sandbox が macOS Seatbelt / Linux namespace と衝突するため、Claude 用 launcher は配線しない。
 
 root の read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
 diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など

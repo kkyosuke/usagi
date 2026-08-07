@@ -474,16 +474,9 @@ struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
-    /// The executable this profile launches: `codex`, or `codex-fugu` for the
-    /// Codex-compatible `sakana-ai` profile.
-    program: &'static str,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
-    sandbox_backend: Option<PathBuf>,
-    sandbox_tmpdir: Option<PathBuf>,
-    sandbox_home: Option<PathBuf>,
-    sandbox_passthrough: bool,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -523,42 +516,13 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
-            let sandbox_roots =
-                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
-                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            validate_claude_sandbox_policy(&SandboxPolicyInputs {
-                mode,
-                program: self.program,
-                workspace_root: &workspace_root,
-                launch_roots: &sandbox_roots,
-                tmpdir: self.sandbox_tmpdir.as_deref(),
-                home: self.sandbox_home.as_deref(),
-                backend: self.sandbox_backend.as_deref(),
-                passthrough: self.sandbox_passthrough,
-            })
-            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            let protected_root = workspace_root
-                .canonicalize()
-                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            let launcher = claude_sandbox_launcher(
-                &self.mcp_command,
-                mode,
-                &protected_root,
-                self.sandbox_backend.as_deref(),
-                self.sandbox_tmpdir.as_deref(),
-                self.sandbox_home.as_deref(),
-                &sandbox_roots,
-            )
-            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
-            spawn.set_sandbox_launcher(launcher);
+            // Codex applies its own `--sandbox read-only` policy to tool processes.
+            // Wrapping the Codex process itself in Seatbelt prevents its startup
+            // arg0 helpers (`~/.codex/tmp/arg0`) from creating symlinks/locks and
+            // prevents Codex from applying its own nested macOS sandbox. Keep the
+            // independent root guard and hardened Git environment, but do not add
+            // the Claude-specific outer launcher to a native-sandbox provider.
             insert_root_git_environment(&mut spawn);
-            if self.sandbox_passthrough {
-                spawn.insert_daemon_environment(
-                    EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
-                        .expect("literal environment variable name is valid"),
-                    "1".to_owned(),
-                );
-            }
         }
         Ok(CodexProvision {
             working_directory,
@@ -569,40 +533,8 @@ impl CodexProvisioner for RootCodexProvisioner {
 }
 /// The Claude provisioner's product program: what the readiness probe proves,
 /// what the launcher execs, and whose `$HOME` state root the sandbox grants.
-/// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
 const CLAUDE_PROGRAM: &str = "claude";
 
-/// Ensure the launched agent's private state directory exists before a root
-/// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
-/// so the daemon creates and validates the provider-specific directory first.
-fn root_agent_writable_roots(
-    home: Option<&Path>,
-    program: &str,
-) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
-    let (Some(home), Some(state_directory)) =
-        (home, claude_sandbox::agent_state_directory(program))
-    else {
-        return Ok(Vec::new());
-    };
-    validate_owned_directory(home)?;
-    let state = home.join(state_directory);
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    match builder.create(&state) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
-    }
-    validate_owned_directory(&state)?;
-    state
-        .canonicalize()
-        .map(|state| vec![state])
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
-}
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
     mcp_command: PathBuf,
@@ -3253,23 +3185,13 @@ fn open_agent_runtime(
             sessions: Arc::clone(&sessions),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: DefaultModel::OpenAi.command(),
             environment: Some(Arc::clone(&environment)),
-            sandbox_backend: sandbox_backend.clone(),
-            sandbox_tmpdir: sandbox_tmpdir.clone(),
-            sandbox_home: sandbox_home.clone(),
-            sandbox_passthrough,
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
-            program: DefaultModel::SakanaAi.command(),
             environment: Some(Arc::clone(&environment)),
-            sandbox_backend: sandbox_backend.clone(),
-            sandbox_tmpdir: sandbox_tmpdir.clone(),
-            sandbox_home: sandbox_home.clone(),
-            sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
@@ -13691,44 +13613,31 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn root_codex_os_sandbox_admits_only_its_private_state_directory() {
-        let home = tempfile::tempdir().unwrap();
-        let roots = root_agent_writable_roots(Some(home.path()), "codex").unwrap();
-        assert_eq!(roots, [home.path().join(".codex").canonicalize().unwrap()]);
-        assert!(home.path().join(".codex").is_dir());
-        let launcher = claude_sandbox_launcher(
-            Path::new("/opt/usagi/bin/usagi"),
-            SandboxMode::Root,
-            Path::new("/repo"),
-            None,
-            None,
-            Some(home.path()),
-            &roots,
-        )
-        .unwrap();
-        assert!(
-            launcher.prefix.windows(2).any(|pair| {
-                pair[0] == "--writable-root" && pair[1] == roots[0].to_string_lossy()
-            })
+    fn root_codex_uses_its_native_read_only_sandbox_without_an_outer_launcher() {
+        let mut spawn = SpawnProvision::new([], Vec::new());
+        insert_root_git_environment(&mut spawn);
+
+        assert!(spawn.sandbox_launcher().is_none());
+        let (program, argv) = provisioned_agent_command(
+            "codex",
+            &[
+                "--sandbox".to_owned(),
+                "read-only".to_owned(),
+                "--ask-for-approval".to_owned(),
+                "never".to_owned(),
+            ],
+            &spawn,
         );
-        assert!(
-            !launcher
-                .prefix
-                .windows(2)
-                .any(|pair| pair == ["--writable-root", "/repo"])
-        );
+        assert_eq!(program, "codex");
         assert_eq!(
-            root_agent_writable_roots(None, "codex").unwrap(),
-            Vec::<PathBuf>::new()
+            argv,
+            ["--sandbox", "read-only", "--ask-for-approval", "never"]
         );
-        assert_eq!(
-            root_agent_writable_roots(Some(home.path()), "/bin/sh").unwrap(),
-            Vec::<PathBuf>::new()
-        );
-        assert_eq!(
-            root_agent_writable_roots(Some(home.path()), "codex-fugu").unwrap(),
-            [home.path().join(".codex-fugu").canonicalize().unwrap()]
-        );
+
+        let environment = spawn.compose_environment(&BTreeMap::new());
+        assert_eq!(environment["GIT_CONFIG_NOSYSTEM"], "1");
+        assert_eq!(environment["GIT_CONFIG_GLOBAL"], "/dev/null");
+        assert_eq!(environment["GIT_OPTIONAL_LOCKS"], "0");
     }
 
     #[test]
