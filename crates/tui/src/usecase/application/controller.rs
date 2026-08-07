@@ -870,6 +870,10 @@ pub struct AppState {
     session_lifecycles: BTreeMap<SessionId, SessionLifecycle>,
     /// Non-persistent daemon role assignment projection by stable identity.
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
+    /// Daemon-authoritative PR rows by stable session identity. The sidebar and
+    /// modal deliberately read this same projection.
+    session_prs: BTreeMap<SessionId, (u64, Vec<PrLink>)>,
+    session_pr_revision: u64,
     /// Read-only effective session-scope catalog used by the create picker.
     role_catalog: SessionRoleCatalog,
     selected: Selection,
@@ -1008,6 +1012,8 @@ impl AppState {
             session_names: Vec::new(),
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
+            session_prs: BTreeMap::new(),
+            session_pr_revision: 0,
             role_catalog: SessionRoleCatalog::default(),
             selected,
             active,
@@ -1143,6 +1149,18 @@ impl AppState {
     #[must_use]
     pub fn session_roles(&self) -> &BTreeMap<SessionId, SessionRoleProjection> {
         &self.session_roles
+    }
+    /// Latest daemon PR rows for one stable session identity.
+    #[must_use]
+    pub fn session_prs(&self, session: SessionId) -> Option<&[PrLink]> {
+        self.session_prs
+            .get(&session)
+            .map(|(_, prs)| prs.as_slice())
+    }
+    /// Local generation for change-driven sidebar row reconstruction.
+    #[must_use]
+    pub const fn session_pr_revision(&self) -> u64 {
+        self.session_pr_revision
     }
     #[must_use]
     pub fn role_catalog(&self) -> &SessionRoleCatalog {
@@ -1772,7 +1790,13 @@ pub enum BackendEvent {
         error: SafeError,
     },
     /// Pull Request list returned by its snapshot owner for one target.
-    PullRequestsLoaded { target: Target, prs: Vec<PrLink> },
+    PullRequestsLoaded {
+        target: Target,
+        /// Monotonic daemon inventory revision. Late completions cannot replace
+        /// a newer sidebar/modal projection.
+        revision: u64,
+        prs: Vec<PrLink>,
+    },
     /// A safe Pull Request read failure.
     PullRequestsError { target: Target, error: SafeError },
     /// Markdown preview lines returned by the overlay data owner for one target.
@@ -2763,8 +2787,22 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                         .session_id
                         .is_none_or(|session| state.sessions.contains(&session))
                 });
+            let before = state.session_prs.len();
+            state
+                .session_prs
+                .retain(|session, _| state.sessions.contains(session));
+            if state.session_prs.len() != before {
+                state.session_pr_revision = state.session_pr_revision.saturating_add(1);
+            }
             state.reconcile_sessions(&previous_sessions);
-            Vec::new()
+            state
+                .sessions
+                .iter()
+                .filter(|session| !previous_sessions.contains(session))
+                .map(|session| Effect::LoadPullRequests {
+                    target: Target::Session(*session),
+                })
+                .collect()
         }
         AppEvent::Backend(BackendEvent::SessionNames(names)) => {
             state.session_names = names;
@@ -2816,8 +2854,19 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Feedback(feedback)) => {
+            let refresh_prs = matches!(feedback, Feedback::Reconnected | Feedback::ResyncRequired);
             state.feedback = Some(feedback);
-            Vec::new()
+            if refresh_prs {
+                state
+                    .sessions
+                    .iter()
+                    .map(|session| Effect::LoadPullRequests {
+                        target: Target::Session(*session),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
         }
         AppEvent::DirectorLaunchFinished(operation) => {
             if state.director_launching == Some(operation) {
@@ -2967,11 +3016,30 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 editor.saving = false;
             }
         }
-        BackendEvent::PullRequestsLoaded { target, prs } => {
+        BackendEvent::PullRequestsLoaded {
+            target,
+            revision,
+            prs,
+        } => {
+            let accepted = match target {
+                Target::Root(_) => true,
+                Target::Session(session) => {
+                    let accepted = state.sessions.contains(session)
+                        && state
+                            .session_prs
+                            .get(session)
+                            .is_none_or(|(current, _)| revision > current);
+                    if accepted {
+                        state.session_prs.insert(*session, (*revision, prs.clone()));
+                        state.session_pr_revision = state.session_pr_revision.saturating_add(1);
+                    }
+                    accepted
+                }
+            };
             if let Some(overlay) = state
                 .pr_overlay
                 .as_mut()
-                .filter(|overlay| overlay.target == *target)
+                .filter(|overlay| accepted && overlay.target == *target)
             {
                 overlay.prs.clone_from(prs);
                 overlay.selected = overlay.selected.min(prs.len().saturating_sub(1));
@@ -8114,6 +8182,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target: Target::Root(workspace),
+                revision: 0,
                 prs: vec![pr_link(9)],
             }),
         );
@@ -8123,11 +8192,26 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
+                revision: 1,
                 prs: prs.clone(),
             }),
         );
         assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
         assert_eq!(state.pr_overlay().unwrap().selected(), 0);
+        assert_eq!(state.session_prs(session), Some(prs.as_slice()));
+
+        // A delayed older snapshot cannot roll either the modal or sidebar
+        // projection back after a newer daemon revision has landed.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 0,
+                prs: vec![pr_link(99)],
+            }),
+        );
+        assert_eq!(state.pr_overlay().unwrap().prs(), prs.as_slice());
+        assert_eq!(state.session_prs(session), Some(prs.as_slice()));
 
         // Down/Up wrap around the list.
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -8484,6 +8568,7 @@ mod tests {
             },
             BackendEvent::PullRequestsLoaded {
                 target: Target::Session(session),
+                revision: 1,
                 prs: Vec::new(),
             },
             BackendEvent::PullRequestsError {

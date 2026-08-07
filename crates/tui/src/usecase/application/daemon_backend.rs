@@ -724,6 +724,7 @@ mod tests {
             self.pull_requests.push(target);
             completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
+                revision: 1,
                 prs: vec![usagi_core::domain::pullrequest::PrLink::new(
                     7,
                     "https://github.com/o/r/pull/7",
@@ -974,7 +975,7 @@ mod tests {
         );
         assert!(matches!(
             backend.drain_events().as_slice(),
-            [AppEvent::Backend(BackendEvent::PullRequestsLoaded { target: loaded, prs })]
+            [AppEvent::Backend(BackendEvent::PullRequestsLoaded { target: loaded, prs, .. })]
                 if *loaded == target && prs.len() == 1
         ));
         assert_eq!(

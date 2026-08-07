@@ -648,11 +648,13 @@ impl BackendOverlayPort for ProductionOverlayPort {
         let event = match target {
             Target::Root(_) => BackendEvent::PullRequestsLoaded {
                 target,
+                revision: 0,
                 prs: Vec::new(),
             },
             Target::Session(session) => match self.prs.snapshot(session) {
                 Ok(snapshot) => BackendEvent::PullRequestsLoaded {
                     target,
+                    revision: snapshot.revision,
                     prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
                 },
                 Err(message) => BackendEvent::PullRequestsError {

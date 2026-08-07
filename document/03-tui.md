@@ -795,8 +795,10 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 
 ## PR modal と browser effect
 
-`p` の PR modal は、focused `SessionId` の daemon PR snapshot だけを表示する。snapshot の revision が
-同じか古い値、または別 session の値は捨てる。`pr.updated` は再取得の hint であり、event payload を
+workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない先頭 PR と残件数を
+sidebar の `PR #<number> +<count>` に投影する。`p` の PR modal は focused `SessionId` について同じ
+projection を表示する。snapshot の revision が同じか古い値、または別 session の値は捨てる。
+`pr.updated` は再取得の hint であり、event payload を
 表示の正本にしない。snapshot が取れない場合は安全な unavailable 表示に留まり、legacy workspace state
 や TUI scanner を production の fallback にしない。Open、Closed、Merged、Dismissed と title を表示し、
 dismissed を新規検出として通知しない。

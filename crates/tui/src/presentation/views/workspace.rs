@@ -161,7 +161,7 @@ impl ProjectedSession {
     }
 }
 
-fn pr_summary(prs: &[PrLink]) -> Option<String> {
+pub(crate) fn pr_summary(prs: &[PrLink]) -> Option<String> {
     let visible = prs.iter().filter(|pr| pr.is_visible()).collect::<Vec<_>>();
     let first = visible.first()?;
     let suffix = visible.len().saturating_sub(1);
@@ -326,6 +326,9 @@ impl HomeProjection {
             .iter()
             .filter_map(|id| {
                 let mut session = (*snapshot_by_id.get(id)?).clone();
+                if let Some(prs) = state.session_prs(*id) {
+                    session.pr_summary = pr_summary(prs);
+                }
                 session.role_id = state
                     .session_roles()
                     .get(id)
@@ -3471,6 +3474,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
+                revision: 1,
                 prs: vec![first, second],
             }),
         );
@@ -3489,6 +3493,17 @@ mod tests {
         assert!(text.contains("merged"));
         // The selected PR's detail URL is the second one.
         assert!(text.contains("github.com/o/r/pull/8"));
+
+        // Closing the modal leaves the same daemon projection visible as the
+        // sidebar badge; no legacy SessionRecord PR data is required.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[projected_session(session, "session", "/work/session")],
+        );
+        assert!(strip(&render_home(30, 100, &home).join("\n")).contains("PR #7 +1"));
     }
 
     #[test]

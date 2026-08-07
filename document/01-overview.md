@@ -107,7 +107,9 @@ Switch で session 行を選択しているとき、`x` は `session remove`、`
 
 `:` はどちらの mode からも Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
-`p` は選択中 session の Pull Request モーダルを開き、root では空一覧を表示する。`v` は対象の
+Workspace entry は各 session の daemon PR snapshot を読み、sidebar に `PR #<number>`（複数件は
+`+<count>`）を表示する。`p` は同じ snapshot projection から選択中 session の Pull Request モーダルを
+開き、root では空一覧を表示する。`v` は対象の
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
 長文を scroll し、データを提供できない diff や空の Notes は安全な fallback を表示する。いずれも
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
