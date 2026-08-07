@@ -196,7 +196,9 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
 | Roles | session / root ごとの追加 instruction と既定 role |
 
-環境変数は Overview の `env [workspace|global]` で編集する。同名の値は workspace 側が優先され、
+環境変数は Config の `Env  [ N variables ]`、Overview の `env [workspace|global]`、Closeup の `env` で編集する。
+Workspace Config と Closeup は同じ複数行 editor で
+workspace の値だけを変更し、global の値は変更しない。同名の値は workspace 側が優先され、
 `op://vault/item/field` は 1Password CLI で解決してから子プロセスへ渡される。secret 本体は設定ファイルに保存しない。
 保存場所、解決順序、予約変数は [環境変数設定](document/09-env.md)を参照する。
 

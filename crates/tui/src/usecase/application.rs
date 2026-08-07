@@ -29,6 +29,8 @@ pub mod controller;
 /// controller の [`controller::Effect`] を daemon-owned ポート群へ実行する本番
 /// executor。effect → 実行 → `AppEvent` 還流の単方向ループを閉じる。
 pub mod daemon_backend;
+/// Config と Home が共有する複数行 environment source editor。
+pub mod environment_source;
 /// interrupted Agent runtime を tab へ投影し、tab 単位の明示 resume を検証する
 /// 純粋 reducer（#510）。
 pub mod interrupted_tab;

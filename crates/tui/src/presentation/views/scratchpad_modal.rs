@@ -4,23 +4,17 @@
 //! persistence is deliberately handled by controller effects, keeping the
 //! workspace state and settings owners outside presentation.
 
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::Role;
 use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::{
-    EnvironmentEditor, EnvironmentEntry, NoteEditor, NoteSection, ROLE_EDITOR_VIEWPORT_LINES,
-    RoleEditor, RoleEditorScope,
+    EnvironmentEditor, NoteEditor, NoteSection, ROLE_EDITOR_VIEWPORT_LINES, RoleEditor,
+    RoleEditorScope,
 };
 use usagi_core::usecase::env::EnvScope;
 
 const INNER_WIDTH: usize = 62;
 const MAX_ROWS: usize = 8;
 const NOTES_BODY_HEIGHT: usize = 16;
-/// The environment overlay shows two lists (this scope's bindings and the global
-/// ones it inherits), an input line, and a footer. The row caps and this height
-/// are chosen together so the footer and input line always stay visible.
-const ENVIRONMENT_BODY_HEIGHT: usize = 18;
-const ENVIRONMENT_MAX_ROWS: usize = 6;
-const ENVIRONMENT_MAX_INHERITED_ROWS: usize = 3;
 
 fn error_line(error: Option<&str>) -> Option<String> {
     error.map(|message| {
@@ -106,106 +100,6 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
     modal::fixed_body(lines, NOTES_BODY_HEIGHT)
 }
 
-fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
-    let (caption, scope_hint) = match (editor.scope(), editor.is_scope_locked()) {
-        (EnvScope::Workspace, true) => ("this workspace's environment", None),
-        (EnvScope::Workspace, false) => ("this workspace's environment", Some("Tab: global")),
-        (EnvScope::Global, _) => (
-            "global environment · every workspace",
-            Some("Tab: workspace"),
-        ),
-    };
-    let mut lines = vec![modal::caption(caption)];
-    if editor.is_loading() {
-        // Still reading the persisted values; distinct from a loaded-but-empty
-        // environment so the reader knows nothing has refluxed yet.
-        lines.push(modal::empty_notice("(loading…)"));
-    } else {
-        lines.extend(scope_rows(editor));
-        lines.extend(inherited_rows(editor));
-    }
-    if let Some(line) = error_line(editor.error().map(|error| error.message.as_str())) {
-        lines.push(String::new());
-        lines.push(line);
-    }
-    lines.push(String::new());
-    lines.push(modal::content_line(
-        &format!("> {}", editor.draft()),
-        INNER_WIDTH,
-    ));
-    // While a save is in flight the footer reflects it, and the reducer rejects
-    // a second Save until the owning port refluxes — no double-submit.
-    let footer = if editor.is_saving() {
-        "Esc: close   Saving…".to_owned()
-    } else if let Some(scope_hint) = scope_hint {
-        format!("Enter: NAME=value / save   {scope_hint}   Esc: close")
-    } else {
-        "Enter: NAME=value / save   Esc: close".to_owned()
-    };
-    lines.push(modal::footer(&footer));
-    modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
-}
-
-/// The bindings the edited scope owns itself.
-fn environment_rows(entries: &[EnvironmentEntry]) -> Vec<String> {
-    let mut lines: Vec<String> = entries
-        .iter()
-        .take(ENVIRONMENT_MAX_ROWS)
-        .map(|entry| modal::content_line(&format!("{}={}", entry.name, entry.value), INNER_WIDTH))
-        .collect();
-    if entries.len() > ENVIRONMENT_MAX_ROWS {
-        lines.push(modal::caption(&format!(
-            "… {} more",
-            entries.len() - ENVIRONMENT_MAX_ROWS
-        )));
-    }
-    lines
-}
-
-fn scope_rows(editor: &EnvironmentEditor) -> Vec<String> {
-    let mut lines = Vec::new();
-    if editor.entries().is_empty() {
-        lines.push(modal::empty_notice("(no environment variables)"));
-    }
-    lines.extend(environment_rows(editor.entries()));
-    lines
-}
-
-/// The global bindings a workspace edit inherits. Shown read-only so a workspace
-/// change is made knowing what is already set everywhere; a name this workspace
-/// also binds is marked as shadowed rather than hidden, because both values stay
-/// stored and the workspace one is what a launch will use.
-fn inherited_rows(editor: &EnvironmentEditor) -> Vec<String> {
-    if editor.inherited().is_empty() {
-        return Vec::new();
-    }
-    let mut lines = vec![modal::caption("inherited from global")];
-    lines.extend(
-        editor
-            .inherited()
-            .iter()
-            .take(ENVIRONMENT_MAX_INHERITED_ROWS)
-            .map(|entry| {
-                let suffix = if editor.shadows(&entry.name) {
-                    "   (overridden here)"
-                } else {
-                    ""
-                };
-                Style::new().dim().paint(&modal::content_line(
-                    &format!("{}={}{suffix}", entry.name, entry.value),
-                    INNER_WIDTH,
-                ))
-            }),
-    );
-    if editor.inherited().len() > ENVIRONMENT_MAX_INHERITED_ROWS {
-        lines.push(modal::caption(&format!(
-            "… {} more inherited",
-            editor.inherited().len() - ENVIRONMENT_MAX_INHERITED_ROWS
-        )));
-    }
-    lines
-}
-
 /// Render the scratchpad over an existing Home frame without replacing its background.
 #[must_use]
 pub fn render_notes_over(
@@ -232,13 +126,22 @@ pub fn render_environment_over(
     base: &[String],
     editor: &EnvironmentEditor,
 ) -> Vec<String> {
-    modal::render_over(
+    let scope = match editor.scope() {
+        EnvScope::Global => usagi_core::usecase::settings::SettingsScope::Global,
+        EnvScope::Workspace => usagi_core::usecase::settings::SettingsScope::Workspace,
+    };
+    super::config::render_environment_source_over(
         height,
         width,
         base,
-        "Environment",
-        INNER_WIDTH,
-        &environment_body(editor),
+        super::config::EnvironmentSource {
+            scope,
+            value: editor.draft(),
+            cursor: editor.cursor(),
+            error: editor.error().map(|error| error.message.as_str()),
+            save_focused: editor.is_save_focused(),
+            ctrl_s_save: true,
+        },
     )
 }
 
@@ -292,7 +195,7 @@ pub fn render_roles_over(
 #[cfg(test)]
 mod tests {
     use super::{render_environment_over, render_notes_over, render_roles_over};
-    use crate::presentation::widgets::display_width;
+    use crate::presentation::widgets::{display_width, strip_ansi};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, EnvironmentEntry, NoteSection, RoleEditorScope,
         SafeError, SafeMessage, Target, update,
@@ -393,62 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_overlay_marks_inherited_rows_and_names_the_edited_scope() {
-        let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, vec![SessionId::new()]);
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
-        let inherited = (0..5)
-            .map(|index| EnvironmentEntry {
-                name: format!("GLOBAL_{index}"),
-                value: format!("g-{index}"),
-            })
-            .collect();
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
-                scope: EnvScope::Workspace,
-                entries: vec![EnvironmentEntry {
-                    name: "GLOBAL_0".to_owned(),
-                    value: "mine".to_owned(),
-                }],
-                inherited,
-            }),
-        );
-        let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
-            .join("\n");
-        // The workspace scope is named, its own binding is listed, and the global
-        // set is shown with only the shadowed name marked. The list is capped, so
-        // the remainder is counted rather than pushing the footer off the modal.
-        assert!(frame.contains("this workspace's environment"));
-        assert!(frame.contains("Tab: global"));
-        assert!(frame.contains("GLOBAL_0=mine"));
-        assert!(frame.contains("GLOBAL_0=g-0   (overridden here)"));
-        assert!(frame.contains("GLOBAL_1=g-1"));
-        assert!(!frame.contains("GLOBAL_1=g-1   (overridden here)"));
-        assert!(frame.contains("2 more inherited"));
-
-        // The global scope names itself and inherits nothing, so no second list.
-        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleEnvironmentScope));
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
-                scope: EnvScope::Global,
-                entries: vec![EnvironmentEntry {
-                    name: "GLOBAL_0".to_owned(),
-                    value: "g-0".to_owned(),
-                }],
-                inherited: Vec::new(),
-            }),
-        );
-        let global = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
-            .join("\n");
-        assert!(global.contains("global environment"));
-        assert!(global.contains("Tab: workspace"));
-        assert!(!global.contains("inherited from global"));
-    }
-
-    #[test]
-    fn closeup_environment_overlay_is_workspace_only_and_hides_the_scope_toggle() {
+    fn closeup_environment_overlay_matches_workspace_config_editor() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, vec![SessionId::new()]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
@@ -470,92 +318,99 @@ mod tests {
                 }],
             }),
         );
-
-        let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
-            .join("\n");
-        assert!(frame.contains("this workspace's environment"));
-        assert!(frame.contains("RUST_LOG=debug"));
-        assert!(frame.contains("inherited from global"));
-        assert!(!frame.contains("Tab: global"));
-        assert!(!frame.contains("Tab: workspace"));
-        assert!(frame.contains("Enter: NAME=value / save   Esc: close"));
-    }
-
-    #[test]
-    fn environment_overlay_renders_empty_values_errors_and_overflow() {
-        let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
-        // Freshly opened: the read is still in flight, shown as loading (not the
-        // loaded-but-empty notice).
-        let loading_environment =
-            render_environment_over(24, 30, &base(), state.environment_editor().unwrap());
-        let environment_height = loading_environment
-            .iter()
-            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
-            .count();
-        assert!(loading_environment.join("\n").contains("loading"));
-        assert!(!loading_environment.join("\n").contains("no environment"));
-        // An empty load resolves the loading state to the empty notice.
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
-                scope: EnvScope::Workspace,
-                entries: Vec::new(),
-                inherited: Vec::new(),
-            }),
-        );
-        let empty_environment =
-            render_environment_over(24, 30, &base(), state.environment_editor().unwrap());
-        assert!(empty_environment.join("\n").contains("no environment"));
-        let entries = (0..7)
-            .map(|index| EnvironmentEntry {
-                name: format!("KEY_{index}"),
-                value: format!("value-{index}"),
-            })
-            .collect();
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
-                scope: EnvScope::Workspace,
-                entries,
-                inherited: vec![EnvironmentEntry {
-                    name: "KEY_0".to_owned(),
-                    value: "from-global".to_owned(),
-                }],
-            }),
-        );
-        // A save in flight is reflected in the footer and guards re-submission.
-        let _ = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
-        let saving = render_environment_over(40, 80, &base(), state.environment_editor().unwrap());
-        assert!(saving.join("\n").contains("Saving"));
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::EnvironmentError {
                 scope: EnvScope::Workspace,
                 error: SafeError {
                     message: SafeMessage::new("Could not save environment"),
-                    error_id: "safe-environment".into(),
+                    error_id: "safe-closeup-environment".to_owned(),
                 },
             }),
         );
-        let environment =
-            render_environment_over(40, 80, &base(), state.environment_editor().unwrap());
-        assert!(environment.join("\n").contains("KEY_0=value-0"));
-        assert!(environment.join("\n").contains("1 more"));
-        // The inherited global binding is listed, and marked as shadowed by the
-        // workspace binding of the same name.
-        assert!(environment.join("\n").contains("inherited from global"));
-        assert!(environment.join("\n").contains("overridden here"));
-        assert!(environment.join("\n").contains("Could not save"));
-        assert!(environment.iter().all(|line| display_width(line) == 80));
+
+        let frame = render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+            .join("\n");
+        assert!(frame.contains("workspace env only (global values stay unchanged)"));
+        assert!(frame.contains("one NAME=value binding per line"));
+        assert!(frame.contains("RUST_LOG=debug"));
+        assert!(frame.contains("Could not save environment"));
+        assert!(!frame.contains("GLOBAL_TOKEN"));
+        assert!(frame.contains("[ Save ]"));
+        assert!(frame.contains("Ctrl-S: save"));
+        assert!(frame.contains("Enter: newline/save   Tab: switch   Esc: cancel"));
+        assert!(frame.contains("\u{1b}[37;48;5;236m"));
+        let save_row = frame
+            .lines()
+            .map(strip_ansi)
+            .find(|line| line.contains("[ Save ]"))
+            .unwrap();
         assert_eq!(
-            environment_height,
-            render_environment_over(24, 30, &base(), state.environment_editor().unwrap())
-                .iter()
-                .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
-                .count()
+            display_width(&save_row[..save_row.find("[ Save ]").unwrap()]) + 4,
+            40,
+            "Closeup Save must be centered in an 80-column frame"
         );
+        let rows = frame.lines().map(strip_ansi).collect::<Vec<_>>();
+        let save_index = rows
+            .iter()
+            .position(|line| line.contains("[ Save ]"))
+            .unwrap();
+        let footer_index = rows
+            .iter()
+            .position(|line| line.contains("Ctrl-S: save"))
+            .unwrap();
+        assert_eq!(footer_index, save_index + 2);
+    }
+
+    #[test]
+    fn overview_environment_overlays_match_config_editors() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: vec![EnvironmentEntry {
+                    name: "RUST_LOG".to_owned(),
+                    value: "debug".to_owned(),
+                }],
+                inherited: Vec::new(),
+            }),
+        );
+        let workspace_frame =
+            render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+                .join("\n");
+        assert!(workspace_frame.contains("workspace env only (global values stay unchanged)"));
+        assert!(workspace_frame.contains("RUST_LOG=debug"));
+        assert!(workspace_frame.contains("[ Save ]"));
+        assert!(!workspace_frame.contains("Tab: global"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("env global".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Global,
+                entries: Vec::new(),
+                inherited: Vec::new(),
+            }),
+        );
+        let global_frame =
+            render_environment_over(40, 80, &base(), state.environment_editor().unwrap())
+                .join("\n");
+        assert!(global_frame.contains("global env (inherited by every workspace)"));
+        assert!(global_frame.contains("Ctrl-S: save"));
+        assert!(global_frame.contains("[ Save ]"));
+        assert!(!global_frame.contains("Tab: workspace"));
     }
 
     #[test]

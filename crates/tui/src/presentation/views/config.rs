@@ -3,22 +3,24 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, EnvBindings, ModalSelectionMode, Settings, Theme, is_valid_env_name,
+    DefaultModel, ModalSelectionMode, Settings, Theme, format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Role, Style, editor_surface_style};
 use crate::presentation::widgets::{self, modal, select};
+use crate::usecase::application::environment_source::EnvironmentSourceEditor;
 
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 const MODAL_INNER_WIDTH: usize = 64;
 const MODAL_BODY_HEIGHT: usize = 9;
 const MODAL_FOOTER: &str = "↑↓: select  ←→: change  Enter: save  Esc: back";
-const SECTION_HEADING_WIDTH: usize = 35;
+const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
 const ENVIRONMENT_MAX_ROWS: usize = 10;
+const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
 
 /// Time between frames while the Save button's highlight wave is moving.
 pub const SAVE_WAVE_TICK: Duration = Duration::from_millis(60);
@@ -90,16 +92,8 @@ pub struct Config {
     notice: Option<String>,
     save_phase: SavePhase,
     save_animation_frame: usize,
-    environment_editor: Option<ConfigEnvironmentEditor>,
-}
-
-/// Global environment draft opened from the Config screen.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ConfigEnvironmentEditor {
-    bindings: EnvBindings,
-    draft: String,
-    error: Option<String>,
-    confirmed: bool,
+    environment_editor: Option<EnvironmentSourceEditor>,
+    environment_error: Option<String>,
 }
 
 impl Config {
@@ -134,7 +128,7 @@ impl Config {
             });
         let field = match scope {
             SettingsScope::Global => Field::Theme,
-            SettingsScope::Workspace if available_models.is_empty() => Field::Issue,
+            SettingsScope::Workspace if available_models.is_empty() => Field::Environment,
             SettingsScope::Workspace => Field::DefaultModel,
         };
         Self {
@@ -146,6 +140,7 @@ impl Config {
             save_phase: SavePhase::Idle,
             save_animation_frame: 0,
             environment_editor: None,
+            environment_error: None,
         }
     }
 
@@ -186,16 +181,18 @@ impl Config {
                 Field::Save => Field::Theme,
             },
             SettingsScope::Workspace => match self.field {
-                Field::DefaultModel => Field::Issue,
+                Field::DefaultModel => Field::Environment,
+                Field::Environment => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
-                Field::Save | Field::Theme | Field::ModalSelectionMode | Field::Environment => {
-                    Field::DefaultModel
-                }
+                Field::Save | Field::Theme | Field::ModalSelectionMode => Field::DefaultModel,
             },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
-            self.field = Field::Issue;
+            self.field = match self.scope {
+                SettingsScope::Global => Field::Issue,
+                SettingsScope::Workspace => Field::Environment,
+            };
         }
         self.notice = None;
     }
@@ -213,13 +210,11 @@ impl Config {
                 Field::Save => Field::Memory,
             },
             SettingsScope::Workspace => match self.field {
-                Field::Issue => Field::DefaultModel,
+                Field::Environment => Field::DefaultModel,
+                Field::Issue => Field::Environment,
                 Field::Memory => Field::Issue,
                 Field::Save => Field::Memory,
-                Field::DefaultModel
-                | Field::Theme
-                | Field::ModalSelectionMode
-                | Field::Environment => Field::Save,
+                Field::DefaultModel | Field::Theme | Field::ModalSelectionMode => Field::Save,
             },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
@@ -307,25 +302,23 @@ impl Config {
         true
     }
 
-    /// Whether the global environment modal currently owns Config input.
+    /// Whether the environment modal currently owns Config input.
     #[must_use]
     pub fn is_editing_environment(&self) -> bool {
         self.environment_editor.is_some()
     }
 
-    /// Read the latest global environment and open its overwrite warning.
+    /// Read the latest environment for this Config's scope and open its textarea.
     pub fn open_environment(&mut self, port: &mut dyn SettingsPort) -> bool {
-        if self.scope != SettingsScope::Global || self.field != Field::Environment {
+        if self.field != Field::Environment {
             return false;
         }
-        match port.read(SettingsScope::Global) {
+        match port.read(self.scope) {
             Ok(settings) => {
-                self.environment_editor = Some(ConfigEnvironmentEditor {
-                    bindings: settings.env,
-                    draft: String::new(),
-                    error: None,
-                    confirmed: false,
-                });
+                self.environment_editor = Some(EnvironmentSourceEditor::new(format_env_bindings(
+                    &settings.env,
+                )));
+                self.environment_error = None;
                 self.notice = None;
             }
             Err(error) => self.notice = Some(format!("Load failed: {error}")),
@@ -333,115 +326,92 @@ impl Config {
         true
     }
 
-    /// Whether the overwrite warning is waiting for confirmation.
+    /// Insert text at the textarea caret.
+    pub fn type_environment(&mut self, text: &str) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.insert(text);
+            self.environment_error = None;
+        }
+    }
+
+    /// Paste text into the textarea, preserving line breaks.
+    pub fn paste_environment(&mut self, text: &str) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.paste(text);
+            self.environment_error = None;
+        }
+    }
+
+    /// Insert a newline into the focused textarea.
+    pub fn newline_environment(&mut self) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.newline();
+            self.environment_error = None;
+        }
+    }
+
+    /// Move focus between the textarea and its Save action.
+    pub fn toggle_environment_focus(&mut self) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.toggle_save_focus(self.scope == SettingsScope::Workspace);
+            self.environment_error = None;
+        }
+    }
+
+    /// Whether Enter should save instead of inserting a newline.
     #[must_use]
-    pub fn is_confirming_environment(&self) -> bool {
+    pub fn is_environment_save_focused(&self) -> bool {
         self.environment_editor
             .as_ref()
-            .is_some_and(|editor| !editor.confirmed)
-    }
-
-    /// Accept the snapshot warning and begin editing.
-    pub fn confirm_environment(&mut self) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.confirmed = true;
-        }
-    }
-
-    /// Append text to the focused `NAME=value` input.
-    pub fn type_environment(&mut self, text: &str) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| editor.confirmed)
-        {
-            editor.draft.push_str(text);
-            editor.error = None;
-        }
-    }
-
-    /// Paste one or more bindings. Newlines submit each pasted line instead of
-    /// becoming part of an environment value.
-    pub fn paste_environment(&mut self, text: &str) {
-        if !text.contains(['\n', '\r']) {
-            self.type_environment(text);
-            return;
-        }
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        for line in normalized.split('\n') {
-            self.type_environment(line);
-            let _ = self.commit_environment_line();
-            if self
-                .environment_editor
-                .as_ref()
-                .is_some_and(|editor| editor.error.is_some())
-            {
-                break;
-            }
-        }
+            .is_some_and(EnvironmentSourceEditor::is_save_focused)
     }
 
     /// Delete the final character from the focused environment input.
     pub fn backspace_environment(&mut self) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| editor.confirmed)
-        {
-            editor.draft.pop();
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.backspace();
+            self.environment_error = None;
         }
     }
 
-    /// Apply one `NAME=value` line. An empty value removes the binding.
-    /// Returns `true` when an empty line requests persistence.
-    pub fn commit_environment_line(&mut self) -> bool {
-        let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| editor.confirmed)
-        else {
-            return false;
-        };
-        let draft = editor.draft.trim().to_owned();
-        if draft.is_empty() {
-            return true;
+    /// Delete the character at the textarea caret.
+    pub fn delete_environment(&mut self) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.delete_forward();
+            self.environment_error = None;
         }
-        let Some((name, value)) = draft.split_once('=') else {
-            editor.error = Some("type NAME=value (an empty value removes it)".to_owned());
-            return false;
-        };
-        let name = name.trim();
-        let value = value.trim();
-        if !is_valid_env_name(name) {
-            editor.error =
-                Some("names use letters, digits, and _ (not starting with a digit)".to_owned());
-            return false;
-        }
-        if value.is_empty() {
-            editor.bindings.remove(name);
-        } else if value.contains('\0') {
-            editor.error = Some("environment values cannot contain NUL".to_owned());
-            return false;
-        } else {
-            editor.bindings.insert(name.to_owned(), value.to_owned());
-        }
-        editor.draft.clear();
-        editor.error = None;
-        false
     }
 
-    /// Persist the global environment without saving the other Config fields.
+    /// Move the textarea caret horizontally.
+    pub fn move_environment(&mut self, forward: bool) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.move_cursor(forward);
+            self.environment_error = None;
+        }
+    }
+
+    /// Move the textarea caret to the beginning or end of the buffer.
+    pub fn move_environment_edge(&mut self, end: bool) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.move_edge(end);
+            self.environment_error = None;
+        }
+    }
+
+    /// Persist only the environment owned by the modal's scope.
     pub fn save_environment(&mut self, port: &mut dyn SettingsPort) -> bool {
-        let Some(editor) = self
-            .environment_editor
-            .as_ref()
-            .filter(|editor| editor.confirmed)
-        else {
+        let Some(editor) = self.environment_editor.as_ref() else {
             return false;
         };
-        let bindings = editor.bindings.clone();
-        match port.save_environment(SettingsScope::Global, &bindings) {
+        let scope = self.scope;
+        let bindings = match editor.parse() {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                self.environment_error = Some(error);
+                return false;
+            }
+        };
+        match port.save_environment(scope, &bindings) {
             Ok(()) => {
                 self.settings.saved.env.clone_from(&bindings);
                 self.settings.draft.env = bindings;
@@ -450,9 +420,7 @@ impl Config {
                 true
             }
             Err(error) => {
-                if let Some(editor) = self.environment_editor.as_mut() {
-                    editor.error = Some(format!("Save failed: {error}"));
-                }
+                self.environment_error = Some(format!("Save failed: {error}"));
                 false
             }
         }
@@ -461,6 +429,7 @@ impl Config {
     /// Discard the environment modal's unsaved draft.
     pub fn cancel_environment(&mut self) {
         self.environment_editor = None;
+        self.environment_error = None;
     }
 
     /// Returns whether the focused row is the enabled Save action.
@@ -557,7 +526,7 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             .collect()
     });
     match config.environment_editor.as_ref() {
-        Some(editor) => render_environment_over(raw_height, raw_width, &base, editor),
+        Some(editor) => render_environment_over(raw_height, raw_width, &base, config, editor),
         None => base,
     }
 }
@@ -580,7 +549,7 @@ pub fn render_over(
     }));
     lines.push(String::new());
     lines.push(modal::footer(MODAL_FOOTER));
-    modal::render_body_over(
+    let config_base = modal::render_body_over(
         raw_height,
         raw_width,
         base,
@@ -588,7 +557,13 @@ pub fn render_over(
         MODAL_INNER_WIDTH,
         MODAL_BODY_HEIGHT,
         lines,
-    )
+    );
+    match config.environment_editor.as_ref() {
+        Some(editor) => {
+            render_environment_over(raw_height, raw_width, &config_base, config, editor)
+        }
+        None => config_base,
+    }
 }
 
 fn form_rows(config: &Config) -> Vec<String> {
@@ -633,14 +608,10 @@ fn global_rows(config: &Config) -> Vec<String> {
             config.field() == Field::ModalSelectionMode,
             config.settings().modal_selection_mode != config.current().saved.modal_selection_mode,
         ),
-        select::action(
-            &format!("Environment ({} vars)", config.settings().env.len()),
-            config.field() == Field::Environment,
-            false,
-        ),
-        String::new(),
-        section_heading("Workspace init"),
     ];
+    lines.push(environment_row(config));
+    lines.push(String::new());
+    lines.push(section_heading("Workspace init"));
     lines.extend(workspace_setting_rows(config));
     lines
 }
@@ -649,69 +620,94 @@ fn render_environment_over(
     height: usize,
     width: usize,
     base: &[String],
-    editor: &ConfigEnvironmentEditor,
+    config: &Config,
+    editor: &EnvironmentSourceEditor,
 ) -> Vec<String> {
-    if !editor.confirmed {
-        let lines = vec![
-            modal::caption("global environment snapshot"),
-            modal::content_line(
-                "The latest global environment was captured for editing.",
-                ENVIRONMENT_INNER_WIDTH,
-            ),
-            modal::content_line(
-                "Changes saved elsewhere while this editor is open may be overwritten.",
-                ENVIRONMENT_INNER_WIDTH,
-            ),
-            String::new(),
-            Role::Danger.style().paint(&modal::content_line(
-                "Continue with this snapshot?",
-                ENVIRONMENT_INNER_WIDTH,
-            )),
-            modal::footer("Enter: continue   Esc: cancel"),
-        ];
-        return modal::render_over(
-            height,
-            width,
-            base,
-            "Environment",
-            ENVIRONMENT_INNER_WIDTH,
-            &lines,
-        );
-    }
-    let mut lines = vec![modal::caption("global environment · every workspace")];
-    if editor.bindings.is_empty() {
-        lines.push(modal::empty_notice("(no environment variables)"));
-    } else {
-        lines.extend(
-            editor
-                .bindings
-                .iter()
-                .take(ENVIRONMENT_MAX_ROWS)
-                .map(|(name, value)| {
-                    modal::content_line(&format!("{name}={value}"), ENVIRONMENT_INNER_WIDTH)
-                }),
-        );
-        if editor.bindings.len() > ENVIRONMENT_MAX_ROWS {
-            lines.push(modal::caption(&format!(
-                "… {} more",
-                editor.bindings.len() - ENVIRONMENT_MAX_ROWS
-            )));
+    render_environment_source_over(
+        height,
+        width,
+        base,
+        EnvironmentSource {
+            scope: config.scope,
+            value: editor.value(),
+            cursor: editor.cursor(),
+            error: config.environment_error.as_deref(),
+            save_focused: editor.is_save_focused(),
+            ctrl_s_save: config.scope == SettingsScope::Global,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct EnvironmentSource<'a> {
+    pub(super) scope: SettingsScope,
+    pub(super) value: &'a str,
+    pub(super) cursor: usize,
+    pub(super) error: Option<&'a str>,
+    pub(super) save_focused: bool,
+    pub(super) ctrl_s_save: bool,
+}
+
+/// Render the shared multiline environment source modal used by Config and Closeup.
+#[must_use]
+pub(super) fn render_environment_source_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    source: EnvironmentSource<'_>,
+) -> Vec<String> {
+    let scope_caption = match source.scope {
+        SettingsScope::Global => "global env (inherited by every workspace)",
+        SettingsScope::Workspace => "workspace env only (global values stay unchanged)",
+    };
+    let mut lines = vec![
+        modal::caption(scope_caption),
+        modal::caption("one NAME=value binding per line"),
+        String::new(),
+    ];
+    lines.extend(environment_textarea(
+        source.value,
+        source.cursor,
+        source.save_focused,
+    ));
+    // Reserve the error area even before validation fails. Otherwise Ctrl-S
+    // grows the modal by two rows and shifts the entire editor upward.
+    lines.push(String::new());
+    lines.push(source.error.map_or_else(String::new, |error| {
+        Role::Danger
+            .style()
+            .paint(&modal::content_line(error, ENVIRONMENT_INNER_WIDTH))
+    }));
+    lines.push(String::new());
+    match source.scope {
+        SettingsScope::Global => {
+            let button = Role::Success.style().bold().paint("[ Save ]");
+            let padding =
+                widgets::centered_padding(ENVIRONMENT_INNER_WIDTH, widgets::display_width(&button));
+            lines.push(format!("{}{}", " ".repeat(padding), button));
+            lines.push(String::new());
+            lines.push(modal::footer("Ctrl-S: save   Enter: newline   Esc: cancel"));
+        }
+        SettingsScope::Workspace => {
+            let marker = modal::selection_marker(source.save_focused);
+            let button = Role::Success.style().bold().paint("[ Save ]");
+            let padding =
+                widgets::centered_padding(ENVIRONMENT_INNER_WIDTH, widgets::display_width(&button));
+            lines.push(format!(
+                "{}{}{}",
+                " ".repeat(padding.saturating_sub(widgets::display_width(&marker))),
+                marker,
+                button
+            ));
+            lines.push(String::new());
+            let footer = if source.ctrl_s_save {
+                "Ctrl-S: save   Enter: newline/save   Tab: switch   Esc: cancel"
+            } else {
+                "Enter: newline/save   Tab: switch   Esc: cancel"
+            };
+            lines.push(modal::footer(footer));
         }
     }
-    if let Some(error) = &editor.error {
-        lines.push(String::new());
-        lines.push(
-            Role::Danger
-                .style()
-                .paint(&modal::content_line(error, ENVIRONMENT_INNER_WIDTH)),
-        );
-    }
-    lines.push(String::new());
-    lines.push(modal::content_line(
-        &format!("> {}", editor.draft),
-        ENVIRONMENT_INNER_WIDTH,
-    ));
-    lines.push(modal::footer("Enter: NAME=value / save   Esc: cancel"));
     modal::render_over(
         height,
         width,
@@ -723,7 +719,72 @@ fn render_environment_over(
 }
 
 fn workspace_rows(config: &Config) -> Vec<String> {
-    workspace_setting_rows(config)
+    let mut lines = workspace_setting_rows(config);
+    let environment_index = usize::from(!config.available_models.is_empty());
+    lines.insert(environment_index, environment_row(config));
+    lines
+}
+
+fn environment_row(config: &Config) -> String {
+    select::bracketed(
+        "Env",
+        &format!("{} variables", config.settings().env.len()),
+        config.field() == Field::Environment,
+        false,
+    )
+}
+
+fn environment_textarea(value: &str, cursor: usize, save_focused: bool) -> Vec<String> {
+    let source = value.split('\n').collect::<Vec<_>>();
+    let cursor_line = value[..cursor]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    let cursor_line_start = value[..cursor]
+        .rfind('\n')
+        .map_or(0, |position| position + 1);
+    let viewport_start = cursor_line.saturating_sub(ENVIRONMENT_MAX_ROWS - 1);
+    let viewport_end = (viewport_start + ENVIRONMENT_MAX_ROWS).min(source.len());
+    let textarea = editor_surface_style();
+    let mut lines = Vec::new();
+    for (line_index, line) in source[viewport_start..viewport_end].iter().enumerate() {
+        let absolute_line = viewport_start + line_index;
+        let prefix = format!("{:>2} ", absolute_line + 1);
+        let content =
+            if !save_focused && absolute_line == cursor_line {
+                let caret = widgets::block_caret(line, cursor - cursor_line_start, &textarea);
+                let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
+                    widgets::display_width(&prefix) + widgets::display_width(&caret),
+                ));
+                format!(
+                    "{}{}{}",
+                    textarea.paint(&prefix),
+                    caret,
+                    textarea.paint(&padding)
+                )
+            } else {
+                let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
+                    widgets::display_width(&prefix) + widgets::display_width(line),
+                ));
+                textarea.paint(&format!("{prefix}{line}{padding}"))
+            };
+        lines.push(modal::content_line(&content, ENVIRONMENT_INNER_WIDTH));
+    }
+    while lines.len() < ENVIRONMENT_MAX_ROWS {
+        lines.push(modal::content_line(
+            &textarea.paint(&" ".repeat(ENVIRONMENT_TEXTAREA_WIDTH)),
+            ENVIRONMENT_INNER_WIDTH,
+        ));
+    }
+    if source.len() > viewport_end {
+        lines.push(modal::caption(&format!(
+            "↓ {} more",
+            source.len() - viewport_end
+        )));
+    } else if viewport_start > 0 {
+        lines.push(modal::caption(&format!("↑ {viewport_start} more")));
+    }
+    lines
 }
 
 fn workspace_setting_rows(config: &Config) -> Vec<String> {
@@ -789,8 +850,14 @@ fn enabled_name(enabled: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, Field, render, render_over};
-    use crate::presentation::widgets::{display_width, strip_ansi};
+    use super::{
+        AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, ENVIRONMENT_TEXTAREA_WIDTH, Field,
+        environment_textarea, render, render_over,
+    };
+    use crate::presentation::widgets::{display_width, modal, strip_ansi};
+    use crate::usecase::application::environment_source::{
+        EnvironmentSourceEditor, parse_environment_source,
+    };
     use std::io;
     use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -847,6 +914,23 @@ mod tests {
     }
 
     #[test]
+    fn environment_text_parser_normalizes_blank_and_duplicate_lines() {
+        let bindings = parse_environment_source("\n A = first \nA=last\nB=two\n").unwrap();
+        assert_eq!(bindings["A"], "last");
+        assert_eq!(bindings["B"], "two");
+
+        let over_limit = (0..=usagi_core::domain::settings::MAX_ENV_BINDINGS)
+            .map(|index| format!("VALUE_{index}=set"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            parse_environment_source(&over_limit)
+                .unwrap_err()
+                .contains("binding limit")
+        );
+    }
+
+    #[test]
     fn global_and_workspace_entries_save_only_their_own_target() {
         let mut port = FakeSettingsPort {
             global: Settings {
@@ -859,6 +943,10 @@ mod tests {
         let mut config = Config::load(&mut port);
         let initial = render(24, 80, &config).join("\n");
         assert!(initial.contains("Theme") && initial.contains("light"));
+        config.cycle_theme(false);
+        assert_eq!(config.settings().theme, Theme::Dark);
+        config.cycle_theme(true);
+        assert_eq!(config.settings().theme, Theme::Light);
         config.cycle_theme(true);
         config.commit_save(&mut port);
         assert_eq!(port.global.theme, Theme::System);
@@ -885,69 +973,96 @@ mod tests {
         assert_eq!(config.field(), Field::Environment);
         assert!(config.open_environment(&mut port));
         assert!(config.is_editing_environment());
-        assert!(config.is_confirming_environment());
-        assert!(
-            render(24, 80, &config)
-                .join("\n")
-                .contains("Continue with this snapshot?")
+        config.toggle_environment_focus();
+        assert!(!config.is_environment_save_focused());
+        let frame = render(24, 80, &config).join("\n");
+        assert!(!frame.contains('·'));
+        assert!(frame.contains("\u{1b}[37;48;5;236m"));
+        assert!(frame.contains("Ctrl-S: save"));
+        let plain = render(24, 80, &config)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        let save = plain.iter().find(|line| line.contains("[ Save ]")).unwrap();
+        assert_eq!(
+            display_width(&save[..save.find("[ Save ]").unwrap()]) + 4,
+            40
         );
-        config.confirm_environment();
-        assert!(!config.is_confirming_environment());
-        assert!(
-            render(24, 80, &config)
-                .join("\n")
-                .contains("(no environment variables)")
-        );
-
+        config.move_environment(false);
+        config.move_environment_edge(false);
         config.type_environment("RUST_LOG=debuX");
         config.backspace_environment();
         config.type_environment("g");
-        assert!(!config.commit_environment_line());
+        config.newline_environment();
+        config.newline_environment();
+        config.paste_environment("A=1\r\nB=2");
+        assert!(config.save_environment(&mut port));
+
+        assert!(!config.is_editing_environment());
+        assert_eq!(port.global.env["RUST_LOG"], "debug");
+        assert_eq!(port.global.env["A"], "1");
+        assert_eq!(port.global.env["B"], "2");
+        let frame = render(24, 80, &config).join("\n");
+        assert!(frame.contains("Env") && frame.contains("[ 3 variables ]"));
+
+        assert!(config.open_environment(&mut port));
         assert!(
             render(24, 80, &config)
                 .join("\n")
                 .contains("RUST_LOG=debug")
         );
-        assert!(config.commit_environment_line());
-        assert!(config.save_environment(&mut port));
-
-        assert!(!config.is_editing_environment());
-        assert_eq!(port.global.env["RUST_LOG"], "debug");
-        assert!(
-            render(24, 80, &config)
-                .join("\n")
-                .contains("Environment (1 vars)")
-        );
-
-        assert!(config.open_environment(&mut port));
-        config.confirm_environment();
-        config.type_environment("RUST_LOG=");
-        assert!(!config.commit_environment_line());
-        assert!(config.commit_environment_line());
-        assert!(config.save_environment(&mut port));
-        assert!(port.global.env.is_empty());
-
-        assert!(config.open_environment(&mut port));
-        config.confirm_environment();
-        config.type_environment("1BAD=value");
-        assert!(!config.commit_environment_line());
-        assert!(
-            render(24, 80, &config)
-                .join("\n")
-                .contains("not starting with a digit")
-        );
         config.cancel_environment();
         assert!(!config.is_editing_environment());
         config.type_environment("ignored");
         config.backspace_environment();
-        assert!(!config.commit_environment_line());
         assert!(!config.save_environment(&mut port));
+    }
 
+    #[test]
+    fn focused_environment_rows_keep_the_textarea_background_width() {
+        for value in ["", "A=1"] {
+            let editor = EnvironmentSourceEditor::new(value.to_owned());
+            let rows =
+                environment_textarea(editor.value(), editor.cursor(), editor.is_save_focused());
+            assert_eq!(
+                display_width(&rows[0]),
+                ENVIRONMENT_TEXTAREA_WIDTH + modal::BODY_INDENT_WIDTH
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_environment_save_cannot_change_global_bindings() {
+        let mut port = FakeSettingsPort {
+            global: Settings {
+                env: [("GLOBAL".to_owned(), "kept".to_owned())]
+                    .into_iter()
+                    .collect(),
+                ..Settings::default()
+            },
+            ..FakeSettingsPort::default()
+        };
         let mut workspace =
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
-        assert!(!workspace.open_environment(&mut port));
         workspace.next_field();
-        assert!(!workspace.open_environment(&mut port));
+        assert_eq!(workspace.field(), Field::Environment);
+        assert!(workspace.open_environment(&mut port));
+        workspace.toggle_environment_focus();
+        assert!(workspace.is_environment_save_focused());
+        workspace.move_environment(true);
+        workspace.move_environment_edge(true);
+        workspace.toggle_environment_focus();
+        let base = vec!["home background".to_owned(); 24];
+        let composited = render_over(24, 80, &base, &workspace);
+        let frame = composited.join("\n");
+        assert!(frame.contains("workspace env only"));
+        assert!(!frame.contains("GLOBAL=kept"));
+        assert!(composited.iter().all(|line| display_width(line) <= 80));
+        workspace.type_environment("LOCAL=only");
+        assert!(workspace.save_environment(&mut port));
+
+        assert_eq!(port.global.env["GLOBAL"], "kept");
+        assert_eq!(port.workspace.env["LOCAL"], "only");
     }
 
     #[test]
@@ -960,9 +1075,7 @@ mod tests {
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
-        config.confirm_environment();
         config.type_environment("A=1");
-        assert!(!config.commit_environment_line());
         assert!(!config.save_environment(&mut port));
         assert!(config.is_editing_environment());
         assert!(render(24, 80, &config).join("\n").contains("Save failed"));
@@ -970,9 +1083,8 @@ mod tests {
         config.cancel_environment();
         port.fail_save = false;
         assert!(config.open_environment(&mut port));
-        config.confirm_environment();
         config.type_environment("NUL=a\0b");
-        assert!(!config.commit_environment_line());
+        assert!(!config.save_environment(&mut port));
         assert!(
             render(24, 80, &config)
                 .join("\n")
@@ -981,7 +1093,30 @@ mod tests {
     }
 
     #[test]
-    fn global_environment_warning_uses_a_fresh_snapshot_and_reports_load_failure() {
+    fn global_environment_validation_error_does_not_shift_the_modal() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        assert!(config.open_environment(&mut port));
+        config.type_environment("MISSING_EQUALS");
+
+        let before = render(24, 80, &config);
+        assert!(!config.save_environment(&mut port));
+        let after = render(24, 80, &config);
+        assert!(after.join("\n").contains("expected NAME=value"));
+
+        for marker in ["Environment", "[ Save ]", "Ctrl-S: save"] {
+            assert_eq!(
+                before.iter().position(|line| line.contains(marker)),
+                after.iter().position(|line| line.contains(marker)),
+                "{marker} must stay on the same row when the error appears"
+            );
+        }
+    }
+
+    #[test]
+    fn global_environment_editor_uses_a_fresh_snapshot_and_reports_load_failure() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
         config.next_field();
@@ -991,10 +1126,8 @@ mod tests {
             .collect();
 
         assert!(config.open_environment(&mut port));
-        config.confirm_environment();
         assert!(render(24, 80, &config).join("\n").contains("FRESH=value"));
         config.cancel_environment();
-        config.confirm_environment();
 
         port.fail_read = Some(SettingsScope::Global);
         assert!(config.open_environment(&mut port));
@@ -1003,24 +1136,44 @@ mod tests {
     }
 
     #[test]
-    fn multiline_environment_paste_commits_each_binding_and_keeps_invalid_input() {
+    fn multiline_environment_text_keeps_invalid_input_for_retry() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
-        config.confirm_environment();
 
         config.paste_environment("A=1\rB=2\nC=3");
         assert!(render(24, 80, &config).join("\n").contains("A=1"));
         assert!(render(24, 80, &config).join("\n").contains("B=2"));
         assert!(render(24, 80, &config).join("\n").contains("C=3"));
 
-        config.paste_environment("D=4\nnot-a-binding\nE=5");
+        config.paste_environment("\nD=4\nnot-a-binding\nE=5");
+        assert!(!config.save_environment(&mut port));
         let frame = render(24, 80, &config).join("\n");
         assert!(frame.contains("D=4"));
-        assert!(frame.contains("type NAME=value"));
-        assert!(!frame.contains("E=5"));
+        assert!(frame.contains("expected NAME=value"));
+        assert!(frame.contains("E=5"));
+
+        config.cancel_environment();
+        assert!(config.open_environment(&mut port));
+        config.type_environment("1BAD=value");
+        assert!(!config.save_environment(&mut port));
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("invalid variable name")
+        );
+
+        config.cancel_environment();
+        assert!(config.open_environment(&mut port));
+        config.type_environment("EMPTY=");
+        assert!(!config.save_environment(&mut port));
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("remove the line")
+        );
     }
 
     #[test]
@@ -1038,8 +1191,10 @@ mod tests {
         config.next_field();
         config.next_field();
         assert!(config.open_environment(&mut port));
-        config.confirm_environment();
-        assert!(render(24, 80, &config).join("\n").contains("… 1 more"));
+        config.move_environment_edge(false);
+        assert!(render(24, 80, &config).join("\n").contains("↓ 1 more"));
+        config.move_environment_edge(true);
+        assert!(render(24, 80, &config).join("\n").contains("↑ 1 more"));
     }
 
     #[test]
@@ -1076,6 +1231,7 @@ mod tests {
         assert!(frame.contains("Global"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
+        assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
         assert!(frame.contains("Workspace init"));
         assert!(frame.contains("Agent") && frame.contains("OpenAI"));
         assert!(frame.contains("Issue") && frame.contains("on"));
@@ -1091,10 +1247,23 @@ mod tests {
             .find(|line| line.contains("Workspace init"))
             .unwrap();
         assert_eq!(global.find("Global"), workspace.find("Workspace init"));
+
+        let theme = plain.iter().find(|line| line.contains("Theme")).unwrap();
+        let modal = plain
+            .iter()
+            .find(|line| line.contains("Modal mode"))
+            .unwrap();
+        let environment = plain.iter().find(|line| line.contains("Env")).unwrap();
+        let column = |line: &str, needle: &str| {
+            let byte = line.find(needle).unwrap();
+            display_width(&line[..byte])
+        };
+        assert_eq!(column(theme, "Theme"), column(modal, "Modal mode"));
+        assert_eq!(column(theme, "Theme"), column(environment, "Env"));
     }
 
     #[test]
-    fn global_chevrons_align_with_the_heading_without_moving_controls() {
+    fn global_chevrons_and_controls_align_with_the_heading() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
         let plain = render(24, 80, &config)
@@ -1113,7 +1282,7 @@ mod tests {
 
         assert_eq!(column_of(theme, "›"), chevron_column);
         assert_eq!(column_of(theme, "Theme"), label_column);
-        assert_eq!(column_of(theme, "<"), 43);
+        assert_eq!(column_of(theme, "<"), 40);
 
         config.cycle_theme(true);
         let dirty = render(24, 80, &config)
@@ -1135,7 +1304,7 @@ mod tests {
             .find(|line| line.contains("[ Save ]"))
             .unwrap();
         assert_eq!(column_of(save, "›"), chevron_column);
-        assert_eq!(column_of(save, "["), 38);
+        assert_eq!(column_of(save, "["), 35);
     }
 
     #[test]
@@ -1162,13 +1331,14 @@ mod tests {
         assert!(frame.contains("Agent"));
         assert!(frame.contains("Issue"));
         assert!(frame.contains("Memory"));
+        assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
         assert!(!frame.contains("Scope:"));
         assert!(!frame.contains("Theme"));
         assert!(!frame.contains("Modal mode"));
     }
 
     #[test]
-    fn workspace_navigation_wraps_its_three_settings_and_skips_missing_agents() {
+    fn workspace_navigation_wraps_its_settings_and_skips_missing_agents() {
         let mut port = FakeSettingsPort::default();
         let mut config =
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
@@ -1177,6 +1347,10 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Memory);
         config.previous_field();
+        assert_eq!(config.field(), Field::Issue);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Environment);
+        config.next_field();
         assert_eq!(config.field(), Field::Issue);
         config.next_field();
         assert_eq!(config.field(), Field::Memory);
@@ -1189,17 +1363,17 @@ mod tests {
             &mut port,
             AvailableAgentModels::default(),
         );
-        assert_eq!(without_agents.field(), Field::Issue);
+        assert_eq!(without_agents.field(), Field::Environment);
         without_agents.previous_field();
         assert_eq!(without_agents.field(), Field::Save);
         without_agents.next_field();
-        assert_eq!(without_agents.field(), Field::Issue);
+        assert_eq!(without_agents.field(), Field::Environment);
 
         // Defensive normalization keeps an externally restored stale focus
         // inside the rows visible for Workspace Config.
         without_agents.field = Field::Theme;
         without_agents.next_field();
-        assert_eq!(without_agents.field(), Field::Issue);
+        assert_eq!(without_agents.field(), Field::Environment);
         without_agents.field = Field::ModalSelectionMode;
         without_agents.previous_field();
         assert_eq!(without_agents.field(), Field::Save);

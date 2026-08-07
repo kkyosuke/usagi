@@ -161,7 +161,8 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
 merge して atomic write する。Global Config は Theme・Modal mode・Agent・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` と `local_llm` を保持する。
-Workspace Config は Agent・Issue・Memory を所有し、workspace の `env` を保持する。
+Workspace Config は Agent・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
+workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
 Agent は `default_model`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
@@ -746,31 +747,42 @@ worker が続けるため（[5. daemon の session teardown worker](05-daemon.md
 
 ### env editor
 
-Overview の `env [workspace|global]` と Closeup の `env` は同じ環境変数 editor を開く。Overview は引数なし
-（または `workspace`）でこの workspace のスコープ、`global` で全 workspace 共通のスコープを編集する。
-Closeup は**引数を取らず workspace スコープだけ**を編集し、`Tab` の scope 切り替えも表示・受理しない。
+Overview の `env [workspace|global]` と Closeup の `env` は Config と同じ複数行 textarea の環境変数 editor を開く。
+Overview は引数なし（または `workspace`）でこの workspace のスコープ、`global` で全 workspace 共通のスコープを編集する。
+Closeup は**引数を取らず workspace スコープだけ**を編集し、Workspace Config と同じ複数行 textarea を表示する。
 `env global` など引数付きの Closeup 入力は editor を開かず安全な notice で拒否する。Closeup から開いた場合も
 対象 session 固有の環境を作らず、この workspace に属する root / session の次回 pane 起動へ共通して効く。
 保存場所・スコープの合成・secret の解決・注入は [9. 環境変数設定](09-env.md) が正本で、ここでは editor の
 操作だけを述べる。
 
-Welcome の Config では Global セクションの `Environment (N vars)` を選んで Enter を押すと global editor を開く。
-開く直前に最新の global binding を読み、全置換用のスナップショットとして固定する。確認画面は、editor を開いている間に
-別画面が保存した global env はこのスナップショットの保存で失われ得ることを示し、Enter で続行、Esc で中止する。
-`NAME=value` を Enter で追加・更新し、`NAME=` で削除する。複数行Pasteは改行ごとに各行を binding として取り込む。
-空の入力で Enter を押すと global `env` だけを保存して Config に戻り、Esc は未保存の environment draft を破棄して
-Config に戻る。
+Global / Workspace Config は Theme や Modal mode と同じラベル列にある `Env  [ N variables ]` を選んで Enter を押すと、
+その Config scope の editor を開く。
+開く直前に対象 scope の最新 binding を読み、`NAME=value` を 1 行 1 binding とする複数行 textarea に表示する。
+textarea は背景色で入力領域を示し、空行には placeholder を表示しない。Enter は textarea 内で改行する。
+Global Config は `Ctrl-S`、Workspace Config は `Tab` で Save action へ移動して Enter を押すと、編集中 scope の
+`env` だけを全置換保存する。Global Config の `Tab` は何もしない。
+行を取り除くと binding を削除できる。Esc は未保存の environment draft を破棄して元の画面に戻る。
+
+Config、Overview、Closeup textarea の入力は次のとおりである。
 
 | 入力 | 動作 |
 |---|---|
-| 文字 / `Backspace` | `NAME=value` の入力行を編集する |
-| `Enter`（入力行あり） | その binding を追加・置換する。値が空なら削除する |
-| `Enter`（入力行が空） | 編集中のスコープを保存する |
-| `Tab` | Overview から開いた editor では workspace ⇄ global を切り替える。Closeup から開いた editor では何もしない |
+| 文字 / `Backspace` / `←→` | textarea を編集する |
+| `Delete` / `Home` / `End`（Config） | caret の位置または端を基準に編集する |
+| `Enter`（textarea） | 改行する |
+| `Ctrl-S`（Global Config / Overview / Closeup） | 編集中の `env` を保存する |
+| `Tab`（Workspace Config / Overview workspace / Closeup） | textarea と Save action の focus を切り替える |
+| `Enter`（workspace editor の Save） | workspace `env` を保存する |
 | `Esc` | editor を閉じる |
 
-- **workspace を編集しているときは global の binding を read-only で併記**し、workspace 側が同名を持つ
-  ものは上書き済みとして示す。global スコープは継承元を持たないため併記しない。
+Overview と Closeup は Config と同じ背景色付き textarea と中央の Save action を表示する。
+Overview の scope は開くコマンドで決まり editor 内では切り替えない。Overview workspace と Closeup は `Tab` で Save action へ移り、
+Enter または `Ctrl-S` で workspace binding 全体を保存する。Overview global は Global Config と同様に `Tab` を受け付けず、
+`Ctrl-S` で保存する。
+Overview と Closeup は保存完了の `EnvironmentSaved` を受けると editor を閉じる。入力の検証エラーまたは保存エラー時は editor を開いたまま入力とエラーを保持する。
+
+- Config、Overview、Closeup の workspace editor は workspace binding だけを表示する。global binding を編集可能と誤認させず、
+  保存時も global settings を変更しない。
 - 保存は差分ではなく編集中スコープの全置換で、消した変数は取り除かれる。相手スコープの binding は
   変わらない。
 - 読み込み中と保存中はその状態を表示し、保存中の再保存・編集・スコープ切り替えは受け付けない

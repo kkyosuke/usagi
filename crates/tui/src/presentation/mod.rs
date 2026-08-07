@@ -2450,21 +2450,24 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 #[allow(clippy::needless_pass_by_value)]
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     if config.is_editing_environment() {
-        if config.is_confirming_environment() {
-            match key {
-                Key::Enter => config.confirm_environment(),
-                Key::Escape => config.cancel_environment(),
-                _ => {}
-            }
-            return ConfigStep::Stay;
-        }
         match key {
-            Key::Enter => {
-                if config.commit_environment_line() {
-                    config.save_environment(settings);
-                }
+            Key::Management {
+                action: AppKey::SaveRoles,
+                ..
+            } if config.scope() == usagi_core::usecase::settings::SettingsScope::Global => {
+                config.save_environment(settings);
             }
+            Key::Enter if config.is_environment_save_focused() => {
+                config.save_environment(settings);
+            }
+            Key::Enter => config.newline_environment(),
+            Key::Tab => config.toggle_environment_focus(),
             Key::Backspace => config.backspace_environment(),
+            Key::Delete => config.delete_environment(),
+            Key::Left => config.move_environment(false),
+            Key::Right => config.move_environment(true),
+            Key::Home | Key::LineStart => config.move_environment_edge(false),
+            Key::End | Key::LineEnd => config.move_environment_edge(true),
             Key::Char(character) if !character.is_control() => {
                 config.type_environment(&character.to_string());
             }
@@ -9290,7 +9293,8 @@ mod tests {
         )
         .join("\n");
         assert!(frame.contains("Environment"));
-        assert!(frame.contains("this workspace's environment"));
+        assert!(frame.contains("workspace env only (global values stay unchanged)"));
+        assert!(frame.contains("one NAME=value binding per line"));
     }
 
     #[test]
@@ -18897,7 +18901,14 @@ mod tests {
             step_config(&mut config, Key::Tab, &mut settings),
             ConfigStep::Stay
         ));
-        for key in [Key::Up, Key::Down, Key::Left, Key::Right, Key::CtrlQ] {
+        for key in [
+            Key::Up,
+            Key::Down,
+            Key::Char('j'),
+            Key::Left,
+            Key::Right,
+            Key::CtrlQ,
+        ] {
             let _ = step_config(&mut config, key, &mut settings);
         }
     }
@@ -18913,24 +18924,33 @@ mod tests {
         assert_eq!(config.field(), ConfigField::Environment);
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(config.is_editing_environment());
-        assert!(config.is_confirming_environment());
-
-        // The warning owns input until Enter confirms the freshly loaded
-        // snapshot; typing before confirmation is ignored.
-        step_config(&mut config, Key::Char('A'), &mut settings);
-        step_config(&mut config, Key::Enter, &mut settings);
-        assert!(!config.is_confirming_environment());
         step_config(&mut config, Key::Char('C'), &mut settings);
-        step_config(&mut config, Key::Paste("=3x".to_owned()), &mut settings);
+        step_config(&mut config, Key::Paste("=3xy".to_owned()), &mut settings);
         step_config(&mut config, Key::Backspace, &mut settings);
+        step_config(&mut config, Key::Left, &mut settings);
+        step_config(&mut config, Key::Delete, &mut settings);
+        step_config(&mut config, Key::End, &mut settings);
         step_config(&mut config, Key::Enter, &mut settings);
         step_config(
             &mut config,
-            Key::Paste("A=1\r\nB=2\n".to_owned()),
+            Key::Paste("A=1\r\nB=2".to_owned()),
             &mut settings,
         );
+        step_config(&mut config, Key::Home, &mut settings);
+        step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::LineEnd, &mut settings);
+        step_config(&mut config, Key::LineStart, &mut settings);
+        step_config(&mut config, Key::Tab, &mut settings);
+        assert!(!config.is_environment_save_focused());
         step_config(&mut config, Key::Other, &mut settings);
-        step_config(&mut config, Key::Enter, &mut settings);
+        step_config(
+            &mut config,
+            Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![19],
+            },
+            &mut settings,
+        );
         assert!(!config.is_editing_environment());
         assert_eq!(config.settings().env["A"], "1");
         assert_eq!(config.settings().env["B"], "2");
@@ -18938,15 +18958,27 @@ mod tests {
 
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(config.is_editing_environment());
-        step_config(&mut config, Key::Enter, &mut settings);
-        assert!(!config.is_confirming_environment());
         step_config(&mut config, Key::Escape, &mut settings);
         assert!(!config.is_editing_environment());
+    }
 
+    #[test]
+    fn step_config_saves_the_workspace_environment_from_its_save_action() {
+        let mut settings = DefaultSettingsPort;
+        let mut config = Config::load_workspace_with_available_models(
+            &mut settings,
+            AvailableAgentModels::all(),
+        );
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Enter, &mut settings);
-        assert!(config.is_confirming_environment());
-        step_config(&mut config, Key::Escape, &mut settings);
+        step_config(&mut config, Key::Char('A'), &mut settings);
+        step_config(&mut config, Key::Paste("=1".to_owned()), &mut settings);
+        step_config(&mut config, Key::Tab, &mut settings);
+        assert!(config.is_environment_save_focused());
+        step_config(&mut config, Key::Enter, &mut settings);
+
         assert!(!config.is_editing_environment());
+        assert_eq!(config.settings().env["A"], "1");
     }
 
     #[test]
@@ -19022,6 +19054,7 @@ mod tests {
         keys.extend("config".chars().map(Key::Char));
         keys.extend([
             Key::Enter,
+            Key::Down,
             Key::Down,
             Key::Right,
             Key::Down,
@@ -19167,10 +19200,16 @@ mod tests {
         Key::Enter,
     ];
 
-    // Workspace Config starts on Agent and contains only Agent → Issue →
+    // Workspace Config starts on Agent and contains Agent → env → Issue →
     // Memory → Save.
-    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 5] =
-        [Key::Right, Key::Down, Key::Down, Key::Down, Key::Enter];
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 6] = [
+        Key::Right,
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Down,
+        Key::Enter,
+    ];
 
     fn config_save_waits(done: bool) -> Vec<std::time::Duration> {
         let mut waits = vec![

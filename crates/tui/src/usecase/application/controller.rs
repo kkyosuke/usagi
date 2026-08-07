@@ -16,11 +16,14 @@ use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_core::domain::settings::{AvailableModels, DefaultModel, is_valid_env_name};
+use usagi_core::domain::settings::{
+    AvailableModels, DefaultModel, EnvBindings, format_env_bindings,
+};
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
+use crate::usecase::application::environment_source::EnvironmentSourceEditor;
 use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
 use crate::usecase::{agent_command, closeup, overview};
 
@@ -413,22 +416,12 @@ pub struct EnvironmentEntry {
 }
 
 /// Environment editor state for one settings scope.
-///
-/// The editor owns exactly the bindings of its own [`EnvScope`]. When the scope
-/// is [`EnvScope::Workspace`] it also carries the read-only global bindings in
-/// [`inherited`](Self::inherited), so a workspace edit is made while seeing what
-/// every workspace already gets — and which of those a workspace binding
-/// shadows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentEditor {
     scope: EnvScope,
     entries: Vec<EnvironmentEntry>,
-    /// Global bindings this scope inherits; always empty for
-    /// [`EnvScope::Global`], which inherits nothing.
-    inherited: Vec<EnvironmentEntry>,
-    /// The `NAME=value` line being typed. Committing it upserts a binding, and
-    /// an empty value removes one.
-    draft: String,
+    /// Shared Config/Home multiline source editing state.
+    source: EnvironmentSourceEditor,
     error: Option<SafeError>,
     /// `true` while the initial read is in flight, before any values have
     /// refluxed. Distinguishes "still loading" from "loaded, but empty".
@@ -436,11 +429,6 @@ pub struct EnvironmentEditor {
     /// `true` while a save is in flight. Local edits and re-saves are ignored
     /// until the owning port refluxes, so a save can never be double-submitted.
     saving: bool,
-    /// `true` when this editor is pinned to a single scope and the workspace ⇄
-    /// global toggle is inert. Closeup opens the editor locked to the workspace
-    /// scope, so the session/root surface only ever edits this workspace; the
-    /// Overview palette opens it unlocked to reach the global scope too.
-    locked: bool,
 }
 
 /// Local navigation and draft state for a durable user decision.  The durable
@@ -602,23 +590,13 @@ impl PreviewOverlay {
 
 impl EnvironmentEditor {
     fn loading(scope: EnvScope) -> Self {
-        Self::loading_with_lock(scope, false)
-    }
-
-    fn loading_locked(scope: EnvScope) -> Self {
-        Self::loading_with_lock(scope, true)
-    }
-
-    fn loading_with_lock(scope: EnvScope, locked: bool) -> Self {
         Self {
             scope,
             entries: Vec::new(),
-            inherited: Vec::new(),
-            draft: String::new(),
+            source: EnvironmentSourceEditor::default(),
             error: None,
             loading: true,
             saving: false,
-            locked,
         }
     }
 
@@ -631,21 +609,20 @@ impl EnvironmentEditor {
     pub fn entries(&self) -> &[EnvironmentEntry] {
         &self.entries
     }
-    /// The global bindings this scope inherits, in name order. Empty for the
-    /// global scope itself.
-    #[must_use]
-    pub fn inherited(&self) -> &[EnvironmentEntry] {
-        &self.inherited
-    }
     /// The `NAME=value` line being typed.
     #[must_use]
     pub fn draft(&self) -> &str {
-        &self.draft
+        self.source.value()
     }
-    /// Whether an inherited binding is shadowed by one of this scope's own.
+    /// Byte cursor in the multiline source.
     #[must_use]
-    pub fn shadows(&self, name: &str) -> bool {
-        self.entries.iter().any(|entry| entry.name == name)
+    pub const fn cursor(&self) -> usize {
+        self.source.cursor()
+    }
+    /// Whether the multiline editor's Save action owns Enter.
+    #[must_use]
+    pub const fn is_save_focused(&self) -> bool {
+        self.source.is_save_focused()
     }
     #[must_use]
     pub fn error(&self) -> Option<&SafeError> {
@@ -662,31 +639,10 @@ impl EnvironmentEditor {
     pub const fn is_saving(&self) -> bool {
         self.saving
     }
-    /// Whether this editor is pinned to its current scope.
-    #[must_use]
-    pub const fn is_scope_locked(&self) -> bool {
-        self.locked
-    }
     /// Whether the editor is accepting local edits and saves (neither the
     /// initial read nor a save is in flight).
     fn is_busy(&self) -> bool {
         self.loading || self.saving
-    }
-
-    /// Insert or replace one binding, keeping the list in name order. A blank
-    /// name is not a binding and is ignored.
-    fn upsert(&mut self, name: &str, value: &str) {
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == name) {
-            value.clone_into(&mut entry.value);
-        } else if !name.trim().is_empty() {
-            self.entries.push(EnvironmentEntry {
-                name: name.to_owned(),
-                value: value.to_owned(),
-            });
-            self.entries
-                .sort_by(|left, right| left.name.cmp(&right.name));
-        }
-        self.error = None;
     }
 }
 
@@ -1593,22 +1549,6 @@ pub enum AppKey {
     ToggleTodo(usize),
     /// Persist the current scratchpad through its owning port.
     SaveNotes,
-    /// Insert or replace one environment variable in the local editor.
-    SetEnvironment {
-        name: String,
-        value: String,
-    },
-    /// Remove one environment variable from the local editor by name.
-    RemoveEnvironment {
-        name: String,
-    },
-    /// Replace the environment editor's `NAME=value` draft line.
-    SetEnvironmentDraft(String),
-    /// Apply the draft line to the edited scope: upsert a binding, or remove one
-    /// when the value is empty.
-    CommitEnvironmentDraft,
-    /// Switch the environment editor between the workspace and global scope.
-    ToggleEnvironmentScope,
     /// Persist the current environment through its owning port.
     SaveEnvironment,
     /// Toggle and save the raw, lossless role catalog editor.
@@ -1796,6 +1736,11 @@ pub enum BackendEvent {
     /// own bindings, plus the global ones a workspace inherits (empty when the
     /// edited scope *is* global).
     EnvironmentLoaded {
+        scope: EnvScope,
+        entries: Vec<EnvironmentEntry>,
+        inherited: Vec<EnvironmentEntry>,
+    },
+    EnvironmentSaved {
         scope: EnvScope,
         entries: Vec<EnvironmentEntry>,
         inherited: Vec<EnvironmentEntry>,
@@ -2695,6 +2640,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             event @ (BackendEvent::NotesLoaded { .. }
             | BackendEvent::NotesError { .. }
             | BackendEvent::EnvironmentLoaded { .. }
+            | BackendEvent::EnvironmentSaved { .. }
             | BackendEvent::EnvironmentError { .. }
             | BackendEvent::RolesLoaded { .. }
             | BackendEvent::RolesError { .. }
@@ -2945,7 +2891,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
         BackendEvent::EnvironmentLoaded {
             scope,
             entries,
-            inherited,
+            inherited: _,
         } => {
             if let Some(editor) = state
                 .environment_editor
@@ -2953,7 +2899,34 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 .filter(|editor| editor.scope == *scope)
             {
                 editor.entries.clone_from(entries);
-                editor.inherited.clone_from(inherited);
+                let bindings = entries
+                    .iter()
+                    .map(|entry| (entry.name.clone(), entry.value.clone()))
+                    .collect::<EnvBindings>();
+                editor.source.replace(format_env_bindings(&bindings));
+                editor.error = None;
+                editor.loading = false;
+                editor.saving = false;
+            }
+        }
+        BackendEvent::EnvironmentSaved {
+            scope,
+            entries,
+            inherited: _,
+        } => {
+            let close_after_save = state
+                .environment_editor
+                .as_ref()
+                .is_some_and(|editor| editor.scope == *scope && editor.saving);
+            if close_after_save {
+                state.overlay = None;
+                state.environment_editor = None;
+            } else if let Some(editor) = state
+                .environment_editor
+                .as_mut()
+                .filter(|editor| editor.scope == *scope)
+            {
+                editor.entries.clone_from(entries);
                 editor.error = None;
                 editor.loading = false;
                 editor.saving = false;
@@ -3627,11 +3600,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CommitNoteDraft
         | AppKey::ToggleTodo(_)
         | AppKey::SaveNotes
-        | AppKey::SetEnvironment { .. }
-        | AppKey::RemoveEnvironment { .. }
-        | AppKey::SetEnvironmentDraft(_)
-        | AppKey::CommitEnvironmentDraft
-        | AppKey::ToggleEnvironmentScope
         | AppKey::SaveEnvironment
         | AppKey::ToggleRoleScope
         | AppKey::SaveRoles
@@ -3661,9 +3629,12 @@ fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
 fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> {
     let notes_open = state.overlay == Some(Overlay::Notes);
     let environment_open = state.overlay == Some(Overlay::Environment);
+    if let Some(effects) = update_environment_source_key(state, key, environment_open) {
+        return Some(effects);
+    }
     match key {
         AppKey::OpenNotes => Some(open_notes(state)),
-        AppKey::OpenEnvironment => Some(open_environment(state, EnvScope::Workspace)),
+        AppKey::OpenEnvironment => Some(open_environment_source(state, EnvScope::Workspace)),
         AppKey::SelectNoteSection(section) => {
             if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
                 editor.section = *section;
@@ -3701,80 +3672,115 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
                     }]
                 }),
         ),
-        AppKey::SetEnvironment { name, value } => {
-            if let Some(editor) = editable_environment(state, environment_open) {
-                editor.upsert(name, value);
-            }
-            Some(Vec::new())
-        }
-        AppKey::RemoveEnvironment { name } => {
-            if let Some(editor) = editable_environment(state, environment_open) {
-                editor.entries.retain(|entry| entry.name != *name);
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::SetEnvironmentDraft(draft) => {
-            if let Some(editor) = editable_environment(state, environment_open) {
-                editor.draft.clone_from(draft);
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::CommitEnvironmentDraft => Some(commit_environment_draft(state, environment_open)),
-        AppKey::ToggleEnvironmentScope => Some(toggle_environment_scope(state, environment_open)),
-        // While the environment editor owns input, the ordinary editing keys drive
-        // it: Enter commits the line (or saves), Tab switches scope, and typing
-        // edits the line. The notes overlay keeps its own draft keys.
-        AppKey::Enter if environment_open => {
-            Some(commit_environment_draft(state, environment_open))
-        }
-        AppKey::Tab if environment_open => Some(toggle_environment_scope(state, environment_open)),
-        AppKey::Char(character) if environment_open => {
-            if let Some(editor) = editable_environment(state, environment_open) {
-                editor.draft.push(*character);
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::Backspace if environment_open => {
-            if let Some(editor) = editable_environment(state, environment_open) {
-                editor.draft.pop();
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::Paste(text) if environment_open => {
-            Some(paste_environment_draft(state, text, environment_open))
-        }
-        AppKey::SaveEnvironment => Some(editable_environment(state, environment_open).map_or_else(
-            Vec::new,
-            |editor| {
-                editor.saving = true;
-                vec![Effect::SaveEnvironment {
-                    scope: editor.scope,
-                    entries: editor.entries.clone(),
-                }]
-            },
-        )),
         _ => None,
     }
 }
 
-fn paste_note_draft(state: &mut AppState, text: &str) -> Vec<Effect> {
-    if let Some(editor) = state.note_editor.as_mut() {
-        editor.draft.push_str(text);
-        editor.error = None;
+fn update_environment_source_key(
+    state: &mut AppState,
+    key: &AppKey,
+    environment_open: bool,
+) -> Option<Vec<Effect>> {
+    if !environment_source_is_open(state, environment_open) {
+        return None;
     }
-    Vec::new()
+    match key {
+        AppKey::Tab => {
+            if let Some(editor) = editable_environment(state, environment_open) {
+                if editor.scope == EnvScope::Global {
+                    return Some(Vec::new());
+                }
+                editor
+                    .source
+                    .toggle_save_focus(editor.scope != EnvScope::Global);
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::Enter => Some(enter_environment_source(state, environment_open)),
+        AppKey::Char(character) => {
+            if let Some(editor) = editable_environment(state, environment_open) {
+                editor.source.insert(&character.to_string());
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::Backspace => {
+            if let Some(editor) = editable_environment(state, environment_open) {
+                editor.source.backspace();
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::Left | AppKey::Right => {
+            if let Some(editor) = editable_environment(state, environment_open) {
+                editor.source.move_cursor(matches!(key, AppKey::Right));
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::Paste(text) => {
+            if let Some(editor) = editable_environment(state, environment_open) {
+                editor.source.paste(text);
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::SaveEnvironment | AppKey::SaveRoles => {
+            Some(save_environment_source(state, environment_open))
+        }
+        _ => None,
+    }
 }
 
-fn paste_environment_draft(
-    state: &mut AppState,
-    text: &str,
-    environment_open: bool,
-) -> Vec<Effect> {
-    if let Some(editor) = editable_environment(state, environment_open) {
+fn environment_source_is_open(state: &AppState, environment_open: bool) -> bool {
+    environment_open && state.environment_editor.as_ref().is_some()
+}
+
+fn enter_environment_source(state: &mut AppState, environment_open: bool) -> Vec<Effect> {
+    let save_focused = state
+        .environment_editor
+        .as_ref()
+        .is_some_and(EnvironmentEditor::is_save_focused);
+    if save_focused {
+        save_environment_source(state, environment_open)
+    } else {
+        if let Some(editor) = editable_environment(state, environment_open) {
+            editor.source.newline();
+            editor.error = None;
+        }
+        Vec::new()
+    }
+}
+
+fn save_environment_source(state: &mut AppState, environment_open: bool) -> Vec<Effect> {
+    let Some(editor) = editable_environment(state, environment_open) else {
+        return Vec::new();
+    };
+    let bindings = match editor.source.parse() {
+        Ok(bindings) => bindings,
+        Err(message) => {
+            editor.error = Some(SafeError {
+                message: SafeMessage::new(message),
+                error_id: "environment-invalid-source".to_owned(),
+            });
+            editor.source.focus_source();
+            return Vec::new();
+        }
+    };
+    editor.entries = bindings
+        .into_iter()
+        .map(|(name, value)| EnvironmentEntry { name, value })
+        .collect();
+    editor.saving = true;
+    vec![Effect::SaveEnvironment {
+        scope: editor.scope,
+        entries: editor.entries.clone(),
+    }]
+}
+
+fn paste_note_draft(state: &mut AppState, text: &str) -> Vec<Effect> {
+    if let Some(editor) = state.note_editor.as_mut() {
         editor.draft.push_str(text);
         editor.error = None;
     }
@@ -3791,71 +3797,6 @@ fn editable_environment(
         .environment_editor
         .as_mut()
         .filter(|editor| environment_open && !editor.is_busy())
-}
-
-/// Apply the typed `NAME=value` line to the edited scope.
-///
-/// An empty draft is a save request, which keeps the editor to one committing
-/// key. A line with an empty value removes the binding, so a variable can be
-/// dropped — and an inherited global one stop being shadowed — without a
-/// dedicated delete key. Anything that is not a `NAME=value` line leaves the
-/// draft in place with a safe error, so nothing typed is lost.
-fn commit_environment_draft(state: &mut AppState, environment_open: bool) -> Vec<Effect> {
-    let Some(editor) = editable_environment(state, environment_open) else {
-        return Vec::new();
-    };
-    let draft = editor.draft.trim().to_owned();
-    if draft.is_empty() {
-        editor.saving = true;
-        return vec![Effect::SaveEnvironment {
-            scope: editor.scope,
-            entries: editor.entries.clone(),
-        }];
-    }
-    let Some((name, value)) = draft.split_once('=') else {
-        editor.error = Some(SafeError {
-            message: SafeMessage::new("type NAME=value (an empty value removes it)"),
-            error_id: "environment-invalid-binding".to_owned(),
-        });
-        return Vec::new();
-    };
-    let name = name.trim().to_owned();
-    let value = value.trim().to_owned();
-    if !is_valid_env_name(&name) {
-        editor.error = Some(SafeError {
-            message: SafeMessage::new(
-                "names use letters, digits, and _ (not starting with a digit)",
-            ),
-            error_id: "environment-invalid-name".to_owned(),
-        });
-        return Vec::new();
-    }
-    if value.is_empty() {
-        editor.entries.retain(|entry| entry.name != name);
-    } else {
-        editor.upsert(&name, &value);
-    }
-    editor.draft.clear();
-    editor.error = None;
-    Vec::new()
-}
-
-/// Move the editor to the other scope and read that scope from its owner.
-/// Unsaved edits belong to the scope being left, so they are dropped rather than
-/// carried across — the reload is what the other scope actually holds.
-fn toggle_environment_scope(state: &mut AppState, environment_open: bool) -> Vec<Effect> {
-    let Some(editor) = editable_environment(state, environment_open) else {
-        return Vec::new();
-    };
-    if editor.locked {
-        return Vec::new();
-    }
-    let scope = match editor.scope {
-        EnvScope::Workspace => EnvScope::Global,
-        EnvScope::Global => EnvScope::Workspace,
-    };
-    *editor = EnvironmentEditor::loading(scope);
-    vec![Effect::LoadEnvironment { scope }]
 }
 
 fn open_notes(state: &mut AppState) -> Vec<Effect> {
@@ -3879,22 +3820,12 @@ fn environment_scope(arguments: &str) -> Option<EnvScope> {
     }
 }
 
-/// Open the environment editor on `scope`, reading that scope from its owner.
-fn open_environment(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
+/// Open the Config-style environment source editor pinned to `scope`.
+fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect> {
     state.overlay = Some(Overlay::Environment);
     state.note_editor = None;
     state.environment_editor = Some(EnvironmentEditor::loading(scope));
     vec![Effect::LoadEnvironment { scope }]
-}
-
-/// Open the workspace-only environment editor used by Closeup.
-fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
-    state.overlay = Some(Overlay::Environment);
-    state.note_editor = None;
-    state.environment_editor = Some(EnvironmentEditor::loading_locked(EnvScope::Workspace));
-    vec![Effect::LoadEnvironment {
-        scope: EnvScope::Workspace,
-    }]
 }
 
 fn open_prs(state: &mut AppState) -> Vec<Effect> {
@@ -4037,7 +3968,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
         Ok(overview::Command::Env { arguments }) => {
             if let Some(scope) = environment_scope(&arguments) {
-                open_environment(state, scope)
+                open_environment_source(state, scope)
             } else {
                 state.notice = Some(Notice::new(
                     "env takes an optional scope (usage: env [workspace|global])",
@@ -4263,7 +4194,7 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
 /// Overview rather than any session-specific environment.
 fn submit_closeup_env(state: &mut AppState, arguments: &str) -> Vec<Effect> {
     if arguments.trim().is_empty() {
-        open_closeup_environment(state)
+        open_environment_source(state, EnvScope::Workspace)
     } else {
         state.notice = Some(Notice::new("env takes no arguments (usage: env)"));
         Vec::new()
@@ -4445,6 +4376,7 @@ pub fn run_fake_cycle(state: &mut AppState, backend: &mut impl BackendPort, effe
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
+    use crate::usecase::application::environment_source::parse_environment_source;
 
     #[test]
     fn terminal_arguments_normalize_open_and_reject_untrusted_input() {
@@ -7141,23 +7073,54 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Environment));
         let editor = state.environment_editor().unwrap();
         assert_eq!(editor.scope(), EnvScope::Workspace);
-        assert!(editor.is_scope_locked());
+        assert!(editor.is_loading());
+        assert!(!editor.is_saving());
 
-        // Once the read refluxes the editor accepts edits, but Closeup owns only
-        // this workspace's scope: Tab cannot move the locked editor to global or
-        // issue another load.
+        // Once the read refluxes, Closeup uses the same multiline source and
+        // Save focus interaction as Workspace Config.
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::EnvironmentLoaded {
                 scope: EnvScope::Workspace,
-                entries: Vec::new(),
-                inherited: Vec::new(),
+                entries: vec![entry("KEEP", "1")],
+                inherited: vec![entry("GLOBAL", "hidden")],
             }),
+        );
+        let editor = state.environment_editor().unwrap();
+        assert_eq!(editor.draft(), "KEEP=1");
+        assert_eq!(editor.cursor(), "KEEP=1".len());
+        assert!(!editor.is_save_focused());
+        assert!(!editor.is_loading());
+        assert!(!editor.is_saving());
+
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::Paste("RUST_LOG=debug\r\nNEXT=2".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            state.environment_editor().unwrap().draft(),
+            "KEEP=1\nRUST_LOG=debug\nNEXT=2"
         );
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
         let editor = state.environment_editor().unwrap();
         assert_eq!(editor.scope(), EnvScope::Workspace);
-        assert!(editor.is_scope_locked());
+        assert!(editor.is_save_focused());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::SaveEnvironment {
+                scope: EnvScope::Workspace,
+                entries: vec![
+                    entry("KEEP", "1"),
+                    entry("NEXT", "2"),
+                    entry("RUST_LOG", "debug")
+                ],
+            }]
+        );
+        assert!(state.environment_editor().unwrap().is_saving());
 
         // Arguments (including `global`) are refused safely: the editor never
         // opens and the Closeup overlay stays up with a usage notice.
@@ -7178,6 +7141,149 @@ mod tests {
                 Some("env takes no arguments (usage: env)")
             );
         }
+    }
+
+    #[test]
+    fn closeup_environment_source_edits_at_the_cursor_and_keeps_validation_errors() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: Vec::new(),
+                inherited: Vec::new(),
+            }),
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('é')));
+        assert_eq!(state.environment_editor().unwrap().cursor(), 2);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        assert_eq!(state.environment_editor().unwrap().draft(), "é");
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        assert!(state.environment_editor().unwrap().draft().is_empty());
+
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::Paste("MISSING_EQUALS".to_owned())),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert!(!state.environment_editor().unwrap().is_save_focused());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        let editor = state.environment_editor().unwrap();
+        assert_eq!(editor.draft(), "MISSING_EQUALS");
+        assert!(!editor.is_save_focused());
+        assert_eq!(
+            editor.error().unwrap().message.as_str(),
+            "line 1: expected NAME=value"
+        );
+
+        let editor = state.environment_editor.as_mut().unwrap();
+        editor.source.replace("OK=1");
+        editor.error = None;
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)),
+            vec![Effect::SaveEnvironment {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("OK", "1")],
+            }]
+        );
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).is_empty(),
+            "a save in flight must not be submitted twice"
+        );
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+    }
+
+    #[test]
+    fn closeup_environment_ctrl_s_saves_the_workspace_source() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+                inherited: Vec::new(),
+            }),
+        );
+
+        // A completion not initiated by this editor refreshes its projection
+        // without closing the modal. The initiated completion below closes it.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentSaved {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+                inherited: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        assert!(!state.environment_editor().unwrap().is_saving());
+
+        let save = update(&mut state, AppEvent::Key(AppKey::SaveRoles));
+        assert_eq!(
+            save,
+            vec![Effect::SaveEnvironment {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentSaved {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+                inherited: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.environment_editor().is_none());
+    }
+
+    #[test]
+    fn closeup_environment_source_reports_each_invalid_line_shape_and_limits() {
+        for (source, expected) in [
+            ("\nMISSING", "line 2: expected NAME=value"),
+            ("1BAD=value", "line 1: invalid variable name"),
+            ("EMPTY=", "line 1: remove the line to unset it"),
+            ("NUL=a\0b", "line 1: values cannot contain NUL"),
+        ] {
+            assert_eq!(parse_environment_source(source), Err(expected.to_owned()));
+        }
+
+        let over_limit = (0..=usagi_core::domain::settings::MAX_ENV_BINDINGS)
+            .map(|index| format!("KEY_{index}=value"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            parse_environment_source(&over_limit)
+                .unwrap_err()
+                .contains("binding limit")
+        );
     }
 
     #[test]
@@ -7418,13 +7524,8 @@ mod tests {
             inherited: Vec::new(),
         });
         run_fake_cycle(&mut state, &mut backend, effects);
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::SetEnvironment {
-                name: "MODE".to_owned(),
-                value: "test".to_owned(),
-            }),
-        );
+        let editor = state.environment_editor.as_mut().unwrap();
+        editor.source.replace("MODE=test");
         let saves = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
         assert_eq!(
             saves,
@@ -7457,151 +7558,6 @@ mod tests {
             name: name.to_owned(),
             value: value.to_owned(),
         }
-    }
-
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn environment_editor_loads_edits_removes_and_saves_with_a_double_submit_guard() {
-        let (workspace, session, _) = ids();
-        // `env` edits this workspace's own bindings.
-        let scope = EnvScope::Workspace;
-        let mut state = AppState::home(workspace, vec![session]);
-        let mut backend = FakeBackend::default();
-
-        // Open: the editor is in the loading state and requests a read.
-        let effects = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
-        assert_eq!(effects, vec![Effect::LoadEnvironment { scope }]);
-        assert!(state.environment_editor().unwrap().is_loading());
-        // Edits are ignored while the read is in flight.
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::SetEnvironment {
-                name: "EARLY".to_owned(),
-                value: "x".to_owned(),
-            }),
-        );
-        assert!(state.environment_editor().unwrap().entries().is_empty());
-
-        // The read refluxes: loading clears and the values appear.
-        backend.push_event(BackendEvent::EnvironmentLoaded {
-            scope,
-            entries: vec![entry("A", "1"), entry("B", "2")],
-            inherited: vec![entry("A", "global"), entry("SHARED", "yes")],
-        });
-        run_fake_cycle(&mut state, &mut backend, effects);
-        assert!(!state.environment_editor().unwrap().is_loading());
-        assert_eq!(state.environment_editor().unwrap().entries().len(), 2);
-        // The global bindings are visible while editing the workspace, and the
-        // one this workspace also binds is reported as shadowed.
-        assert_eq!(
-            state.environment_editor().unwrap().inherited(),
-            [entry("A", "global"), entry("SHARED", "yes")].as_slice()
-        );
-        assert!(state.environment_editor().unwrap().shadows("A"));
-        assert!(!state.environment_editor().unwrap().shadows("SHARED"));
-
-        // Add (kept sorted by name), edit in place, and delete.
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::SetEnvironment {
-                name: "C".to_owned(),
-                value: "3".to_owned(),
-            }),
-        );
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::SetEnvironment {
-                name: "A".to_owned(),
-                value: "9".to_owned(),
-            }),
-        );
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::RemoveEnvironment {
-                name: "B".to_owned(),
-            }),
-        );
-        let edited = vec![entry("A", "9"), entry("C", "3")];
-        assert_eq!(
-            state.environment_editor().unwrap().entries(),
-            edited.as_slice()
-        );
-
-        // Save: the editor enters the saving state and emits the full set.
-        let saves = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
-        assert_eq!(
-            saves,
-            vec![Effect::SaveEnvironment {
-                scope,
-                entries: edited.clone(),
-            }]
-        );
-        assert!(state.environment_editor().unwrap().is_saving());
-
-        // A second Save while one is in flight is ignored (no double-submit), and
-        // edits/removes are held until the save resolves.
-        assert!(update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).is_empty());
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::SetEnvironment {
-                name: "D".to_owned(),
-                value: "4".to_owned(),
-            }),
-        );
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::RemoveEnvironment {
-                name: "A".to_owned(),
-            }),
-        );
-        assert_eq!(
-            state.environment_editor().unwrap().entries(),
-            edited.as_slice()
-        );
-        assert!(state.environment_editor().unwrap().is_saving());
-
-        // Success refluxes the persisted set and clears the saving state.
-        backend.push_event(BackendEvent::EnvironmentLoaded {
-            scope,
-            entries: edited.clone(),
-            inherited: Vec::new(),
-        });
-        run_fake_cycle(&mut state, &mut backend, saves);
-        assert!(!state.environment_editor().unwrap().is_saving());
-        assert!(state.environment_editor().unwrap().error().is_none());
-
-        // A save failure keeps the values, surfaces a safe error, and clears the
-        // saving state so the edit remains retryable.
-        let retry = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
-        assert_eq!(retry.len(), 1);
-        backend.push_event(BackendEvent::EnvironmentError {
-            scope,
-            error: SafeError {
-                message: SafeMessage::new("Could not save environment"),
-                error_id: "safe-env-retry".to_owned(),
-            },
-        });
-        run_fake_cycle(&mut state, &mut backend, retry);
-        assert!(!state.environment_editor().unwrap().is_saving());
-        assert_eq!(
-            state.environment_editor().unwrap().entries(),
-            edited.as_slice()
-        );
-        assert_eq!(
-            state
-                .environment_editor()
-                .unwrap()
-                .error()
-                .unwrap()
-                .message
-                .as_str(),
-            "Could not save environment"
-        );
-        // After a failure the retry is allowed again.
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).len(),
-            1
-        );
     }
 
     #[test]
@@ -7838,144 +7794,49 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn environment_draft_upserts_removes_saves_and_switches_scope() {
+    fn overview_global_env_uses_ctrl_s_source_save_and_ignores_tab() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
-        let mut backend = FakeBackend::default();
-
-        let effects = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
-        backend.push_event(BackendEvent::EnvironmentLoaded {
-            scope: EnvScope::Workspace,
-            entries: vec![entry("KEEP", "1")],
-            inherited: vec![entry("GLOBAL", "g")],
-        });
-        run_fake_cycle(&mut state, &mut backend, effects);
-
-        // Typing builds the `NAME=value` line; committing it upserts a binding.
-        for character in "RUST_LOG=debug".chars() {
-            let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
-        }
-        assert_eq!(
-            state.environment_editor().unwrap().draft(),
-            "RUST_LOG=debug"
-        );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
-        assert_eq!(state.environment_editor().unwrap().draft(), "RUST_LOG=debu");
-        let _ = update(&mut state, AppEvent::Key(AppKey::Char('g')));
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-        assert_eq!(
-            state.environment_editor().unwrap().entries(),
-            [entry("KEEP", "1"), entry("RUST_LOG", "debug")].as_slice()
-        );
-        assert!(state.environment_editor().unwrap().draft().is_empty());
-
-        // A line without `=`, and one with an unusable name, keep the draft and
-        // explain the problem instead of storing anything.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         let _ = update(
             &mut state,
-            AppEvent::Key(AppKey::SetEnvironmentDraft("RUST_LOG".to_owned())),
-        );
-        assert!(update(&mut state, AppEvent::Key(AppKey::CommitEnvironmentDraft)).is_empty());
-        assert_eq!(state.environment_editor().unwrap().draft(), "RUST_LOG");
-        assert_eq!(
-            state
-                .environment_editor()
-                .unwrap()
-                .error()
-                .unwrap()
-                .error_id,
-            "environment-invalid-binding"
+            AppEvent::Key(AppKey::SubmitOverview("env global".to_owned())),
         );
         let _ = update(
             &mut state,
-            AppEvent::Key(AppKey::SetEnvironmentDraft("1BAD=x".to_owned())),
-        );
-        let _ = update(&mut state, AppEvent::Key(AppKey::CommitEnvironmentDraft));
-        assert_eq!(
-            state
-                .environment_editor()
-                .unwrap()
-                .error()
-                .unwrap()
-                .error_id,
-            "environment-invalid-name"
+            AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                scope: EnvScope::Global,
+                entries: vec![entry("TOKEN", "secret")],
+                inherited: Vec::new(),
+            }),
         );
 
-        // An empty value removes the binding.
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::SetEnvironmentDraft("KEEP=".to_owned())),
-        );
-        let _ = update(&mut state, AppEvent::Key(AppKey::CommitEnvironmentDraft));
+        assert_eq!(state.environment_editor().unwrap().draft(), "TOKEN=secret");
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert!(!state.environment_editor().unwrap().is_save_focused());
         assert_eq!(
-            state.environment_editor().unwrap().entries(),
-            [entry("RUST_LOG", "debug")].as_slice()
-        );
-
-        // An empty draft commits the scope through its owner.
-        let saves = update(&mut state, AppEvent::Key(AppKey::CommitEnvironmentDraft));
-        assert_eq!(
-            saves,
+            update(&mut state, AppEvent::Key(AppKey::SaveRoles)),
             vec![Effect::SaveEnvironment {
-                scope: EnvScope::Workspace,
-                entries: vec![entry("RUST_LOG", "debug")],
+                scope: EnvScope::Global,
+                entries: vec![entry("TOKEN", "secret")],
             }]
         );
-        assert!(state.environment_editor().unwrap().is_saving());
-        // While saving, nothing else is accepted — including a scope switch.
-        assert!(update(&mut state, AppEvent::Key(AppKey::ToggleEnvironmentScope)).is_empty());
-        assert!(update(&mut state, AppEvent::Key(AppKey::CommitEnvironmentDraft)).is_empty());
-        backend.push_event(BackendEvent::EnvironmentLoaded {
-            scope: EnvScope::Workspace,
-            entries: vec![entry("RUST_LOG", "debug")],
-            inherited: vec![entry("GLOBAL", "g")],
-        });
-        run_fake_cycle(&mut state, &mut backend, saves);
-
-        // Switching scope reloads the other scope, which inherits nothing.
-        let switched = update(&mut state, AppEvent::Key(AppKey::ToggleEnvironmentScope));
-        assert_eq!(
-            switched,
-            vec![Effect::LoadEnvironment {
-                scope: EnvScope::Global
-            }]
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentSaved {
+                scope: EnvScope::Global,
+                entries: vec![entry("TOKEN", "secret")],
+                inherited: Vec::new(),
+            }),
         );
-        assert_eq!(
-            state.environment_editor().unwrap().scope(),
-            EnvScope::Global
-        );
-        assert!(state.environment_editor().unwrap().is_loading());
-        backend.push_event(BackendEvent::EnvironmentLoaded {
-            scope: EnvScope::Global,
-            entries: vec![entry("GLOBAL", "g")],
-            inherited: Vec::new(),
-        });
-        run_fake_cycle(&mut state, &mut backend, switched);
-        assert!(state.environment_editor().unwrap().inherited().is_empty());
-        // And back again — `Tab` is the same request as the explicit key.
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Tab)),
-            vec![Effect::LoadEnvironment {
-                scope: EnvScope::Workspace
-            }]
-        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.environment_editor().is_none());
     }
 
     #[test]
     fn environment_keys_are_inert_without_an_open_editor() {
         let (workspace, session, _) = ids();
-        let environment_keys = || {
-            [
-                AppKey::SetEnvironmentDraft("A=1".to_owned()),
-                AppKey::CommitEnvironmentDraft,
-                AppKey::ToggleEnvironmentScope,
-                AppKey::SaveEnvironment,
-                AppKey::RemoveEnvironment {
-                    name: "A".to_owned(),
-                },
-            ]
-        };
+        let environment_keys = || [AppKey::SaveEnvironment];
 
         // With no overlay at all.
         let mut state = AppState::home(workspace, Vec::new());
@@ -8080,10 +7941,8 @@ mod tests {
         let mut environment = AppState::home(workspace, vec![session]);
         let _ = update(&mut environment, AppEvent::Key(AppKey::OpenEnvironment));
         environment.environment_editor.as_mut().unwrap().loading = false;
-        let _ = update(
-            &mut environment,
-            AppEvent::Key(AppKey::SetEnvironmentDraft("TOKEN=".to_owned())),
-        );
+        let editor = environment.environment_editor.as_mut().unwrap();
+        editor.source.replace("TOKEN=");
         let _ = update(
             &mut environment,
             AppEvent::Key(AppKey::Paste("long-value".to_owned())),
@@ -8473,7 +8332,6 @@ mod tests {
         assert_eq!(preview.target(), root);
         let environment = EnvironmentEditor::loading(EnvScope::Global);
         assert_eq!(environment.scope(), EnvScope::Global);
-        assert!(environment.inherited().is_empty());
 
         assert_eq!(PendingToken::from_raw(7).get(), 7);
         let entry_workspace = EntryWorkspace::new(workspace, "repo");
@@ -8808,21 +8666,11 @@ mod tests {
         state.environment_editor = Some(EnvironmentEditor {
             scope: EnvScope::Workspace,
             entries: Vec::new(),
-            inherited: Vec::new(),
-            draft: String::new(),
+            source: EnvironmentSourceEditor::default(),
             loading: false,
             saving: false,
-            locked: false,
             error: None,
         });
-        let _ = update_editor_key(
-            &mut state,
-            &AppKey::SetEnvironment {
-                name: String::new(),
-                value: "ignored".into(),
-            },
-        );
-
         state.overlay = Some(Overlay::Overview);
         let _ = submit_overview(&mut state, "session create created");
         state.overlay = Some(Overlay::Overview);

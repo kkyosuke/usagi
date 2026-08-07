@@ -522,11 +522,19 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         entries: Vec<EnvironmentEntry>,
         completions: Completions,
     ) {
-        completions.emit(
-            usagi_tui::usecase::application::controller::AppEvent::Backend(
-                EnvironmentStorePort::save(&mut self.environment, scope, entries),
-            ),
-        );
+        let event = match EnvironmentStorePort::save(&mut self.environment, scope, entries) {
+            BackendEvent::EnvironmentLoaded {
+                scope,
+                entries,
+                inherited,
+            } => BackendEvent::EnvironmentSaved {
+                scope,
+                entries,
+                inherited,
+            },
+            event => event,
+        };
+        completions.emit(AppEvent::Backend(event));
     }
 }
 
@@ -4276,8 +4284,9 @@ mod tests {
     };
     use usagi_tui::usecase::application::Key;
     use usagi_tui::usecase::application::controller::{
-        BackendEvent, Effect, EntryEvent, EntryState, EntryWorkspace, EnvironmentEntry, NewEvent,
-        NewForm, NewMode, NewRequest, NewState, Notice, Target, update_entry, update_new,
+        AppState, BackendEvent, Effect, EntryEvent, EntryState, EntryWorkspace, EnvironmentEntry,
+        NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, Target, update,
+        update_entry, update_new,
     };
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers, PointerEvent, PointerKind,
@@ -7666,6 +7675,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn production_backend_factory_preserves_terminal_arguments_and_completes_store_routes() {
         let temporary = tempfile::tempdir().unwrap();
         let workspace_id = WorkspaceId::new();
@@ -7691,7 +7701,7 @@ mod tests {
                 ..Default::default()
             },
             workspace_id,
-            session_ids,
+            session_ids.clone(),
         );
         let (host, actions) = ControllerHost::channel();
         let mut factory = ProductionBackendFactory::default();
@@ -7733,6 +7743,57 @@ mod tests {
                 )
             ]
         ));
+
+        composition.backend.dispatch(Effect::SaveEnvironment {
+            scope: EnvScope::Workspace,
+            entries: vec![EnvironmentEntry {
+                name: "RUST_LOG".to_owned(),
+                value: "debug".to_owned(),
+            }],
+        });
+        assert!(matches!(
+            composition.backend.drain_events().as_slice(),
+            [usagi_tui::usecase::application::controller::AppEvent::Backend(
+                BackendEvent::EnvironmentSaved {
+                    scope: EnvScope::Workspace,
+                    entries,
+                    ..
+                }
+            )] if entries == &vec![EnvironmentEntry {
+                name: "RUST_LOG".to_owned(),
+                value: "debug".to_owned(),
+            }]
+        ));
+
+        // Exercise the real Closeup path end to end: command -> load completion
+        // -> Ctrl-S save effect -> production store completion -> modal close.
+        let mut state = AppState::home(workspace_id, session_ids.clone());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        for effect in update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("env".to_owned())),
+        ) {
+            composition.backend.dispatch(effect);
+        }
+        for event in composition.backend.drain_events() {
+            let _ = update(&mut state, event);
+        }
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        for effect in update(&mut state, AppEvent::Key(AppKey::SaveRoles)) {
+            composition.backend.dispatch(effect);
+        }
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        let completions = composition.backend.drain_events();
+        assert!(matches!(
+            completions.as_slice(),
+            [AppEvent::Backend(BackendEvent::EnvironmentSaved { .. })]
+        ));
+        for event in completions {
+            let _ = update(&mut state, event);
+        }
+        assert_eq!(state.overlay(), None);
+        assert!(state.environment_editor().is_none());
     }
 
     #[test]

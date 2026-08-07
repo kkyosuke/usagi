@@ -17,6 +17,8 @@ const INFO_256: u8 = 75;
 /// `feature` 役割（マスコット）の ANSI-256 インデックス。うさぎを表すはっきりしたピンク
 /// （`#ff87af` 相当）。16 色の magenta より柔らかく、ピンクとして読める。
 const FEATURE_PINK_256: u8 = 211;
+/// Editable textarea surfaces use a quiet dark background distinct from the modal body.
+const EDITOR_SURFACE_256: u8 = 236;
 
 /// 端末色。ANSI 16 色の名前付き色と、256 色キューブのインデックスを表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,20 @@ impl Color {
             Color::Ansi256(n) => format!("38;5;{n}"),
         }
     }
+
+    /// この色を背景に選ぶ SGR パラメータ。
+    #[must_use]
+    fn bg_params(self) -> String {
+        match self {
+            Color::White => "47".to_string(),
+            Color::Cyan => "46".to_string(),
+            Color::Green => "42".to_string(),
+            Color::Red => "41".to_string(),
+            Color::Yellow => "43".to_string(),
+            Color::Magenta => "45".to_string(),
+            Color::Ansi256(n) => format!("48;5;{n}"),
+        }
+    }
 }
 
 /// 文字装飾のビットマスク。SGR パラメータ（bold=1 / dim=2 / italic=3 / underline=4 /
@@ -64,11 +80,12 @@ const ATTRS: [(u8, &str); 5] = [
     (1 << 4, "7"),
 ];
 
-/// 前景色と文字装飾の組。色そのものは [`Color`]、色でない属性（bold / dim / italic /
-/// underline / reverse）はビットマスクで持つ。[`Style::paint`] でテキストを SGR で包む。
+/// 前景色・背景色と文字装飾の組。色そのものは [`Color`]、色でない属性（bold / dim /
+/// italic / underline / reverse）はビットマスクで持つ。[`Style::paint`] でテキストを SGR で包む。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Style {
     fg: Option<Color>,
+    bg: Option<Color>,
     /// [`ATTRS`] のビットの論理和。
     attrs: u8,
 }
@@ -84,6 +101,13 @@ impl Style {
     #[must_use]
     pub fn fg(mut self, color: Color) -> Self {
         self.fg = Some(color);
+        self
+    }
+
+    /// 背景色を設定する。
+    #[must_use]
+    pub fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
         self
     }
 
@@ -135,11 +159,22 @@ impl Style {
         if let Some(color) = self.fg {
             params.push(color.fg_params());
         }
+        if let Some(color) = self.bg {
+            params.push(color.bg_params());
+        }
         if params.is_empty() {
             return text.to_string();
         }
         format!("\u{1b}[{}m{text}\u{1b}[0m", params.join(";"))
     }
+}
+
+/// Shared style for editable textarea and environment-input surfaces.
+#[must_use]
+pub fn editor_surface_style() -> Style {
+    Style::new()
+        .fg(Color::White)
+        .bg(Color::Ansi256(EDITOR_SURFACE_256))
 }
 
 /// ANSI パレット上に写した意味的な色役割。UI は役割で色を要求し、[`Role::color`] /
@@ -206,6 +241,38 @@ mod tests {
         assert_eq!(
             Style::new().fg(Color::Magenta).bold().paint("x"),
             "\u{1b}[1;35mx\u{1b}[0m"
+        );
+    }
+
+    #[test]
+    fn paint_supports_a_background_colour() {
+        assert_eq!(
+            Style::new()
+                .fg(Color::White)
+                .bg(Color::Ansi256(236))
+                .paint(" field "),
+            "\u{1b}[37;48;5;236m field \u{1b}[0m"
+        );
+        for (color, code) in [
+            (Color::White, 47),
+            (Color::Cyan, 46),
+            (Color::Green, 42),
+            (Color::Red, 41),
+            (Color::Yellow, 43),
+            (Color::Magenta, 45),
+        ] {
+            assert_eq!(
+                Style::new().bg(color).paint("x"),
+                format!("\u{1b}[{code}mx\u{1b}[0m")
+            );
+        }
+    }
+
+    #[test]
+    fn editor_surface_has_a_distinct_background() {
+        assert_eq!(
+            super::editor_surface_style().paint(" field "),
+            "\u{1b}[37;48;5;236m field \u{1b}[0m"
         );
     }
 

@@ -166,7 +166,8 @@ pub trait AgentPort {
 ///
 /// Reads and writes return through [`Completions`] as the matching
 /// `BackendEvent` (`NotesLoaded` / `NotesError` / `EnvironmentLoaded` /
-/// `EnvironmentError`), so a save failure never discards the editor's values.
+/// `EnvironmentSaved` / `EnvironmentError`), so a save failure never discards
+/// the editor's values and a save success is distinct from an initial read.
 /// A scratchpad belongs to one target (workspace root or session); an
 /// environment belongs to one [`EnvScope`] (this workspace, or every workspace).
 pub trait TargetStorePort {
