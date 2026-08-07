@@ -148,7 +148,8 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
             &configured.bindings,
             &self.resolver,
             configured.service_account_token.as_deref(),
-        )?;
+        )
+        .expect("removing one binding preserves the validated env limits");
         for failure in &resolved.failures {
             ErrorLog::record(&format!(
                 "could not resolve environment variable {} from {}: {}",
@@ -321,6 +322,10 @@ mod tests {
 
     #[test]
     fn service_account_token_authenticates_op_only_and_workspace_overrides_global() {
+        let direct = CountingResolver::new();
+        assert_eq!(direct.read("literal"), Ok("secret:literal".to_owned()));
+        assert_eq!(direct.service_account_tokens(), [None]);
+
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         write_global(

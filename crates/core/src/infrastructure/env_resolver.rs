@@ -571,10 +571,11 @@ mod tests {
             .and_then(|value| value.to_str());
         assert_eq!(configured, Some("service-token"));
 
-        assert!(
+        assert_eq!(
             op_read_command("op://Private/GitHub/token", None)
                 .get_envs()
-                .all(|(name, _)| name != "OP_SERVICE_ACCOUNT_TOKEN")
+                .count(),
+            0
         );
     }
 
