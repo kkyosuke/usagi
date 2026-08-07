@@ -7221,6 +7221,8 @@ mod tests {
         );
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
         assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Down)).is_empty());
     }
 
     #[test]
