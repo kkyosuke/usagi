@@ -1995,17 +1995,26 @@ fn home_row_lines_at(
         // their resets cannot make the relative time bright. The cursor row
         // keeps its established marker emphasis. Column widths still reuse the
         // shared `sidebar_metadata` so both render paths align identically.
+        let inactive = home.mode == HomeMode::Switch && !selected;
+        // Keep the descriptive prefix subdued, but end that span before the
+        // selected session's Git cells so they do not inherit dim intensity.
+        // Inactive Switch rows are dimmed as a whole below.
+        let metadata = if inactive {
+            metadata
+        } else {
+            Style::new().dim().paint(&metadata)
+        };
         let metadata = sidebar_metadata(
             metadata,
             home.git_diffs.get(&session.id),
             columns,
             width,
-            true,
+            inactive,
         );
-        let metadata = if home.mode == HomeMode::Switch && !selected {
+        let metadata = if inactive {
             widgets::dim_ansi(&metadata)
         } else {
-            Style::new().dim().paint(&metadata)
+            metadata
         };
         vec![first, widgets::pad_to_width(&metadata, width)]
     } else {
@@ -3761,6 +3770,43 @@ mod tests {
         assert!(metadata.contains("\u{1b}[2;32m+ 3"));
         assert!(metadata.contains("\u{1b}[2;31m- 4"));
         assert!(!metadata.contains("\u{1b}[0m now"));
+    }
+
+    #[test]
+    fn switch_keeps_selected_session_git_status_bright() {
+        let workspace = WorkspaceId::new();
+        let selected = SessionId::new();
+        let state = AppState::home(workspace, vec![selected]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[projected_session(selected, "selected", "/work/selected")],
+        )
+        .with_git_diffs(&BTreeMap::from([(
+            selected,
+            GitDiff {
+                base: "origin/main".to_owned(),
+                ahead: 1,
+                behind: 2,
+                added: 3,
+                removed: 4,
+            },
+        )]));
+
+        let metadata = render_home(30, 100, &home)
+            .into_iter()
+            .find(|line| line.contains("↑1"))
+            .expect("selected session metadata row");
+
+        assert!(metadata.contains("\u{1b}[36m↑1"));
+        assert!(metadata.contains("\u{1b}[35m↓2"));
+        assert!(metadata.contains("\u{1b}[32m+ 3"));
+        assert!(metadata.contains("\u{1b}[31m- 4"));
+        assert!(!metadata.contains("\u{1b}[2;36m↑1"));
+        assert!(!metadata.contains("\u{1b}[2;35m↓2"));
+        assert!(!metadata.contains("\u{1b}[2;32m+ 3"));
+        assert!(!metadata.contains("\u{1b}[2;31m- 4"));
     }
 
     #[test]
