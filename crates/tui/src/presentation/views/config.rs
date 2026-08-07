@@ -3,14 +3,14 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, EnvBindings, ModalSelectionMode, Settings, Theme, format_env_bindings,
-    validate_env_limits,
+    DefaultModel, ModalSelectionMode, Settings, Theme, format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style, editor_surface_style};
-use crate::presentation::widgets::{self, TextInput, modal, select};
+use crate::presentation::widgets::{self, modal, select};
+use crate::usecase::application::environment_source::EnvironmentSourceEditor;
 
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
@@ -92,16 +92,8 @@ pub struct Config {
     notice: Option<String>,
     save_phase: SavePhase,
     save_animation_frame: usize,
-    environment_editor: Option<ConfigEnvironmentEditor>,
-}
-
-/// Environment textarea opened from the Config screen for exactly one scope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ConfigEnvironmentEditor {
-    scope: SettingsScope,
-    input: TextInput,
-    error: Option<String>,
-    save_focused: bool,
+    environment_editor: Option<EnvironmentSourceEditor>,
+    environment_error: Option<String>,
 }
 
 impl Config {
@@ -148,6 +140,7 @@ impl Config {
             save_phase: SavePhase::Idle,
             save_animation_frame: 0,
             environment_editor: None,
+            environment_error: None,
         }
     }
 
@@ -322,12 +315,10 @@ impl Config {
         }
         match port.read(self.scope) {
             Ok(settings) => {
-                self.environment_editor = Some(ConfigEnvironmentEditor {
-                    scope: self.scope,
-                    input: TextInput::with_value(format_env_bindings(&settings.env)),
-                    error: None,
-                    save_focused: false,
-                });
+                self.environment_editor = Some(EnvironmentSourceEditor::new(format_env_bindings(
+                    &settings.env,
+                )));
+                self.environment_error = None;
                 self.notice = None;
             }
             Err(error) => self.notice = Some(format!("Load failed: {error}")),
@@ -337,36 +328,33 @@ impl Config {
 
     /// Insert text at the textarea caret.
     pub fn type_environment(&mut self, text: &str) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| !editor.save_focused)
-        {
-            editor.input.insert_str(text);
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.insert(text);
+            self.environment_error = None;
         }
     }
 
     /// Paste text into the textarea, preserving line breaks.
     pub fn paste_environment(&mut self, text: &str) {
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.type_environment(&normalized);
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.paste(text);
+            self.environment_error = None;
+        }
     }
 
     /// Insert a newline into the focused textarea.
     pub fn newline_environment(&mut self) {
-        self.type_environment("\n");
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.newline();
+            self.environment_error = None;
+        }
     }
 
     /// Move focus between the textarea and its Save action.
     pub fn toggle_environment_focus(&mut self) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| editor.scope == SettingsScope::Workspace)
-        {
-            editor.save_focused = !editor.save_focused;
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.toggle_save_focus(self.scope == SettingsScope::Workspace);
+            self.environment_error = None;
         }
     }
 
@@ -375,62 +363,38 @@ impl Config {
     pub fn is_environment_save_focused(&self) -> bool {
         self.environment_editor
             .as_ref()
-            .is_some_and(|editor| editor.save_focused)
+            .is_some_and(EnvironmentSourceEditor::is_save_focused)
     }
 
     /// Delete the final character from the focused environment input.
     pub fn backspace_environment(&mut self) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| !editor.save_focused)
-        {
-            editor.input.backspace();
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.backspace();
+            self.environment_error = None;
         }
     }
 
     /// Delete the character at the textarea caret.
     pub fn delete_environment(&mut self) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| !editor.save_focused)
-        {
-            editor.input.delete_forward();
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.delete_forward();
+            self.environment_error = None;
         }
     }
 
     /// Move the textarea caret horizontally.
     pub fn move_environment(&mut self, forward: bool) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| !editor.save_focused)
-        {
-            if forward {
-                editor.input.move_right();
-            } else {
-                editor.input.move_left();
-            }
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.move_cursor(forward);
+            self.environment_error = None;
         }
     }
 
     /// Move the textarea caret to the beginning or end of the buffer.
     pub fn move_environment_edge(&mut self, end: bool) {
-        if let Some(editor) = self
-            .environment_editor
-            .as_mut()
-            .filter(|editor| !editor.save_focused)
-        {
-            if end {
-                editor.input.move_end();
-            } else {
-                editor.input.move_home();
-            }
-            editor.error = None;
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.move_edge(end);
+            self.environment_error = None;
         }
     }
 
@@ -439,13 +403,11 @@ impl Config {
         let Some(editor) = self.environment_editor.as_ref() else {
             return false;
         };
-        let scope = editor.scope;
-        let bindings = match parse_environment_text(editor.input.value()) {
+        let scope = self.scope;
+        let bindings = match editor.parse() {
             Ok(bindings) => bindings,
             Err(error) => {
-                if let Some(editor) = self.environment_editor.as_mut() {
-                    editor.error = Some(error);
-                }
+                self.environment_error = Some(error);
                 return false;
             }
         };
@@ -458,9 +420,7 @@ impl Config {
                 true
             }
             Err(error) => {
-                if let Some(editor) = self.environment_editor.as_mut() {
-                    editor.error = Some(format!("Save failed: {error}"));
-                }
+                self.environment_error = Some(format!("Save failed: {error}"));
                 false
             }
         }
@@ -469,6 +429,7 @@ impl Config {
     /// Discard the environment modal's unsaved draft.
     pub fn cancel_environment(&mut self) {
         self.environment_editor = None;
+        self.environment_error = None;
     }
 
     /// Returns whether the focused row is the enabled Save action.
@@ -548,33 +509,6 @@ impl Config {
     }
 }
 
-fn parse_environment_text(text: &str) -> Result<EnvBindings, String> {
-    let mut bindings = EnvBindings::new();
-    for (index, raw_line) in text.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((name, value)) = line.split_once('=') else {
-            return Err(format!("line {}: expected NAME=value", index + 1));
-        };
-        let name = name.trim();
-        let value = value.trim();
-        if !usagi_core::domain::settings::is_valid_env_name(name) {
-            return Err(format!("line {}: invalid variable name", index + 1));
-        }
-        if value.is_empty() {
-            return Err(format!("line {}: remove the line to unset it", index + 1));
-        }
-        if value.contains('\0') {
-            return Err(format!("line {}: values cannot contain NUL", index + 1));
-        }
-        bindings.insert(name.to_owned(), value.to_owned());
-    }
-    validate_env_limits(&bindings).map_err(|error| error.to_string())?;
-    Ok(bindings)
-}
-
 fn read_scope(port: &mut dyn SettingsPort, scope: SettingsScope) -> (Settings, Option<String>) {
     match port.read(scope) {
         Ok(settings) => (settings, None),
@@ -592,7 +526,7 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             .collect()
     });
     match config.environment_editor.as_ref() {
-        Some(editor) => render_environment_over(raw_height, raw_width, &base, editor),
+        Some(editor) => render_environment_over(raw_height, raw_width, &base, config, editor),
         None => base,
     }
 }
@@ -625,7 +559,9 @@ pub fn render_over(
         lines,
     );
     match config.environment_editor.as_ref() {
-        Some(editor) => render_environment_over(raw_height, raw_width, &config_base, editor),
+        Some(editor) => {
+            render_environment_over(raw_height, raw_width, &config_base, config, editor)
+        }
         None => config_base,
     }
 }
@@ -684,19 +620,20 @@ fn render_environment_over(
     height: usize,
     width: usize,
     base: &[String],
-    editor: &ConfigEnvironmentEditor,
+    config: &Config,
+    editor: &EnvironmentSourceEditor,
 ) -> Vec<String> {
     render_environment_source_over(
         height,
         width,
         base,
         EnvironmentSource {
-            scope: editor.scope,
-            value: editor.input.value(),
-            cursor: editor.input.cursor(),
-            error: editor.error.as_deref(),
-            save_focused: editor.save_focused,
-            ctrl_s_save: editor.scope == SettingsScope::Global,
+            scope: config.scope,
+            value: editor.value(),
+            cursor: editor.cursor(),
+            error: config.environment_error.as_deref(),
+            save_focused: editor.is_save_focused(),
+            ctrl_s_save: config.scope == SettingsScope::Global,
         },
     )
 }
@@ -914,11 +851,13 @@ fn enabled_name(enabled: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AvailableAgentModels, Config, ConfigEnvironmentEditor, ENVIRONMENT_MAX_ROWS,
-        ENVIRONMENT_TEXTAREA_WIDTH, Field, environment_textarea, parse_environment_text, render,
-        render_over,
+        AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, ENVIRONMENT_TEXTAREA_WIDTH, Field,
+        environment_textarea, render, render_over,
     };
-    use crate::presentation::widgets::{TextInput, display_width, modal, strip_ansi};
+    use crate::presentation::widgets::{display_width, modal, strip_ansi};
+    use crate::usecase::application::environment_source::{
+        EnvironmentSourceEditor, parse_environment_source,
+    };
     use std::io;
     use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -976,7 +915,7 @@ mod tests {
 
     #[test]
     fn environment_text_parser_normalizes_blank_and_duplicate_lines() {
-        let bindings = parse_environment_text("\n A = first \nA=last\nB=two\n").unwrap();
+        let bindings = parse_environment_source("\n A = first \nA=last\nB=two\n").unwrap();
         assert_eq!(bindings["A"], "last");
         assert_eq!(bindings["B"], "two");
 
@@ -985,7 +924,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            parse_environment_text(&over_limit)
+            parse_environment_source(&over_limit)
                 .unwrap_err()
                 .contains("binding limit")
         );
@@ -1082,17 +1021,9 @@ mod tests {
     #[test]
     fn focused_environment_rows_keep_the_textarea_background_width() {
         for value in ["", "A=1"] {
-            let editor = ConfigEnvironmentEditor {
-                scope: SettingsScope::Global,
-                input: TextInput::with_value(value.to_owned()),
-                error: None,
-                save_focused: false,
-            };
-            let rows = environment_textarea(
-                editor.input.value(),
-                editor.input.cursor(),
-                editor.save_focused,
-            );
+            let editor = EnvironmentSourceEditor::new(value.to_owned());
+            let rows =
+                environment_textarea(editor.value(), editor.cursor(), editor.is_save_focused());
             assert_eq!(
                 display_width(&rows[0]),
                 ENVIRONMENT_TEXTAREA_WIDTH + modal::BODY_INDENT_WIDTH

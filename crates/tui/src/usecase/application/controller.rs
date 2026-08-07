@@ -17,13 +17,13 @@ use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_core::domain::settings::{
-    AvailableModels, DefaultModel, EnvBindings, format_env_bindings, is_valid_env_name,
-    validate_env_limits,
+    AvailableModels, DefaultModel, EnvBindings, format_env_bindings,
 };
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
+use crate::usecase::application::environment_source::EnvironmentSourceEditor;
 use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
 use crate::usecase::{agent_command, closeup, overview};
 
@@ -415,23 +415,13 @@ pub struct EnvironmentEntry {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnvironmentEditorFocus {
-    Source,
-    Save,
-}
-
 /// Environment editor state for one settings scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentEditor {
     scope: EnvScope,
     entries: Vec<EnvironmentEntry>,
-    /// Complete `NAME=value` source for this scope.
-    draft: String,
-    /// Byte cursor used by the Config-style multiline source editor.
-    cursor: usize,
-    /// Config-style source editor focus.
-    focus: EnvironmentEditorFocus,
+    /// Shared Config/Home multiline source editing state.
+    source: EnvironmentSourceEditor,
     error: Option<SafeError>,
     /// `true` while the initial read is in flight, before any values have
     /// refluxed. Distinguishes "still loading" from "loaded, but empty".
@@ -603,9 +593,7 @@ impl EnvironmentEditor {
         Self {
             scope,
             entries: Vec::new(),
-            draft: String::new(),
-            cursor: 0,
-            focus: EnvironmentEditorFocus::Source,
+            source: EnvironmentSourceEditor::default(),
             error: None,
             loading: true,
             saving: false,
@@ -624,17 +612,17 @@ impl EnvironmentEditor {
     /// The `NAME=value` line being typed.
     #[must_use]
     pub fn draft(&self) -> &str {
-        &self.draft
+        self.source.value()
     }
     /// Byte cursor in the multiline source.
     #[must_use]
     pub const fn cursor(&self) -> usize {
-        self.cursor
+        self.source.cursor()
     }
     /// Whether the multiline editor's Save action owns Enter.
     #[must_use]
     pub const fn is_save_focused(&self) -> bool {
-        matches!(self.focus, EnvironmentEditorFocus::Save)
+        self.source.is_save_focused()
     }
     #[must_use]
     pub fn error(&self) -> Option<&SafeError> {
@@ -655,41 +643,6 @@ impl EnvironmentEditor {
     /// initial read nor a save is in flight).
     fn is_busy(&self) -> bool {
         self.loading || self.saving
-    }
-
-    fn insert_source(&mut self, text: &str) {
-        if self.is_save_focused() {
-            return;
-        }
-        self.draft.insert_str(self.cursor, text);
-        self.cursor += text.len();
-        self.error = None;
-    }
-
-    fn backspace_source(&mut self) {
-        if self.is_save_focused() || self.cursor == 0 {
-            return;
-        }
-        let previous = self.draft[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(index, _)| index);
-        self.draft.drain(previous..self.cursor);
-        self.cursor = previous;
-        self.error = None;
-    }
-
-    fn move_source(&mut self, forward: bool) {
-        if self.is_save_focused() {
-            return;
-        }
-        if forward {
-            if let Some(character) = self.draft[self.cursor..].chars().next() {
-                self.cursor += character.len_utf8();
-            }
-        } else if let Some((index, _)) = self.draft[..self.cursor].char_indices().next_back() {
-            self.cursor = index;
-        }
     }
 }
 
@@ -2950,9 +2903,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     .iter()
                     .map(|entry| (entry.name.clone(), entry.value.clone()))
                     .collect::<EnvBindings>();
-                editor.draft = format_env_bindings(&bindings);
-                editor.cursor = editor.draft.len();
-                editor.focus = EnvironmentEditorFocus::Source;
+                editor.source.replace(format_env_bindings(&bindings));
                 editor.error = None;
                 editor.loading = false;
                 editor.saving = false;
@@ -3738,11 +3689,9 @@ fn update_environment_source_key(
                 if editor.scope == EnvScope::Global {
                     return Some(Vec::new());
                 }
-                editor.focus = if editor.is_save_focused() {
-                    EnvironmentEditorFocus::Source
-                } else {
-                    EnvironmentEditorFocus::Save
-                };
+                editor
+                    .source
+                    .toggle_save_focus(editor.scope != EnvScope::Global);
                 editor.error = None;
             }
             Some(Vec::new())
@@ -3750,25 +3699,29 @@ fn update_environment_source_key(
         AppKey::Enter => Some(enter_environment_source(state, environment_open)),
         AppKey::Char(character) => {
             if let Some(editor) = editable_environment(state, environment_open) {
-                editor.insert_source(&character.to_string());
+                editor.source.insert(&character.to_string());
+                editor.error = None;
             }
             Some(Vec::new())
         }
         AppKey::Backspace => {
             if let Some(editor) = editable_environment(state, environment_open) {
-                editor.backspace_source();
+                editor.source.backspace();
+                editor.error = None;
             }
             Some(Vec::new())
         }
         AppKey::Left | AppKey::Right => {
             if let Some(editor) = editable_environment(state, environment_open) {
-                editor.move_source(matches!(key, AppKey::Right));
+                editor.source.move_cursor(matches!(key, AppKey::Right));
+                editor.error = None;
             }
             Some(Vec::new())
         }
         AppKey::Paste(text) => {
             if let Some(editor) = editable_environment(state, environment_open) {
-                editor.insert_source(&text.replace("\r\n", "\n").replace('\r', "\n"));
+                editor.source.paste(text);
+                editor.error = None;
             }
             Some(Vec::new())
         }
@@ -3792,7 +3745,8 @@ fn enter_environment_source(state: &mut AppState, environment_open: bool) -> Vec
         save_environment_source(state, environment_open)
     } else {
         if let Some(editor) = editable_environment(state, environment_open) {
-            editor.insert_source("\n");
+            editor.source.newline();
+            editor.error = None;
         }
         Vec::new()
     }
@@ -3802,53 +3756,26 @@ fn save_environment_source(state: &mut AppState, environment_open: bool) -> Vec<
     let Some(editor) = editable_environment(state, environment_open) else {
         return Vec::new();
     };
-    let entries = match parse_environment_source(&editor.draft) {
-        Ok(entries) => entries,
+    let bindings = match editor.source.parse() {
+        Ok(bindings) => bindings,
         Err(message) => {
             editor.error = Some(SafeError {
                 message: SafeMessage::new(message),
                 error_id: "environment-invalid-source".to_owned(),
             });
-            editor.focus = EnvironmentEditorFocus::Source;
+            editor.source.focus_source();
             return Vec::new();
         }
     };
-    editor.entries = entries;
+    editor.entries = bindings
+        .into_iter()
+        .map(|(name, value)| EnvironmentEntry { name, value })
+        .collect();
     editor.saving = true;
     vec![Effect::SaveEnvironment {
         scope: editor.scope,
         entries: editor.entries.clone(),
     }]
-}
-
-fn parse_environment_source(source: &str) -> Result<Vec<EnvironmentEntry>, String> {
-    let mut bindings = EnvBindings::new();
-    for (index, raw_line) in source.lines().enumerate() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((name, value)) = line.split_once('=') else {
-            return Err(format!("line {}: expected NAME=value", index + 1));
-        };
-        let name = name.trim();
-        let value = value.trim();
-        if !is_valid_env_name(name) {
-            return Err(format!("line {}: invalid variable name", index + 1));
-        }
-        if value.is_empty() {
-            return Err(format!("line {}: remove the line to unset it", index + 1));
-        }
-        if value.contains('\0') {
-            return Err(format!("line {}: values cannot contain NUL", index + 1));
-        }
-        bindings.insert(name.to_owned(), value.to_owned());
-    }
-    validate_env_limits(&bindings).map_err(|error| error.to_string())?;
-    Ok(bindings
-        .into_iter()
-        .map(|(name, value)| EnvironmentEntry { name, value })
-        .collect())
 }
 
 fn paste_note_draft(state: &mut AppState, text: &str) -> Vec<Effect> {
@@ -3898,11 +3825,6 @@ fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect>
     state.note_editor = None;
     state.environment_editor = Some(EnvironmentEditor::loading(scope));
     vec![Effect::LoadEnvironment { scope }]
-}
-
-/// Open the workspace-only environment editor used by Closeup.
-fn open_closeup_environment(state: &mut AppState) -> Vec<Effect> {
-    open_environment_source(state, EnvScope::Workspace)
 }
 
 fn open_prs(state: &mut AppState) -> Vec<Effect> {
@@ -4271,7 +4193,7 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
 /// Overview rather than any session-specific environment.
 fn submit_closeup_env(state: &mut AppState, arguments: &str) -> Vec<Effect> {
     if arguments.trim().is_empty() {
-        open_closeup_environment(state)
+        open_environment_source(state, EnvScope::Workspace)
     } else {
         state.notice = Some(Notice::new("env takes no arguments (usage: env)"));
         Vec::new()
@@ -4453,6 +4375,7 @@ pub fn run_fake_cycle(state: &mut AppState, backend: &mut impl BackendPort, effe
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
+    use crate::usecase::application::environment_source::parse_environment_source;
 
     #[test]
     fn terminal_arguments_normalize_open_and_reject_untrusted_input() {
@@ -7265,8 +7188,7 @@ mod tests {
         );
 
         let editor = state.environment_editor.as_mut().unwrap();
-        editor.draft = "OK=1".to_owned();
-        editor.cursor = editor.draft.len();
+        editor.source.replace("OK=1");
         editor.error = None;
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)),
@@ -7584,8 +7506,7 @@ mod tests {
         });
         run_fake_cycle(&mut state, &mut backend, effects);
         let editor = state.environment_editor.as_mut().unwrap();
-        editor.draft = "MODE=test".to_owned();
-        editor.cursor = editor.draft.len();
+        editor.source.replace("MODE=test");
         let saves = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
         assert_eq!(
             saves,
@@ -8002,8 +7923,7 @@ mod tests {
         let _ = update(&mut environment, AppEvent::Key(AppKey::OpenEnvironment));
         environment.environment_editor.as_mut().unwrap().loading = false;
         let editor = environment.environment_editor.as_mut().unwrap();
-        editor.draft = "TOKEN=".to_owned();
-        editor.cursor = editor.draft.len();
+        editor.source.replace("TOKEN=");
         let _ = update(
             &mut environment,
             AppEvent::Key(AppKey::Paste("long-value".to_owned())),
@@ -8727,9 +8647,7 @@ mod tests {
         state.environment_editor = Some(EnvironmentEditor {
             scope: EnvScope::Workspace,
             entries: Vec::new(),
-            draft: String::new(),
-            cursor: 0,
-            focus: EnvironmentEditorFocus::Source,
+            source: EnvironmentSourceEditor::default(),
             loading: false,
             saving: false,
             error: None,
