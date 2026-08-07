@@ -354,16 +354,35 @@ fn production_delegate_brief_refuses_before_creating_or_rolls_the_session_back()
             "agent":{"runtime":"codex","model":"uncommitted-model"}
         }),
     );
-    // The claimed MCP child reads the caller worktree's committed config, not
-    // an uncommitted root-worktree edit. It therefore rejects at schema
-    // validation before creating anything.
-    assert_eq!(refused["error"]["code"], -32602);
-    assert!(
-        !mcp.workspace()
-            .join(".usagi/sessions/rollback-target")
-            .exists()
+    // The claimed MCP child reads the trusted workspace root, so its schema
+    // admits the uncommitted model. The created worktree still has only the
+    // committed config; daemon launch admission rejects it and the composite
+    // operation reports that the created session was compensated.
+    assert_eq!(refused["error"]["code"], -32603);
+    assert_eq!(refused["error"]["data"]["side_effect"], "none");
+    assert_eq!(
+        refused["error"]["data"]["details"]["reconcile"],
+        "compensated"
     );
-    assert!(!branches(mcp.workspace()).contains(&"usagi/rollback-target".to_owned()));
+    // Compensation is daemon-owned teardown, so the error can arrive before
+    // its worker has removed the lifecycle row, physical worktree, and branch.
+    wait_until(|| {
+        let list = mcp.tool("session_list", &json!({}));
+        if list.get("error").is_some() {
+            return false;
+        }
+        let lifecycle_absent = !tool_text(&list)["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["name"] == "rollback-target");
+        lifecycle_absent
+            && !mcp
+                .workspace()
+                .join(".usagi/sessions/rollback-target")
+                .exists()
+            && !branches(mcp.workspace()).contains(&"usagi/rollback-target".to_owned())
+    });
     // No launch was queued for the session that never existed.
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
     assert!(!dispatch.contains("must not leave a worktree behind"));
