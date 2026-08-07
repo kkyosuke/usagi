@@ -13586,6 +13586,68 @@ instructions = "{instructions}"
         );
     }
 
+    #[test]
+    fn saved_environment_reaches_terminal_and_agent_with_workspace_precedence() {
+        use usagi_core::domain::settings::{LocalSettings, Settings};
+        use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        Storage::new(data.path().to_path_buf())
+            .save_settings(&Settings {
+                env: BTreeMap::from([
+                    ("GLOBAL_ONLY".to_owned(), "global".to_owned()),
+                    ("SHARED".to_owned(), "global".to_owned()),
+                ]),
+                ..Settings::default()
+            })
+            .unwrap();
+        WorkspaceSettingsStore::new(workspace.path())
+            .save(&LocalSettings {
+                env: BTreeMap::from([
+                    ("SHARED".to_owned(), "workspace".to_owned()),
+                    ("WORKSPACE_ONLY".to_owned(), "workspace".to_owned()),
+                ]),
+                ..LocalSettings::default()
+            })
+            .unwrap();
+
+        let configured = Arc::new(UserEnvironment::new(data.path().to_path_buf(), OpCli));
+        let request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: TerminalLaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: Some(SessionId::new()),
+                worktree_id: WorktreeId::new(),
+            },
+        };
+        let terminal = TrustedLoginShell {
+            profile: LoginShellProfile::new(
+                BTreeMap::from([("SHELL".to_owned(), "/bin/sh".to_owned())]),
+                workspace.path().to_path_buf(),
+            ),
+            environment: Some(Arc::clone(&configured)),
+            workspace_root: workspace.path().to_path_buf(),
+        }
+        .resolve(&request)
+        .unwrap();
+        let terminal_environment = terminal
+            .environment
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(terminal_environment["GLOBAL_ONLY"], "global");
+        assert_eq!(terminal_environment["SHARED"], "workspace");
+        assert_eq!(terminal_environment["WORKSPACE_ONLY"], "workspace");
+
+        let user = configured_environment(Some(&configured), workspace.path()).unwrap();
+        let agent = SpawnProvision::new(launch_environment(&user, Vec::new()), Vec::new())
+            .compose_environment(&BTreeMap::new());
+        assert_eq!(agent["GLOBAL_ONLY"], "global");
+        assert_eq!(agent["SHARED"], "workspace");
+        assert_eq!(agent["WORKSPACE_ONLY"], "workspace");
+    }
+
     fn provision_context(session: Option<SessionId>) -> ProvisionContext {
         ProvisionContext {
             scope: usagi_core::domain::agent::LaunchScope {
