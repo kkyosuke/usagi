@@ -46,10 +46,11 @@ impl From<EnvLimitError> for UserEnvironmentError {
     }
 }
 
-const CLAUDE_LAUNCHER_CONTROL_VARIABLES: [&str; 4] = [
+const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 5] = [
     "PATH",
     "TMPDIR",
     "HOME",
+    "CODEX_HOME",
     usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
 ];
 
@@ -102,7 +103,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         if local
             .env
             .keys()
-            .any(|name| CLAUDE_LAUNCHER_CONTROL_VARIABLES.contains(&name.as_str()))
+            .any(|name| WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&name.as_str()))
         {
             return Err(UserEnvironmentError::ReservedLauncherVariable);
         }
@@ -371,6 +372,7 @@ mod tests {
             ("PATH", "/workspace/fake-bin"),
             ("TMPDIR", "/"),
             ("HOME", "/"),
+            ("CODEX_HOME", "/workspace/.codex"),
             ("USAGI_CLAUDE_SANDBOX_PASSTHROUGH", "1"),
             ("TMPDIR", symlink_value.as_ref()),
         ];

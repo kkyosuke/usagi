@@ -474,9 +474,16 @@ struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
+    /// The executable this profile launches: `codex`, or `codex-fugu` for the
+    /// Codex-compatible `sakana-ai` profile.
+    program: &'static str,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
+    sandbox_backend: Option<PathBuf>,
+    sandbox_tmpdir: Option<PathBuf>,
+    sandbox_home: Option<PathBuf>,
+    sandbox_passthrough: bool,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -516,13 +523,42 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
-            // Codex applies its own `--sandbox read-only` policy to tool processes.
-            // Wrapping the Codex process itself in Seatbelt prevents its startup
-            // arg0 helpers (`~/.codex/tmp/arg0`) from creating symlinks/locks and
-            // prevents Codex from applying its own nested macOS sandbox. Keep the
-            // independent root guard and hardened Git environment, but do not add
-            // the Claude-specific outer launcher to a native-sandbox provider.
+            let sandbox_roots =
+                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
+                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                mode,
+                program: self.program,
+                workspace_root: &workspace_root,
+                launch_roots: &sandbox_roots,
+                tmpdir: self.sandbox_tmpdir.as_deref(),
+                home: self.sandbox_home.as_deref(),
+                backend: self.sandbox_backend.as_deref(),
+                passthrough: self.sandbox_passthrough,
+            })
+            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            let protected_root = workspace_root
+                .canonicalize()
+                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            let launcher = claude_sandbox_launcher(
+                &self.mcp_command,
+                mode,
+                &protected_root,
+                self.sandbox_backend.as_deref(),
+                self.sandbox_tmpdir.as_deref(),
+                self.sandbox_home.as_deref(),
+                &sandbox_roots,
+            )
+            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+            spawn.set_sandbox_launcher(launcher);
             insert_root_git_environment(&mut spawn);
+            if self.sandbox_passthrough {
+                spawn.insert_daemon_environment(
+                    EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                        .expect("literal environment variable name is valid"),
+                    "1".to_owned(),
+                );
+            }
         }
         Ok(CodexProvision {
             working_directory,
@@ -533,7 +569,109 @@ impl CodexProvisioner for RootCodexProvisioner {
 }
 /// The Claude provisioner's product program: what the readiness probe proves,
 /// what the launcher execs, and whose `$HOME` state root the sandbox grants.
+/// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
 const CLAUDE_PROGRAM: &str = "claude";
+
+/// Ensure the launched agent's private state directory exists before a root
+/// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
+/// so the daemon creates and validates the provider-specific directory first.
+fn root_agent_writable_roots(
+    home: Option<&Path>,
+    program: &str,
+) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
+    let (Some(home), Some(state_directory)) =
+        (home, claude_sandbox::agent_state_directory(program))
+    else {
+        return Ok(Vec::new());
+    };
+    validate_owned_directory(home)?;
+    let state = home.join(state_directory);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    match builder.create(&state) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+    }
+    validate_owned_directory(&state)?;
+    state
+        .canonicalize()
+        .map(|state| vec![state])
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
+}
+
+/// Codex's arg0 janitor cannot open the `.lock` inside a directory left with no
+/// owner permissions by an interrupted sandboxed cleanup. Repair only the mode
+/// of owned, provider-named temp directories; Codex still owns lock validation
+/// and deletion, so a live helper is never removed here.
+const CODEX_ARG0_REPAIR_LIMIT: usize = 4_096;
+
+fn repair_codex_arg0_permissions(state_root: &Path) -> std::io::Result<usize> {
+    repair_codex_arg0_permissions_with_limit(state_root, CODEX_ARG0_REPAIR_LIMIT)
+}
+
+fn repair_codex_arg0_permissions_with_limit(
+    state_root: &Path,
+    limit: usize,
+) -> std::io::Result<usize> {
+    #[cfg(not(unix))]
+    {
+        let _ = (state_root, limit);
+        return Ok(0);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let arg0 = state_root.join("tmp/arg0");
+        let metadata = match std::fs::symlink_metadata(&arg0) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let expected_uid = unsafe { libc::geteuid() };
+        if !metadata.file_type().is_dir() || metadata.uid() != expected_uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Codex arg0 root is not an owned directory",
+            ));
+        }
+        if metadata.mode() & 0o700 != 0o700 {
+            std::fs::set_permissions(&arg0, std::fs::Permissions::from_mode(0o700))?;
+        }
+
+        let mut repaired = 0;
+        for (index, entry) in std::fs::read_dir(&arg0)?.enumerate() {
+            if index == limit {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Codex arg0 repair scan limit exceeded",
+                ));
+            }
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !name.starts_with("codex-arg0") {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if !metadata.file_type().is_dir() || metadata.uid() != expected_uid {
+                continue;
+            }
+            if metadata.mode() & 0o700 != 0o700 {
+                std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o700))?;
+                repaired += 1;
+            }
+        }
+        Ok(repaired)
+    }
+}
 
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
@@ -3129,6 +3267,26 @@ fn spawn_decision_maintenance(
         })
 }
 
+fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
+    // Repair only stale directory modes before the Agent owner mutex exists.
+    // Codex performs the lock-aware deletion itself after startup.
+    for program in [
+        DefaultModel::OpenAi.command(),
+        DefaultModel::SakanaAi.command(),
+    ] {
+        if let Ok(roots) = root_agent_writable_roots(sandbox_home, program) {
+            for root in roots {
+                if let Err(error) = repair_codex_arg0_permissions(&root) {
+                    ErrorLog::record(&format!(
+                        "could not repair Codex arg0 temp permissions: {:?}",
+                        error.kind()
+                    ));
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // Composition injects each Agent dependency separately.
 fn open_agent_runtime(
     data_dir: &Path,
@@ -3177,6 +3335,7 @@ fn open_agent_runtime(
             .ok()
             .as_deref(),
     );
+    repair_agent_codex_arg0_permissions(sandbox_home.as_deref());
     // Duplicate registration cannot happen for the two literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
@@ -3185,13 +3344,23 @@ fn open_agent_runtime(
             sessions: Arc::clone(&sessions),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            program: DefaultModel::OpenAi.command(),
             environment: Some(Arc::clone(&environment)),
+            sandbox_backend: sandbox_backend.clone(),
+            sandbox_tmpdir: sandbox_tmpdir.clone(),
+            sandbox_home: sandbox_home.clone(),
+            sandbox_passthrough,
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
+            program: DefaultModel::SakanaAi.command(),
             environment: Some(Arc::clone(&environment)),
+            sandbox_backend: sandbox_backend.clone(),
+            sandbox_tmpdir: sandbox_tmpdir.clone(),
+            sandbox_home: sandbox_home.clone(),
+            sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
@@ -13613,31 +13782,98 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn root_codex_uses_its_native_read_only_sandbox_without_an_outer_launcher() {
+    fn root_codex_uses_the_outer_boundary_without_nesting_the_native_sandbox() {
         let mut spawn = SpawnProvision::new([], Vec::new());
+        spawn.set_sandbox_launcher(SandboxLauncher {
+            program: "/opt/usagi/bin/usagi".to_owned(),
+            prefix: vec!["claude-sandbox".to_owned(), "--".to_owned()],
+        });
         insert_root_git_environment(&mut spawn);
 
-        assert!(spawn.sandbox_launcher().is_none());
+        assert!(spawn.sandbox_launcher().is_some());
         let (program, argv) = provisioned_agent_command(
             "codex",
             &[
                 "--sandbox".to_owned(),
-                "read-only".to_owned(),
+                "danger-full-access".to_owned(),
                 "--ask-for-approval".to_owned(),
                 "never".to_owned(),
             ],
             &spawn,
         );
-        assert_eq!(program, "codex");
+        assert_eq!(program, "/opt/usagi/bin/usagi");
         assert_eq!(
             argv,
-            ["--sandbox", "read-only", "--ask-for-approval", "never"]
+            [
+                "claude-sandbox",
+                "--",
+                "codex",
+                "--sandbox",
+                "danger-full-access",
+                "--ask-for-approval",
+                "never"
+            ]
         );
 
         let environment = spawn.compose_environment(&BTreeMap::new());
         assert_eq!(environment["GIT_CONFIG_NOSYSTEM"], "1");
         assert_eq!(environment["GIT_CONFIG_GLOBAL"], "/dev/null");
         assert_eq!(environment["GIT_OPTIONAL_LOCKS"], "0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_arg0_preflight_repairs_only_owned_provider_temp_directory_modes() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let state = tempfile::tempdir().unwrap();
+        let arg0 = state.path().join("tmp/arg0");
+        let stale_dir = arg0.join("codex-arg0-stale");
+        let unrelated = arg0.join("other-temp");
+        let target = arg0.join("target");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        symlink(&target, arg0.join("codex-arg0-alias")).unwrap();
+        std::fs::set_permissions(&stale_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert_eq!(repair_codex_arg0_permissions(state.path()).unwrap(), 1);
+        assert_eq!(
+            std::fs::symlink_metadata(&stale_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&unrelated)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o000
+        );
+
+        // Let TempDir clean up the intentionally untouched fixture.
+        std::fs::set_permissions(&unrelated, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_arg0_preflight_has_a_hard_scan_bound() {
+        let state = tempfile::tempdir().unwrap();
+        let arg0 = state.path().join("tmp/arg0");
+        std::fs::create_dir_all(arg0.join("codex-arg0-first")).unwrap();
+        std::fs::create_dir(arg0.join("codex-arg0-second")).unwrap();
+
+        assert_eq!(
+            repair_codex_arg0_permissions_with_limit(state.path(), 1)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

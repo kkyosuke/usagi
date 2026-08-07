@@ -1840,7 +1840,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     wait_for_screen_since(&captured, first_baseline, "codex-input:codex-initial");
     let root_codex_argv = fs::read_to_string(&codex_argv).unwrap();
     assert!(
-        root_codex_argv.contains("--sandbox read-only"),
+        root_codex_argv.contains("--sandbox danger-full-access"),
         "{root_codex_argv}"
     );
     assert!(

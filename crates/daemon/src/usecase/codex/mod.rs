@@ -271,11 +271,25 @@ fn render_plan(
     program: &str,
 ) -> Result<LaunchPlan, LaunchValidationError> {
     let root = request.scope.session_id.is_none();
+    // A production root launch is already confined by the daemon-owned outer
+    // sandbox. Ask Codex not to apply a nested platform sandbox, which macOS
+    // Seatbelt and Linux namespaces may reject. If the outer launcher is ever
+    // absent, retain Codex's native read-only fallback.
+    let root_sandbox = if provision.spawn.sandbox_launcher().is_some() {
+        "danger-full-access"
+    } else {
+        "read-only"
+    };
     let mut argv = match (request.mode, root) {
         (LaunchMode::Interactive, _) => vec![
             "--dangerously-bypass-hook-trust".into(),
             "--sandbox".into(),
-            if root { "read-only" } else { "workspace-write" }.into(),
+            if root {
+                root_sandbox
+            } else {
+                "workspace-write"
+            }
+            .into(),
             "--ask-for-approval".into(),
             "never".into(),
         ],
@@ -288,7 +302,7 @@ fn render_plan(
             "approval_policy=\"never\"".into(),
             "exec".into(),
             "--sandbox".into(),
-            "read-only".into(),
+            root_sandbox.into(),
         ],
     };
     if let Some(model) = &request.model {

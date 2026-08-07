@@ -17,7 +17,7 @@ use crate::usecase::{
     generation::ProcessIdentity,
     runtime::{
         AdapterError, AgentAdapter, ProvisionContext, PtySpawner, RuntimeCoordinator, RuntimeStore,
-        RuntimeStoreSnapshot, SpawnProvision,
+        RuntimeStoreSnapshot, SandboxLauncher, SpawnProvision,
     },
     terminal::Geometry,
 };
@@ -50,6 +50,21 @@ impl FakeProvisioner {
             })),
             calls: Vec::new(),
         }
+    }
+
+    fn with_outer_sandbox() -> Self {
+        let mut ready = Self::ready();
+        ready
+            .result
+            .as_mut()
+            .and_then(|result| result.as_mut().ok())
+            .expect("ready provision")
+            .spawn
+            .set_sandbox_launcher(SandboxLauncher {
+                program: "/opt/usagi/bin/usagi".into(),
+                prefix: vec!["claude-sandbox".into(), "--".into()],
+            });
+        ready
     }
 }
 
@@ -128,7 +143,7 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
 }
 
 #[test]
-fn root_scope_never_bypasses_the_read_only_sandbox() {
+fn root_scope_without_an_outer_launcher_falls_back_to_the_native_read_only_sandbox() {
     for mode in [LaunchMode::Interactive, LaunchMode::Headless] {
         let mut request = request(mode);
         request.scope.session_id = None;
@@ -157,6 +172,31 @@ fn root_scope_never_bypasses_the_read_only_sandbox() {
         assert!(!snapshot.plan.argv.iter().any(|argument| {
             argument == "--dangerously-bypass-approvals-and-sandbox"
                 || argument == "workspace-write"
+        }));
+    }
+}
+
+#[test]
+fn root_scope_with_an_outer_launcher_avoids_a_nested_platform_sandbox() {
+    for mode in [LaunchMode::Interactive, LaunchMode::Headless] {
+        let mut request = request(mode);
+        request.scope.session_id = None;
+        let resolved = CodexAdapter::new(FakeProvisioner::with_outer_sandbox())
+            .resolve(&request)
+            .unwrap();
+        assert!(resolved.provision.sandbox_launcher().is_some());
+        assert!(
+            resolved
+                .snapshot
+                .plan
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "danger-full-access"])
+        );
+        assert!(!resolved.snapshot.plan.argv.iter().any(|argument| {
+            argument == "read-only"
+                || argument == "workspace-write"
+                || argument == "--dangerously-bypass-approvals-and-sandbox"
         }));
     }
 }
