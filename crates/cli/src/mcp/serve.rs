@@ -9,7 +9,7 @@
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV;
@@ -20,7 +20,9 @@ use usagi_core::usecase::client::{
 };
 
 use super::protocol::{self, error_code};
-use super::runtime_model::{PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
+use super::runtime_model::{
+    ExecutableLocator, PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
+};
 use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
 use super::tools::ToolAvailability;
 use super::{resources, tools};
@@ -30,6 +32,19 @@ const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Maximum JSON payload accepted from one stdio line, excluding its trailing LF.
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 1024 * 1024;
+
+fn resolve_workspace_root(current_dir: PathBuf, configured_root: Option<PathBuf>) -> PathBuf {
+    configured_root
+        .filter(|root| !root.as_os_str().is_empty())
+        .unwrap_or(current_dir)
+}
+
+fn runtime_model_snapshot(
+    workspace_root: &Path,
+    locator: &dyn ExecutableLocator,
+) -> RuntimeModelSnapshot {
+    RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::read(workspace_root), locator)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServerState {
@@ -79,20 +94,19 @@ pub fn serve_with_client(
     version: &str,
     client: &mut dyn DaemonClient,
 ) -> io::Result<()> {
-    let workspace = std::env::current_dir()?;
-    let settings_root = std::env::var_os(WORKSPACE_ROOT_ENV)
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| workspace.clone(), PathBuf::from);
+    let workspace_root = resolve_workspace_root(
+        std::env::current_dir()?,
+        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
+    );
     let global = Storage::open_default()
         .and_then(|storage| storage.load_settings())
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let local = WorkspaceSettingsStore::new(settings_root)
+    let local = WorkspaceSettingsStore::new(&workspace_root)
         .load()
         .map_err(|error| io::Error::other(error.to_string()))?;
     let availability = ToolAvailability::from(&global.with_local(&local));
     let locator = PathExecutableLocator;
-    let config = WorkspaceAgentConfig::read(&workspace);
-    let snapshot = RuntimeModelSnapshot::capture(&config, &locator);
+    let snapshot = runtime_model_snapshot(&workspace_root, &locator);
     serve_with_client_and_features_and_caller(
         input,
         out,
@@ -119,21 +133,18 @@ pub fn serve_with_client_and_caller(
     client: &mut dyn DaemonClient,
     caller_credential: &str,
 ) -> io::Result<()> {
-    let workspace = std::env::current_dir()?;
-    let settings_root = std::env::var_os(WORKSPACE_ROOT_ENV)
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| workspace.clone(), PathBuf::from);
+    let workspace_root = resolve_workspace_root(
+        std::env::current_dir()?,
+        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
+    );
     let global = Storage::open_default()
         .and_then(|storage| storage.load_settings())
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let local = WorkspaceSettingsStore::new(settings_root)
+    let local = WorkspaceSettingsStore::new(&workspace_root)
         .load()
         .map_err(|error| io::Error::other(error.to_string()))?;
     let availability = ToolAvailability::from(&global.with_local(&local));
-    let snapshot = RuntimeModelSnapshot::capture(
-        &WorkspaceAgentConfig::read(&workspace),
-        &PathExecutableLocator,
-    );
+    let snapshot = runtime_model_snapshot(&workspace_root, &PathExecutableLocator);
     serve_with_client_and_features_and_caller(
         input,
         out,
@@ -772,9 +783,9 @@ mod tests {
     use super::{
         MAX_STDIO_MESSAGE_BYTES, SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState,
         agent_selector_schema, apply_caller_policy, daemon_error_data, execute_tool, handle_line,
-        handle_line_with_client, normalize_caller_credential, read_bounded_line, serve,
-        serve_with_client, serve_with_client_and_features, serve_with_client_and_snapshot,
-        session_tool_response,
+        handle_line_with_client, normalize_caller_credential, read_bounded_line,
+        resolve_workspace_root, runtime_model_snapshot, serve, serve_with_client,
+        serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -783,6 +794,8 @@ mod tests {
     use crate::mcp::tools::{ToolAvailability, registry};
     use serde_json::Value;
     use std::io::{BufReader, Cursor, ErrorKind, Write};
+    use std::path::PathBuf;
+    use tempfile::tempdir;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
@@ -934,6 +947,37 @@ mod tests {
         assert_eq!(v["result"]["serverInfo"]["version"], "9.9.9");
         assert!(v["result"]["capabilities"]["tools"].is_object());
         assert!(v["result"]["capabilities"]["resources"].is_object());
+    }
+
+    #[test]
+    fn runtime_models_are_read_from_the_trusted_workspace_root() {
+        let workspace = tempdir().unwrap();
+        let session_worktree = tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
+        std::fs::write(
+            workspace.path().join(".usagi/config.toml"),
+            "[agents.codex]\nmodels = [\"gpt-5\"]\n",
+        )
+        .unwrap();
+
+        let workspace_root = resolve_workspace_root(
+            session_worktree.path().to_path_buf(),
+            Some(workspace.path().to_path_buf()),
+        );
+        let snapshot = runtime_model_snapshot(&workspace_root, &FakeLocator(&["codex"]));
+        let schema = snapshot.agent_schema();
+        let branches = schema["oneOf"].as_array().unwrap();
+
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[1]["properties"]["runtime"]["const"], "codex");
+        assert_eq!(
+            branches[1]["properties"]["model"]["enum"],
+            serde_json::json!(["gpt-5"])
+        );
+        assert_eq!(
+            resolve_workspace_root(session_worktree.path().to_path_buf(), Some(PathBuf::new())),
+            session_worktree.path()
+        );
     }
 
     #[test]

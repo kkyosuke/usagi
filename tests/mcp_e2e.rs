@@ -291,17 +291,13 @@ printf '%s\n%s\n%s\n' \
     });
 }
 
-/// `session_delegate_brief` is one operation: either the session exists with an
-/// admitted run, or nothing exists.
-///
-/// Both halves of that are exercised here by moving the workspace root's
-/// runtime/model allowlist out from under the MCP server's captured snapshot. A
-/// model the root no longer allows is refused **before** the worktree exists; a
-/// model the root allows but the committed configuration does not can only be
-/// refused **after** it, so that create is rolled back — no session row, no
-/// worktree, no branch, no queued launch — and the name is free again (#611).
+/// Runtime/model policy has one authority across MCP schema publication,
+/// delegate preflight, and dispatch after a managed worktree exists. A stale
+/// MCP snapshot is still revalidated before create, while an uncommitted,
+/// machine-local root allowlist governs both existing and newly delegated
+/// sessions whose worktrees do not contain that policy.
 #[test]
-fn production_delegate_brief_refuses_before_creating_or_rolls_the_session_back() {
+fn production_dispatch_uses_the_trusted_root_before_and_after_session_creation() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();
     let lifecycle_path = mcp.data_dir().join("daemon/sessions.json");
@@ -338,7 +334,8 @@ fn production_delegate_brief_refuses_before_creating_or_rolls_the_session_back()
     assert!(!branches(mcp.workspace()).contains(&"usagi/preflight-target".to_owned()));
 
     // The workspace root now allows a model the committed configuration does
-    // not, so the preflight admits what the created session then refuses.
+    // not. Both MCP schema validation and daemon dispatch must use that root
+    // authority, while the managed session remains the worker's launch cwd.
     fs::write(
         mcp.workspace().join(".usagi/config.toml"),
         "[agents.codex]\nmodels = [\"fixture-codex\", \"uncommitted-model\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n",
@@ -346,50 +343,36 @@ fn production_delegate_brief_refuses_before_creating_or_rolls_the_session_back()
     .unwrap();
     mcp.restart_with_credential(&caller_credential);
 
-    let refused = mcp.tool(
+    let created = mcp.tool("session_create", &json!({"name":"root-policy-target"}));
+    assert!(created.get("error").is_none(), "{created}");
+    let dispatched = mcp.tool(
+        "session_dispatch",
+        &json!({
+            "session":{"name":"root-policy-target"},
+            "agent":{"runtime":"codex","model":"uncommitted-model"},
+            "prompt":"use trusted root policy"
+        }),
+    );
+    assert!(dispatched.get("error").is_none(), "{dispatched}");
+    let admission = tool_text(&dispatched);
+    assert!(admission["run_id"].is_string());
+    assert!(admission["terminal"].is_object());
+
+    let delegated = mcp.tool(
         "session_delegate_brief",
         &json!({
-            "name":"rollback-target",
-            "brief":"must not leave a worktree behind",
+            "name":"root-policy-delegated",
+            "brief":"use trusted root policy after create",
             "agent":{"runtime":"codex","model":"uncommitted-model"}
         }),
     );
-    // The claimed MCP child reads the caller worktree's committed config, not
-    // an uncommitted root-worktree edit. It therefore rejects at schema
-    // validation before creating anything.
-    assert_eq!(refused["error"]["code"], -32602);
-    assert!(
-        !mcp.workspace()
-            .join(".usagi/sessions/rollback-target")
-            .exists()
-    );
-    assert!(!branches(mcp.workspace()).contains(&"usagi/rollback-target".to_owned()));
-    // No launch was queued for the session that never existed.
-    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
-    assert!(!dispatch.contains("must not leave a worktree behind"));
-
-    // The same name delegates cleanly afterwards.
-    mcp.replace_fixture_agent(
-        "codex",
-        r#"#!/bin/sh
-if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
-sleep 30
-"#,
-    );
-    let accepted = mcp.tool(
-        "session_delegate_brief",
-        &json!({
-            "name":"rollback-target",
-            "brief":"retry under the freed name",
-            "agent":{"runtime":"codex","model":"fixture-codex"}
-        }),
-    );
-    let delegated = tool_text(&accepted);
-    assert_eq!(delegated["name"], "rollback-target");
+    assert!(delegated.get("error").is_none(), "{delegated}");
+    let delegated = tool_text(&delegated);
+    assert_eq!(delegated["name"], "root-policy-delegated");
     assert!(delegated["run_id"].is_string());
     assert!(
         mcp.workspace()
-            .join(".usagi/sessions/rollback-target/.git")
+            .join(".usagi/sessions/root-policy-delegated/.git")
             .exists()
     );
 }
