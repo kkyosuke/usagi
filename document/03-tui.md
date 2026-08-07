@@ -362,7 +362,8 @@ CJK、Nerd Font glyph 未対応、極小幅でも後続行の style や列幅を
 
 Switch で cursor ではない session の補足行は、相対時刻・PR・Git summary の意味色を保ったまま dim にする。各
 ANSI span の reset 後にも dim を再適用するため、current marker や Git の色 span が続いても相対時刻だけが明るく
-戻らない。
+戻らない。cursor が指す session の補足行は、相対時刻・PR を dim のまま描く一方、Git summary の意味色を通常輝度で
+描き、選択対象の Git 状態を非アクティブ行と区別する。
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
 選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。`+ new session`
