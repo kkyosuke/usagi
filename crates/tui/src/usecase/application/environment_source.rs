@@ -8,6 +8,8 @@ pub struct EnvironmentSourceEditor {
     value: String,
     cursor: usize,
     save_focused: bool,
+    /// Character column retained while moving through shorter lines.
+    vertical_column: Option<usize>,
 }
 
 impl EnvironmentSourceEditor {
@@ -19,6 +21,7 @@ impl EnvironmentSourceEditor {
             value,
             cursor,
             save_focused: false,
+            vertical_column: None,
         }
     }
 
@@ -41,10 +44,12 @@ impl EnvironmentSourceEditor {
         self.value = value.into();
         self.cursor = self.value.len();
         self.save_focused = false;
+        self.vertical_column = None;
     }
 
     pub fn focus_source(&mut self) {
         self.save_focused = false;
+        self.vertical_column = None;
     }
 
     pub fn toggle_save_focus(&mut self, enabled: bool) {
@@ -59,6 +64,7 @@ impl EnvironmentSourceEditor {
         }
         self.value.insert_str(self.cursor, text);
         self.cursor += text.len();
+        self.vertical_column = None;
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -79,6 +85,7 @@ impl EnvironmentSourceEditor {
             .map_or(0, |(index, _)| index);
         self.value.drain(previous..self.cursor);
         self.cursor = previous;
+        self.vertical_column = None;
     }
 
     pub fn delete_forward(&mut self) {
@@ -90,6 +97,7 @@ impl EnvironmentSourceEditor {
             .next()
             .map_or(self.cursor, |character| self.cursor + character.len_utf8());
         self.value.drain(self.cursor..next);
+        self.vertical_column = None;
     }
 
     pub fn move_cursor(&mut self, forward: bool) {
@@ -103,6 +111,46 @@ impl EnvironmentSourceEditor {
         } else if let Some((index, _)) = self.value[..self.cursor].char_indices().next_back() {
             self.cursor = index;
         }
+        self.vertical_column = None;
+    }
+
+    /// Move to the previous or next source line while retaining the character
+    /// column across shorter intermediate lines.
+    pub fn move_vertical(&mut self, down: bool) {
+        if self.save_focused {
+            return;
+        }
+        let line_start = self.value[..self.cursor]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line_end = self.value[self.cursor..]
+            .find('\n')
+            .map_or(self.value.len(), |offset| self.cursor + offset);
+        let column = self.value[line_start..self.cursor].chars().count();
+        let preferred = self.vertical_column.unwrap_or(column);
+        let target = if down {
+            if line_end == self.value.len() {
+                return;
+            }
+            let start = line_end + 1;
+            let end = self.value[start..]
+                .find('\n')
+                .map_or(self.value.len(), |offset| start + offset);
+            (start, end)
+        } else {
+            if line_start == 0 {
+                return;
+            }
+            let end = line_start - 1;
+            let start = self.value[..end].rfind('\n').map_or(0, |index| index + 1);
+            (start, end)
+        };
+        self.cursor = target.0
+            + self.value[target.0..target.1]
+                .char_indices()
+                .nth(preferred)
+                .map_or(target.1 - target.0, |(index, _)| index);
+        self.vertical_column = Some(preferred);
     }
 
     pub fn move_edge(&mut self, end: bool) {
@@ -110,6 +158,7 @@ impl EnvironmentSourceEditor {
             return;
         }
         self.cursor = if end { self.value.len() } else { 0 };
+        self.vertical_column = None;
     }
 
     /// Parse the current source into validated bindings.
@@ -175,6 +224,36 @@ mod tests {
         editor.toggle_save_focus(true);
         editor.insert("x");
         editor.backspace();
+        editor.move_vertical(false);
+        editor.move_vertical(true);
         assert_eq!(editor.value(), "A=1");
+    }
+
+    #[test]
+    fn vertical_movement_is_unicode_safe_and_retains_the_preferred_column() {
+        let mut editor = EnvironmentSourceEditor::new("ABCD\né\nWXYZ");
+
+        editor.move_vertical(false);
+        assert_eq!(editor.cursor(), "ABCD\né".len());
+        editor.move_vertical(false);
+        assert_eq!(editor.cursor(), "ABCD".len());
+        editor.move_vertical(false);
+        assert_eq!(editor.cursor(), "ABCD".len());
+
+        editor.move_vertical(true);
+        assert_eq!(editor.cursor(), "ABCD\né".len());
+        editor.move_vertical(true);
+        assert_eq!(editor.cursor(), "ABCD\né\nWXYZ".len());
+        editor.move_vertical(true);
+        assert_eq!(editor.cursor(), "ABCD\né\nWXYZ".len());
+
+        editor.move_vertical(false);
+        editor.move_cursor(false);
+        editor.move_vertical(false);
+        assert_eq!(
+            editor.cursor(),
+            0,
+            "horizontal movement resets the preferred column"
+        );
     }
 }

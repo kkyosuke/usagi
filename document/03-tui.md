@@ -768,6 +768,7 @@ Config、Overview、Closeup textarea の入力は次のとおりである。
 | 入力 | 動作 |
 |---|---|
 | 文字 / `Backspace` / `←→` | textarea を編集する |
+| `↑↓` | 前後の行へ caret を移動する。短い行をまたいでも元の列を保持する |
 | `Delete` / `Home` / `End`（Config） | caret の位置または端を基準に編集する |
 | `Enter`（textarea） | 改行する |
 | `Ctrl-S`（Global Config / Overview / Closeup） | 編集中の `env` を保存する |
