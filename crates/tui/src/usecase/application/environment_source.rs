@@ -165,6 +165,7 @@ mod tests {
         let mut editor = EnvironmentSourceEditor::new("A=é");
         editor.backspace();
         editor.insert("1\nB=2");
+        editor.delete_forward();
         assert_eq!(editor.parse().unwrap().len(), 2);
     }
 

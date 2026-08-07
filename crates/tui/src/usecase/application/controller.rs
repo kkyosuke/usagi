@@ -7072,6 +7072,8 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Environment));
         let editor = state.environment_editor().unwrap();
         assert_eq!(editor.scope(), EnvScope::Workspace);
+        assert!(editor.is_loading());
+        assert!(!editor.is_saving());
 
         // Once the read refluxes, Closeup uses the same multiline source and
         // Save focus interaction as Workspace Config.
@@ -7087,6 +7089,8 @@ mod tests {
         assert_eq!(editor.draft(), "KEEP=1");
         assert_eq!(editor.cursor(), "KEEP=1".len());
         assert!(!editor.is_save_focused());
+        assert!(!editor.is_loading());
+        assert!(!editor.is_saving());
 
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         assert!(
@@ -7115,6 +7119,7 @@ mod tests {
                 ],
             }]
         );
+        assert!(state.environment_editor().unwrap().is_saving());
 
         // Arguments (including `global`) are refused safely: the editor never
         // opens and the Closeup overlay stays up with a usage notice.
@@ -7223,6 +7228,19 @@ mod tests {
                 inherited: Vec::new(),
             }),
         );
+
+        // A completion not initiated by this editor refreshes its projection
+        // without closing the modal. The initiated completion below closes it.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::EnvironmentSaved {
+                scope: EnvScope::Workspace,
+                entries: vec![entry("RUST_LOG", "debug")],
+                inherited: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Environment));
+        assert!(!state.environment_editor().unwrap().is_saving());
 
         let save = update(&mut state, AppEvent::Key(AppKey::SaveRoles));
         assert_eq!(
