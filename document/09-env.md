@@ -43,6 +43,10 @@ editor は 1 行 1 binding の `NAME=value` を受け取り、保存時に次の
 | secret 参照 | `op://` で始まり、続くパスが空でない値。それ以外は平文として扱う |
 | 重複 | 同名は後の行が勝ち、map は名前順に正規化される |
 
+workspace binding の `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` /
+`USAGI_CLAUDE_SANDBOX_PASSTHROUGH` は Agent launcher の境界を変更できるため、launch admission で secret 解決前に拒否する。
+global binding は利用者が管理する trusted baseline として扱い、この workspace 固有の拒否対象には含めない。
+
 binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
 合成後の launch admission が同じ検証を使う。
 

@@ -890,7 +890,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   **無保護フォールバックせず起動を拒否する**（fail-closed）。sandbox 計画の純粋な決定部は `usagi-core` の
   [`usecase::claude_sandbox`] にあり、daemon bootstrap が backend を absolute canonical path として一度だけ
   確定する。launcher は Agent child の `PATH` / `TMPDIR` / `HOME` を policy 解決に使わない。
-  workspace environment の `PATH` / `TMPDIR` / `HOME` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` は secret 解決前に
+  workspace environment の `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` /
+  `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` は secret 解決前に
   typed admission error として拒否する。writable root は absolute canonical directory・owner・symlink identity と
   session workspace の protected ancestor を daemon と exec 直前の両境界で検証する。
   この launcher で子を包む指示は非 durable な `SpawnProvision`（`sandbox_launcher`）に載り、durable な launch
@@ -960,17 +961,18 @@ root mode の launcher は、**exec する program 自身の state directory** �
   Git common dir）と重なる構成を拒否する。
 - session mode はこの grant を使わない。writable root は own worktree だけで、state は daemon-issued
   environment（`CLAUDE_CONFIG_DIR` / `TMPDIR`）で worktree 内へ向ける。
-
 Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
-root 起動は interactive/headless とも `--sandbox read-only --ask-for-approval never`、session 起動は interactive の
-`workspace-write` と headless の session 専用 bypass を使うため、root で approval/sandbox bypass を選ばない。さらに
-root Codex も daemon-owned OS sandbox launcher で包み、provider sandbox と独立に checkout を read-only にする。
-この外側の sandbox が許可する provider 固有 writable root は
-[agent state の writable root](#agent-state-の-writable-root)が正本である。
+root 起動は daemon-owned OS sandbox launcher で checkout を read-only にする。外側 launcher がある場合、Codex
+自身には `--sandbox danger-full-access --ask-for-approval never` を渡して、macOS Seatbelt / Linux namespace の
+入れ子を作らない。この `danger-full-access` は外側 hard boundary の内側だけで使い、launcher が無い構成では
+`--sandbox read-only` へ fail-closed する。session 起動は interactive の `workspace-write` と headless の session
+専用 bypass を使う。workspace 設定の `CODEX_HOME` は launcher control として拒否し、Codex process の state / arg0
+書き込み先を checkout 内へ差し替えさせない。daemon bootstrap は所有者権限を失った stale arg0 directory の mode
+だけを有界に修復し、lock-aware cleanup と削除は Codex 自身へ委ねる。
 
-root の read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
+Claude の root read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
 diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など
 外部 process を起動しうる option は拒否する。Agent child の daemon-issued environment は system/global config、
 fsmonitor、hook、submodule recursion、optional index lock、pager、external diff を無効化し、repository config や公開
