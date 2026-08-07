@@ -8233,6 +8233,19 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert_eq!(state.overlay(), None);
         assert!(state.pr_overlay().is_none());
+
+        // Removing the stable session identity also removes its cached PR rows;
+        // a later session reusing display text cannot inherit the badge.
+        let revision = state.session_pr_revision();
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(Vec::new()))
+            )
+            .is_empty()
+        );
+        assert!(state.session_prs(session).is_none());
+        assert!(state.session_pr_revision() > revision);
     }
 
     #[test]
