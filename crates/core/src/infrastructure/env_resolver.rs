@@ -5,6 +5,7 @@
 //! ordered outcomes through [`collect`](crate::usecase::env::collect).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -22,10 +23,34 @@ const OP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpCli;
 
+fn op_read_command(reference: &str, service_account_token: Option<&str>) -> Command {
+    let mut command = Command::new("op");
+    command
+        .arg("read")
+        .arg("--no-newline")
+        .arg(reference)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(token) = service_account_token {
+        command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
+    }
+    command
+}
+
 impl SecretResolver for OpCli {
     #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=successful_child_is_reaped_and_its_readers_are_joined
     fn read(&self, reference: &str) -> Result<String, String> {
-        real::run(reference)
+        real::run(reference, None)
+    }
+
+    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=service_account_token_is_scoped_to_the_owned_op_child
+    fn read_with_service_account_token(
+        &self,
+        reference: &str,
+        service_account_token: Option<&str>,
+    ) -> Result<String, String> {
+        real::run(reference, service_account_token)
     }
 }
 
@@ -36,6 +61,22 @@ impl SecretResolver for OpCli {
 pub fn resolve_parallel<R>(
     bindings: &EnvBindings,
     resolver: &R,
+) -> Result<ResolvedEnvironment, EnvLimitError>
+where
+    R: SecretResolver + Sync,
+{
+    resolve_parallel_with_service_account_token(bindings, resolver, None)
+}
+
+/// Resolve references with bounded fan-out and an optional daemon-owned
+/// 1Password service-account credential.
+///
+/// # Errors
+/// Returns the domain limit error before any resolver call is made.
+pub fn resolve_parallel_with_service_account_token<R>(
+    bindings: &EnvBindings,
+    resolver: &R,
+    service_account_token: Option<&str>,
 ) -> Result<ResolvedEnvironment, EnvLimitError>
 where
     R: SecretResolver + Sync,
@@ -81,8 +122,10 @@ where
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .recv();
                     let Ok((index, reference)) = job else { break };
-                    let outcome = catch_unwind(AssertUnwindSafe(|| resolver.read(&reference)))
-                        .unwrap_or_else(|_| Err("secret read thread panicked".to_owned()));
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        resolver.read_with_service_account_token(&reference, service_account_token)
+                    }))
+                    .unwrap_or_else(|_| Err("secret read thread panicked".to_owned()));
                     outcomes
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)[index] = outcome;
@@ -207,38 +250,43 @@ mod real {
     #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output
 
     use std::io::Read;
-    use std::process::{Child, Command, Stdio};
+    use std::process::Child;
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     use super::{
         Cancellation, ChildExit, ChildRunner, OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT,
-        OwnedChild, Time, run_owned_child,
+        OwnedChild, Time, op_read_command, run_owned_child,
     };
 
-    pub(super) fn run(reference: &str) -> Result<String, String> {
-        run_owned_child(
-            &SystemRunner,
+    pub(super) fn run(
+        reference: &str,
+        service_account_token: Option<&str>,
+    ) -> Result<String, String> {
+        let outcome = run_owned_child(
+            &SystemRunner {
+                service_account_token,
+            },
             &SystemTime::new(),
             reference,
             &NeverCancelled,
             OP_TIMEOUT,
             OP_TERMINATE_GRACE,
             OP_POLL_INTERVAL,
-        )
+        );
+        outcome.map_err(|error| match service_account_token {
+            Some(token) => error.replace(token, "[redacted]"),
+            None => error,
+        })
     }
 
-    struct SystemRunner;
+    struct SystemRunner<'a> {
+        service_account_token: Option<&'a str>,
+    }
 
-    impl ChildRunner for SystemRunner {
+    impl ChildRunner for SystemRunner<'_> {
         fn spawn(&self, reference: &str) -> Result<Box<dyn OwnedChild>, String> {
-            let mut child = Command::new("op")
-                .arg("read")
-                .arg("--no-newline")
-                .arg(reference)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+            let mut child = op_read_command(reference, self.service_account_token)
                 .spawn()
                 .map_err(|_| "failed to start secret resolver".to_owned())?;
             let stdout = reader(child.stdout.take().expect("piped stdout"));
@@ -387,6 +435,28 @@ mod tests {
         }
     }
 
+    struct ServiceAccountResolver {
+        tokens: Mutex<Vec<Option<String>>>,
+    }
+
+    impl SecretResolver for ServiceAccountResolver {
+        fn read(&self, reference: &str) -> Result<String, String> {
+            Ok(reference.to_owned())
+        }
+
+        fn read_with_service_account_token(
+            &self,
+            reference: &str,
+            service_account_token: Option<&str>,
+        ) -> Result<String, String> {
+            self.tokens
+                .lock()
+                .unwrap()
+                .push(service_account_token.map(str::to_owned));
+            Ok(format!("resolved:{reference}"))
+        }
+    }
+
     fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
         pairs
             .iter()
@@ -462,6 +532,51 @@ mod tests {
             BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())])
         );
         assert!(reader.reads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn service_account_token_reaches_only_secret_resolver_calls() {
+        let resolver = ServiceAccountResolver {
+            tokens: Mutex::new(Vec::new()),
+        };
+        assert_eq!(resolver.read("literal"), Ok("literal".to_owned()));
+        let environment = resolve_parallel_with_service_account_token(
+            &bindings(&[
+                ("GH_TOKEN", "op://Private/GitHub/token"),
+                ("LITERAL", "kept"),
+            ]),
+            &resolver,
+            Some("service-token"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            environment.values["GH_TOKEN"],
+            "resolved:op://Private/GitHub/token"
+        );
+        assert_eq!(environment.values["LITERAL"], "kept");
+        assert_eq!(
+            resolver.tokens.lock().unwrap().as_slice(),
+            [Some("service-token".to_owned())]
+        );
+    }
+
+    #[test]
+    fn service_account_token_is_scoped_to_the_owned_op_child() {
+        let command = op_read_command("op://Private/GitHub/token", Some("service-token"));
+        let configured = command
+            .get_envs()
+            .find(|(name, _)| *name == "OP_SERVICE_ACCOUNT_TOKEN")
+            .and_then(|(_, value)| value)
+            .and_then(|value| value.to_str());
+        assert_eq!(configured, Some("service-token"));
+
+        assert_eq!(
+            op_read_command("op://Private/GitHub/token", None)
+                .get_envs()
+                .count(),
+            0
+        );
     }
 
     struct ConcurrencyResolver {

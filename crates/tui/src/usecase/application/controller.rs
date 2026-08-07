@@ -3719,6 +3719,13 @@ fn update_environment_source_key(
             }
             Some(Vec::new())
         }
+        AppKey::Up | AppKey::Down => {
+            if let Some(editor) = editable_environment(state, environment_open) {
+                editor.source.move_vertical(matches!(key, AppKey::Down));
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
         AppKey::Paste(text) => {
             if let Some(editor) = editable_environment(state, environment_open) {
                 editor.source.paste(text);
@@ -7105,6 +7112,11 @@ mod tests {
             state.environment_editor().unwrap().draft(),
             "KEEP=1\nRUST_LOG=debug\nNEXT=2"
         );
+        let end = state.environment_editor().unwrap().cursor();
+        assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
+        assert!(state.environment_editor().unwrap().cursor() < end);
+        assert!(update(&mut state, AppEvent::Key(AppKey::Down)).is_empty());
+        assert_eq!(state.environment_editor().unwrap().cursor(), end);
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
         let editor = state.environment_editor().unwrap();
         assert_eq!(editor.scope(), EnvScope::Workspace);
@@ -7209,6 +7221,8 @@ mod tests {
         );
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
         assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Down)).is_empty());
     }
 
     #[test]

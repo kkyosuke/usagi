@@ -90,12 +90,14 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - deadline を超えた `op` は、その child handle の owner が exact child だけへ graceful terminate を送り、2 秒の bounded wait
   後も残る場合は kill する。その後は wait/reap と stdout / stderr reader の join を終えてから failure を返す。任意 PID や
   owner が証明できない process は signal 対象にしない。
-- `op` の認証は CLI 側の通常の仕組みに従う（`op signin` セッション、または daemon 自身の環境の
-  `OP_SERVICE_ACCOUNT_TOKEN`）。
+- `op` の認証は CLI 側の通常の仕組みに従う。`op signin` セッションに加え、env editor で平文の
+  `OP_SERVICE_ACCOUNT_TOKEN` を設定できる。global と workspace の両方にある場合は workspace が勝つ。
+  daemon はこの値を通常の設定 env から取り除き、自身が所有する `op read` subprocess だけへ渡すため、
+  Agent / terminal、durable state、error log には注入しない。
 - **解決に失敗した binding は注入せず、その変数だけを落として error ログに記録する**（変数名と参照は
   記録し、解決値は記録しない）。vault がロックされていても pane は開く。
 - 解決結果は workspace ごとに**設定内容をキーにキャッシュ**する。設定が変わらなければ次の pane 起動で
-  `op read` を再実行せず、設定を編集すればキャッシュは無効になる。
+  `op read` を再実行せず、設定または `OP_SERVICE_ACCOUNT_TOKEN` を編集すればキャッシュは無効になる。
 
 ## 注入のタイミングと優先順位
 

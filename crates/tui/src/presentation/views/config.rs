@@ -390,6 +390,14 @@ impl Config {
         }
     }
 
+    /// Move the textarea caret to the previous or next line.
+    pub fn move_environment_vertical(&mut self, down: bool) {
+        if let Some(editor) = self.environment_editor.as_mut() {
+            editor.move_vertical(down);
+            self.environment_error = None;
+        }
+    }
+
     /// Move the textarea caret to the beginning or end of the buffer.
     pub fn move_environment_edge(&mut self, end: bool) {
         if let Some(editor) = self.environment_editor.as_mut() {

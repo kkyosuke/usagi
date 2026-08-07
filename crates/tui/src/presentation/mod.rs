@@ -2466,6 +2466,8 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
             Key::Delete => config.delete_environment(),
             Key::Left => config.move_environment(false),
             Key::Right => config.move_environment(true),
+            Key::Up => config.move_environment_vertical(false),
+            Key::Down => config.move_environment_vertical(true),
             Key::Home | Key::LineStart => config.move_environment_edge(false),
             Key::End | Key::LineEnd => config.move_environment_edge(true),
             Key::Char(character) if !character.is_control() => {
@@ -18936,6 +18938,8 @@ mod tests {
             Key::Paste("A=1\r\nB=2".to_owned()),
             &mut settings,
         );
+        step_config(&mut config, Key::Up, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Home, &mut settings);
         step_config(&mut config, Key::Right, &mut settings);
         step_config(&mut config, Key::LineEnd, &mut settings);

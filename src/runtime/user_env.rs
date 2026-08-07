@@ -24,14 +24,25 @@ use std::sync::Mutex;
 
 use usagi_core::domain::agent::EnvironmentVariableName;
 use usagi_core::domain::settings::{EnvBindings, EnvLimitError, Settings, validate_env_limits};
-use usagi_core::infrastructure::env_resolver::{OpCli, resolve_parallel};
+use usagi_core::infrastructure::env_resolver::{
+    OpCli, resolve_parallel_with_service_account_token,
+};
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::env::SecretResolver;
 
-/// Resolved environment values, keyed by the bindings that produced them.
-type CachedEnvironment = (EnvBindings, BTreeMap<String, String>);
+const OP_SERVICE_ACCOUNT_TOKEN: &str = "OP_SERVICE_ACCOUNT_TOKEN";
+
+#[derive(Clone, PartialEq, Eq)]
+struct ConfiguredEnvironment {
+    bindings: EnvBindings,
+    service_account_token: Option<String>,
+}
+
+/// Resolved environment values, keyed by the complete configuration that
+/// produced them, including the credential used only by `op read`.
+type CachedEnvironment = (ConfiguredEnvironment, BTreeMap<String, String>);
 
 /// Admission failures raised before any configured secret is resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +88,10 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
     /// The effective bindings for `workspace_root`: the global ones with the
     /// workspace's own layered on top. An unreadable settings file is logged and
     /// treated as "nothing configured", so a damaged file never blocks a launch.
-    fn configured(&self, workspace_root: &Path) -> Result<EnvBindings, UserEnvironmentError> {
+    fn configured(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<ConfiguredEnvironment, UserEnvironmentError> {
         let global = match self.global.load_settings() {
             Ok(settings) => settings,
             Err(error) => {
@@ -107,9 +121,13 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         {
             return Err(UserEnvironmentError::ReservedLauncherVariable);
         }
-        let bindings = global.with_local(&local).env;
+        let mut bindings = global.with_local(&local).env;
         validate_env_limits(&bindings)?;
-        Ok(bindings)
+        let service_account_token = bindings.remove(OP_SERVICE_ACCOUNT_TOKEN);
+        Ok(ConfiguredEnvironment {
+            bindings,
+            service_account_token,
+        })
     }
 
     /// The environment values to inject for a launch in `workspace_root`.
@@ -117,17 +135,22 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         &self,
         workspace_root: &Path,
     ) -> Result<BTreeMap<String, String>, UserEnvironmentError> {
-        let bindings = self.configured(workspace_root)?;
+        let configured = self.configured(workspace_root)?;
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((cached_bindings, values)) = cache.get(workspace_root)
-            && *cached_bindings == bindings
+        if let Some((cached_configuration, values)) = cache.get(workspace_root)
+            && *cached_configuration == configured
         {
             return Ok(values.clone());
         }
-        let resolved = resolve_parallel(&bindings, &self.resolver)?;
+        let resolved = resolve_parallel_with_service_account_token(
+            &configured.bindings,
+            &self.resolver,
+            configured.service_account_token.as_deref(),
+        )
+        .expect("removing one binding preserves the validated env limits");
         for failure in &resolved.failures {
             ErrorLog::record(&format!(
                 "could not resolve environment variable {} from {}: {}",
@@ -136,7 +159,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         }
         cache.insert(
             workspace_root.to_path_buf(),
-            (bindings, resolved.values.clone()),
+            (configured, resolved.values.clone()),
         );
         Ok(resolved.values)
     }
@@ -180,22 +203,39 @@ mod tests {
 
     struct CountingResolver {
         reads: Mutex<Vec<String>>,
+        service_account_tokens: Mutex<Vec<Option<String>>>,
     }
 
     impl CountingResolver {
         fn new() -> Self {
             Self {
                 reads: Mutex::new(Vec::new()),
+                service_account_tokens: Mutex::new(Vec::new()),
             }
         }
         fn reads(&self) -> Vec<String> {
             self.reads.lock().unwrap().clone()
         }
+        fn service_account_tokens(&self) -> Vec<Option<String>> {
+            self.service_account_tokens.lock().unwrap().clone()
+        }
     }
 
     impl SecretResolver for CountingResolver {
         fn read(&self, reference: &str) -> Result<String, String> {
+            self.read_with_service_account_token(reference, None)
+        }
+
+        fn read_with_service_account_token(
+            &self,
+            reference: &str,
+            service_account_token: Option<&str>,
+        ) -> Result<String, String> {
             self.reads.lock().unwrap().push(reference.to_owned());
+            self.service_account_tokens
+                .lock()
+                .unwrap()
+                .push(service_account_token.map(str::to_owned));
             if reference.contains("Locked") {
                 Err("op is locked".to_owned())
             } else {
@@ -279,6 +319,60 @@ mod tests {
             Some(&"trace".to_owned())
         );
         assert_eq!(environment.resolver.reads().len(), 2);
+    }
+
+    #[test]
+    fn service_account_token_authenticates_op_only_and_workspace_overrides_global() {
+        let direct = CountingResolver::new();
+        assert_eq!(direct.read("literal"), Ok("secret:literal".to_owned()));
+        assert_eq!(direct.service_account_tokens(), [None]);
+
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_global(
+            data.path(),
+            bindings(&[
+                ("GH_TOKEN", "op://Private/GitHub/token"),
+                ("OP_SERVICE_ACCOUNT_TOKEN", "global-token"),
+            ]),
+        );
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+
+        let values = environment.resolved(workspace.path()).unwrap();
+        assert_eq!(values["GH_TOKEN"], "secret:op://Private/GitHub/token");
+        assert!(!values.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
+        assert_eq!(
+            environment.resolver.service_account_tokens(),
+            [Some("global-token".to_owned())]
+        );
+
+        write_workspace(
+            workspace.path(),
+            bindings(&[("OP_SERVICE_ACCOUNT_TOKEN", "workspace-token")]),
+        );
+        environment.resolved(workspace.path()).unwrap();
+        assert_eq!(
+            environment.resolver.service_account_tokens(),
+            [
+                Some("global-token".to_owned()),
+                Some("workspace-token".to_owned()),
+            ]
+        );
+
+        write_workspace(
+            workspace.path(),
+            bindings(&[("OP_SERVICE_ACCOUNT_TOKEN", "rotated-token")]),
+        );
+        environment.resolved(workspace.path()).unwrap();
+        assert_eq!(
+            environment.resolver.service_account_tokens(),
+            [
+                Some("global-token".to_owned()),
+                Some("workspace-token".to_owned()),
+                Some("rotated-token".to_owned()),
+            ],
+            "changing only the credential must invalidate the resolution cache"
+        );
     }
 
     #[test]
