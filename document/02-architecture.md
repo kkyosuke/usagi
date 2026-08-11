@@ -639,9 +639,7 @@ adapter private config は含めない。
 system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。選択軸は
 `LaunchScope.session_id` の有無と trusted local LLM 設定だけであり、`session_id` が無い launch は main
 チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の本文を使う。
-root coordinator 用の本文は root で tracked file を編集せず、`usagi://guides/orchestration` を参照して
-`session_delegate_issue` / `session_delegate_brief` で実作業を dispatch し、session の状態と成果を観測するよう要求する。
-実装・修正・調査などの成果物を求める依頼では計画だけで終了せず、少なくとも 1 つの session を起動する。
+scope ごとの具体的な責務は [10. session role の prompt 合成](10-session-roles.md#prompt-合成)を正本とする。
 `SystemPrompt` は `McpWiring` と同じ必須 agent capability として fail-closed に検証する一方、選択・合成した
 system prompt 本文は ephemeral な adapter materialization であり、`LaunchRequest`、`LaunchPlan`、
 `DurableLaunchSnapshot` には保存しない（設計判断は issue #592）。

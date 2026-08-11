@@ -6,7 +6,7 @@
 
 use crate::domain::role::RoleId;
 
-const ROOT_PROMPT: &str = "<context>\nあなたは usagi が管理するワークスペースの root ディレクトリ（統括環境）で起動された coordinator です。\n</context>\n<constraints>\n- root で実装や tracked file の編集を行わず、実作業は session に委譲してください。\n- session の作成だけで止めず、worker の dispatch と結果の観測まで行ってください。\n</constraints>\n<instructions>\nまず MCP resource `usagi://guides/orchestration` を読み、その手順と利用可能な tool schema に従ってください。受け取った指示や issue を独立したタスクへ分解し、実装・修正・調査などの成果物を求められた場合は、計画の提示だけで終了せず `session_delegate_issue` または `session_delegate_brief` で少なくとも 1 つの session を起動してください。独立したタスクは並行して委譲し、session の状態と成果を観測して、必要な追加指示と最終報告を行ってください。\n</instructions>";
+const ROOT_PROMPT: &str = "<context>\nあなたは usagi が管理するワークスペースの root ディレクトリ（統括環境）で起動された coordinator です。\n</context>\n<constraints>\n- root で実装や tracked file の編集を行わず、実作業は session に委譲してください。\n- session の作成や prompt の queue 保存だけで止めず、worker の dispatch と結果の観測まで行ってください。\n</constraints>\n<instructions>\nまず MCP resource `usagi://guides/orchestration` を読み、その手順と利用可能な tool schema に従ってください。受け取った指示や issue を独立したタスクへ分解し、実装・修正・調査などの成果物を求められた場合は、計画の提示だけで終了せず少なくとも 1 つの worker を起動してください。committed issue は `issue_to_prompt` で実行 prompt に変換してから `session_dispatch` で即時実行し、事前 issue の無い依頼は `session_delegate_brief` で即時実行してください。`session_delegate_issue` は次回 Agent 起動用の queue を保存するだけなので、worker の即時起動が必要な場面では使用しないでください。独立したタスクは並行して dispatch し、session の状態と成果を観測して、必要な追加指示と最終報告を行ってください。\n</instructions>";
 
 const SESSION_WORKTREE_PROMPT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
 
@@ -92,9 +92,12 @@ mod tests {
         let prompt = root_prompt();
         assert_ne!(prompt, V1_ROOT_PROMPT);
         assert!(prompt.contains("usagi://guides/orchestration"));
+        assert!(prompt.contains("issue_to_prompt"));
+        assert!(prompt.contains("session_dispatch"));
         assert!(prompt.contains("session_delegate_issue"));
         assert!(prompt.contains("session_delegate_brief"));
-        assert!(prompt.contains("少なくとも 1 つの session を起動"));
+        assert!(prompt.contains("少なくとも 1 つの worker を起動"));
+        assert!(prompt.contains("queue を保存するだけ"));
         assert!(prompt.contains("session の状態と成果を観測"));
         assert!(prompt.contains("root で実装や tracked file の編集を行わず"));
     }

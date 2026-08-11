@@ -473,7 +473,7 @@ impl Tool for SessionDecisionLog {
     }
 }
 
-/// `session_delegate_issue` — issue を新セッションに委譲して着手させる（合成 tool）。
+/// `session_delegate_issue` — issue を新セッションの次回起動 queue へ保存する（合成 tool）。
 pub struct SessionDelegateIssue;
 
 impl Tool for SessionDelegateIssue {
@@ -481,7 +481,7 @@ impl Tool for SessionDelegateIssue {
         "session_delegate_issue"
     }
     fn description(&self) -> &'static str {
-        "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
+        "既存の committed issue を新しいセッションの次回 Agent 起動用 queue へ保存するときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行うが、worker は即時起動しない。即時実行には issue_to_prompt→session_dispatch を使う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"role":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"]}"#

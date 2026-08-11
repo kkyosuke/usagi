@@ -17,9 +17,10 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | 操作 | tool | durable effect |
 |---|---|---|
 | session 作成 | `session_create` | daemon が session を lifecycle store に記録し、git worktree を作る |
+| issue prompt 化 | `issue_to_prompt` | committed issue を worker に渡せる実行 prompt へ変換する |
 | 一覧・進捗観測 | `session_list` / `session_status` | lifecycle snapshot と agent phase・worktree の dirty/merged を返す |
 | 追加指示 | `session_prompt` | live Agent PTY または durable next-launch queue へ prompt を配送する |
-| issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
+| issue の次回起動 queue | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う。worker は起動しない |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | daemon-owned PR inventory と merged 集約を返す |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し root coordinator へ報告する |
@@ -47,10 +48,12 @@ coordinator は session の生存を `session_status`、成果の統合を `sess
 
 ## delegate
 
-committed issue は `session_delegate_issue`、事前 issue の無い依頼は `session_delegate_brief` を使う。
-`session_delegate_issue` は daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を
-保存する。`session_delegate_brief` は caller credential を検証してから worktree を作成し、worker を直ちに
-dispatch する。brief の `agent` は
+worker を即時起動する committed issue は `issue_to_prompt` で実行 prompt を取得し、その prompt を
+`session_dispatch` へ渡す。`session_delegate_issue` は daemon が worktree を作成した後、同じ session identity の
+次回起動 queue へ初回 prompt を保存するだけで、worker を起動しない。したがって即時実行の完了条件として使わない。
+
+事前 issue の無い依頼は `session_delegate_brief` を使う。この tool は caller credential を検証してから worktree を作成し、
+worker を直ちに dispatch する。brief の `agent` は
 `{"id":"<agent_id>"}` または allowlist にある `{"runtime":"codex","model":"gpt-5"}` のどちらか一方だけを
 指定する。credential・selector・session 作成のいずれかが失敗した場合は queue へフォールバックしない。
 
@@ -68,6 +71,8 @@ credential を必要とする。手動で
 
 `session_dispatch` は session 名と worker selector、prompt を受け取る。session は存在すれば再利用し、
 無ければ作成する。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
+committed issue の即時実行では、先に `issue_to_prompt {"number": N}` が返した `prompt` field をこの tool の
+`prompt` に渡し、session 名を `issue-N` とする。
 
 ```json
 {"name":"session_dispatch","arguments":{"session":{"name":"issue-123","role":"coder"},

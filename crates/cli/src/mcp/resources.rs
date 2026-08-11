@@ -119,7 +119,10 @@ mod tests {
         assert!(text.contains("session_create"));
         assert!(text.contains("session_status"));
         assert!(text.contains("session_prompt"));
+        assert!(text.contains("issue_to_prompt"));
+        assert!(text.contains("session_dispatch"));
         assert!(text.contains("session_delegate_brief"));
+        assert!(text.contains("worker を起動しない"));
     }
 
     #[test]
