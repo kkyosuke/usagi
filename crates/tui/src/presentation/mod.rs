@@ -3438,7 +3438,7 @@ fn projection_build_counts() -> (usize, usize) {
 
 /// Project the daemon-authoritative session records into the controller's Home
 /// row material, in the same order the runtime holds their IDs.
-fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
+fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<ProjectedSession> {
     #[cfg(test)]
     SESSION_PROJECTION_BUILDS.set(SESSION_PROJECTION_BUILDS.get() + 1);
     ui.workspace
@@ -3467,6 +3467,9 @@ fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
                 .get(id)
                 .and_then(|role| role.role_id.as_ref())
                 .map(ToString::to_string);
+            if let Some(prs) = state.session_prs(*id) {
+                projected.pr_summary = crate::presentation::views::workspace::pr_summary(prs);
+            }
             projected
         })
         .collect()
@@ -4667,7 +4670,7 @@ struct FrameMaterialKey {
     height: usize,
     width: usize,
     controller: (u64, u64),
-    sessions: (u64, Option<SessionId>),
+    sessions: (u64, Option<SessionId>, u64),
     shell: u64,
     metrics: u64,
     terminal: (u64, u64),
@@ -5363,6 +5366,9 @@ fn drive_workspace_controller(
     let _ = backend.dispatch(Effect::RefreshDecisions {
         workspace: workspace_id,
     });
+    let _ = backend.dispatch(Effect::SyncPullRequestTargets {
+        sessions: runtime.state().sessions().to_vec(),
+    });
     session_refresh.wake();
     // Start restore after the first frame. The controller owns retry admission
     // and a capped backoff across worker jobs; a frame tick never resets it.
@@ -5377,7 +5383,7 @@ fn drive_workspace_controller(
     let mut drawn_material: Option<HomeFrameMaterial> = None;
     // Owned daemon row/path material is rebuilt only when its authoritative
     // inputs change. The cache never feeds commands back into the controller.
-    let mut session_material_key: Option<(u64, Option<SessionId>)> = None;
+    let mut session_material_key: Option<(u64, Option<SessionId>, u64)> = None;
     let mut sessions: Arc<[ProjectedSession]> = Arc::from([]);
     let mut metrics_sessions = Vec::new();
     let mut terminal_material_key: Option<(Option<TerminalRef>, u64, u64, Geometry)> = None;
@@ -5526,10 +5532,14 @@ fn drive_workspace_controller(
                 Feedback::Reconnected,
             )));
         }
-        let next_session_key = (ui.workspace.material_revision(), ui.removing_session);
+        let next_session_key = (
+            ui.workspace.material_revision(),
+            ui.removing_session,
+            runtime.state().session_pr_revision(),
+        );
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {
-            sessions = Arc::from(project_controller_sessions(&ui));
+            sessions = Arc::from(project_controller_sessions(&ui, runtime.state()));
             metrics_sessions = sessions
                 .iter()
                 .map(|session| (session.id, session.cwd.clone()))
@@ -7437,7 +7447,9 @@ mod tests {
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         // The projected sidebar row carries the Failed lifecycle and its reason.
-        let rows = super::project_controller_sessions(&ui);
+        let state =
+            crate::usecase::application::controller::AppState::home(workspace, vec![session]);
+        let rows = super::project_controller_sessions(&ui, &state);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lifecycle, SessionLifecycle::Failed);
         assert_eq!(rows[0].failure_summary.as_deref(), Some("create failed"));
@@ -7471,7 +7483,11 @@ mod tests {
         // The daemon accepts a removal before its worktree teardown runs, so the
         // row stays marked as being removed on the strength of the daemon's
         // lifecycle alone — this TUI never issued the command.
-        let rows = super::project_controller_sessions(&ui);
+        let state = crate::usecase::application::controller::AppState::home(
+            WorkspaceId::new(),
+            vec![session],
+        );
+        let rows = super::project_controller_sessions(&ui, &state);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lifecycle, SessionLifecycle::Deleting);
         assert!(rows[0].removing);
