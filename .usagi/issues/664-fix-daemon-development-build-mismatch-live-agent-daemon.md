@@ -1,13 +1,13 @@
 ---
 number: 664
 title: fix(daemon): development の build mismatch で live Agent を破棄せず daemon を再利用する
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, lifecycle, tui]
 dependson: []
 related: [507, 528, 559, 572]
 created_at: 2026-08-11T23:55:32.445020+00:00
-updated_at: 2026-08-11T23:55:32.445020+00:00
+updated_at: 2026-08-11T23:58:07.964797+00:00
 ---
 
 ## 問題・影響
@@ -42,4 +42,4 @@ updated_at: 2026-08-11T23:55:32.445020+00:00
 
 ## docs
 
-[05-daemon.md の authority と lifecycle](../../document/05-daemon.md#authority-と-lifecycle)（build mismatch の 3 段と 1 回だけの attempt）と [04-ipc.md の build fence](../../document/04-ipc.md#build-artifact-fence) を現在形に更新した。
+[05-daemon.md の authority と lifecycle](../../document/05-daemon.md#authority-と-lifecycle)（build mismatch の 3 段と 1 回だけの attempt）と [04-ipc.md の identity と fence](../../document/04-ipc.md#identity-と-fence) を現在形に更新した。
