@@ -95,6 +95,9 @@ code-defined optional local-LLM suffix
 
 scope safety prompt は role で置換できない。Claude adapter は合成済み文字列を単一 `--append-system-prompt` 値、Codex / Sakana AI
 adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral provision に渡す。initial user prompt へ連結しない。
+root scope の prompt は coordinator に `usagi://guides/orchestration` の参照、session への実作業の dispatch、
+状態と成果の観測を要求する。成果物を求める依頼は計画だけで完了せず、少なくとも 1 つの session を起動する。
+session scope の prompt は自身の worktree 内で成果物を作る実装者としての境界を要求する。
 
 ## safe projection と非永続データ
 
