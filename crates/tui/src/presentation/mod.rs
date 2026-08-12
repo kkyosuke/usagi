@@ -2136,7 +2136,11 @@ impl WorkspaceUi {
             .filter_map(|session| {
                 let before = session.state();
                 session.poll(&mut AgentStreamPort(port));
-                if before == SessionState::Reconnecting && session.state() == SessionState::Live {
+                // Any pane that streams again is a reconnection, not only one
+                // that was waiting on an unavailable daemon: a refused attach
+                // and a refused stream recover through the same re-attach, and
+                // the user is owed the same feedback for all of them.
+                if before != SessionState::Live && session.state() == SessionState::Live {
                     reconnected = true;
                 }
                 (session.state() == SessionState::Exited).then(|| session.terminal().clone())

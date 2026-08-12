@@ -189,7 +189,7 @@ pub enum TerminalError {
     Unavailable,
     /// The referenced terminal is gone or its generation no longer matches.
     Stale,
-    /// Ownership is unknown; input is disabled until reconciled.
+    /// Ownership is unknown; input is refused until a re-attach reconciles it.
     Orphaned,
     /// The terminal process has exited; its final output is retained.
     Exited,
@@ -308,9 +308,12 @@ pub enum SessionState {
     Live,
     /// The daemon transport is temporarily unavailable; attach will be retried.
     Reconnecting,
-    /// Not attached; a reconnect is required to resume.
+    /// Not attached. A failure schedules the same bounded re-attach as
+    /// [`Self::Reconnecting`]; an explicit detach schedules none and waits to be
+    /// selected again.
     Disconnected,
-    /// Ownership is unknown; input is disabled.
+    /// Ownership is unknown. Input is refused until a scheduled re-attach proves
+    /// the terminal is streaming again.
     Orphaned,
     /// The terminal process has exited; the final screen is retained.
     Exited,
@@ -783,6 +786,17 @@ impl TerminalSession {
             self.resolve_input_fence_at(port, unresolved, now);
             return;
         }
+        // A drain interrupted by a stream failure leaves inputs queued with no
+        // fence in front of them. Resume it as soon as this pane streams again,
+        // so recovering the attachment also delivers what the user already
+        // typed, in the order they typed it.
+        if self.state == SessionState::Live
+            && !self.subscription_replaced(port)
+            && self.unresolved_input.is_none()
+            && !self.fenced_queue.is_empty()
+        {
+            self.drain_input_fence_at(port, now);
+        }
         match self.state {
             // The shared transport was replaced, so this pane's attachment is
             // gone: take a fresh one before asking the new connection for
@@ -865,7 +879,13 @@ impl TerminalSession {
         // keystroke now would risk reordering it against a request that may still
         // be applied, or concatenating it onto a command the unresolved input
         // half-wrote, so it is held in order instead.
-        if self.unresolved_input.is_some() {
+        //
+        // A queue that outlived its fence holds the same ordering claim. The
+        // fence is released before the queue drains, and a failure mid-drain
+        // stops it with inputs still queued, so writing the next keystroke
+        // straight to the PTY would let it overtake them. Ordering is owned by
+        // the queue being empty, not by the fence still standing.
+        if self.unresolved_input.is_some() || !self.fenced_queue.is_empty() {
             return Err(self.enqueue_behind_fence(bytes));
         }
         self.write_input_at(port, bytes, now)
@@ -1259,6 +1279,13 @@ impl TerminalSession {
             // backoff as an unavailable daemon. Leaving them unscheduled wedged
             // the pane for the whole process lifetime: output stopped, input was
             // refused as `NotLive`, and only restarting the TUI recovered it.
+            //
+            // A failure the daemon keeps repeating (a `Stale` reference it will
+            // never accept again) therefore retries indefinitely, exactly as an
+            // unavailable daemon already did. The cost is bounded by the same
+            // capped backoff — one attach round per `RETRY_MAX`, and only for
+            // the single attached foreground pane — which is the price of never
+            // presenting a pane that cannot come back on its own.
             self.retry_at = Some(now + retry_delay(self.retry_attempt));
             self.retry_attempt = self.retry_attempt.saturating_add(1);
         }
@@ -1350,14 +1377,12 @@ fn error_message(error: TerminalError) -> &'static str {
         TerminalError::ResyncRequired => "terminal output is resynchronizing",
         TerminalError::Unavailable => "daemon unavailable; reconnecting",
         TerminalError::Stale => "terminal is no longer available",
-        TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
+        TerminalError::Orphaned => "terminal ownership is unknown; reconnecting",
         TerminalError::Exited => "terminal has exited",
         TerminalError::InputEffectUnknown => {
             "terminal input acknowledgement was lost; delivery is unknown"
         }
-        TerminalError::OrderingMismatch => {
-            "terminal input ordering is out of sync; input is disabled"
-        }
+        TerminalError::OrderingMismatch => "terminal input ordering is out of sync; reconnecting",
     }
 }
 
@@ -2513,7 +2538,7 @@ mod tests {
         assert_eq!(session.state(), SessionState::Disconnected);
         assert_eq!(
             session.error(),
-            Some("terminal input ordering is out of sync; input is disabled")
+            Some("terminal input ordering is out of sync; reconnecting")
         );
     }
 
@@ -2530,7 +2555,7 @@ mod tests {
         assert_eq!(session.state(), SessionState::Orphaned);
         assert_eq!(
             session.error(),
-            Some("terminal ownership is unknown; input is disabled")
+            Some("terminal ownership is unknown; reconnecting")
         );
     }
 
@@ -2541,11 +2566,10 @@ mod tests {
     /// 失敗を受け取ると、以前は `Disconnected` / `Orphaned` のまま二度と retry せず、
     /// 出力は止まり入力は `NotLive` で拒否され、TUI を再起動するまで戻らなかった。
     #[test]
-    fn every_non_exit_failure_reattaches_on_its_own_backoff() {
+    fn a_refused_stream_reattaches_on_its_own_backoff() {
         for error in [
             TerminalError::Stale,
             TerminalError::OrderingMismatch,
-            TerminalError::ResyncRequired,
             TerminalError::Orphaned,
         ] {
             let mut port = FakePort {
@@ -2559,9 +2583,9 @@ mod tests {
             let mut session = TerminalSession::new(terminal(), geometry());
             let now = Instant::now();
             session.connect_at(&mut port, now);
-            // `poll` recovers `ResyncRequired` itself; the others land in a
-            // non-live state that must still schedule its own retry.
-            session.fail_at(error, now);
+
+            // The fetch the shell drains every frame is what fails.
+            session.poll_at(&mut port, now);
             assert_ne!(session.state(), SessionState::Live, "{error:?}");
             assert_eq!(
                 session.send_input(&mut port, b"x"),
@@ -2571,7 +2595,6 @@ mod tests {
 
             // Before the backoff expires nothing is re-requested.
             session.poll_at(&mut port, now);
-            assert_ne!(session.state(), SessionState::Live, "{error:?}");
             assert_eq!(port.attach.len(), 1, "{error:?}");
 
             session.poll_at(&mut port, now + RETRY_INITIAL);
@@ -2580,6 +2603,112 @@ mod tests {
             assert_eq!(session.rows()[0], "after", "{error:?}");
             assert_eq!(session.send_input(&mut port, b"x"), Ok(()), "{error:?}");
         }
+    }
+
+    /// 報告された経路そのもの: drawer が foreground を奪って detach し、閉じたときの
+    /// 再 attach が daemon に拒否される。
+    #[test]
+    fn a_refused_reattach_after_the_drawer_handoff_recovers_on_the_next_backoff() {
+        for error in [
+            TerminalError::Stale,
+            TerminalError::OrderingMismatch,
+            TerminalError::ResyncRequired,
+            TerminalError::Orphaned,
+        ] {
+            let mut port = FakePort {
+                attach: vec![
+                    Ok(attach(1, 0, b"before", false)),
+                    Err(error),
+                    Ok(attach(2, 0, b"after", false)),
+                ],
+                ..FakePort::default()
+            };
+            let mut session = TerminalSession::new(terminal(), geometry());
+            let now = Instant::now();
+            session.connect_at(&mut port, now);
+            // Director drawer takes the foreground, then hands it back.
+            session.detach(&mut port);
+            session.connect_at(&mut port, now);
+            assert_ne!(session.state(), SessionState::Live, "{error:?}");
+            assert_eq!(
+                session.send_input(&mut port, b"x"),
+                Err(TerminalInputError::NotLive(session.state())),
+                "{error:?}"
+            );
+
+            session.poll_at(&mut port, now);
+            assert_eq!(port.attach.len(), 1, "{error:?}");
+
+            session.poll_at(&mut port, now + RETRY_INITIAL);
+            assert_eq!(session.state(), SessionState::Live, "{error:?}");
+            assert_eq!(session.rows()[0], "after", "{error:?}");
+            assert_eq!(session.send_input(&mut port, b"x"), Ok(()), "{error:?}");
+        }
+    }
+
+    /// 回復した pane が、待たせていた入力を追い越されないこと。
+    ///
+    /// fence は queue を空にする前に外れるので、drain 中の失敗は「fence 無し・queue 有り」を
+    /// 残す。以前はその状態で pane が永久に死んでいたため後続の keystroke は存在しなかったが、
+    /// 回復するようになった今は、順序の所有者を fence ではなく **queue が空であること**に
+    /// 置かないと、新しい keystroke が待機中の入力を追い越して PTY に届く。
+    #[test]
+    fn an_interrupted_drain_keeps_its_queue_ahead_of_later_keystrokes() {
+        let now = Instant::now();
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach_at(1, 1, 0, b"", false)),
+                Ok(attach_at(2, 2, 0, b"", false)),
+                Ok(attach_at(3, 3, 0, b"", false)),
+            ],
+            input: Some(TerminalError::InputEffectUnknown),
+            resolutions: vec![Ok(TerminalInputResolution::Final(
+                TerminalInputOutcome::Written,
+            ))],
+            polls: vec![Ok(Vec::new()); 4],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect_at(&mut port, now);
+        let _ = session.send_input_at(&mut port, b"fenced", now);
+        port.input = None;
+        assert_eq!(
+            session.send_input_at(&mut port, b"queued-first", now),
+            Err(TerminalInputError::Fenced { queued: 1 })
+        );
+        assert_eq!(
+            session.send_input_at(&mut port, b"queued-second", now),
+            Err(TerminalInputError::Fenced { queued: 2 })
+        );
+
+        // Recover, resolve the fence, and let the drain fail on its first write.
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        port.input_error_once = Some(TerminalError::Stale);
+        session.poll_at(&mut port, now + RETRY_INITIAL);
+        assert_eq!(session.unresolved_input_length(), None);
+        assert_eq!(session.fenced_input_count(), 1);
+        assert_ne!(session.state(), SessionState::Live);
+
+        // The keystroke typed after the interrupted drain queues behind it
+        // instead of reaching the PTY first.
+        assert_eq!(
+            session.send_input_at(&mut port, b"typed-later", now + RETRY_INITIAL),
+            Err(TerminalInputError::Fenced { queued: 2 })
+        );
+        assert!(port.inputs.is_empty());
+
+        // Recovery delivers what was waiting, oldest first.
+        session.poll_at(&mut port, now + RETRY_INITIAL * 4);
+        assert_eq!(session.state(), SessionState::Live);
+        session.poll_at(&mut port, now + RETRY_INITIAL * 4);
+        assert_eq!(session.fenced_input_count(), 0);
+        assert_eq!(
+            port.inputs
+                .iter()
+                .map(|(_, _, bytes)| bytes.clone())
+                .collect::<Vec<_>>(),
+            vec![b"queued-second".to_vec(), b"typed-later".to_vec()]
+        );
     }
 
     /// 逆側の不変条件: 明示的な detach（background へ回した pane）は retry しない。

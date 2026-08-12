@@ -1180,7 +1180,17 @@ atomic checkpoint から screen を組み直し、daemon 自身の `next_input_s
 | exit 済み | process の終了を観測した | 最終 screen を保持し、tab は inventory 観測とともに閉じる |
 
 detach と失敗の区別は状態名ではなく**予約された再試行の有無**であり、背景へ回した pane が勝手に attach を
-奪い返すことも、失敗した pane が TUI の再起動まで回復しないこともない。
+奪い返すことも、失敗した pane が TUI の再起動まで回復しないこともない。daemon が拒否し続ける失敗
+（二度と受理されない `TerminalRef` など）も同じ backoff で再試行し続ける。上限に達した backoff で
+attach 1 往復 / 2s、しかも attach 済みの foreground pane 1 つ分に限られるため、「自力で戻れない pane を
+表示し続けない」ことを優先する。
+
+再 attach で live へ戻った pane は、失敗の種類にかかわらず reconnect として扱い、`Reconnected` feedback と
+PR target の再同期を 1 度だけ発行する。
+
+入力の順序は fence ではなく**待機 queue が空であること**が所有する。fence が外れたあとの drain が失敗で
+中断されると queue だけが残るため、その状態で受け取った keystroke は PTY へ直接書かず queue の末尾へ入れ、
+pane が live へ戻った frame で古い順に送る。
 
 #### 背景 observation lane
 
