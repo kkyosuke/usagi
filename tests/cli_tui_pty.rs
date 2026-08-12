@@ -2761,3 +2761,118 @@ fn durable_records(data_dir: &Path) -> Vec<serde_json::Value> {
     }
     records
 }
+
+/// 指示モードで root Agent の出力を遡る。
+///
+/// scroll offset は live bottom からの行数で保持するため、遡っている間に Agent が
+/// 出力すると窓が前へ滑り、読んでいた行が消えていた（live Agent は常に出力するので
+/// 「指示モードでスクロールできない」ように見える）。scroll 中は追記行を offset へ
+/// 足し戻して同じ行を保持し、live bottom へ戻したときだけ追従することを実 PTY で固定する。
+#[test]
+fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("drawer-scroll-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
+        .output()
+        .expect("workspace registers");
+    assert!(registered.status.success());
+    let (workspace_id, _session) = create_session(home.path(), "drawer-scroll");
+    let _root = launch_agent(home.path(), workspace_id, None, "claude");
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+
+    // The root conversation is restored into the drawer and owns its input.
+    toggle_director_with_key(&mut master);
+    wait_for_screen_since(&captured, baseline, "󰚩 director");
+    wait_for_screen_since(&captured, baseline, "claude-ready-unique:");
+
+    // Fill the 16-row drawer viewport well past its retained window.
+    for line in 1..=30 {
+        send(&mut master, format!("mark-{line:02}\r").as_bytes());
+    }
+    wait_for_screen_since(&captured, baseline, "claude-input:mark-30");
+
+    // Scroll back with the mouse wheel over the drawer, then with the key chord.
+    for _ in 0..6 {
+        send(&mut master, b"\x1b[<64;70;12M");
+        thread::sleep(Duration::from_millis(60));
+    }
+    send(&mut master, b"\x0fu");
+    send(&mut master, b"\x0fu");
+    wait_for_screen_absent_since(&captured, baseline, "claude-input:mark-30");
+    let scrolled = screen_since(&captured, baseline).unwrap_or_default();
+    // The topmost echoed mark now on screen is the row the appended output below
+    // would push off the top if the offset kept measuring from the live bottom.
+    // Reading it from the frame keeps the assertion independent of how many
+    // wheel events the PTY coalesced.
+    let top_mark = scrolled
+        .lines()
+        .find_map(|line| line.split("claude-input:").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("the scrolled drawer shows an echoed mark")
+        .to_owned();
+    assert!(top_mark.as_str() < "mark-27", "{top_mark}: {scrolled}");
+
+    // The Agent keeps writing while the reader is scrolled back. The rows on
+    // screen must not slide away underneath them.
+    for line in 31..=34 {
+        send(&mut master, format!("mark-{line:02}\r").as_bytes());
+        thread::sleep(Duration::from_millis(120));
+    }
+    thread::sleep(Duration::from_millis(400));
+    let held = screen_since(&captured, baseline).unwrap_or_default();
+    assert!(held.contains(&format!("claude-input:{top_mark}")), "{held}");
+    assert!(!held.contains("claude-input:mark-34"), "{held}");
+
+    // Returning to the live bottom follows the newest output again.
+    for _ in 0..40 {
+        send(&mut master, b"\x1b[<65;70;12M");
+    }
+    wait_for_screen_since(&captured, baseline, "claude-input:mark-34");
+
+    send(&mut master, b"\x0f\x07");
+    wait_for_screen_since(&captured, baseline, "[switch]");
+    let status = quit_from_switch(&mut master, &mut tui, &captured, baseline);
+    assert!(
+        status.success(),
+        "{status}: {}",
+        String::from_utf8_lossy(&captured.lock().unwrap())
+    );
+    stop_daemon(&home);
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+}

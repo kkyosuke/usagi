@@ -1274,7 +1274,14 @@ retry 中に replacement terminal を spawn せず、stale / orphaned / exited �
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
 表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
-snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
+snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。
+
+**live bottom から離れている間、表示中の行は Agent の追記で動かない**。viewport が live bottom
+（offset 0）にある間だけ新しい出力へ追従し、遡っている間は追記された行数を offset へ足し戻して同じ
+retained 行を描き続ける。live Agent は読んでいる最中も出力するため、この保持がないと 1 行遡るたびに
+窓が同じだけ前へ滑り、履歴の同じ位置に留まれない（[指示モード](#指示モードdirector-mode)の root Agent で顕著）。
+live bottom へ戻すと追従を再開する。scrollback 上限で古い行が捨てられても live bottom からの距離は
+変わらないため、この補正は追記だけを対象とする。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も

@@ -35,6 +35,12 @@ struct TerminalViewState {
     /// The furthest the current viewport can scroll, recomputed each frame from
     /// the retained rows so `scroll_up` cannot run past the top.
     max_scroll: usize,
+    /// Retained row count observed by the previous projection, or `None` before
+    /// the first one. Comparing it against the next count is what tells an
+    /// append (the Agent produced output) apart from an in-place repaint, so a
+    /// viewport scrolled away from the live bottom can hold its rows instead of
+    /// sliding forward with every new line.
+    projected_rows: Option<usize>,
     /// A left-button press that has not moved yet. Keeping this separate from
     /// `selection` is what distinguishes a click from a one-cell drag: the
     /// selection becomes visible and copyable only after the first drag event.
@@ -321,13 +327,36 @@ impl LiveTerminalControls {
         self.revision = self.revision.saturating_add(1);
     }
 
+    /// Re-anchor and clamp the scroll offset against a freshly observed retained
+    /// row count.
+    ///
+    /// `scroll` is stored as rows above the live bottom, which is what makes a
+    /// viewport following live output cost nothing. A viewport the user scrolled
+    /// away from that bottom means the opposite: it must keep showing the rows it
+    /// is on, so every row a live Agent appends is added back to the offset. The
+    /// live bottom (`scroll == 0`) keeps following output, and the offset is
+    /// re-clamped so a shrunk history cannot leave it past the top.
+    ///
+    /// Rows dropped from the top by the retained-scrollback bound move no row
+    /// relative to the bottom, so they need no correction here; only the count
+    /// growing does.
+    fn observe_rows(&mut self, total_rows: usize, viewport_rows: usize) {
+        let previous = self.active.projected_rows.replace(total_rows);
+        if self.active.scroll > 0
+            && let Some(appended) = previous.and_then(|previous| total_rows.checked_sub(previous))
+        {
+            self.active.scroll = self.active.scroll.saturating_add(appended);
+        }
+        self.active.max_scroll = total_rows.saturating_sub(viewport_rows);
+        self.active.scroll = self.active.scroll.min(self.active.max_scroll);
+    }
+
     /// Project `rows` into the right-pane viewport at the current scroll offset,
     /// recomputing the scroll extent from the row count and `viewport_rows` so a
     /// shrunk history re-clamps the offset.
     pub fn project(&mut self, rows: Vec<String>, viewport_rows: usize) -> TerminalViewProjection {
         let total_rows = rows.len();
-        self.active.max_scroll = total_rows.saturating_sub(viewport_rows);
-        self.active.scroll = self.active.scroll.min(self.active.max_scroll);
+        self.observe_rows(total_rows, viewport_rows);
         TerminalViewProjection {
             rows,
             row_offset: 0,
@@ -337,16 +366,16 @@ impl LiveTerminalControls {
         }
     }
 
-    /// Clamp the current scroll offset against a retained row count and return
-    /// the exact row range needed for the visible viewport.
+    /// Re-anchor ([`Self::observe_rows`]) and clamp the current scroll offset
+    /// against a retained row count, and return the exact row range needed for
+    /// the visible viewport.
     #[must_use]
     pub fn visible_range(
         &mut self,
         total_rows: usize,
         viewport_rows: usize,
     ) -> std::ops::Range<usize> {
-        self.active.max_scroll = total_rows.saturating_sub(viewport_rows);
-        self.active.scroll = self.active.scroll.min(self.active.max_scroll);
+        self.observe_rows(total_rows, viewport_rows);
         let end = total_rows.saturating_sub(self.active.scroll);
         end.saturating_sub(viewport_rows)..end
     }
@@ -433,6 +462,53 @@ mod tests {
         assert_eq!(controls.project(rows(20), 5).scroll, 10);
         // The history collapsed to fit the viewport; the offset clamps to zero.
         assert_eq!(controls.project(rows(4), 5).scroll, 0);
+    }
+
+    /// A viewport scrolled away from the live bottom is reading history, so the
+    /// rows it shows must survive the Agent writing more output. Before this the
+    /// offset was measured from the live bottom alone, and a talkative Agent slid
+    /// the window forward by one row per line — the reader could never hold a
+    /// place in the conversation.
+    #[test]
+    fn a_scrolled_viewport_holds_its_rows_while_the_agent_appends() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(controls.visible_range(10, 3), 7..10);
+        controls.scroll_up();
+        controls.scroll_up();
+        let held = controls.visible_range(10, 3);
+        assert_eq!(held, 5..8);
+
+        // Four more rows of live output: the same retained rows stay on screen
+        // and the offset absorbs the appended rows instead.
+        assert_eq!(controls.visible_range(14, 3), held);
+        assert_eq!(controls.scroll(), 6);
+
+        // The same holds for the whole-history projection used by the parity
+        // suite and the drawer's retained view.
+        assert_eq!(controls.project(rows(18), 3).scroll, 10);
+        assert_eq!(controls.visible_range(18, 3), held);
+    }
+
+    /// Following live output is the other half of the contract: a viewport at the
+    /// live bottom stays there, and returning to the bottom resumes following.
+    #[test]
+    fn the_live_bottom_keeps_following_new_output() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(controls.visible_range(10, 3), 7..10);
+        assert_eq!(controls.visible_range(14, 3), 11..14);
+        assert_eq!(controls.scroll(), 0);
+
+        // One row up holds that row across the next two rows of output.
+        controls.scroll_up();
+        assert_eq!(controls.visible_range(16, 3), 10..13);
+        assert_eq!(controls.scroll(), 3);
+
+        // Scrolling back down to the live bottom resumes following.
+        for _ in 0..3 {
+            controls.scroll_down();
+        }
+        assert_eq!(controls.visible_range(20, 3), 17..20);
+        assert_eq!(controls.scroll(), 0);
     }
 
     #[test]
