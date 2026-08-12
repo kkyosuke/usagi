@@ -9337,14 +9337,12 @@ fn bootstrap_client<S: Read + Write>(
 }
 
 /// Development's one-attempt-per-daemon-artifact guard
-/// ([`bootstrap::AttemptedReplacements`]).
-static ATTEMPTED_REPLACEMENTS: bootstrap::AttemptedReplacements =
-    bootstrap::AttemptedReplacements::new();
+/// ([`bootstrap::OncePerArtifact`]).
+static ATTEMPTED_REPLACEMENTS: bootstrap::OncePerArtifact = bootstrap::OncePerArtifact::new();
 
 /// The daemon artifacts whose reuse this process has already recorded, so a
 /// standing mismatch costs one log line instead of one per bootstrapped lane.
-static LOGGED_MISMATCHES: bootstrap::AttemptedReplacements =
-    bootstrap::AttemptedReplacements::new();
+static LOGGED_MISMATCHES: bootstrap::OncePerArtifact = bootstrap::OncePerArtifact::new();
 
 /// The log entry for a development client that keeps talking to a daemon built
 /// from another artifact, or `None` when this process already recorded that same

@@ -167,6 +167,10 @@ pub(crate) enum DevelopmentConnection<S> {
 /// reason [`crate::runtime::daemon`]'s planned replacement guard exists), and a
 /// hard refusal would wedge every control request of a client whose own build no
 /// longer exists on disk.
+// Every rung is exercised through the fake endpoint below. LLVM nevertheless
+// counts the separately generated production `IpcClient` instantiation as
+// uncovered, exactly as it does for the two functions above.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=runtime::bootstrap::tests
 pub(crate) fn replace_or_reuse<S, C, R, B>(
     mut connect: C,
     restart: R,
@@ -200,26 +204,27 @@ where
     Ok(DevelopmentConnection::Reused { stream, reason })
 }
 
-/// The daemon artifacts this process has already asked to have replaced.
+/// The daemon artifacts one action of this process has already been spent on.
 ///
-/// A client's own artifact is a compile-time constant, but the executable a
-/// replacement launches is whatever is on disk when it runs. The two differ as
-/// soon as somebody rebuilds while this process keeps running, so the
-/// replacement cannot bring the daemon to *this* artifact and asking again would
-/// only churn one generation per bootstrap — several per second across the
-/// render and pump lanes. The first observation of a daemon artifact is
-/// therefore worth one attempt; every later observation of the same artifact
-/// reuses the daemon instead of asking again.
-pub(crate) struct AttemptedReplacements(Mutex<BTreeSet<String>>);
+/// Two actions are once-per-artifact, and each keeps its own set: asking for a
+/// replacement, and recording a reuse in the log. A client's own artifact is a
+/// compile-time constant, but the executable a replacement launches is whatever
+/// is on disk when it runs. The two differ as soon as somebody rebuilds while
+/// this process keeps running, so the replacement cannot bring the daemon to
+/// *this* artifact and asking again would only churn one generation per
+/// bootstrap — several per second across the render and pump lanes. The first
+/// observation of a daemon artifact is therefore worth one attempt (and one log
+/// entry); every later observation of the same artifact is silent reuse.
+pub(crate) struct OncePerArtifact(Mutex<BTreeSet<String>>);
 
-impl AttemptedReplacements {
+impl OncePerArtifact {
     pub(crate) const fn new() -> Self {
         Self(Mutex::new(BTreeSet::new()))
     }
 
-    /// Whether this process may take its one replacement attempt against
-    /// `artifact`. A poisoned lock is read through: the set only bounds churn,
-    /// and losing it must not fail a bootstrap.
+    /// Whether this process may still spend its one action on `artifact`. A
+    /// poisoned lock is read through: the set only bounds churn, and losing it
+    /// must not fail a bootstrap.
     pub(crate) fn claim(&self, artifact: &str) -> bool {
         self.0
             .lock()
@@ -1042,7 +1047,7 @@ mod tests {
 
     #[test]
     fn one_replacement_attempt_is_claimed_per_daemon_artifact() {
-        let attempts = super::AttemptedReplacements::new();
+        let attempts = super::OncePerArtifact::new();
         assert!(attempts.claim("usagi-artifact-v1:debug:test:old"));
         assert!(!attempts.claim("usagi-artifact-v1:debug:test:old"));
         // A daemon that changed artifact again is a new observation, and worth the
