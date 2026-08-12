@@ -1841,17 +1841,18 @@ fn remove_operation_matches(
         return false;
     }
     state.sessions.iter().any(|session| {
-        session.name == name
-            && session.operation_id == Some(operation.operation_id)
-            && session.delete_plan.as_ref().is_some_and(|plan| {
-                plan.force == force
-                    && match kind {
-                        RemoveKind::Compensating => plan.delete_branch && plan.force_delete_branch,
-                        // Legacy requested plans preserved the branch; current
-                        // requested plans delete it safely. Neither may force it.
-                        RemoveKind::Requested => !plan.force_delete_branch,
-                    }
-            })
+        if session.name != name || session.operation_id != Some(operation.operation_id) {
+            return false;
+        }
+        session.delete_plan.as_ref().is_some_and(|plan| {
+            let branch_delete_matches = match kind {
+                RemoveKind::Compensating => plan.delete_branch && plan.force_delete_branch,
+                // Legacy requested plans preserved the branch; current requested
+                // plans delete it safely. Neither may force branch deletion.
+                RemoveKind::Requested => !plan.force_delete_branch,
+            };
+            plan.force == force && branch_delete_matches
+        })
     })
 }
 
