@@ -377,7 +377,6 @@ impl VtScreen {
     ///
     /// The iterator follows logical history order without requiring the ring
     /// buffer to be made contiguous.
-    #[must_use]
     pub fn scrollback(&self) -> impl DoubleEndedIterator<Item = &[Cell]> + ExactSizeIterator {
         self.scrollback.iter().map(Vec::as_slice)
     }

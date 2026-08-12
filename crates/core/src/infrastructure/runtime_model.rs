@@ -28,7 +28,6 @@ pub struct SupportedAgentRuntime {
 ///
 /// [`DefaultModel::ALL`] is the closed-vocabulary `SSoT`; adding a provider there
 /// automatically makes it a candidate on every catalog consumer.
-#[must_use]
 pub fn supported_agent_runtimes() -> impl ExactSizeIterator<Item = SupportedAgentRuntime> {
     DefaultModel::ALL
         .into_iter()

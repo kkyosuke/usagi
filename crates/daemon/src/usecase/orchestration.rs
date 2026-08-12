@@ -109,7 +109,6 @@ impl AdapterRegistry {
     }
 
     /// Registered profile IDs in registration order.
-    #[must_use]
     pub fn profile_ids(&self) -> impl ExactSizeIterator<Item = &str> {
         self.adapters.iter().map(|(profile, _)| profile.id.as_str())
     }

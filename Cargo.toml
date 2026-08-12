@@ -122,6 +122,11 @@ portable-pty = "0.9"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# `assert!(value.is_empty())` を `assert_eq!(value, [] as [T; 0])` へ書き換えさせる
+# lint。失敗時に値を出す利点はあるが、要素型を明示する turbofish 相当の注記が
+# 100 箇所近い test assertion に入り、「何を確かめているか」が読み取りにくくなる。
+# 空であることの確認は `is_empty()` のまま読めるほうが良いため allow にする。
+assert_is_empty = "allow"
 
 # リリースバイナリの設定は v1 と同方針（クロス crate の inline 最適化とサイズ優先、
 # strip あり）。panic は既定の unwind のまま。

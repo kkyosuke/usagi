@@ -140,7 +140,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
 const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove", "resume"];
 
 /// Overview 固有コマンドの metadata を名前順に返す。
-#[must_use]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
 }

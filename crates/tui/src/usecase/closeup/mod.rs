@@ -97,7 +97,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
 ];
 
 /// Closeup 固有コマンドの metadata を名前順に返す。
-#[must_use]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
 }
