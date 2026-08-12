@@ -34,7 +34,7 @@ use usagi_core::domain::id::{OperationId, TerminalRef};
 use usagi_core::usecase::vt_screen::{CheckpointError, ScreenCheckpoint};
 
 use super::pane_runtime::Geometry;
-use super::terminal_screen::TerminalScreen;
+use super::terminal_screen::{TerminalBuffer, TerminalScreen};
 use super::terminal_selection::{TerminalPoint, TerminalSelection};
 
 /// How an attach snapshot carries the terminal screen.
@@ -629,6 +629,18 @@ impl TerminalSession {
     pub fn display_row_count(&self) -> usize {
         self.screen
             .rows_with_scrollback_count(self.state == SessionState::Live)
+    }
+
+    /// Monotonic logical index of the oldest rendered row.
+    #[must_use]
+    pub const fn display_row_origin(&self) -> u64 {
+        self.screen.retained_row_origin()
+    }
+
+    /// Visible buffer lineage for [`Self::display_row_origin`].
+    #[must_use]
+    pub fn display_buffer(&self) -> TerminalBuffer {
+        self.screen.retained_buffer()
     }
 
     /// Number of retained rows needed to display live content and the complete
