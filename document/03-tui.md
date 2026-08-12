@@ -414,8 +414,9 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
+| `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `n` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `↑` / `↓` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `n` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
 **指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
 NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は
@@ -1274,15 +1275,16 @@ retry 中に replacement terminal を spawn せず、stale / orphaned / exited �
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
 表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
-snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。
+snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
+history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
 **live bottom から離れている間、表示中の行は Agent の追記で動かない**。viewport が live bottom
 （offset 0）にある間だけ新しい出力へ追従し、遡っている間は追記された行数を offset へ足し戻して同じ
 retained 行を描き続ける。live Agent は読んでいる最中も出力するため、この保持がないと 1 行遡るたびに
 窓が同じだけ前へ滑り、履歴の同じ位置に留まれない（[指示モード](#指示モードdirector-mode)の root Agent で顕著）。
 live bottom へ戻すと追従を再開する。scrollback 上限で古い行が捨てられても live bottom からの距離は
-変わらないため、この補正は追記だけを対象とする。`↑` / `↓` は scrollback 操作に予約せず、PTY の
-history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
+変わらないため、この補正は追記だけを対象とする。保持している間は live bottom までの距離が会話とともに
+伸びるため、`Ctrl-O b` / `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が

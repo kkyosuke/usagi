@@ -154,6 +154,19 @@ impl LiveTerminalControls {
             .saturating_add(u64::from(before != self.active.scroll));
     }
 
+    /// Return to the live bottom in one step, resuming follow-the-output.
+    ///
+    /// A scrolled viewport holds its rows against everything the Agent appends
+    /// ([`Self::observe_rows`]), so the distance back to the newest output grows
+    /// with the conversation. This is the one step that always closes it.
+    pub fn scroll_to_bottom(&mut self) {
+        let before = self.active.scroll;
+        self.active.scroll = 0;
+        self.revision = self
+            .revision
+            .saturating_add(u64::from(before != self.active.scroll));
+    }
+
     /// Begin a drag selection, replacing any earlier (including finished) one,
     /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {
@@ -509,6 +522,30 @@ mod tests {
         }
         assert_eq!(controls.visible_range(20, 3), 17..20);
         assert_eq!(controls.scroll(), 0);
+    }
+
+    /// One step back to live output, because holding rows makes the distance to
+    /// the newest output grow with the conversation.
+    #[test]
+    fn scroll_to_bottom_resumes_following_in_one_step() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(controls.visible_range(200, 3), 197..200);
+        for _ in 0..40 {
+            controls.scroll_up();
+        }
+        assert_eq!(controls.visible_range(400, 3), 157..160);
+        let scrolled_revision = controls.revision();
+
+        controls.scroll_to_bottom();
+        assert_eq!(controls.scroll(), 0);
+        assert_eq!(controls.visible_range(500, 3), 497..500);
+        assert!(controls.revision() > scrolled_revision);
+
+        // Already at the live bottom, it is inert: an unchanged view must not
+        // invalidate the frame's terminal material.
+        let followed_revision = controls.revision();
+        controls.scroll_to_bottom();
+        assert_eq!(controls.revision(), followed_revision);
     }
 
     #[test]

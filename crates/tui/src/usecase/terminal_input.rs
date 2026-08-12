@@ -196,6 +196,12 @@ pub enum LiveTerminalAction {
     ScrollUp,
     /// Scroll the focused terminal pane one line toward the live bottom.
     ScrollDown,
+    /// Return the focused terminal pane to the live bottom in one step, so it
+    /// follows new output again. A scrolled viewport holds its rows against
+    /// everything a live Agent appends, which is what makes reading history
+    /// possible and what would otherwise leave the reader thousands of rows of
+    /// `ScrollDown` away from the newest output.
+    ScrollBottom,
 }
 
 /// A control chord reserved globally when no live-terminal leader is pending.
@@ -414,6 +420,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         KeyCode::Char('[') => Some(LiveTerminalAction::MoveTabPrevious),
         KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
         KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
+        KeyCode::Char('b') | KeyCode::End => Some(LiveTerminalAction::ScrollBottom),
         _ => None,
     }
 }
@@ -756,6 +763,14 @@ mod tests {
             Case {
                 follow_up: key(KeyCode::Down),
                 action: LiveTerminalAction::ScrollDown,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('b')),
+                action: LiveTerminalAction::ScrollBottom,
+            },
+            Case {
+                follow_up: key(KeyCode::End),
+                action: LiveTerminalAction::ScrollBottom,
             },
         ];
         for case in cases {

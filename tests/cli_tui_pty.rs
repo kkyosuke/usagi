@@ -2767,7 +2767,8 @@ fn durable_records(data_dir: &Path) -> Vec<serde_json::Value> {
 /// scroll offset は live bottom からの行数で保持するため、遡っている間に Agent が
 /// 出力すると窓が前へ滑り、読んでいた行が消えていた（live Agent は常に出力するので
 /// 「指示モードでスクロールできない」ように見える）。scroll 中は追記行を offset へ
-/// 足し戻して同じ行を保持し、live bottom へ戻したときだけ追従することを実 PTY で固定する。
+/// 足し戻して同じ行を保持し、`Ctrl-O b` で live bottom へ戻すと追従を再開することを
+/// 実 PTY で固定する。
 #[test]
 fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
     let _serial = serial();
@@ -2857,10 +2858,8 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
     assert!(held.contains(&format!("claude-input:{top_mark}")), "{held}");
     assert!(!held.contains("claude-input:mark-34"), "{held}");
 
-    // Returning to the live bottom follows the newest output again.
-    for _ in 0..40 {
-        send(&mut master, b"\x1b[<65;70;12M");
-    }
+    // `Ctrl-O b` returns to the live bottom in one step and follows again.
+    send(&mut master, b"\x0fb");
     wait_for_screen_since(&captured, baseline, "claude-input:mark-34");
 
     send(&mut master, b"\x0f\x07");
