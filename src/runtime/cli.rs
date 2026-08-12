@@ -335,14 +335,7 @@ fn claude_sandbox(
     } else {
         Platform::Unsupported
     };
-    if let Err(reason) = validate_launcher_policy_inputs(
-        policy.protected_root.as_deref(),
-        policy.backend.as_deref(),
-        policy.tmpdir.as_deref(),
-        policy.home.as_deref(),
-        policy.cache_dir.as_deref(),
-        &policy.writable_roots,
-    ) {
+    if let Err(reason) = validate_launcher_policy_inputs(&policy) {
         writeln!(err, "claude-sandbox: {reason:?}")?;
         return Ok(ExitCode::FAILURE);
     }
@@ -374,6 +367,9 @@ fn claude_sandbox(
     }
 }
 
+/// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
+/// 位置引数ではなく名前付きで渡す（順序を取り違えても型では気づけない）。
+#[derive(Default)]
 struct LauncherPolicyInputs {
     protected_root: Option<PathBuf>,
     backend: Option<PathBuf>,
@@ -391,13 +387,23 @@ enum LauncherPolicyError {
 }
 
 fn validate_launcher_policy_inputs(
-    protected_root: Option<&Path>,
-    backend: Option<&Path>,
-    tmpdir: Option<&Path>,
-    home: Option<&Path>,
-    cache_dir: Option<&Path>,
-    writable_roots: &[PathBuf],
+    policy: &LauncherPolicyInputs,
 ) -> Result<(), LauncherPolicyError> {
+    let LauncherPolicyInputs {
+        protected_root,
+        backend,
+        tmpdir,
+        home,
+        cache_dir,
+        writable_roots,
+    } = policy;
+    let (protected_root, backend, tmpdir, home, cache_dir) = (
+        protected_root.as_deref(),
+        backend.as_deref(),
+        tmpdir.as_deref(),
+        home.as_deref(),
+        cache_dir.as_deref(),
+    );
     if let Some(backend) = backend {
         if !backend.is_absolute() {
             return Err(LauncherPolicyError::Backend);
@@ -588,7 +594,7 @@ mod tests {
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
-        Action, LauncherPolicyError, execute_self_update_with, exit_code,
+        Action, LauncherPolicyError, LauncherPolicyInputs, execute_self_update_with, exit_code,
         validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
@@ -598,49 +604,35 @@ mod tests {
     fn launcher_policy_rejects_root_and_symlink_inputs() {
         let root = tempfile::tempdir().unwrap();
         let protected = root.path().canonicalize().unwrap();
+        let inputs = |tmpdir: Option<&std::path::Path>, cache_dir: Option<&std::path::Path>| {
+            LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                tmpdir: tmpdir.map(std::path::Path::to_path_buf),
+                cache_dir: cache_dir.map(std::path::Path::to_path_buf),
+                ..LauncherPolicyInputs::default()
+            }
+        };
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                None,
-                Some(std::path::Path::new("/")),
-                None,
-                None,
-                &[],
-            ),
+            validate_launcher_policy_inputs(&inputs(Some(std::path::Path::new("/")), None)),
             Err(LauncherPolicyError::WritableRoot)
         );
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(std::path::Path::new("/")),
-                None,
-                None,
-                None,
-                None,
-                &[],
-            ),
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(PathBuf::from("/")),
+                ..LauncherPolicyInputs::default()
+            }),
             Err(LauncherPolicyError::ProtectedRoot)
         );
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                None,
+            validate_launcher_policy_inputs(&inputs(
                 Some(&protected.join("missing-writable-root")),
-                None,
-                None,
-                &[],
-            ),
+                None
+            )),
             Err(LauncherPolicyError::WritableRoot)
         );
         // 存在しない cache root も他の policy path と同じく拒否する。
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                None,
-                None,
-                None,
-                Some(&protected.join("missing-cache-dir")),
-                &[],
-            ),
+            validate_launcher_policy_inputs(&inputs(None, Some(&protected.join("missing-cache")))),
             Err(LauncherPolicyError::WritableRoot)
         );
 
@@ -655,27 +647,20 @@ mod tests {
         // backend・tmpdir・home・cache root・起動固有 root がすべて所有された canonical
         // directory なら受け入れる。
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                Some(&backend_path),
-                Some(&protected),
-                Some(&protected),
-                Some(&protected),
-                std::slice::from_ref(&protected),
-            ),
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                backend: Some(backend_path),
+                tmpdir: Some(protected.clone()),
+                home: Some(protected.clone()),
+                cache_dir: Some(protected.clone()),
+                writable_roots: vec![protected.clone()],
+            }),
             Ok(())
         );
 
         #[cfg(unix)]
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                None,
-                Some(std::path::Path::new("/usr")),
-                None,
-                None,
-                &[],
-            ),
+            validate_launcher_policy_inputs(&inputs(Some(std::path::Path::new("/usr")), None)),
             Err(LauncherPolicyError::WritableRoot)
         );
     }
@@ -686,23 +671,27 @@ mod tests {
         let protected = root.path().canonicalize().unwrap();
         let backend = tempfile::NamedTempFile::new().unwrap();
         let backend_path = backend.path().canonicalize().unwrap();
-        let refused = |backend: &std::path::Path| {
-            validate_launcher_policy_inputs(Some(&protected), Some(backend), None, None, None, &[])
+        let refused = |backend: PathBuf| {
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                backend: Some(backend),
+                ..LauncherPolicyInputs::default()
+            })
         };
         // 存在しない / 相対 / directory / 実行 bit の無い file はいずれも拒否する。
         assert_eq!(
-            refused(&protected.join("missing-sandbox-backend")),
+            refused(protected.join("missing-sandbox-backend")),
             Err(LauncherPolicyError::Backend)
         );
         assert_eq!(
-            refused(std::path::Path::new("Cargo.toml")),
+            refused(PathBuf::from("Cargo.toml")),
             Err(LauncherPolicyError::Backend)
         );
         assert_eq!(
-            refused(std::path::Path::new("/usr")),
+            refused(PathBuf::from("/usr")),
             Err(LauncherPolicyError::Backend)
         );
-        assert_eq!(refused(&backend_path), Err(LauncherPolicyError::Backend));
+        assert_eq!(refused(backend_path), Err(LauncherPolicyError::Backend));
     }
 
     #[cfg(unix)]
@@ -715,7 +704,11 @@ mod tests {
         let alias = protected.with_extension("alias");
         symlink(&protected, &alias).unwrap();
         assert_eq!(
-            validate_launcher_policy_inputs(Some(&protected), None, Some(&alias), None, None, &[]),
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                tmpdir: Some(alias.clone()),
+                ..LauncherPolicyInputs::default()
+            }),
             Err(LauncherPolicyError::WritableRoot)
         );
         std::fs::remove_file(alias).unwrap();
@@ -727,28 +720,22 @@ mod tests {
         let directory = real_parent.join("directory");
         std::fs::create_dir(&directory).unwrap();
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                None,
-                Some(&parent_alias.join("directory")),
-                None,
-                None,
-                &[],
-            ),
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                tmpdir: Some(parent_alias.join("directory")),
+                ..LauncherPolicyInputs::default()
+            }),
             Err(LauncherPolicyError::WritableRoot)
         );
         let executable = real_parent.join("executable");
         std::fs::write(&executable, "fixture").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
-            validate_launcher_policy_inputs(
-                Some(&protected),
-                Some(&parent_alias.join("executable")),
-                None,
-                None,
-                None,
-                &[],
-            ),
+            validate_launcher_policy_inputs(&LauncherPolicyInputs {
+                protected_root: Some(protected.clone()),
+                backend: Some(parent_alias.join("executable")),
+                ..LauncherPolicyInputs::default()
+            }),
             Err(LauncherPolicyError::Backend)
         );
         std::fs::remove_file(parent_alias).unwrap();

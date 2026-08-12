@@ -979,16 +979,23 @@ system 側（`/private/var/db/mds`）に加えて **per-user cache**（`<$DARWIN
   他の writable root と同じ規則（absolute canonical directory・owner・保護対象 workspace と
   Git common dir の非重複）で cache root を検証する。
 - session mode はこの grant を使わない（writable root は own worktree だけ）。macOS 以外には MDS が
-  無いため cache root を渡さない。
+  無いため cache root を渡さない。session の agent CLI は `CLAUDE_CONFIG_DIR` が worktree 内へ向いて
+  いるため、認証情報もその config directory（= writable root の中）に置き、OS の credential store を
+  writable にする必要がない。したがって session の launcher が Keychain / MDS へ書けないことは、
+  root の 401 とは別の話である（session の未認証は `Not logged in · Please run /login` になる）。
 
 #### `/dev` の device node
 
 macOS の profile は、writable root の subpath に加えて **`/dev` 配下の device node への data 書き込み**
 （`file-write-data`）を許す。`/dev/null` を `O_RDWR` で開けないと `git` すら
 `fatal: could not open '/dev/null' for reading and writing` で失敗し、root coordinator の read-only Git
-allowlist が丸ごと使えなくなるためである。許すのは data 書き込みだけで、`/dev` への node 作成・削除・
-属性変更は deny のまま残る。Linux の `bwrap` は `--dev /dev` で新しい devtmpfs を張るため、この差は
-macOS 側にだけ現れる（Linux CI ではこの分岐を踏まない）。
+allowlist が丸ごと使えなくなるためである。Linux の `bwrap` は `--dev /dev` で新しい devtmpfs を張るため、
+この差は macOS 側にだけ現れる（Linux CI ではこの分岐を踏まない）。
+
+緩めるのは **path ではなく動詞**である。`/dev/null` などを `(literal …)` で列挙する形にすると、agent が
+動かす shell の `> /dev/stdout` や `> /dev/fd/1` が `Operation not permitted` になる。そこで path は
+`(subpath "/dev")` のまま、許可する操作を `file-write-data` だけに絞る。`/dev` への node 作成・削除・
+属性変更は deny のまま残る。
 Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。

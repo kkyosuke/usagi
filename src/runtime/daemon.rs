@@ -912,7 +912,7 @@ fn validate_root_git_common_dir_policy(
             PathBuf::from("/Library/Keychains"),
             PathBuf::from("/private/var/db/mds"),
         ]);
-        writable.extend(cache_dir.map(|cache| cache.join("mds")));
+        writable.extend(cache_dir.map(claude_sandbox::macos_mds_cache_root));
     }
     let overlaps = writable.into_iter().any(|root| {
         let root = root.canonicalize().unwrap_or(root);
@@ -1028,7 +1028,17 @@ fn validate_claude_sandbox_policy(
         roots.push(tmpdir.to_path_buf());
     }
     if let Some(cache_dir) = cache_dir {
-        roots.push(cache_dir.to_path_buf());
+        // 所有者と canonical 性は実在する cache root で確かめ、workspace との重なりは
+        // launcher が実際に grant する `<cache>/mds` で判定する（この子はまだ存在しない
+        // ことがあるので、存在を要求できるのは親だけである）。
+        validate_owned_directory(cache_dir)?;
+        let granted = claude_sandbox::macos_mds_cache_root(cache_dir);
+        let granted = granted.canonicalize().unwrap_or(granted);
+        if protected_workspace.starts_with(&granted)
+            || (mode == SandboxMode::Root && granted.starts_with(&protected_workspace))
+        {
+            return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+        }
     }
     if let Some(home) = home {
         validate_owned_directory(home)?;
@@ -1136,10 +1146,26 @@ fn resolve_sandbox_cache_dir() -> Option<PathBuf> {
             )
         };
         if written == 0 || written > buffer.len() {
+            ErrorLog::record(
+                "could not read the macOS per-user cache directory for the agent sandbox",
+            );
             return None;
         }
-        let text = std::str::from_utf8(&buffer[..written - 1]).ok()?;
-        PathBuf::from(text).canonicalize().ok()
+        let Ok(text) = std::str::from_utf8(&buffer[..written - 1]) else {
+            ErrorLog::record("the macOS per-user cache directory is not valid UTF-8");
+            return None;
+        };
+        // ここが None のまま進むと、症状は「Keychain が読めず agent が 401 で起動できない」に
+        // 戻る。原因が黙って消えないよう、解決できなかったことだけは残す。
+        match PathBuf::from(text).canonicalize() {
+            Ok(path) => Some(path),
+            Err(error) => {
+                ErrorLog::record(&format!(
+                    "could not canonicalize the macOS per-user cache directory {text}: {error}"
+                ));
+                None
+            }
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -14210,11 +14236,27 @@ instructions = "{instructions}"
             })
         };
         assert_eq!(validate(Some(&cache_root)), Ok(()));
-        // workspace を含む cache root は他の writable root と同じく拒否する。
+        // 判定の対象は grant する `<cache>/mds` である。workspace がその中にある構成だけを
+        // 拒否し、workspace の単なる兄弟（`<cache>/…`）は grant と重ならないので通す。
+        let overlapping = tempfile::tempdir_in("target").unwrap();
+        let overlapping_root = overlapping.path().canonicalize().unwrap();
+        let nested_workspace = claude_sandbox::macos_mds_cache_root(&overlapping_root).join("repo");
+        std::fs::create_dir_all(nested_workspace.join(".git")).unwrap();
         assert_eq!(
-            validate(Some(workspace_root.parent().unwrap())),
+            validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                mode: SandboxMode::Root,
+                program: CLAUDE_PROGRAM,
+                workspace_root: &nested_workspace,
+                launch_roots: &[],
+                tmpdir: None,
+                home: None,
+                cache_dir: Some(&overlapping_root),
+                backend: Some(&backend),
+                passthrough: false,
+            }),
             Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
         );
+        // cache root 自体は実在しなければならない（grant の親を所有者ごと確かめる）。
         assert_eq!(
             validate(Some(&cache_root.join("missing"))),
             Err(ClaudeSandboxPolicyError::InvalidWritableRoot)

@@ -216,6 +216,16 @@ pub fn agent_state_directory(program: &str) -> Option<&'static str> {
     DefaultModel::from_selector(&name.to_string_lossy()).map(DefaultModel::state_directory)
 }
 
+/// macOS の Keychain 検索が更新する per-user MDS cache（`<cache>/mds`）。
+///
+/// cache root から実際に writable にする path の導出はここが正本で、純粋な計画側と daemon 側の
+/// policy gate が同じ 1 か所を見る（gate だけが親の cache root を見ていると、grant と検証の対象が
+/// 静かにずれる）。
+#[must_use]
+pub fn macos_mds_cache_root(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("mds")
+}
+
 /// 起動固有の root（provisioner 由来）と普遍領域を結合し、重複を除いた決定的な writable root 集合。
 fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut roots: BTreeSet<PathBuf> = request.launch_roots.iter().cloned().collect();
@@ -247,7 +257,7 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
         // per-user の MDS cache。Keychain 検索はここを更新するため、system 側だけでは
         // "A Module Directory Service error has occurred." で検索が失敗する。
         if let Some(cache) = &request.cache_dir {
-            roots.insert(cache.join("mds"));
+            roots.insert(macos_mds_cache_root(cache));
         }
     }
     roots.into_iter().collect()
@@ -275,7 +285,11 @@ fn macos_argv(
 /// `O_RDWR` で開けないと `git` すら
 /// "fatal: could not open '/dev/null' for reading and writing" で失敗するためである
 /// （Linux の `bwrap` は `--dev /dev` で新しい devtmpfs を張るため、この差は macOS だけに出る）。
-/// `file-write-data` に限るので、`/dev` への node 作成・削除・属性変更は deny のままである。
+///
+/// `(literal "/dev/null")` のような列挙にしないのは、agent が動かす shell が `> /dev/stdout` や
+/// `> /dev/fd/1` を日常的に使い、literal 列挙ではそれらが `Operation not permitted` になるためである。
+/// 代わりに動詞を `file-write-data` に絞ってあるので、`/dev` への node 作成・削除・属性変更は
+/// deny のまま残る。
 fn macos_profile(mode: SandboxMode, roots: &[PathBuf]) -> String {
     let subpaths = macos_write_roots(roots)
         .iter()
@@ -459,7 +473,10 @@ mod tests {
         assert!(profile.contains("(subpath \"/private/tmp\")"));
         assert!(profile.contains("(subpath \"/private/var/tmp\")"));
         // device node の data 書き込みだけは許す（`/dev/null` が開けないと git すら動かない）。
+        // literal 列挙にすると shell の `> /dev/stdout` / `> /dev/fd/1` が拒否されるため、
+        // path は subpath のまま動詞だけを絞る、という形をここで固定する。
         assert!(profile.contains("(allow file-write-data (subpath \"/dev\"))"));
+        assert!(!profile.contains("(literal \"/dev/null\")"));
         assert!(!profile.contains("file-write-create"));
         // program と引数が profile の後ろに続く。
         assert_eq!(&argv[2..], ["claude", "--print"]);
@@ -603,6 +620,10 @@ mod tests {
         let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         request.mode = SandboxMode::Root;
         request.launch_roots.clear();
+        assert_eq!(
+            macos_mds_cache_root(Path::new("/private/var/folders/ab/cd/C")),
+            PathBuf::from("/private/var/folders/ab/cd/C/mds")
+        );
         assert!(
             writable_roots(&request).contains(&PathBuf::from("/private/var/folders/ab/cd/C/mds"))
         );
