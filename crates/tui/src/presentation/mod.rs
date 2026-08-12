@@ -82,6 +82,7 @@ use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand
 use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
+use crate::usecase::application::terminal_screen::TerminalBuffer;
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
@@ -2359,17 +2360,20 @@ impl WorkspaceUi {
         })
     }
 
-    fn terminal_row_count(
+    fn terminal_row_extent(
         &self,
         terminal: &TerminalRef,
         selection: Option<&TerminalSelection>,
-    ) -> Option<usize> {
+    ) -> Option<(TerminalBuffer, u64, usize)> {
         self.terminals
             .iter()
             .find(|session| session.terminal().fences(terminal))
-            .map(|session| match selection {
-                Some(selection) => session.display_row_count_selection(selection),
-                None => session.display_row_count(),
+            .map(|session| {
+                let rows = match selection {
+                    Some(selection) => session.display_row_count_selection(selection),
+                    None => session.display_row_count(),
+                };
+                (session.display_buffer(), session.display_row_origin(), rows)
             })
     }
 
@@ -3686,8 +3690,9 @@ fn controller_terminal_view(
     controls.retain_terminals(&live_terminals);
     controls.sync_focus(terminal.as_ref());
     let terminal = terminal?;
-    let total_rows = ui.terminal_row_count(&terminal, controls.selection())?;
-    let range = controls.visible_range(total_rows, viewport_rows);
+    let (buffer, row_origin, total_rows) =
+        ui.terminal_row_extent(&terminal, controls.selection())?;
+    let range = controls.visible_range(buffer, row_origin, total_rows, viewport_rows);
     let rows = ui.terminal_row_window(&terminal, range.start, range.end, controls.selection())?;
     let mut projection = controls.project_window(rows, range.start, total_rows);
     if let Some(error) = ui.terminal_error(&terminal) {

@@ -1147,7 +1147,7 @@ scrollback 全体を文字列化・全走査せず、表示行数と必要な折
 live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
-checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback・cursor・saved cursor・
+checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback とその oldest-row origin・cursor・saved cursor・
 scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態）を含むため、retention の先頭が
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
@@ -1309,9 +1309,12 @@ history navigation へそのまま送る。right pane の footer の直前には
 （offset 0）にある間だけ新しい出力へ追従し、遡っている間は追記された行数を offset へ足し戻して同じ
 retained 行を描き続ける。live Agent は読んでいる最中も出力するため、この保持がないと 1 行遡るたびに
 窓が同じだけ前へ滑り、履歴の同じ位置に留まれない（[指示モード](#指示モードdirector-mode)の root Agent で顕著）。
-live bottom へ戻すと追従を再開する。scrollback 上限で古い行が捨てられても live bottom からの距離は
-変わらないため、この補正は追記だけを対象とする。保持している間は live bottom までの距離が会話とともに
-伸びるため、`Ctrl-O b` / `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
+live bottom へ戻すと追従を再開する。各 primary / alternate buffer は oldest retained row の
+monotonic origin を持ち、viewport は row count と origin の両方から追記数を算出する。したがって 10,000 行上限や
+daemon の cell / checkpoint frame budget で oldest row の eviction と追記が同時に起き、retained row count が
+変わらない場合も同じ surviving content を保持する。buffer が切り替わった場合は別の座標系として扱い、
+一方の origin を他方の追記量へ混ぜない。保持している間は live bottom までの距離が会話とともに伸びるため、
+`Ctrl-O b` / `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
 
 出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が

@@ -14,7 +14,9 @@
 
 use std::collections::HashSet;
 
-use usagi_core::usecase::vt_screen::{Cell, CheckpointError, ScreenCheckpoint, VtScreen};
+use usagi_core::usecase::vt_screen::{
+    ActiveBuffer, Cell, CheckpointError, ScreenCheckpoint, VtScreen,
+};
 
 use super::terminal_link::scan_links;
 use super::terminal_selection::TerminalPoint;
@@ -23,6 +25,15 @@ use super::terminal_selection::TerminalPoint;
 // use-case module deliberately does not depend on presentation, while the
 // renderer consumes the marker before writing terminal output.
 const TERMINAL_CURSOR_MARKER: char = '\u{e0001}';
+
+/// Visible VT buffer lineage. A primary transcript and a full-screen alternate
+/// frame have independent retained-row coordinates even when their origins are
+/// numerically equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalBuffer {
+    Primary,
+    Alternate,
+}
 
 /// Renders the shared core VT screen into the rows the pane draws.
 ///
@@ -109,6 +120,21 @@ impl TerminalScreen {
             content.max(self.cursor_retained_row() + 1)
         } else {
             content
+        }
+    }
+
+    /// Monotonic logical index of the oldest row retained by the active buffer.
+    #[must_use]
+    pub const fn retained_row_origin(&self) -> u64 {
+        self.screen.scrollback_origin()
+    }
+
+    /// Buffer lineage for [`Self::retained_row_origin`].
+    #[must_use]
+    pub fn retained_buffer(&self) -> TerminalBuffer {
+        match self.screen.active_buffer() {
+            ActiveBuffer::Primary => TerminalBuffer::Primary,
+            ActiveBuffer::Alternate => TerminalBuffer::Alternate,
         }
     }
 
@@ -606,6 +632,23 @@ mod tests {
             screen.rows_with_scrollback_window(1, 2, true),
             vec![format!("\x1b[7m{TERMINAL_CURSOR_MARKER} \x1b[0m")]
         );
+    }
+
+    #[test]
+    fn retained_origin_and_buffer_follow_the_core_screen_authority() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo\r\nthree\r\nfour");
+        assert_eq!(screen.retained_buffer(), TerminalBuffer::Primary);
+        assert_eq!(screen.retained_row_origin(), 0);
+        assert_eq!(screen.screen.trim_to_cells(3 * 8), 1);
+        assert_eq!(screen.retained_row_origin(), 1);
+
+        screen.advance(b"\x1b[?1049h");
+        assert_eq!(screen.retained_buffer(), TerminalBuffer::Alternate);
+        assert_eq!(screen.retained_row_origin(), 0);
+        screen.advance(b"\x1b[?1049l");
+        assert_eq!(screen.retained_buffer(), TerminalBuffer::Primary);
+        assert_eq!(screen.retained_row_origin(), 1);
     }
 
     #[test]
