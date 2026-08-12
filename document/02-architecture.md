@@ -867,8 +867,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   session モードは session worktree の外を狙う file 書き込みを拒否し、root モードはコーディネータの
   リポジトリ変更（全 file 書き込みツールと read-only allowlist 外の shell command）を拒否する。判定は
   **ツール名の closed allowlist ではなく変更能力**で行う。名前で分かるのは書き込みツールと `Bash` と
-  MCP tool までで、未知のツールは `tool_input` が file を名指しするかどうかで決める（名指しするなら
-  書き込みうるものとして fail-closed）。名前の allowlist は harness が tool を追加・改名するたびに壊れ、
+  MCP tool までで、未知のツールは `tool_input` の shape で決める。file を名指しする key を持てば
+  書き込みうるものとして、command を運ぶ key を持てば shell として扱う（どちらも fail-closed 側）ため、
+  `Bash` の改名や新しい実行系ツールでも root の read-only allowlist は素通りされない。key は
+  snake_case へ正規化した最後の語で照合するので、`file_path` / `target_file` / `filePath` / `paths` は
+  当たり、`profile` のような偶然の部分一致は当たらない。名前の allowlist は harness が tool を追加・改名するたびに壊れ、
   guard の性質と無関係にエージェントの手足（`ToolSearch` 経由の MCP tool、subagent、task 追跡）を奪うため
   採らない。malformed な payload は fail-closed で拒否し、拒否は Claude の `PreToolUse` 契約どおり stdout の
   `hookSpecificOutput`（`permissionDecision: "deny"`、終了コード 0）で返す。判定ロジックは

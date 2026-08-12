@@ -8,7 +8,8 @@
 //! 判定対象は**ツール名の allowlist ではなく変更能力**である（[`workspace_guard::classify_tool`]）。
 //! harness は tool を追加・改名し続けるため、名前の closed allowlist は更新のたびに壊れ、guard が
 //! 守るべき性質と無関係に agent の手足（`ToolSearch` 経由の MCP tool、subagent、task 追跡…）を
-//! 奪ってしまう。未知でもファイルを名指しする input を持つ呼び出しは書き込みうるものとして扱う。
+//! 奪ってしまう。未知でもファイルを名指しする input を持てば書き込みうるもの、command を運ぶ input を
+//! 持てば shell として扱うので、`Bash` の改名や新しい実行系ツールでも判定は素通りしない。
 //!
 //! フックは runtime に `cwd` から 2 モードのいずれかを選ぶ。
 //!
@@ -123,24 +124,28 @@ fn session_worktree_root(cwd: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// `tool_input` が名指しするファイルパス（[`workspace_guard::is_path_input_key`] の key の値）。
-/// 書き込みツールの対象はここから拾い、1 つでも worktree を出れば拒否する。
-fn path_targets(input: &serde_json::Map<String, serde_json::Value>) -> Vec<PathBuf> {
+/// `tool_input` の値のうち、`matches` に当たる key が運ぶ空でない文字列。書き込み先候補と
+/// command 候補はどちらもこの形で拾い、1 つでも危険なら拒否する（配列や非文字列は拾えないため
+/// 候補ゼロ＝fail-closed の拒否に落ちる）。
+fn string_values(
+    input: &serde_json::Map<String, serde_json::Value>,
+    matches: fn(&str) -> bool,
+) -> Vec<&str> {
     input
         .iter()
-        .filter(|(key, _)| workspace_guard::is_path_input_key(key))
+        .filter(|(key, _)| matches(key))
         .filter_map(|(_, value)| value.as_str())
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+        .filter(|value| !value.trim().is_empty())
         .collect()
 }
 
-/// `Bash` payload の command。欠落・空白のみは拒否理由を返す。
-fn bash_command(input: &serde_json::Map<String, serde_json::Value>) -> Result<&str, String> {
-    match input.get("command").and_then(serde_json::Value::as_str) {
-        Some(command) if !command.trim().is_empty() => Ok(command),
-        _ => Err("Bash payload has no command".to_string()),
-    }
+/// 書き込み先候補。`Write` の `file_path`、`NotebookEdit` の `notebook_path`、未知ツールの
+/// `target_file` などを同じ経路で拾う。
+fn path_targets(input: &serde_json::Map<String, serde_json::Value>) -> Vec<PathBuf> {
+    string_values(input, workspace_guard::is_path_input_key)
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// session モード: file 書き込みの対象を canonicalize し、escape を弾く。非書き込みツールは
@@ -155,7 +160,9 @@ fn session_deny_reason(
         workspace_guard::ToolGuard::FileWrite => {
             let targets = path_targets(input);
             if targets.is_empty() {
-                return Some(format!("{tool_name} payload has no file_path"));
+                return Some(format!(
+                    "{tool_name} payload names no usable file path（書き込み先の key に空でない文字列がありません）"
+                ));
             }
             // escape、または解決できないケースは fail-closed で拒否する（判定は core 側で total）。
             targets
@@ -171,9 +178,17 @@ fn session_deny_reason(
         }
         // shell command と subagent は必須の OS sandbox を継承する。フックは shape を検証するが、
         // shell semantics を security boundary としてパースするとは主張しない。
-        workspace_guard::ToolGuard::Shell => bash_command(input).err(),
+        workspace_guard::ToolGuard::Shell => shell_commands(input)
+            .is_empty()
+            .then(|| format!("{tool_name} payload has no command")),
         workspace_guard::ToolGuard::Unrestricted => None,
     }
+}
+
+/// 検査対象の shell command 候補。`Bash` の `command` も、command を運ぶ未知ツールの key も
+/// 同じ判定（[`workspace_guard::is_command_input_key`]）で拾う。
+fn shell_commands(input: &serde_json::Map<String, serde_json::Value>) -> Vec<&str> {
+    string_values(input, workspace_guard::is_command_input_key)
 }
 
 /// root モード: コーディネータはリポジトリを変更してはならない。file 書き込みツールをパスによらず
@@ -187,16 +202,23 @@ fn root_deny_reason(
             "ワークスペースルート（コーディネータ）ではファイルを書きうるツール（{tool_name}）を実行できません。\
              root 行はリポジトリを変更しません。編集はセッションの worktree に委譲してください。"
         )),
-        workspace_guard::ToolGuard::Shell => match bash_command(input) {
-            Err(reason) => Some(reason),
-            Ok(command) => workspace_guard::command_mutates_repo(command).then(|| {
-                format!(
-                    "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。\
-                     Git は `git --no-pager --no-optional-locks <subcommand>` を使い、diff 系には \
-                     `--no-ext-diff --no-textconv` も指定してください。"
-                )
-            }),
-        },
+        workspace_guard::ToolGuard::Shell => {
+            let commands = shell_commands(input);
+            if commands.is_empty() {
+                return Some(format!("{tool_name} payload has no command"));
+            }
+            // 1 つでも変更しうる command があれば拒否する。
+            commands
+                .into_iter()
+                .find(|command| workspace_guard::command_mutates_repo(command))
+                .map(|command| {
+                    format!(
+                        "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。\
+                         Git は `git --no-pager --no-optional-locks <subcommand>` を使い、diff 系には \
+                         `--no-ext-diff --no-textconv` も指定してください。"
+                    )
+                })
+        }
         workspace_guard::ToolGuard::Unrestricted => None,
     }
 }
@@ -321,13 +343,26 @@ mod tests {
             serde_json::json!({"notebook_path": worktree.join("nb.ipynb")}),
         );
         assert_eq!(deny_reason(&inside), None);
-        // path を持たない未知のツールは変更能力の証拠がないので通す。
+        // path も command も持たない未知のツールは変更能力の証拠がないので通す。
         let harmless = payload(
             &worktree,
             "FutureMutator",
             serde_json::json!({"query": "x"}),
         );
         assert_eq!(deny_reason(&harmless), None);
+        // command を運ぶ未知のツールは shell として shape だけ検証する（副作用は OS sandbox）。
+        let runner = payload(
+            &worktree,
+            "FutureRunner",
+            serde_json::json!({"script": "rm -rf /tmp/x"}),
+        );
+        assert_eq!(deny_reason(&runner), None);
+        let empty_runner = payload(&worktree, "FutureRunner", serde_json::json!({"cmd": "  "}));
+        assert!(
+            deny_reason(&empty_runner)
+                .unwrap()
+                .contains("has no command")
+        );
     }
 
     #[test]
@@ -355,8 +390,19 @@ mod tests {
             serde_json::json!({"file_path": 7}),
         ] {
             let no_path = payload(&worktree, "Write", input);
-            assert!(deny_reason(&no_path).unwrap().contains("has no file_path"));
+            assert!(
+                deny_reason(&no_path)
+                    .unwrap()
+                    .contains("names no usable file path")
+            );
         }
+        // `notebook_path` しか持たない `NotebookEdit` も同じ経路で解決される（旧実装は常に拒否した）。
+        let notebook = payload(
+            &worktree,
+            "NotebookEdit",
+            serde_json::json!({"notebook_path": worktree.join("nb.ipynb")}),
+        );
+        assert_eq!(deny_reason(&notebook), None);
     }
 
     #[test]
@@ -489,6 +535,35 @@ mod tests {
             let allowed = payload(temp.path(), tool, serde_json::json!({"query": "usagi"}));
             assert_eq!(deny_reason(&allowed), None, "{tool} should be allowed");
         }
+    }
+
+    #[test]
+    fn root_mode_checks_commands_from_an_unknown_runner_not_just_bash() {
+        // `Bash` が改名されても root の read-only allowlist を素通りさせない。command を運ぶ
+        // key を持つ未知のツールは shell として検査する。
+        let (temp, _root, _worktree) = layout();
+        let mutating = payload(
+            temp.path(),
+            "FutureRunner",
+            serde_json::json!({"script": "git commit -m x"}),
+        );
+        assert!(deny_reason(&mutating).unwrap().contains("git commit -m x"));
+        let read_only = payload(
+            temp.path(),
+            "FutureRunner",
+            serde_json::json!({"cmd": "git --no-pager --no-optional-locks status"}),
+        );
+        assert_eq!(deny_reason(&read_only), None);
+        // 変更しうる command が 1 つでもあれば拒否する。
+        let mixed = payload(
+            temp.path(),
+            "FutureRunner",
+            serde_json::json!({"cmd": "git --no-pager --no-optional-locks status", "script": "rm -rf x"}),
+        );
+        assert!(deny_reason(&mixed).unwrap().contains("rm -rf x"));
+        // command key はあるが使える値が無い場合も拒否する。
+        let empty = payload(temp.path(), "FutureRunner", serde_json::json!({"cmd": 7}));
+        assert!(deny_reason(&empty).unwrap().contains("has no command"));
     }
 
     #[test]
