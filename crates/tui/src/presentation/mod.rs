@@ -3327,7 +3327,8 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         | LiveTerminalAction::MoveTabNext
         | LiveTerminalAction::MoveTabPrevious
         | LiveTerminalAction::ScrollUp
-        | LiveTerminalAction::ScrollDown => None,
+        | LiveTerminalAction::ScrollDown
+        | LiveTerminalAction::ScrollBottom => None,
     }
 }
 
@@ -4534,6 +4535,7 @@ fn intercept_live_terminal_control(
     let pane_only_control = if let Key::Live(action) = key {
         *action == LiveTerminalAction::ScrollUp
             || *action == LiveTerminalAction::ScrollDown
+            || *action == LiveTerminalAction::ScrollBottom
             || *action == LiveTerminalAction::CloseTab
             || *action == LiveTerminalAction::ResumeTab
             || *action == LiveTerminalAction::MoveTabNext
@@ -4548,6 +4550,7 @@ fn intercept_live_terminal_control(
         match key {
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
+            Key::Live(LiveTerminalAction::ScrollBottom) => controls.scroll_to_bottom(),
             Key::Live(LiveTerminalAction::CloseTab) => {
                 close_focused_terminal_pane(ui, runtime, pending_targets);
             }
@@ -7069,6 +7072,7 @@ mod tests {
             LiveTerminalAction::CloseTab,
             LiveTerminalAction::ScrollUp,
             LiveTerminalAction::ScrollDown,
+            LiveTerminalAction::ScrollBottom,
         ] {
             assert_eq!(app_event_from_key(Key::Live(action)), None);
         }
@@ -12723,6 +12727,96 @@ mod tests {
                 .notice()
                 .map(|notice| notice.message.as_str()),
             Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+        );
+    }
+
+    /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
+    /// rows against everything the Agent appends, so the distance to the newest
+    /// output grows with the conversation and one-line `ScrollDown` alone cannot
+    /// be the only way back.
+    #[test]
+    fn scroll_bottom_returns_a_scrolled_pane_to_the_live_output() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let mut replay = String::new();
+        for row in 0..40 {
+            use std::fmt::Write as _;
+            let _ = writeln!(replay, "row {row}\r");
+        }
+        let replay = replay.into_bytes();
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(ScriptedAgentPort {
+                terminal,
+                subscription: 11,
+                replay,
+                poll_error: None,
+                detaches: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        let geometry = terminal_geometry(20, 80);
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut pending = std::collections::HashMap::new();
+        let mut scroll_key = |key,
+                              ui: &mut WorkspaceUi,
+                              runtime: &mut WorkspaceRuntime,
+                              controls: &mut LiveTerminalControls,
+                              rows_len,
+                              scroll| {
+            assert!(intercept_live_terminal_control(
+                &Key::Live(key),
+                ui,
+                runtime,
+                controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                rows_len,
+                scroll,
+            ));
+        };
+
+        let (view, rows_len, scroll) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        let live_bottom = view.expect("the focused live tab projects its rows");
+        assert_eq!(live_bottom.scroll, 0);
+
+        for _ in 0..5 {
+            scroll_key(
+                LiveTerminalAction::ScrollUp,
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                rows_len,
+                scroll,
+            );
+        }
+        let (scrolled, rows_len, scroll) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        let scrolled = scrolled.expect("a scrolled viewport still projects rows");
+        assert_eq!(scrolled.scroll, 5);
+        assert_ne!(scrolled.rows, live_bottom.rows);
+
+        scroll_key(
+            LiveTerminalAction::ScrollBottom,
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            rows_len,
+            scroll,
+        );
+        let (followed, _, _) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        assert_eq!(
+            followed.expect("the pane follows live output again"),
+            live_bottom
         );
     }
 
