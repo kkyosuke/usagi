@@ -6,8 +6,10 @@
 //! only through an injected ownership proof; the connection error itself is
 //! never authority to mutate lifecycle state.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -138,6 +140,99 @@ where
     Ok(stream)
 }
 
+/// What development's build-mismatch ladder settled on.
+#[derive(Debug)]
+pub(crate) enum DevelopmentConnection<S> {
+    /// The daemon now advertises this client's exact artifact.
+    Replaced(S),
+    /// The mismatch stands and the reachable daemon is reused as it is, because
+    /// resolving it would have destroyed live runtime — or because this process
+    /// already spent its one attempt against that artifact. `reason` is the
+    /// non-sensitive explanation for the log.
+    Reused { stream: S, reason: String },
+}
+
+/// Development's build-mismatch ladder: ask for one *planned* replacement, then
+/// keep the mismatched daemon rather than destroy what it owns.
+///
+/// The replacement is planned, never forced. The daemon's own census then
+/// decides between a cold transition (it owns nothing live) and a seamless
+/// rollover that keeps the old PTY masters alive, and refuses only when neither
+/// is safe. A refusal — or a replacement that still does not advertise this
+/// artifact, which is exactly what a rebuilt on-disk executable produces — falls
+/// back to reusing the reachable daemon.
+///
+/// Development prefers that over both alternatives on purpose. A forced cold
+/// transition kills the Agent conversations another client is holding (the very
+/// reason [`crate::runtime::daemon`]'s planned replacement guard exists), and a
+/// hard refusal would wedge every control request of a client whose own build no
+/// longer exists on disk.
+// Every rung is exercised through the fake endpoint below. LLVM nevertheless
+// counts the separately generated production `IpcClient` instantiation as
+// uncovered, exactly as it does for the two functions above.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=runtime::bootstrap::tests
+pub(crate) fn replace_or_reuse<S, C, R, B>(
+    mut connect: C,
+    restart: R,
+    expected_build: &BuildIdentity,
+    build_of: B,
+    may_attempt: bool,
+) -> Result<DevelopmentConnection<S>, BootstrapError>
+where
+    C: FnMut() -> io::Result<S>,
+    R: FnMut() -> io::Result<()>,
+    B: Fn(&S) -> &BuildIdentity,
+{
+    let reason = if may_attempt {
+        match restart_and_connect(&mut connect, restart, expected_build, &build_of) {
+            Ok(stream) => return Ok(DevelopmentConnection::Replaced(stream)),
+            // A daemon serving another workspace is a definitive answer about
+            // this endpoint, not a build mismatch to work around: there is
+            // nothing here this client may reuse.
+            Err(BootstrapError::WorkspaceMismatch(refusal)) => {
+                return Err(BootstrapError::WorkspaceMismatch(refusal));
+            }
+            Err(error) => error.to_string(),
+        }
+    } else {
+        "this daemon build was already asked to be replaced".to_owned()
+    };
+    let stream = connect().map_err(|error| match workspace_refusal(&error) {
+        Some(refusal) => BootstrapError::WorkspaceMismatch(refusal),
+        None => BootstrapError::Connect(error),
+    })?;
+    Ok(DevelopmentConnection::Reused { stream, reason })
+}
+
+/// The daemon artifacts one action of this process has already been spent on.
+///
+/// Two actions are once-per-artifact, and each keeps its own set: asking for a
+/// replacement, and recording a reuse in the log. A client's own artifact is a
+/// compile-time constant, but the executable a replacement launches is whatever
+/// is on disk when it runs. The two differ as soon as somebody rebuilds while
+/// this process keeps running, so the replacement cannot bring the daemon to
+/// *this* artifact and asking again would only churn one generation per
+/// bootstrap — several per second across the render and pump lanes. The first
+/// observation of a daemon artifact is therefore worth one attempt (and one log
+/// entry); every later observation of the same artifact is silent reuse.
+pub(crate) struct OncePerArtifact(Mutex<BTreeSet<String>>);
+
+impl OncePerArtifact {
+    pub(crate) const fn new() -> Self {
+        Self(Mutex::new(BTreeSet::new()))
+    }
+
+    /// Whether this process may still spend its one action on `artifact`. A
+    /// poisoned lock is read through: the set only bounds churn, and losing it
+    /// must not fail a bootstrap.
+    pub(crate) fn claim(&self, artifact: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(artifact.to_owned())
+    }
+}
+
 /// Result of the composition root's lock- and identity-fenced stale-owner
 /// proof. `NotProven` is intentionally distinct from an error: live, replaced,
 /// or identity-unknown owners remain untouched and preserve the original
@@ -259,7 +354,8 @@ fn wait_for_ready(connect: &mut dyn FnMut() -> io::Result<()>) -> Result<(), Boo
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapError, StaleRecovery, connect_or_start, restart_and_connect, workspace_refusal,
+        BootstrapError, DevelopmentConnection, StaleRecovery, connect_or_start, replace_or_reuse,
+        restart_and_connect, workspace_refusal,
     };
     use std::cell::Cell;
     use std::io;
@@ -842,6 +938,160 @@ mod tests {
         .unwrap_err();
         assert_same_variant(
             &unrelated,
+            &BootstrapError::Connect(io::Error::other("expected variant")),
+        );
+    }
+
+    /// The endpoint a development ladder settled on, and whether the mismatch
+    /// survived it.
+    fn settled(outcome: DevelopmentConnection<Endpoint>) -> (&'static str, Option<String>) {
+        match outcome {
+            DevelopmentConnection::Replaced(stream) => (stream.name, None),
+            DevelopmentConnection::Reused { stream, reason } => (stream.name, Some(reason)),
+        }
+    }
+
+    #[test]
+    fn a_planned_replacement_that_reaches_this_build_is_adopted() {
+        let restarts = Cell::new(0);
+        let expected = build("current");
+        let outcome = replace_or_reuse(
+            || Ok(endpoint("replacement", "current")),
+            counted_restart(&restarts),
+            &expected,
+            endpoint_build,
+            true,
+        )
+        .unwrap();
+        assert_eq!(settled(outcome), ("replacement", None));
+        assert_eq!(restarts.get(), 1);
+    }
+
+    /// A successful replacement that records each attempt. Shared by the cases
+    /// that expect an attempt and the case that expects none, so one code site
+    /// answers "how many times was the daemon asked to replace itself".
+    fn counted_restart(restarts: &Cell<u32>) -> impl FnMut() -> io::Result<()> + '_ {
+        move || {
+            restarts.set(restarts.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_refused_replacement_reuses_the_daemon_instead_of_destroying_its_runtime() {
+        let expected = build("current");
+        let outcome = replace_or_reuse(
+            || Ok(endpoint("live-owner", "old")),
+            // What the daemon's live-runtime census answers while it still owns
+            // another client's Agent: the transition is refused, effect zero.
+            lifecycle_error,
+            &expected,
+            endpoint_build,
+            true,
+        )
+        .unwrap();
+        let (name, reason) = settled(outcome);
+        assert_eq!(name, "live-owner");
+        assert_eq!(
+            reason.as_deref(),
+            Some("daemon generation could not be restarted")
+        );
+    }
+
+    #[test]
+    fn a_replacement_that_still_advertises_another_build_is_reused_not_retried() {
+        let restarts = Cell::new(0);
+        let expected = build("current");
+        // What a rebuilt on-disk executable produces: the replacement succeeds and
+        // is somebody else's artifact again, so this client can never reach its
+        // own build by asking for another one.
+        let outcome = replace_or_reuse(
+            || Ok(endpoint("newer", "old")),
+            counted_restart(&restarts),
+            &expected,
+            endpoint_build,
+            true,
+        )
+        .unwrap();
+        let (name, reason) = settled(outcome);
+        assert_eq!(name, "newer");
+        assert_eq!(
+            reason.as_deref(),
+            Some("replacement daemon build does not match this client")
+        );
+        assert_eq!(restarts.get(), 1);
+    }
+
+    #[test]
+    fn an_already_attempted_artifact_is_reused_without_asking_again() {
+        let expected = build("current");
+        let restarts = Cell::new(0);
+        let outcome = replace_or_reuse(
+            || Ok(endpoint("standing-mismatch", "old")),
+            counted_restart(&restarts),
+            &expected,
+            endpoint_build,
+            false,
+        )
+        .unwrap();
+        let (name, reason) = settled(outcome);
+        assert_eq!(name, "standing-mismatch");
+        assert_eq!(
+            reason.as_deref(),
+            Some("this daemon build was already asked to be replaced")
+        );
+        // Every later lane of this process reuses in place: nothing is restarted,
+        // so a mismatch cannot churn one generation per bootstrap.
+        assert_eq!(restarts.get(), 0);
+    }
+
+    #[test]
+    fn one_replacement_attempt_is_claimed_per_daemon_artifact() {
+        let attempts = super::OncePerArtifact::new();
+        assert!(attempts.claim("usagi-artifact-v1:debug:test:old"));
+        assert!(!attempts.claim("usagi-artifact-v1:debug:test:old"));
+        // A daemon that changed artifact again is a new observation, and worth the
+        // one attempt that may reach this client's build.
+        assert!(attempts.claim("usagi-artifact-v1:debug:test:newer"));
+    }
+
+    #[test]
+    fn a_reused_endpoint_keeps_the_workspace_fence_and_connect_failures_typed() {
+        use usagi_core::infrastructure::ipc::{ClientWorkspace, workspace_admission};
+
+        let expected = build("current");
+        let refusal = workspace_admission(
+            Some(&ClientWorkspace::Bound {
+                root: "/workspace/other".into(),
+            }),
+            "/workspace/root",
+        )
+        .unwrap_err();
+        let refused =
+            || Err::<Endpoint, _>(io::Error::other(ClientError::Protocol(refusal.clone())));
+
+        // Another workspace's daemon is a definitive answer about the endpoint,
+        // so it is neither replaced nor reused — on either rung of the ladder.
+        let attempted =
+            replace_or_reuse(refused, || Ok(()), &expected, endpoint_build, true).unwrap_err();
+        assert_eq!(workspace_mismatch(attempted).as_ref(), Some(&refusal));
+        let without_attempt =
+            replace_or_reuse(refused, lifecycle_error, &expected, endpoint_build, false)
+                .unwrap_err();
+        assert_eq!(workspace_mismatch(without_attempt).as_ref(), Some(&refusal));
+
+        // An endpoint that stopped answering keeps its transport classification
+        // rather than being reported as a build decision.
+        let unreachable = replace_or_reuse(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::ConnectionRefused)),
+            lifecycle_error,
+            &expected,
+            endpoint_build,
+            false,
+        )
+        .unwrap_err();
+        assert_same_variant(
+            &unreachable,
             &BootstrapError::Connect(io::Error::other("expected variant")),
         );
     }

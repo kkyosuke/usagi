@@ -9394,18 +9394,33 @@ fn bootstrap_client<S: Read + Write>(
         IpcClient::server_build,
     );
     let connection = match connection {
-        Err(bootstrap::BootstrapError::RolloverRequired(_))
+        Err(bootstrap::BootstrapError::RolloverRequired(trigger))
             if paths::runtime_mode() == paths::RuntimeMode::Development =>
         {
-            bootstrap::restart_and_connect(
+            // Keyed by the artifact this daemon advertises, so a client whose own
+            // build no longer exists on disk asks once instead of once per lane.
+            let may_attempt = ATTEMPTED_REPLACEMENTS.claim(&trigger.running_artifact);
+            match bootstrap::replace_or_reuse(
                 || connect(&data_dir, &expected_build),
-                // Development has already chosen a destructive replacement of a
-                // different build: the cold transition must not be refused by
-                // the live-runtime guard it deliberately overrides (#507).
-                || run_lifecycle_with(&exe, &["daemon", "restart", "--force"], "restart"),
+                // Planned, never forced. A rebuild is not a reason to destroy the
+                // Agent conversations this daemon owns for another client: its
+                // census picks a cold transition only when nothing is live, and a
+                // seamless rollover keeps the old PTY masters alive otherwise
+                // (#507 / #559).
+                || run_lifecycle_with(&exe, &["daemon", "restart"], "restart"),
                 &expected_build,
                 IpcClient::server_build,
-            )
+                may_attempt,
+            ) {
+                Ok(bootstrap::DevelopmentConnection::Replaced(stream)) => Ok(stream),
+                Ok(bootstrap::DevelopmentConnection::Reused { stream, reason }) => {
+                    if let Some(entry) = reused_build_mismatch_record(&trigger, &reason) {
+                        ErrorLog::record(&entry);
+                    }
+                    Ok(stream)
+                }
+                Err(error) => Err(error),
+            }
         }
         other => other,
     };
@@ -9420,6 +9435,35 @@ fn bootstrap_client<S: Read + Write>(
         bootstrap::BootstrapError::WorkspaceMismatch(refusal) => ClientError::Protocol(refusal),
         other => ClientError::Lifecycle(other.to_string()),
     })
+}
+
+/// Development's one-attempt-per-daemon-artifact guard
+/// ([`bootstrap::OncePerArtifact`]).
+static ATTEMPTED_REPLACEMENTS: bootstrap::OncePerArtifact = bootstrap::OncePerArtifact::new();
+
+/// The daemon artifacts whose reuse this process has already recorded, so a
+/// standing mismatch costs one log line instead of one per bootstrapped lane.
+static LOGGED_MISMATCHES: bootstrap::OncePerArtifact = bootstrap::OncePerArtifact::new();
+
+/// The log entry for a development client that keeps talking to a daemon built
+/// from another artifact, or `None` when this process already recorded that same
+/// standing mismatch.
+///
+/// Reusing the daemon preserves live Agent conversations, but a stale client is
+/// exactly what to look for when a freshly built binary behaves like an older
+/// one, so the deliberate mismatch leaves a trail instead of being silent. Every
+/// bootstrapped lane observes the same mismatch, hence one entry per daemon
+/// artifact rather than one per connection. Only the artifact identities and the
+/// non-sensitive reason are recorded.
+fn reused_build_mismatch_record(trigger: &BuildRolloverTrigger, reason: &str) -> Option<String> {
+    LOGGED_MISMATCHES
+        .claim(&trigger.running_artifact)
+        .then(|| {
+            format!(
+                "development client reused the daemon build {} instead of replacing it with {}: {reason}",
+                trigger.running_artifact, trigger.expected_artifact
+            )
+        })
 }
 
 /// The real process monotonic clock. Only differences between observations are
@@ -11732,18 +11776,46 @@ mod tests {
         // fresh daemon would bind this process's directory and then refuse the
         // very connection that started it.
         let opened = PathBuf::from("/workspace/root");
-        let restart = lifecycle_command(
-            &exe,
-            &["daemon", "restart", "--force"],
-            Some(opened.clone()),
-        );
+        let restart = lifecycle_command(&exe, &["daemon", "restart"], Some(opened.clone()));
         assert_eq!(restart.get_current_dir(), Some(opened.as_path()));
-        // Development consumes a build-mismatch trigger by an explicit cold
-        // transition, so its restart carries the guard override it chose.
+        // Development consumes a build-mismatch trigger with a *planned*
+        // replacement: the live-runtime guard decides between a cold transition
+        // and a seamless rollover, so no `--force` override is passed and a
+        // rebuild cannot kill another client's Agent.
         assert_eq!(
             restart.get_args().collect::<Vec<_>>(),
-            vec!["daemon", "restart", "--force"]
+            vec!["daemon", "restart"]
         );
+    }
+
+    #[test]
+    fn a_reused_development_mismatch_is_recorded_once_per_daemon_artifact() {
+        let running = test_build("a");
+        let expected = test_build("b");
+        let trigger = build_rollover_trigger(&running, &expected, "development", false).unwrap();
+
+        let entry = reused_build_mismatch_record(&trigger, "live runtime preserved")
+            .expect("the first observation of a mismatch is recorded");
+        assert!(entry.contains(&running.artifact), "{entry}");
+        assert!(entry.contains(&expected.artifact), "{entry}");
+        assert!(entry.contains("live runtime preserved"), "{entry}");
+        // Every bootstrapped lane observes the same standing mismatch, so the
+        // trail stays one entry instead of one per connection.
+        assert_eq!(
+            reused_build_mismatch_record(&trigger, "live runtime preserved"),
+            None
+        );
+    }
+
+    /// A known artifact identity whose source digest is distinguished by `seed`.
+    fn test_build(seed: &str) -> BuildIdentity {
+        usagi_core::infrastructure::ipc::build_identity(
+            "2.0.0",
+            "test",
+            "test-target",
+            "debug",
+            &seed.repeat(64),
+        )
     }
 
     #[test]

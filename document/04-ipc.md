@@ -108,8 +108,11 @@ version / target でも source tree または build configuration が異なれ�
 trigger は artifact pair、runtime channel、force bit から決まる stable `OperationId` を持つため、concurrent client、
 response loss、reconnect、repeated bootstrap は同じ key へ収束する。trigger の生成は effect-free であり、old daemon、
 endpoint、PTY に stop signal を送らない。production / local の bootstrap は trigger を typed outcome として返して
-old owner を維持する。development の bootstrap は既知の mismatch trigger に限って cold restart で消費し、
-replacement の exact artifact を再接続時の handshake で確認する。通常 bootstrap から same-artifact replacement は発行せず、明示
+old owner を維持する。development の bootstrap は既知の mismatch trigger に限って **planned replacement** で消費し
+（live runtime があれば seamless rollover、無ければ cold transition）、replacement の exact artifact を再接続時の
+handshake で確認する。replacement が拒否された場合と、replacement 後も別 artifact が広告されている場合は、
+到達可能な old owner を effect 0 で再利用する（[5. daemon の build mismatch](05-daemon.md#authority-と-lifecycle)）。
+通常 bootstrap から same-artifact replacement は発行せず、明示
 `usagi daemon replace` だけが `ForceReplace` trigger を作る。identity が empty / malformed / unsupported の場合は
 version / target 一致へ昇格せず、typed `BuildIdentityUnavailable` として old daemon を維持する。
 

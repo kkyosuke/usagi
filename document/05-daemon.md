@@ -91,9 +91,11 @@ literal `"unknown"` を same build と扱わない。Git metadata の無い pack
 
 build mismatch の通常 bootstrap は artifact pair と channel から決まる stable operation ID の typed rollover trigger を
 生成する。production / local は old daemon を停止せず、trigger を返して old endpoint と live PTY をそのまま維持する。
-development は trigger を cold restart で消費し、replacement の exact artifact を handshake で確認してから再接続する。
-これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動できるが、old daemon が所有する live
-Agent / generic Terminal は継続しない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
+development は trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
+daemon 自身の census が決め、何も live でなければ cold transition、live Agent / generic Terminal があれば PTY を維持する
+seamless rollover になる（[planned replacement](#planned-replacement)）。replacement 後は exact artifact を handshake で
+確認してから再接続する。これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動でき、かつ再 build が
+他の client の live Agent を巻き添えにしない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
 same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。trigger は
 effect-free であり、production / local は cross-process standby / admission consumer が未接続の間は cold stop/start や
 二重 spawn に進まない。
@@ -119,7 +121,13 @@ detected build mismatch / daemon replace
                                   -> old daemon process + PTY remain alive
 
 development build mismatch
-  client -> stable rollover operation -> cold restart -> exact build reconnect
+  client -> stable rollover operation -> planned replacement (no --force)
+                                     -> nothing live: cold transition -> exact build reconnect
+                                     -> live runtime: gated rollover -> PTY preserved
+                                                                     -> exact build reconnect
+                                     -> refused / still another artifact
+                                          -> reuse the reachable daemon, effect 0
+                                          -> one log entry per daemon artifact
 
 manual restart / replace, daemon owns live runtime
   client -> census -> seamless prerequisites available -> gated rollover -> PTY preserved
@@ -132,6 +140,21 @@ manual cold transition (--force, or nothing live)
          -> start fresh -> reconcile unfinished = identity_unknown
                         -> publish new current.json -> reconnect
 ```
+
+development の build mismatch は上図の 3 段で収束する。**同じ machine で複数の client（複数の TUI、CLI、MCP）が
+同時に動く前提**があり、そのうち 1 つを満足させるために別 client の live Agent を落とさないことを優先する。
+
+| 段 | 条件 | 結果 |
+|---|---|---|
+| planned replacement | この daemon artifact に対するこの process の最初の観測 | daemon の census が cold transition / seamless rollover を選ぶ。成功後は exact artifact を handshake で確認する |
+| reuse | replacement が拒否された、または replacement 後も別 artifact を広告している | 到達可能な daemon をそのまま使い、effect 0。daemon artifact ごとに 1 行だけ日次 error log に記録する |
+| refusal | 到達した daemon が別 workspace を持っている | typed workspace refusal。replacement も reuse も行わない |
+
+replacement を試すのは **daemon artifact ごとに 1 回だけ**である。client 自身の artifact は compile-time 定数だが、
+replacement が起動する executable は on-disk の現在の内容であり、client が動いている間に再 build されれば両者は
+一致し得ない。この場合の再試行は bootstrap ごとに generation を 1 つ churn させるだけなので、2 回目以降の同じ
+artifact の観測は reuse に落とす。build が古いままの client を放置するのではなく、mismatch を log に残して
+「新しく build したはずの binary が古い挙動をする」状況を追跡できるようにする。
 
 daemon verb を含む process argv は、合成ルートが side effect より前に完全に解析する。本節の表は
 解析成功後の lifecycle effect を定義し、文法・usage error・終了 status は
