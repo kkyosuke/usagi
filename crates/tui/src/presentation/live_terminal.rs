@@ -23,6 +23,7 @@ use usagi_core::domain::id::TerminalRef;
 use crate::presentation::views::workspace::TerminalViewProjection;
 use crate::usecase::application::pr::BrowserOpener;
 use crate::usecase::application::terminal_link::{url_at, validate_url};
+use crate::usecase::application::terminal_screen::TerminalBuffer;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 
 const RETAINED_TERMINAL_VIEW_LIMIT: usize = 8;
@@ -35,12 +36,11 @@ struct TerminalViewState {
     /// The furthest the current viewport can scroll, recomputed each frame from
     /// the retained rows so `scroll_up` cannot run past the top.
     max_scroll: usize,
-    /// Retained row count observed by the previous projection, or `None` before
-    /// the first one. Comparing it against the next count is what tells an
-    /// append (the Agent produced output) apart from an in-place repaint, so a
-    /// viewport scrolled away from the live bottom can hold its rows instead of
-    /// sliding forward with every new line.
-    projected_rows: Option<usize>,
+    /// `(oldest logical row, retained row count)` observed by the previous
+    /// projection, or `None` before the first one. The origin distinguishes an
+    /// append+oldest-eviction from an in-place repaint when the bounded retained
+    /// row count is unchanged.
+    projected_extent: Option<(TerminalBuffer, u64, usize)>,
     /// A left-button press that has not moved yet. Keeping this separate from
     /// `selection` is what distinguishes a click from a one-cell drag: the
     /// selection becomes visible and copyable only after the first drag event.
@@ -350,15 +350,38 @@ impl LiveTerminalControls {
     /// live bottom (`scroll == 0`) keeps following output, and the offset is
     /// re-clamped so a shrunk history cannot leave it past the top.
     ///
-    /// Rows dropped from the top by the retained-scrollback bound move no row
-    /// relative to the bottom, so they need no correction here; only the count
-    /// growing does.
-    fn observe_rows(&mut self, total_rows: usize, viewport_rows: usize) {
-        let previous = self.active.projected_rows.replace(total_rows);
+    /// `row_origin` is the logical row represented by retained index zero. It
+    /// advances when bounded history evicts from the top, so append count is:
+    ///
+    /// `current_origin + current_total - previous_origin - previous_total`,
+    /// clamped at zero when the logical tail moved backward.
+    ///
+    /// This remains correct when append and eviction happen in the same update
+    /// and leave `total_rows` unchanged.
+    fn observe_rows(
+        &mut self,
+        buffer: TerminalBuffer,
+        row_origin: u64,
+        total_rows: usize,
+        viewport_rows: usize,
+    ) {
+        let previous = self
+            .active
+            .projected_extent
+            .replace((buffer, row_origin, total_rows));
         if self.active.scroll > 0
-            && let Some(appended) = previous.and_then(|previous| total_rows.checked_sub(previous))
+            && let Some((previous_buffer, previous_origin, previous_total)) = previous
+            && buffer == previous_buffer
         {
-            self.active.scroll = self.active.scroll.saturating_add(appended);
+            let current_end =
+                row_origin.saturating_add(u64::try_from(total_rows).unwrap_or(u64::MAX));
+            let previous_end =
+                previous_origin.saturating_add(u64::try_from(previous_total).unwrap_or(u64::MAX));
+            let appended = current_end.saturating_sub(previous_end);
+            self.active.scroll = self
+                .active
+                .scroll
+                .saturating_add(usize::try_from(appended).unwrap_or(usize::MAX));
         }
         self.active.max_scroll = total_rows.saturating_sub(viewport_rows);
         self.active.scroll = self.active.scroll.min(self.active.max_scroll);
@@ -369,7 +392,7 @@ impl LiveTerminalControls {
     /// shrunk history re-clamps the offset.
     pub fn project(&mut self, rows: Vec<String>, viewport_rows: usize) -> TerminalViewProjection {
         let total_rows = rows.len();
-        self.observe_rows(total_rows, viewport_rows);
+        self.observe_rows(TerminalBuffer::Primary, 0, total_rows, viewport_rows);
         TerminalViewProjection {
             rows,
             row_offset: 0,
@@ -385,10 +408,12 @@ impl LiveTerminalControls {
     #[must_use]
     pub fn visible_range(
         &mut self,
+        buffer: TerminalBuffer,
+        row_origin: u64,
         total_rows: usize,
         viewport_rows: usize,
     ) -> std::ops::Range<usize> {
-        self.observe_rows(total_rows, viewport_rows);
+        self.observe_rows(buffer, row_origin, total_rows, viewport_rows);
         let end = total_rows.saturating_sub(self.active.scroll);
         end.saturating_sub(viewport_rows)..end
     }
@@ -433,6 +458,7 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{LiveTerminalControls, PointerRelease};
     use crate::usecase::application::pr::BrowserOpener;
+    use crate::usecase::application::terminal_screen::TerminalBuffer;
     use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
@@ -485,21 +511,130 @@ mod tests {
     #[test]
     fn a_scrolled_viewport_holds_its_rows_while_the_agent_appends() {
         let mut controls = LiveTerminalControls::default();
-        assert_eq!(controls.visible_range(10, 3), 7..10);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 10, 3),
+            7..10
+        );
         controls.scroll_up();
         controls.scroll_up();
-        let held = controls.visible_range(10, 3);
+        let held = controls.visible_range(TerminalBuffer::Primary, 0, 10, 3);
         assert_eq!(held, 5..8);
 
         // Four more rows of live output: the same retained rows stay on screen
         // and the offset absorbs the appended rows instead.
-        assert_eq!(controls.visible_range(14, 3), held);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 14, 3),
+            held
+        );
         assert_eq!(controls.scroll(), 6);
 
         // The same holds for the whole-history projection used by the parity
         // suite and the drawer's retained view.
         assert_eq!(controls.project(rows(18), 3).scroll, 10);
-        assert_eq!(controls.visible_range(18, 3), held);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 18, 3),
+            held
+        );
+    }
+
+    /// Once scrollback reaches its bound, one append evicts one oldest row and
+    /// leaves the retained row count unchanged. The viewport still has to move
+    /// its retained index back by one to keep the same content on screen.
+    #[test]
+    fn a_scrolled_viewport_holds_its_rows_when_append_evicts_the_oldest_row() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 10, 3),
+            7..10
+        );
+        controls.scroll_up();
+        controls.scroll_up();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 10, 3),
+            5..8
+        );
+
+        // The retained count is still ten after `row 0` is evicted and
+        // `row 10` is appended. Holding the old content would therefore move
+        // the requested retained range from 5..8 to 4..7.
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 1, 10, 3),
+            4..7
+        );
+    }
+
+    #[test]
+    fn a_scrolled_viewport_keeps_surviving_rows_when_history_is_trimmed() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 10, 3),
+            7..10
+        );
+        controls.scroll_up();
+        controls.scroll_up();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 10, 3),
+            5..8
+        );
+
+        // Three oldest rows disappear without new output. The bottom offset is
+        // unchanged, while the retained index shifts from 5..8 to 2..5; both
+        // ranges identify the same surviving logical rows 5..8.
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 3, 7, 3),
+            2..5
+        );
+        assert_eq!(controls.scroll(), 2);
+    }
+
+    #[test]
+    fn prepended_history_and_new_output_still_hold_the_same_logical_rows() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 5, 10, 3),
+            7..10
+        );
+        controls.scroll_up();
+        controls.scroll_up();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 5, 10, 3),
+            5..8
+        );
+
+        // A later checkpoint contains three older rows which the previous
+        // payload had trimmed (origin 5 -> 2), and also two newly appended rows.
+        // The logical tail advances only by two, so the bottom offset absorbs
+        // two while the larger retained vector places the same logical rows at
+        // indices 8..11.
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 2, 15, 3),
+            8..11
+        );
+        assert_eq!(controls.scroll(), 4);
+    }
+
+    #[test]
+    fn switching_screen_buffers_does_not_infer_an_append_from_unrelated_origins() {
+        let mut controls = LiveTerminalControls::default();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 100, 10, 3),
+            7..10
+        );
+        controls.scroll_up();
+        controls.scroll_up();
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 100, 10, 3),
+            5..8
+        );
+
+        // Entering the alternate screen starts a different retained coordinate
+        // space. Its lower origin must not look like a rewind, and its row count
+        // must not be combined with the primary extent as inferred output.
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Alternate, 0, 6, 3),
+            1..4
+        );
+        assert_eq!(controls.scroll(), 2);
     }
 
     /// Following live output is the other half of the contract: a viewport at the
@@ -507,20 +642,32 @@ mod tests {
     #[test]
     fn the_live_bottom_keeps_following_new_output() {
         let mut controls = LiveTerminalControls::default();
-        assert_eq!(controls.visible_range(10, 3), 7..10);
-        assert_eq!(controls.visible_range(14, 3), 11..14);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 10, 3),
+            7..10
+        );
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 14, 3),
+            11..14
+        );
         assert_eq!(controls.scroll(), 0);
 
         // One row up holds that row across the next two rows of output.
         controls.scroll_up();
-        assert_eq!(controls.visible_range(16, 3), 10..13);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 16, 3),
+            10..13
+        );
         assert_eq!(controls.scroll(), 3);
 
         // Scrolling back down to the live bottom resumes following.
         for _ in 0..3 {
             controls.scroll_down();
         }
-        assert_eq!(controls.visible_range(20, 3), 17..20);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 20, 3),
+            17..20
+        );
         assert_eq!(controls.scroll(), 0);
     }
 
@@ -529,16 +676,25 @@ mod tests {
     #[test]
     fn scroll_to_bottom_resumes_following_in_one_step() {
         let mut controls = LiveTerminalControls::default();
-        assert_eq!(controls.visible_range(200, 3), 197..200);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 200, 3),
+            197..200
+        );
         for _ in 0..40 {
             controls.scroll_up();
         }
-        assert_eq!(controls.visible_range(400, 3), 157..160);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 400, 3),
+            157..160
+        );
         let scrolled_revision = controls.revision();
 
         controls.scroll_to_bottom();
         assert_eq!(controls.scroll(), 0);
-        assert_eq!(controls.visible_range(500, 3), 497..500);
+        assert_eq!(
+            controls.visible_range(TerminalBuffer::Primary, 0, 500, 3),
+            497..500
+        );
         assert!(controls.revision() > scrolled_revision);
 
         // Already at the live bottom, it is inert: an unchanged view must not

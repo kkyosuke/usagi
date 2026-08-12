@@ -101,6 +101,7 @@ impl Cell {
 struct ScreenBuffer {
     grid: Vec<Vec<Cell>>,
     scrollback: VecDeque<Vec<Cell>>,
+    scrollback_origin: u64,
     cursor_row: usize,
     cursor_col: usize,
     style: String,
@@ -119,6 +120,11 @@ pub struct VtScreen {
     /// layer preserves the exact terminal semantics for both agent and shell
     /// panes while the view chooses which rows to project.
     scrollback: VecDeque<Vec<Cell>>,
+    /// Monotonic logical index of the oldest retained scrollback row. It
+    /// advances whenever bounded retention discards rows from the front, so a
+    /// viewport can distinguish append+evict from an in-place repaint even
+    /// when the retained row count stays constant.
+    scrollback_origin: u64,
     cursor_row: usize,
     cursor_col: usize,
     phase: Phase,
@@ -301,6 +307,7 @@ impl VtScreen {
             cols,
             grid: vec![vec![Cell::blank(); cols]; rows],
             scrollback: VecDeque::new(),
+            scrollback_origin: 0,
             cursor_row: 0,
             cursor_col: 0,
             phase: Phase::Ground,
@@ -388,6 +395,22 @@ impl VtScreen {
         self.scrollback.len()
     }
 
+    /// Monotonic logical index of the oldest retained row in the active buffer.
+    #[must_use]
+    pub const fn scrollback_origin(&self) -> u64 {
+        self.scrollback_origin
+    }
+
+    /// Which screen buffer currently owns the visible grid and scrollback.
+    #[must_use]
+    pub fn active_buffer(&self) -> ActiveBuffer {
+        if self.primary_screen.is_some() {
+            ActiveBuffer::Alternate
+        } else {
+            ActiveBuffer::Primary
+        }
+    }
+
     /// Returns a retained scrollback row by its oldest-first logical index.
     #[must_use]
     pub fn scrollback_row(&self, row: usize) -> Option<&[Cell]> {
@@ -427,8 +450,15 @@ impl VtScreen {
         let history_rows = (max_cells / self.cols).saturating_sub(grid_rows);
         let keep_rows = history_rows / buffers;
         let mut dropped = trim_rows(&mut self.scrollback, keep_rows);
+        self.scrollback_origin = self
+            .scrollback_origin
+            .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
         if let Some(primary) = &mut self.primary_screen {
-            dropped += trim_rows(&mut primary.scrollback, keep_rows);
+            let primary_dropped = trim_rows(&mut primary.scrollback, keep_rows);
+            primary.scrollback_origin = primary
+                .scrollback_origin
+                .saturating_add(u64::try_from(primary_dropped).unwrap_or(u64::MAX));
+            dropped += primary_dropped;
         }
         dropped
     }
@@ -699,8 +729,11 @@ impl VtScreen {
             let row = self.grid.remove(self.scroll_top);
             // Mirror v1's vt100 policy: a region anchored at row zero is
             // transcript history; a lower region is a transient full-screen UI.
-            if self.primary_screen.is_none() && self.scroll_top == 0 {
-                append_scrollback(&mut self.scrollback, row, SCROLLBACK_MAX);
+            if self.primary_screen.is_none()
+                && self.scroll_top == 0
+                && append_scrollback(&mut self.scrollback, row, SCROLLBACK_MAX)
+            {
+                self.scrollback_origin = self.scrollback_origin.saturating_add(1);
             }
             self.grid
                 .insert(self.scroll_bottom, vec![Cell::blank(); self.cols]);
@@ -782,6 +815,7 @@ impl VtScreen {
         self.primary_screen = Some(Box::new(ScreenBuffer {
             grid: std::mem::take(&mut self.grid),
             scrollback: std::mem::take(&mut self.scrollback),
+            scrollback_origin: std::mem::take(&mut self.scrollback_origin),
             cursor_row: self.cursor_row,
             cursor_col: self.cursor_col,
             style: std::mem::take(&mut self.style),
@@ -802,6 +836,7 @@ impl VtScreen {
         };
         self.grid = primary.grid;
         self.scrollback = primary.scrollback;
+        self.scrollback_origin = primary.scrollback_origin;
         self.cursor_row = primary.cursor_row;
         self.cursor_col = primary.cursor_col;
         self.style = primary.style;
@@ -995,6 +1030,7 @@ impl VtScreen {
                 .iter()
                 .map(|row| encode_row(row, styles))
                 .collect(),
+            scrollback_origin: self.scrollback_origin,
             cursor: (self.cursor_row as u32, self.cursor_col as u32),
             saved_cursor: self.saved_cursor.map(|(row, col)| (row as u32, col as u32)),
             scroll_region: (self.scroll_top as u32, self.scroll_bottom as u32),
@@ -1040,6 +1076,7 @@ impl VtScreen {
                 screen.primary_screen = Some(Box::new(ScreenBuffer {
                     grid: primary.grid,
                     scrollback: primary.scrollback,
+                    scrollback_origin: primary.scrollback_origin,
                     cursor_row: primary.cursor_row,
                     cursor_col: primary.cursor_col,
                     style: primary.style,
@@ -1058,6 +1095,7 @@ impl VtScreen {
     fn install_live_buffer(&mut self, buffer: DecodedBuffer) {
         self.grid = buffer.grid;
         self.scrollback = buffer.scrollback;
+        self.scrollback_origin = buffer.scrollback_origin;
         self.cursor_row = buffer.cursor_row;
         self.cursor_col = buffer.cursor_col;
         self.style = buffer.style;
@@ -1071,6 +1109,7 @@ impl VtScreen {
 struct DecodedBuffer {
     grid: Vec<Vec<Cell>>,
     scrollback: VecDeque<Vec<Cell>>,
+    scrollback_origin: u64,
     cursor_row: usize,
     cursor_col: usize,
     style: String,
@@ -1094,6 +1133,7 @@ fn buffer_checkpoint_from(buffer: &ScreenBuffer, styles: &mut StyleInterner) -> 
             .iter()
             .map(|row| encode_row(row, styles))
             .collect(),
+        scrollback_origin: buffer.scrollback_origin,
         cursor: (buffer.cursor_row as u32, buffer.cursor_col as u32),
         saved_cursor: buffer
             .saved_cursor
@@ -1153,6 +1193,7 @@ fn decode_buffer(
     Ok(DecodedBuffer {
         grid,
         scrollback,
+        scrollback_origin: buffer.scrollback_origin,
         cursor_row: buffer.cursor.0 as usize,
         cursor_col: buffer.cursor.1 as usize,
         style: styles[buffer.style_id as usize].clone(),
@@ -1347,6 +1388,7 @@ mod tests {
         let mut buffer = ScreenBuffer {
             grid: vec![vec![Cell::blank(); 2]; 3],
             scrollback: VecDeque::from([Vec::new()]),
+            scrollback_origin: 0,
             cursor_row: 2,
             cursor_col: 1,
             style: String::new(),
@@ -1547,6 +1589,18 @@ mod tests {
                 .collect::<String>(),
             "bcd"
         );
+    }
+
+    #[test]
+    fn bounded_scrollback_append_advances_the_logical_origin() {
+        let mut screen = VtScreen::new(2, 1);
+        screen.scrollback = VecDeque::from(vec![vec![Cell::blank(); 1]; SCROLLBACK_MAX]);
+        screen.scrollback_origin = 7;
+
+        screen.scroll_region_up(1);
+
+        assert_eq!(screen.scrollback_len(), SCROLLBACK_MAX);
+        assert_eq!(screen.scrollback_origin(), 8);
     }
 
     #[test]
@@ -1901,6 +1955,30 @@ mod tests {
         VtScreen::from_checkpoint(&valid_checkpoint()).expect("minimal checkpoint reconstructs");
     }
 
+    #[test]
+    fn checkpoint_round_trip_preserves_scrollback_origin_and_legacy_defaults_to_zero() {
+        let mut screen = built(2, 8, &[b"one\r\ntwo\r\nthree\r\nfour"]);
+        assert_eq!(screen.trim_to_cells(3 * 8), 1);
+        assert_eq!(screen.scrollback_origin(), 1);
+
+        let checkpoint = screen.checkpoint();
+        assert_eq!(
+            checkpoint.primary.scrollback_origin,
+            screen.scrollback_origin()
+        );
+        let restored = VtScreen::from_checkpoint(&checkpoint).expect("origin checkpoint");
+        assert_eq!(restored.scrollback_origin(), screen.scrollback_origin());
+
+        let mut legacy = serde_json::to_value(&checkpoint).expect("checkpoint JSON");
+        legacy["primary"]
+            .as_object_mut()
+            .expect("primary object")
+            .remove("scrollback_origin");
+        let legacy: ScreenCheckpoint =
+            serde_json::from_value(legacy).expect("legacy checkpoint decodes");
+        assert_eq!(legacy.primary.scrollback_origin, 0);
+    }
+
     /// One block exercising UTF-8, CJK width, combining marks, CSI moves/erase,
     /// OSC, charset select, alternate enter/leave, tabs/wrap and malformed bytes.
     fn rich_block() -> Vec<u8> {
@@ -1995,6 +2073,7 @@ mod tests {
                     }],
                 }],
                 scrollback: Vec::new(),
+                scrollback_origin: 0,
                 cursor: (0, 0),
                 saved_cursor: None,
                 scroll_region: (0, 0),
@@ -2323,6 +2402,7 @@ mod tests {
 
         // A budget for five rows drops the oldest history row.
         assert_eq!(screen.trim_to_cells(5 * 8), 1);
+        assert_eq!(screen.scrollback_origin(), 1);
         assert_eq!(screen.retained_cells(), 5 * 8);
         assert_eq!(
             rows_with_scrollback(&screen),
@@ -2332,6 +2412,7 @@ mod tests {
         // The visible grid is the floor: a budget below it drops all history and
         // stops there.
         assert_eq!(screen.trim_to_cells(0), 2);
+        assert_eq!(screen.scrollback_origin(), 3);
         assert_eq!(screen.scrollback_len(), 0);
         assert_eq!(screen.scrollback_len(), 0);
         assert_eq!(screen.retained_cells(), 3 * 8);
