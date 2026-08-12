@@ -1472,6 +1472,102 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     reader.join().unwrap();
 }
 
+/// detach されている最中に大量出力する Codex fixture。
+///
+/// `burst` を入力すると 3 秒後に 128 KiB を吐くので、drawer を開いて root Agent を起動している
+/// 間に daemon の retained journal（`MAX_RETAINED_OUTPUT_BYTES` = 64 KiB）を追い越す。実 agent CLI が
+/// 裏で描画し続ける状況と同じく、drawer を閉じた再 attach は必ず resync 経路を通る。
+fn write_bursting_codex(fixtures: &AgentFixtures) {
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\nwhile IFS= read input; do\n  if [ \"$input\" = burst ]; then\n    (sleep 3; i=0; while [ $i -lt 1400 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done) &\n  fi\n  printf 'codex-input:%s\\n' \"$input\"\ndone\n",
+        count = fixtures.codex_count.display(),
+    );
+    let path = fixtures.bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// 実 daemon・実 PTY: managed session の Agent を起動して入力できる状態から指示モードの
+/// root Agent を起動しても、drawer を閉じたあとの managed Agent tab が生き続ける。
+#[test]
+fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("director-freeze-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    write_bursting_codex(&fixtures);
+    let fixture_path = fixtures.path_env();
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
+        .output()
+        .expect("workspace registers");
+    assert!(registered.status.success());
+    let _ = create_session(home.path(), "director-freeze");
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+    submit_closeup_command(&mut master, &captured, baseline, "agent -m codex");
+    wait_for_screen_since(&captured, baseline, "codex-ready-unique:");
+    send(&mut master, b"session-before\r");
+    wait_for_screen_since(&captured, baseline, "codex-input:session-before");
+    // detach 中に journal を追い越す出力を予約する。
+    send(&mut master, b"burst\r");
+    wait_for_screen_since(&captured, baseline, "codex-input:burst");
+
+    // 指示モードで root Agent（claude）を起動する。
+    click_director_button(&mut master);
+    wait_for_screen_since(&captured, baseline, "󰚩 director");
+    click_director_new(&mut master);
+    wait_for_screen_since(&captured, baseline, "↑↓: select");
+    send(&mut master, b"\x1b[A");
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, baseline, "claude-ready-unique:");
+    send(&mut master, b"root-hello\r");
+    wait_for_screen_since(&captured, baseline, "claude-input:root-hello");
+    // 予約した burst が detach 中に流れ終わるまで待つ。
+    thread::sleep(Duration::from_secs(5));
+
+    // drawer を閉じると、元の managed session の Agent tab が foreground へ戻る。
+    toggle_director_with_key(&mut master);
+    wait_for_screen_since(&captured, baseline, "[closeup]");
+    send(&mut master, b"session-after\r");
+    wait_for_screen_since(&captured, baseline, "codex-input:session-after");
+
+    assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
+    stop_daemon(&home);
+    drop(master);
+    drop(slave);
+    reader.join().unwrap();
+}
+
 #[test]
 fn real_pty_closeup_agent_m_codex_launches_codex_in_the_managed_session() {
     let _serial = serial();

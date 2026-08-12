@@ -795,7 +795,13 @@ impl TerminalSession {
                 Err(TerminalError::ResyncRequired) => self.connect_at(port, now),
                 Err(error) => self.fail_at(error, now),
             },
-            SessionState::Reconnecting if self.retry_at.is_some_and(|retry_at| now >= retry_at) => {
+            // A scheduled retry is what distinguishes a failure from a
+            // deliberate detach, not the state itself: `detach` leaves
+            // `Disconnected` with no `retry_at`, so a backgrounded pane stays
+            // released, while every failure re-attaches on its own backoff.
+            SessionState::Reconnecting | SessionState::Disconnected | SessionState::Orphaned
+                if self.retry_at.is_some_and(|retry_at| now >= retry_at) =>
+            {
                 self.connect_at(port, now);
             }
             SessionState::Reconnecting
@@ -1238,11 +1244,24 @@ impl TerminalSession {
             | TerminalError::Stale
             | TerminalError::OrderingMismatch => SessionState::Disconnected,
         };
-        if error != TerminalError::Exited {
+        if error == TerminalError::Exited {
+            // The process is gone: its final screen is retained and nothing an
+            // attach could do brings it back.
+            self.retry_at = None;
+            self.retry_attempt = 0;
+        } else {
             self.subscription = None;
+            // Recovery from every non-exit failure is an ordinary attach: it
+            // takes a fresh subscription, rebuilds the screen from the daemon's
+            // atomic checkpoint, and adopts the daemon's own `next_input_seq`.
+            // That repairs a lost cursor, a superseded reference and an ordering
+            // mismatch alike, so these failures schedule the same bounded
+            // backoff as an unavailable daemon. Leaving them unscheduled wedged
+            // the pane for the whole process lifetime: output stopped, input was
+            // refused as `NotLive`, and only restarting the TUI recovered it.
+            self.retry_at = Some(now + retry_delay(self.retry_attempt));
+            self.retry_attempt = self.retry_attempt.saturating_add(1);
         }
-        self.retry_at = None;
-        self.retry_attempt = 0;
         self.state = state;
         self.set_current_error(Some(error_message(error).to_owned()));
     }
@@ -2513,6 +2532,70 @@ mod tests {
             session.error(),
             Some("terminal ownership is unknown; input is disabled")
         );
+    }
+
+    /// 一度の stream 失敗で pane を永久に殺さない（#669）。
+    ///
+    /// Director drawer の foreground 受け渡しは、managed pane を detach してから
+    /// 閉じるときに attach し直す。その attach / 直後の `Resume` が daemon から
+    /// 失敗を受け取ると、以前は `Disconnected` / `Orphaned` のまま二度と retry せず、
+    /// 出力は止まり入力は `NotLive` で拒否され、TUI を再起動するまで戻らなかった。
+    #[test]
+    fn every_non_exit_failure_reattaches_on_its_own_backoff() {
+        for error in [
+            TerminalError::Stale,
+            TerminalError::OrderingMismatch,
+            TerminalError::ResyncRequired,
+            TerminalError::Orphaned,
+        ] {
+            let mut port = FakePort {
+                attach: vec![
+                    Ok(attach(1, 0, b"before", false)),
+                    Ok(attach(2, 0, b"after", false)),
+                ],
+                polls: vec![Err(error)],
+                ..FakePort::default()
+            };
+            let mut session = TerminalSession::new(terminal(), geometry());
+            let now = Instant::now();
+            session.connect_at(&mut port, now);
+            // `poll` recovers `ResyncRequired` itself; the others land in a
+            // non-live state that must still schedule its own retry.
+            session.fail_at(error, now);
+            assert_ne!(session.state(), SessionState::Live, "{error:?}");
+            assert_eq!(
+                session.send_input(&mut port, b"x"),
+                Err(TerminalInputError::NotLive(session.state())),
+                "{error:?}"
+            );
+
+            // Before the backoff expires nothing is re-requested.
+            session.poll_at(&mut port, now);
+            assert_ne!(session.state(), SessionState::Live, "{error:?}");
+            assert_eq!(port.attach.len(), 1, "{error:?}");
+
+            session.poll_at(&mut port, now + RETRY_INITIAL);
+            assert_eq!(session.state(), SessionState::Live, "{error:?}");
+            assert_eq!(session.error(), None, "{error:?}");
+            assert_eq!(session.rows()[0], "after", "{error:?}");
+            assert_eq!(session.send_input(&mut port, b"x"), Ok(()), "{error:?}");
+        }
+    }
+
+    /// 逆側の不変条件: 明示的な detach（background へ回した pane）は retry しない。
+    #[test]
+    fn an_explicit_detach_is_not_a_failure_and_never_reattaches_itself() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 0, b"", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        let now = Instant::now();
+        session.connect_at(&mut port, now);
+        session.detach(&mut port);
+        session.poll_at(&mut port, now + RETRY_MAX * 4);
+        assert_eq!(session.state(), SessionState::Disconnected);
+        assert_eq!(port.attach.len(), 0, "detach must not re-attach on its own");
     }
 
     #[test]
