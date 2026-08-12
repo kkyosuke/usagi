@@ -2,8 +2,13 @@
 //!
 //! usagi がエージェント起動時に Claude の `PreToolUse` フックへ配線し、フックが JSON payload
 //! （エージェントの `cwd`・`tool_name`・tool 入力）を stdin で渡して呼ぶ。人手で叩くものでは
-//! ない（`--help` 非表示）。malformed・未知・明白に不正な呼び出しを fail closed で拒否する。
+//! ない（`--help` 非表示）。malformed・明白に不正な呼び出しを fail closed で拒否する。
 //! これは多層防御の一層であり、hard boundary は将来 `claude-sandbox` が入れる OS sandbox が担う。
+//!
+//! 判定対象は**ツール名の allowlist ではなく変更能力**である（[`workspace_guard::classify_tool`]）。
+//! harness は tool を追加・改名し続けるため、名前の closed allowlist は更新のたびに壊れ、guard が
+//! 守るべき性質と無関係に agent の手足（`ToolSearch` 経由の MCP tool、subagent、task 追跡…）を
+//! 奪ってしまう。未知でもファイルを名指しする input を持つ呼び出しは書き込みうるものとして扱う。
 //!
 //! フックは runtime に `cwd` から 2 モードのいずれかを選ぶ。
 //!
@@ -118,7 +123,27 @@ fn session_worktree_root(cwd: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// session モード: file 書き込みの対象を canonicalize し、escape を弾く。既知の非書き込みツールは
+/// `tool_input` が名指しするファイルパス（[`workspace_guard::is_path_input_key`] の key の値）。
+/// 書き込みツールの対象はここから拾い、1 つでも worktree を出れば拒否する。
+fn path_targets(input: &serde_json::Map<String, serde_json::Value>) -> Vec<PathBuf> {
+    input
+        .iter()
+        .filter(|(key, _)| workspace_guard::is_path_input_key(key))
+        .filter_map(|(_, value)| value.as_str())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// `Bash` payload の command。欠落・空白のみは拒否理由を返す。
+fn bash_command(input: &serde_json::Map<String, serde_json::Value>) -> Result<&str, String> {
+    match input.get("command").and_then(serde_json::Value::as_str) {
+        Some(command) if !command.trim().is_empty() => Ok(command),
+        _ => Err("Bash payload has no command".to_string()),
+    }
+}
+
+/// session モード: file 書き込みの対象を canonicalize し、escape を弾く。非書き込みツールは
 /// 通す。shell / subagent の副作用は（将来の）OS sandbox に閉じ込められる。
 fn session_deny_reason(
     tool_name: &str,
@@ -126,32 +151,28 @@ fn session_deny_reason(
     cwd: &Path,
     worktree: &Path,
 ) -> Option<String> {
-    if workspace_guard::is_write_tool(tool_name) {
-        let target = match input.get("file_path").and_then(serde_json::Value::as_str) {
-            Some(path) if !path.is_empty() => PathBuf::from(path),
-            _ => return Some(format!("{tool_name} payload has no file_path")),
-        };
-        // escape、または解決できないケースは fail-closed で拒否する（判定は core 側で total）。
-        if workspace_guard::path_escapes_root(worktree, cwd, &target) {
-            return Some(format!(
-                "{} はセッション worktree {} の外です。",
-                target.display(),
-                worktree.display()
-            ));
+    match workspace_guard::classify_tool(tool_name, input.keys().map(String::as_str)) {
+        workspace_guard::ToolGuard::FileWrite => {
+            let targets = path_targets(input);
+            if targets.is_empty() {
+                return Some(format!("{tool_name} payload has no file_path"));
+            }
+            // escape、または解決できないケースは fail-closed で拒否する（判定は core 側で total）。
+            targets
+                .into_iter()
+                .find(|target| workspace_guard::path_escapes_root(worktree, cwd, target))
+                .map(|target| {
+                    format!(
+                        "{} はセッション worktree {} の外です。",
+                        target.display(),
+                        worktree.display()
+                    )
+                })
         }
-        return None;
-    }
-    match tool_name {
         // shell command と subagent は必須の OS sandbox を継承する。フックは shape を検証するが、
         // shell semantics を security boundary としてパースするとは主張しない。
-        "Bash" => match input.get("command").and_then(serde_json::Value::as_str) {
-            Some(command) if !command.trim().is_empty() => None,
-            _ => Some("Bash payload has no command".to_string()),
-        },
-        "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" | "Task" | "Skill" | "TodoWrite"
-        | "AskUserQuestion" => None,
-        name if name.starts_with("mcp__") => None,
-        _ => Some(format!("unknown tool is denied fail-closed: {tool_name}")),
+        workspace_guard::ToolGuard::Shell => bash_command(input).err(),
+        workspace_guard::ToolGuard::Unrestricted => None,
     }
 }
 
@@ -161,30 +182,22 @@ fn root_deny_reason(
     tool_name: &str,
     input: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
-    if workspace_guard::is_write_tool(tool_name) {
-        return Some(format!(
-            "ワークスペースルート（コーディネータ）ではファイル書き込みツール（{tool_name}）を実行できません。\
+    match workspace_guard::classify_tool(tool_name, input.keys().map(String::as_str)) {
+        workspace_guard::ToolGuard::FileWrite => Some(format!(
+            "ワークスペースルート（コーディネータ）ではファイルを書きうるツール（{tool_name}）を実行できません。\
              root 行はリポジトリを変更しません。編集はセッションの worktree に委譲してください。"
-        ));
-    }
-    if tool_name == "Bash" {
-        let command = match input.get("command").and_then(serde_json::Value::as_str) {
-            Some(command) if !command.trim().is_empty() => command,
-            _ => return Some("Bash payload has no command".to_string()),
-        };
-        return workspace_guard::command_mutates_repo(command).then(|| {
-            format!(
-                "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。\
-                 Git は `git --no-pager --no-optional-locks <subcommand>` を使い、diff 系には \
-                 `--no-ext-diff --no-textconv` も指定してください。"
-            )
-        });
-    }
-    match tool_name {
-        "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" | "Task" | "Skill" | "TodoWrite"
-        | "AskUserQuestion" => None,
-        name if name.starts_with("mcp__") => None,
-        _ => Some(format!("unknown tool is denied fail-closed: {tool_name}")),
+        )),
+        workspace_guard::ToolGuard::Shell => match bash_command(input) {
+            Err(reason) => Some(reason),
+            Ok(command) => workspace_guard::command_mutates_repo(command).then(|| {
+                format!(
+                    "ワークスペースルートでは read-only allowlist 外の shell command を実行できません（{command}）。\
+                     Git は `git --no-pager --no-optional-locks <subcommand>` を使い、diff 系には \
+                     `--no-ext-diff --no-textconv` も指定してください。"
+                )
+            }),
+        },
+        workspace_guard::ToolGuard::Unrestricted => None,
     }
 }
 
@@ -292,10 +305,34 @@ mod tests {
     }
 
     #[test]
-    fn denies_unknown_tools_and_uncanonicalizable_cwd() {
+    fn session_confines_an_unknown_tool_that_names_a_file() {
+        // 名前を知らないツールでも、file を名指しする input を持つなら書き込みうるとみなす。
+        // worktree の外を指せば拒否、内側なら通す（harness が tool を増やしても壊れない）。
+        let (_temp, root, worktree) = layout();
+        let outside = payload(
+            &worktree,
+            "FutureMutator",
+            serde_json::json!({"path": root.join("src/main.rs")}),
+        );
+        assert!(deny_reason(&outside).unwrap().contains("src/main.rs"));
+        let inside = payload(
+            &worktree,
+            "FutureMutator",
+            serde_json::json!({"notebook_path": worktree.join("nb.ipynb")}),
+        );
+        assert_eq!(deny_reason(&inside), None);
+        // path を持たない未知のツールは変更能力の証拠がないので通す。
+        let harmless = payload(
+            &worktree,
+            "FutureMutator",
+            serde_json::json!({"query": "x"}),
+        );
+        assert_eq!(deny_reason(&harmless), None);
+    }
+
+    #[test]
+    fn denies_an_uncanonicalizable_cwd() {
         let (_temp, _root, worktree) = layout();
-        let unknown = payload(&worktree, "FutureMutator", serde_json::json!({}));
-        assert!(deny_reason(&unknown).unwrap().contains("unknown tool"));
         let missing = payload(
             &worktree.join("missing"),
             "Read",
@@ -311,9 +348,15 @@ mod tests {
     #[test]
     fn session_write_without_a_file_path_and_an_unresolvable_target_are_denied() {
         let (_temp, _root, worktree) = layout();
-        // 書き込みツールなのに file_path が無い。
-        let no_path = payload(&worktree, "Write", serde_json::json!({}));
-        assert!(deny_reason(&no_path).unwrap().contains("has no file_path"));
+        // 書き込みツールなのに使える file_path が無い（欠落・空文字・文字列でない）。
+        for input in [
+            serde_json::json!({}),
+            serde_json::json!({"file_path": ""}),
+            serde_json::json!({"file_path": 7}),
+        ] {
+            let no_path = payload(&worktree, "Write", input);
+            assert!(deny_reason(&no_path).unwrap().contains("has no file_path"));
+        }
     }
 
     #[test]
@@ -326,7 +369,9 @@ mod tests {
             "WebFetch",
             "WebSearch",
             "Task",
+            "Agent",
             "Skill",
+            "ToolSearch",
             "TodoWrite",
             "AskUserQuestion",
             "mcp__usagi__issue_get",
@@ -425,10 +470,25 @@ mod tests {
     }
 
     #[test]
-    fn root_mode_denies_unknown_tools() {
+    fn root_mode_denies_an_unknown_tool_that_names_a_file_but_allows_orchestration() {
         let (temp, _root, _worktree) = layout();
-        let unknown = payload(temp.path(), "FutureMutator", serde_json::json!({}));
-        assert!(deny_reason(&unknown).unwrap().contains("unknown tool"));
+        // 未知でも file を名指しするツールは root では拒否する（root はリポジトリを変更しない）。
+        let unknown_write = payload(
+            temp.path(),
+            "FutureMutator",
+            serde_json::json!({"file_path": "/etc/hosts"}),
+        );
+        assert!(
+            deny_reason(&unknown_write)
+                .unwrap()
+                .contains("FutureMutator")
+        );
+        // 委譲に必要な非書き込みツールは通る。`ToolSearch` が塞がれると deferred な
+        // `mcp__usagi__*` の schema を取れず、root は session へ委譲する手段を失う。
+        for tool in ["ToolSearch", "Agent", "TaskCreate", "EnterPlanMode"] {
+            let allowed = payload(temp.path(), tool, serde_json::json!({"query": "usagi"}));
+            assert_eq!(deny_reason(&allowed), None, "{tool} should be allowed");
+        }
     }
 
     #[test]
