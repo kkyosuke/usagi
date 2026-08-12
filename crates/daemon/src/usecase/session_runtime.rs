@@ -1132,14 +1132,15 @@ impl SessionRuntime {
                     .io
                     .remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
                     .and_then(|()| {
-                        if pending.delete_branch {
-                            delete_branch(
-                                self.git.as_ref(),
-                                &pending.repository_root,
-                                &session_branch(&pending.name),
-                                pending.force_delete_branch,
-                            )?;
-                        }
+                        // Every newly accepted removal carries branch deletion.
+                        // Legacy branch-preserving plans can only be replayed as
+                        // `Settled`, so they never reach this effect path.
+                        delete_branch(
+                            self.git.as_ref(),
+                            &pending.repository_root,
+                            &session_branch(&pending.name),
+                            pending.force_delete_branch,
+                        )?;
                         Ok(())
                     })
                     .map_err(|error| error.to_string());
@@ -4458,6 +4459,57 @@ instructions = "code"
                 .unwrap()
                 .delete_branch
         );
+    }
+
+    #[test]
+    fn legacy_compensation_replay_requires_both_forced_branch_delete_flags() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_delegated_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"triage"}),
+        )
+        .unwrap();
+        let operation_id = operation();
+        let signal = TeardownSignal::new();
+        perform_compensating_remove(&runtime, &signal, &operation_id, "triage").unwrap();
+
+        let mut state = runtime.lock().unwrap().state().unwrap();
+        let mut legacy_operation = state.operations.last().unwrap().clone();
+        legacy_operation.semantic_key = semantic_key(SessionAction::Remove, "triage");
+        let requested_key = remove_semantic_key(RemoveKind::Compensating, "triage", true);
+        assert!(remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+
+        let plan = state.sessions[0].delete_plan.as_mut().unwrap();
+        plan.delete_branch = false;
+        assert!(!remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+        let plan = state.sessions[0].delete_plan.as_mut().unwrap();
+        plan.delete_branch = true;
+        plan.force_delete_branch = false;
+        assert!(!remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
     }
 
     #[test]
