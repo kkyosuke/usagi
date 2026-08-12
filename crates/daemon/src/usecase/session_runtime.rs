@@ -4463,7 +4463,7 @@ instructions = "code"
     }
 
     #[test]
-    fn legacy_compensation_replay_requires_both_forced_branch_delete_flags() {
+    fn legacy_compensation_replay_requires_a_matching_session_and_forced_branch_delete_flags() {
         let (_tmp, rt) = runtime(FakeGit::ok());
         let runtime = Arc::new(Mutex::new(rt));
         perform_delegated_create(
@@ -4484,6 +4484,27 @@ instructions = "code"
         assert!(remove_operation_matches(
             &state,
             &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+
+        let mut wrong_name_operation = legacy_operation.clone();
+        wrong_name_operation.semantic_key = semantic_key(SessionAction::Remove, "missing");
+        assert!(!remove_operation_matches(
+            &state,
+            &wrong_name_operation,
+            RemoveKind::Compensating,
+            "missing",
+            true,
+            &remove_semantic_key(RemoveKind::Compensating, "missing", true),
+        ));
+        let mut wrong_id_operation = legacy_operation.clone();
+        wrong_id_operation.operation_id = OperationId::new();
+        assert!(!remove_operation_matches(
+            &state,
+            &wrong_id_operation,
             RemoveKind::Compensating,
             "triage",
             true,
