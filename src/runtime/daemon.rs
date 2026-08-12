@@ -546,7 +546,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 &self.mcp_command,
                 mode,
                 &protected_root,
-                SandboxLauncherPaths {
+                &SandboxLauncherPaths {
                     backend: self.sandbox_backend.as_deref(),
                     tmpdir: self.sandbox_tmpdir.as_deref(),
                     home: self.sandbox_home.as_deref(),
@@ -751,7 +751,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             &self.mcp_command,
             mode,
             &protected_root,
-            paths,
+            &paths,
             &sandbox_roots,
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
@@ -1166,7 +1166,7 @@ fn claude_sandbox_launcher(
     usagi: &Path,
     mode: SandboxMode,
     protected_root: &Path,
-    paths: SandboxLauncherPaths<'_>,
+    paths: &SandboxLauncherPaths<'_>,
     writable_roots: &[PathBuf],
 ) -> Result<SandboxLauncher, ()> {
     let mut prefix = vec![
@@ -14107,7 +14107,7 @@ instructions = "{instructions}"
             usagi,
             mode,
             Path::new("/repo"),
-            SandboxLauncherPaths::default(),
+            &SandboxLauncherPaths::default(),
             &roots,
         )
         .unwrap();
@@ -14164,7 +14164,7 @@ instructions = "{instructions}"
             usagi,
             SandboxMode::Root,
             Path::new("/repo"),
-            SandboxLauncherPaths {
+            &SandboxLauncherPaths {
                 cache_dir: Some(Path::new("/private/var/folders/ab/cd/C")),
                 ..SandboxLauncherPaths::default()
             },
@@ -14356,7 +14356,7 @@ instructions = "{instructions}"
             usagi,
             mode,
             Path::new("/repo"),
-            SandboxLauncherPaths::default(),
+            &SandboxLauncherPaths::default(),
             &roots,
         )
         .unwrap();
