@@ -686,27 +686,23 @@ mod tests {
         let protected = root.path().canonicalize().unwrap();
         let backend = tempfile::NamedTempFile::new().unwrap();
         let backend_path = backend.path().canonicalize().unwrap();
-        for candidate in [
-            // 存在しない / 相対 / directory / 実行 bit の無い file はいずれも拒否する。
-            protected.join("missing-sandbox-backend"),
-            PathBuf::from("Cargo.toml"),
-            PathBuf::from("/usr"),
-            backend_path,
-        ] {
-            assert_eq!(
-                validate_launcher_policy_inputs(
-                    Some(&protected),
-                    Some(&candidate),
-                    None,
-                    None,
-                    None,
-                    &[],
-                ),
-                Err(LauncherPolicyError::Backend),
-                "{} must be refused as a backend",
-                candidate.display()
-            );
-        }
+        let refused = |backend: &std::path::Path| {
+            validate_launcher_policy_inputs(Some(&protected), Some(backend), None, None, None, &[])
+        };
+        // 存在しない / 相対 / directory / 実行 bit の無い file はいずれも拒否する。
+        assert_eq!(
+            refused(&protected.join("missing-sandbox-backend")),
+            Err(LauncherPolicyError::Backend)
+        );
+        assert_eq!(
+            refused(std::path::Path::new("Cargo.toml")),
+            Err(LauncherPolicyError::Backend)
+        );
+        assert_eq!(
+            refused(std::path::Path::new("/usr")),
+            Err(LauncherPolicyError::Backend)
+        );
+        assert_eq!(refused(&backend_path), Err(LauncherPolicyError::Backend));
     }
 
     #[cfg(unix)]
