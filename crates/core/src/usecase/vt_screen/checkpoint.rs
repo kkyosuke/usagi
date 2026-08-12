@@ -124,6 +124,14 @@ pub struct BufferCheckpoint {
     pub grid: Vec<RowCheckpoint>,
     /// Rows pushed off the top of the grid, oldest first.
     pub scrollback: Vec<RowCheckpoint>,
+    /// Monotonic logical index of `scrollback[0]`: the number of oldest rows
+    /// this buffer discarded before the checkpoint was captured.
+    ///
+    /// Older revision-2 peers omitted this additive field. They decode as
+    /// origin zero and remain safe; they merely cannot preserve a scrolled
+    /// viewport across evictions that happened before that snapshot.
+    #[serde(default)]
+    pub scrollback_origin: u64,
     /// Zero-based `(row, col)` cursor position.
     pub cursor: (u32, u32),
     /// Cursor position saved by `DECSC` / `SCP`, if any.

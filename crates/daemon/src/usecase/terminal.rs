@@ -1324,8 +1324,16 @@ fn checkpoint_within(
 /// zero means only the visible grids remain.
 fn halve_history(checkpoint: &mut ScreenCheckpoint) -> usize {
     let mut dropped = drop_oldest_half(&mut checkpoint.primary.scrollback);
+    checkpoint.primary.scrollback_origin = checkpoint
+        .primary
+        .scrollback_origin
+        .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
     if let Some(alternate) = &mut checkpoint.alternate {
-        dropped += drop_oldest_half(&mut alternate.scrollback);
+        let alternate_dropped = drop_oldest_half(&mut alternate.scrollback);
+        alternate.scrollback_origin = alternate
+            .scrollback_origin
+            .saturating_add(u64::try_from(alternate_dropped).unwrap_or(u64::MAX));
+        dropped += alternate_dropped;
     }
     dropped
 }
@@ -1714,7 +1722,24 @@ mod tests {
             .unwrap()
             .into_frame(SnapshotWire::ScreenCheckpoint);
         let screen = frame.content.screen().expect("checkpoint frame");
+        let authority = registry.entry(&r).unwrap().screen.checkpoint();
         assert!(serde_json::to_vec(screen).unwrap().len() <= 2048);
+        assert_eq!(
+            screen.primary.scrollback_origin
+                + u64::try_from(screen.primary.scrollback.len()).unwrap(),
+            authority.primary.scrollback_origin
+                + u64::try_from(authority.primary.scrollback.len()).unwrap(),
+            "payload trimming must preserve the primary logical tail"
+        );
+        let screen_alternate = screen.alternate.as_ref().expect("alternate payload");
+        let authority_alternate = authority.alternate.as_ref().expect("alternate authority");
+        assert_eq!(
+            screen_alternate.scrollback_origin
+                + u64::try_from(screen_alternate.scrollback.len()).unwrap(),
+            authority_alternate.scrollback_origin
+                + u64::try_from(authority_alternate.scrollback.len()).unwrap(),
+            "payload trimming must preserve the alternate logical tail"
+        );
         let trimmed_once = output_pipeline_counters().checkpoint_trimmed_rows;
         assert!(trimmed_once > before.checkpoint_trimmed_rows);
 

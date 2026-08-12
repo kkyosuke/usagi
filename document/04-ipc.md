@@ -636,6 +636,7 @@ daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHel
 `terminal.screen-checkpoint.v1` を含める。client も `max_revision` 2 を広告し、共通 revision が 1 に落ちる旧 client には
 従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
+oldest-row origin /
 cursor / saved cursor / scroll region、interned style table、decoder の途中状態を持つ。client は
 checkpoint から screen を復元し、`output_offset` からの raw suffix を同じ parser へ feed する。
 raw tail を blank parser へ流すことに起因する UTF-8 / CSI / OSC の切断は revision 2 では起こらない。
