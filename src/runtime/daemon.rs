@@ -12734,6 +12734,7 @@ mod tests {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                force_delete_branch: false,
             });
         signal.notify();
         handle.join().unwrap();
@@ -12811,6 +12812,7 @@ mod tests {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                force_delete_branch: false,
             },
         ]));
         let pending_calls = Arc::new(AtomicUsize::new(0));

@@ -317,7 +317,7 @@ fn validate_session_name_live(name: &str, existing: &[String]) -> Option<Notice>
         // `existing` is supplied from the daemon-authoritative sidebar
         // snapshot. A matching session name owns `.usagi/sessions/<name>`, so
         // surface this actionable conflict before a create request is sent.
-        return Some(Notice::new("worktree already exists"));
+        return Some(Notice::new("session name already exists"));
     }
     None
 }
@@ -4942,7 +4942,7 @@ mod tests {
         for character in "alpha".chars() {
             form.push(character);
         }
-        assert_eq!(form.error().unwrap().message, "worktree already exists");
+        assert_eq!(form.error().unwrap().message, "session name already exists");
         assert!(form.request().is_err());
         assert_eq!(form.name(), "alpha", "draft is preserved");
         // A distinct name is accepted; the duplicate check is against the exact name.
@@ -4967,7 +4967,7 @@ mod tests {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
         let form = state.create_session_form().unwrap();
-        assert_eq!(form.error().unwrap().message, "worktree already exists");
+        assert_eq!(form.error().unwrap().message, "session name already exists");
     }
 
     #[test]
@@ -4987,7 +4987,7 @@ mod tests {
         );
         let form = state.create_session_form().unwrap();
         assert_eq!(form.name(), "alpha", "the draft is preserved");
-        assert_eq!(form.error().unwrap().message, "worktree already exists");
+        assert_eq!(form.error().unwrap().message, "session name already exists");
 
         let _ = update(
             &mut state,
