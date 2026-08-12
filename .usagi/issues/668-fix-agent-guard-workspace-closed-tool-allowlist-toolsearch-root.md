@@ -1,13 +1,13 @@
 ---
 number: 668
 title: fix(agent): guard-workspace の closed tool allowlist が ToolSearch を塞ぎ root から委譲できない
-status: in-progress
+status: done
 priority: high
 labels: [fix, agent, guard]
 dependson: []
 related: []
 created_at: 2026-08-12T05:02:59.198445+00:00
-updated_at: 2026-08-12T05:09:08.742593+00:00
+updated_at: 2026-08-12T05:09:42.456513+00:00
 ---
 
 ## 症状
