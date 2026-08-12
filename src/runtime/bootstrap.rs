@@ -952,10 +952,7 @@ mod tests {
         let expected = build("current");
         let outcome = replace_or_reuse(
             || Ok(endpoint("replacement", "current")),
-            || {
-                restarts.set(restarts.get() + 1);
-                Ok(())
-            },
+            counted_restart(&restarts),
             &expected,
             endpoint_build,
             true,
@@ -963,6 +960,16 @@ mod tests {
         .unwrap();
         assert_eq!(settled(outcome), ("replacement", None));
         assert_eq!(restarts.get(), 1);
+    }
+
+    /// A successful replacement that records each attempt. Shared by the cases
+    /// that expect an attempt and the case that expects none, so one code site
+    /// answers "how many times was the daemon asked to replace itself".
+    fn counted_restart(restarts: &Cell<u32>) -> impl FnMut() -> io::Result<()> + '_ {
+        move || {
+            restarts.set(restarts.get() + 1);
+            Ok(())
+        }
     }
 
     #[test]
@@ -995,10 +1002,7 @@ mod tests {
         // own build by asking for another one.
         let outcome = replace_or_reuse(
             || Ok(endpoint("newer", "old")),
-            || {
-                restarts.set(restarts.get() + 1);
-                Ok(())
-            },
+            counted_restart(&restarts),
             &expected,
             endpoint_build,
             true,
@@ -1019,10 +1023,7 @@ mod tests {
         let restarts = Cell::new(0);
         let outcome = replace_or_reuse(
             || Ok(endpoint("standing-mismatch", "old")),
-            || {
-                restarts.set(restarts.get() + 1);
-                Ok(())
-            },
+            counted_restart(&restarts),
             &expected,
             endpoint_build,
             false,
