@@ -483,6 +483,7 @@ struct RootCodexProvisioner {
     sandbox_backend: Option<PathBuf>,
     sandbox_tmpdir: Option<PathBuf>,
     sandbox_home: Option<PathBuf>,
+    sandbox_cache_dir: Option<PathBuf>,
     sandbox_passthrough: bool,
 }
 impl CodexProvisioner for RootCodexProvisioner {
@@ -533,6 +534,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 launch_roots: &sandbox_roots,
                 tmpdir: self.sandbox_tmpdir.as_deref(),
                 home: self.sandbox_home.as_deref(),
+                cache_dir: self.sandbox_cache_dir.as_deref(),
                 backend: self.sandbox_backend.as_deref(),
                 passthrough: self.sandbox_passthrough,
             })
@@ -544,9 +546,12 @@ impl CodexProvisioner for RootCodexProvisioner {
                 &self.mcp_command,
                 mode,
                 &protected_root,
-                self.sandbox_backend.as_deref(),
-                self.sandbox_tmpdir.as_deref(),
-                self.sandbox_home.as_deref(),
+                SandboxLauncherPaths {
+                    backend: self.sandbox_backend.as_deref(),
+                    tmpdir: self.sandbox_tmpdir.as_deref(),
+                    home: self.sandbox_home.as_deref(),
+                    cache_dir: self.sandbox_cache_dir.as_deref(),
+                },
                 &sandbox_roots,
             )
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
@@ -682,12 +687,33 @@ struct RootClaudeProvisioner {
     /// daemon bootstrap の trusted environment から一度だけ確定した policy paths。
     sandbox_tmpdir: Option<PathBuf>,
     sandbox_home: Option<PathBuf>,
+    /// daemon bootstrap の trusted environment から一度だけ確定した macOS の per-user cache root。
+    sandbox_cache_dir: Option<PathBuf>,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the sandbox and MCP wiring.
     environment: Option<Arc<SharedUserEnvironment>>,
     /// E2E テスト専用 seam（[`claude_sandbox::passthrough_requested`]）。true のとき launcher の子へ
     /// 同じ opt-in を伝え、backend の無い環境でも live 起動経路を通す。release ビルドでは常に false。
     sandbox_passthrough: bool,
+}
+impl RootClaudeProvisioner {
+    /// The policy paths this launch may carry. A session launch contributes no
+    /// universal area at all: its writable root is the own worktree, and
+    /// `TMPDIR` / `CLAUDE_CONFIG_DIR` are redirected inside it by daemon-issued
+    /// environment.
+    fn launcher_paths(&self, mode: SandboxMode) -> SandboxLauncherPaths<'_> {
+        let universal = mode != SandboxMode::Session;
+        SandboxLauncherPaths {
+            backend: self.sandbox_backend.as_deref(),
+            tmpdir: universal
+                .then_some(self.sandbox_tmpdir.as_deref())
+                .flatten(),
+            home: universal.then_some(self.sandbox_home.as_deref()).flatten(),
+            cache_dir: universal
+                .then_some(self.sandbox_cache_dir.as_deref())
+                .flatten(),
+        }
+    }
 }
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
@@ -700,19 +726,16 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
         let launch_roots = claude_writable_roots(mode, &working_directory);
-        let (sandbox_tmpdir, sandbox_home) = if mode == SandboxMode::Session {
-            (None, None)
-        } else {
-            (self.sandbox_tmpdir.as_deref(), self.sandbox_home.as_deref())
-        };
+        let paths = self.launcher_paths(mode);
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
             program: CLAUDE_PROGRAM,
             workspace_root: &workspace_root,
             launch_roots: &launch_roots,
-            tmpdir: sandbox_tmpdir,
-            home: sandbox_home,
-            backend: self.sandbox_backend.as_deref(),
+            tmpdir: paths.tmpdir,
+            home: paths.home,
+            cache_dir: paths.cache_dir,
+            backend: paths.backend,
             passthrough: self.sandbox_passthrough,
         })
         .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
@@ -728,9 +751,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             &self.mcp_command,
             mode,
             &protected_root,
-            self.sandbox_backend.as_deref(),
-            sandbox_tmpdir,
-            sandbox_home,
+            paths,
             &sandbox_roots,
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
@@ -874,6 +895,7 @@ fn validate_root_git_common_dir_policy(
     program: &str,
     tmpdir: Option<&Path>,
     home: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> Result<(), ()> {
     let common = git_common_dir(workspace_root)?;
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
@@ -890,6 +912,7 @@ fn validate_root_git_common_dir_policy(
             PathBuf::from("/Library/Keychains"),
             PathBuf::from("/private/var/db/mds"),
         ]);
+        writable.extend(cache_dir.map(|cache| cache.join("mds")));
     }
     let overlaps = writable.into_iter().any(|root| {
         let root = root.canonicalize().unwrap_or(root);
@@ -959,6 +982,9 @@ struct SandboxPolicyInputs<'a> {
     launch_roots: &'a [PathBuf],
     tmpdir: Option<&'a Path>,
     home: Option<&'a Path>,
+    /// macOS の per-user cache root。root mode の launcher はこの下の `mds`（Keychain 検索が
+    /// 更新する MDS cache）を writable にするため、daemon 側も同じ root を検証する。
+    cache_dir: Option<&'a Path>,
     backend: Option<&'a Path>,
     passthrough: bool,
 }
@@ -975,6 +1001,7 @@ fn validate_claude_sandbox_policy(
         launch_roots,
         tmpdir,
         home,
+        cache_dir,
         backend,
         passthrough,
     } = *policy;
@@ -987,7 +1014,7 @@ fn validate_claude_sandbox_policy(
     let backend = backend.ok_or(ClaudeSandboxPolicyError::MissingBackend)?;
     validate_sandbox_backend(backend)?;
     if mode == SandboxMode::Root {
-        validate_root_git_common_dir_policy(workspace_root, program, tmpdir, home)
+        validate_root_git_common_dir_policy(workspace_root, program, tmpdir, home, cache_dir)
             // Git common dir が writable 領域に入っていれば、read-only な checkout でも
             // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
             .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
@@ -999,6 +1026,9 @@ fn validate_claude_sandbox_policy(
     let mut roots = launch_roots.to_vec();
     if let Some(tmpdir) = tmpdir {
         roots.push(tmpdir.to_path_buf());
+    }
+    if let Some(cache_dir) = cache_dir {
+        roots.push(cache_dir.to_path_buf());
     }
     if let Some(home) = home {
         validate_owned_directory(home)?;
@@ -1085,6 +1115,50 @@ fn is_macos_system_firmlink(path: &Path) -> bool {
     cfg!(target_os = "macos") && matches!(path.to_str(), Some("/var" | "/tmp" | "/etc"))
 }
 
+/// macOS の per-user cache root（`confstr(_CS_DARWIN_USER_CACHE_DIR)`）を canonical path で確定する。
+///
+/// Keychain 検索は Module Directory Service (MDS) の per-user cache（`<cache>/mds`）を更新するため、
+/// root sandbox がここへ書けないと `SecKeychainSearchCreateFromAttributes` が失敗し、agent CLI は
+/// Keychain の credential を読めないまま古い file 側 credential へ fallback して 401 で起動できない。
+/// 値は `$TMPDIR` / `$HOME` と同じく daemon bootstrap の trusted environment で一度だけ確定し、
+/// Agent child は再解決しない。macOS 以外には MDS が無いため `None` を返す。
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=root_policy_accepts_the_per_user_cache_root
+fn resolve_sandbox_cache_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        // confstr は終端 NUL を含む長さを返す。切り詰められた値は使わない（fail-closed）。
+        let mut buffer = [0u8; 1024];
+        let written = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_CACHE_DIR,
+                buffer.as_mut_ptr().cast::<libc::c_char>(),
+                buffer.len(),
+            )
+        };
+        if written == 0 || written > buffer.len() {
+            return None;
+        }
+        let text = std::str::from_utf8(&buffer[..written - 1]).ok()?;
+        PathBuf::from(text).canonicalize().ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The policy paths the daemon bootstrap resolved once from its trusted
+/// environment. The launcher re-validates each of them before it execs, and the
+/// Agent child's own `PATH` / `TMPDIR` / `HOME` never reach this decision.
+#[derive(Default)]
+struct SandboxLauncherPaths<'a> {
+    backend: Option<&'a Path>,
+    tmpdir: Option<&'a Path>,
+    home: Option<&'a Path>,
+    /// macOS の per-user cache root。`<cache>/mds` を writable にするために渡す。
+    cache_dir: Option<&'a Path>,
+}
+
 /// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
 /// instruction that makes the spawned child the launcher instead of the bare
 /// product.  Host paths stay out of the durable launch snapshot.
@@ -1092,9 +1166,7 @@ fn claude_sandbox_launcher(
     usagi: &Path,
     mode: SandboxMode,
     protected_root: &Path,
-    backend: Option<&Path>,
-    tmpdir: Option<&Path>,
-    home: Option<&Path>,
+    paths: SandboxLauncherPaths<'_>,
     writable_roots: &[PathBuf],
 ) -> Result<SandboxLauncher, ()> {
     let mut prefix = vec![
@@ -1104,17 +1176,16 @@ fn claude_sandbox_launcher(
         "--protected-root".to_owned(),
         protected_root.to_str().ok_or(())?.to_owned(),
     ];
-    if let Some(backend) = backend {
-        prefix.push("--backend".to_owned());
-        prefix.push(backend.to_str().ok_or(())?.to_owned());
-    }
-    if let Some(tmpdir) = tmpdir {
-        prefix.push("--tmpdir".to_owned());
-        prefix.push(tmpdir.to_str().ok_or(())?.to_owned());
-    }
-    if let Some(home) = home {
-        prefix.push("--home".to_owned());
-        prefix.push(home.to_str().ok_or(())?.to_owned());
+    for (flag, path) in [
+        ("--backend", paths.backend),
+        ("--tmpdir", paths.tmpdir),
+        ("--cache-dir", paths.cache_dir),
+        ("--home", paths.home),
+    ] {
+        if let Some(path) = path {
+            prefix.push(flag.to_owned());
+            prefix.push(path.to_str().ok_or(())?.to_owned());
+        }
     }
     for root in writable_roots {
         prefix.push("--writable-root".to_owned());
@@ -3329,6 +3400,7 @@ fn open_agent_runtime(
     let sandbox_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());
+    let sandbox_cache_dir = resolve_sandbox_cache_dir();
     let sandbox_passthrough = claude_sandbox::passthrough_requested(
         cfg!(debug_assertions),
         std::env::var(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
@@ -3349,6 +3421,7 @@ fn open_agent_runtime(
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
+            sandbox_cache_dir: sandbox_cache_dir.clone(),
             sandbox_passthrough,
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
@@ -3360,6 +3433,7 @@ fn open_agent_runtime(
             sandbox_backend: sandbox_backend.clone(),
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
+            sandbox_cache_dir: sandbox_cache_dir.clone(),
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
@@ -3369,6 +3443,7 @@ fn open_agent_runtime(
             sandbox_backend,
             sandbox_tmpdir,
             sandbox_home,
+            sandbox_cache_dir,
             environment: Some(environment),
             // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
             // 配布バイナリは常に拘束された Claude だけを起動する。
@@ -13957,6 +14032,7 @@ instructions = "{instructions}"
                 safe.path(),
                 CLAUDE_PROGRAM,
                 Some(Path::new("/tmp")),
+                None,
                 None
             )
             .is_ok()
@@ -13981,6 +14057,7 @@ instructions = "{instructions}"
                 linked.path(),
                 CLAUDE_PROGRAM,
                 Some(Path::new("/tmp")),
+                None,
                 None
             )
             .is_err()
@@ -14006,6 +14083,7 @@ instructions = "{instructions}"
                     program,
                     None,
                     Some(&home.path().canonicalize().unwrap()),
+                    None,
                 )
                 .is_ok(),
                 allowed,
@@ -14025,9 +14103,14 @@ instructions = "{instructions}"
         let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"));
         assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
 
-        let launcher =
-            claude_sandbox_launcher(usagi, mode, Path::new("/repo"), None, None, None, &roots)
-                .unwrap();
+        let launcher = claude_sandbox_launcher(
+            usagi,
+            mode,
+            Path::new("/repo"),
+            SandboxLauncherPaths::default(),
+            &roots,
+        )
+        .unwrap();
         assert_eq!(launcher.program, "/opt/usagi/bin/usagi");
         assert_eq!(
             launcher.prefix,
@@ -14070,6 +14153,84 @@ instructions = "{instructions}"
         );
     }
 
+    #[test]
+    fn root_policy_accepts_the_per_user_cache_root() {
+        // macOS の Keychain 検索は per-user の MDS cache を更新する。root sandbox がここへ
+        // 書けないと agent CLI は Keychain の credential を読めず、古い file 側 credential へ
+        // fallback して 401 で起動できない。launcher へは cache root を渡し、writable にする
+        // subpath（`<cache>/mds`）は core の純粋な決定部が決める。
+        let usagi = Path::new("/opt/usagi/bin/usagi");
+        let launcher = claude_sandbox_launcher(
+            usagi,
+            SandboxMode::Root,
+            Path::new("/repo"),
+            SandboxLauncherPaths {
+                cache_dir: Some(Path::new("/private/var/folders/ab/cd/C")),
+                ..SandboxLauncherPaths::default()
+            },
+            &[],
+        )
+        .unwrap();
+        assert!(
+            launcher
+                .prefix
+                .windows(2)
+                .any(|pair| pair[0] == "--cache-dir" && pair[1] == "/private/var/folders/ab/cd/C"),
+            "{:?}",
+            launcher.prefix
+        );
+
+        // daemon 側の gate も cache root を writable root と同じ規則で検証する。
+        std::fs::create_dir_all("target").unwrap();
+        let workspace = tempfile::tempdir_in("target").unwrap();
+        std::fs::create_dir(workspace.path().join(".git")).unwrap();
+        let cache = tempfile::tempdir_in("target").unwrap();
+        let backend_dir = tempfile::tempdir().unwrap();
+        let backend = backend_dir.path().join("backend");
+        std::fs::write(&backend, "fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let backend = backend.canonicalize().unwrap();
+        let workspace_root = workspace.path().canonicalize().unwrap();
+        let cache_root = cache.path().canonicalize().unwrap();
+        let validate = |cache_dir: Option<&Path>| {
+            validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                mode: SandboxMode::Root,
+                program: CLAUDE_PROGRAM,
+                workspace_root: &workspace_root,
+                launch_roots: &[],
+                tmpdir: None,
+                home: None,
+                cache_dir,
+                backend: Some(&backend),
+                passthrough: false,
+            })
+        };
+        assert_eq!(validate(Some(&cache_root)), Ok(()));
+        // workspace を含む cache root は他の writable root と同じく拒否する。
+        assert_eq!(
+            validate(Some(workspace_root.parent().unwrap())),
+            Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
+        );
+        assert_eq!(
+            validate(Some(&cache_root.join("missing"))),
+            Err(ClaudeSandboxPolicyError::InvalidWritableRoot)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_cache_root_resolves_to_an_owned_canonical_directory() {
+        // bootstrap が実際に確定できることを実 platform で確かめる。ここが None のままだと
+        // root sandbox は per-user MDS cache を許可できず、Keychain 検索が壊れる。
+        let cache = resolve_sandbox_cache_dir().unwrap();
+        assert!(cache.is_absolute() && cache.is_dir());
+        assert_eq!(validate_owned_directory(&cache), Ok(()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn session_claude_environment_rejects_non_utf8_worktrees() {
@@ -14104,6 +14265,7 @@ instructions = "{instructions}"
                 launch_roots: roots,
                 tmpdir,
                 home: None,
+                cache_dir: None,
                 backend: Some(&backend),
                 passthrough: false,
             })
@@ -14171,6 +14333,7 @@ instructions = "{instructions}"
                     launch_roots: &[],
                     tmpdir: None,
                     home: Some(&home),
+                    cache_dir: None,
                     backend: Some(&backend),
                     passthrough: false,
                 }),
@@ -14189,9 +14352,14 @@ instructions = "{instructions}"
         // A root launch's cwd is the project root, but it is not a writable root.
         let roots = claude_writable_roots(mode, Path::new("/repo"));
         assert!(roots.is_empty());
-        let launcher =
-            claude_sandbox_launcher(usagi, mode, Path::new("/repo"), None, None, None, &roots)
-                .unwrap();
+        let launcher = claude_sandbox_launcher(
+            usagi,
+            mode,
+            Path::new("/repo"),
+            SandboxLauncherPaths::default(),
+            &roots,
+        )
+        .unwrap();
         assert_eq!(&launcher.prefix[..3], ["claude-sandbox", "--mode", "root"]);
         assert_eq!(launcher.prefix.last().unwrap(), "--");
 

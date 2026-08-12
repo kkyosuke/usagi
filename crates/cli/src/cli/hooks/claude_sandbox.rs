@@ -28,6 +28,8 @@ pub struct ClaudeSandbox {
     pub tmpdir: Option<PathBuf>,
     /// daemon bootstrap が確定した home directory。
     pub home: Option<PathBuf>,
+    /// daemon bootstrap が確定した per-user cache directory（macOS の MDS cache に使う）。
+    pub cache_dir: Option<PathBuf>,
     /// sandbox が書き込みを許す起動固有 root。
     pub writable_roots: Vec<PathBuf>,
     /// sandbox の中で exec する program と引数。
@@ -42,6 +44,7 @@ impl Run for ClaudeSandbox {
             backend: self.backend.clone(),
             tmpdir: self.tmpdir.clone(),
             home: self.home.clone(),
+            cache_dir: self.cache_dir.clone(),
             writable_roots: self.writable_roots.clone(),
             command: self.command.clone(),
         })
@@ -91,6 +94,7 @@ mod tests {
                 backend: None,
                 tmpdir: None,
                 home: None,
+                cache_dir: None,
                 writable_roots: vec![
                     PathBuf::from("/repo/.usagi/sessions/work"),
                     PathBuf::from("/repo/.git"),
@@ -105,7 +109,16 @@ mod tests {
 
     #[test]
     fn root_mode_maps_and_requires_a_command() {
-        let outcome = run_parsed(&["usagi", "claude-sandbox", "--mode", "root", "--", "claude"]);
+        let outcome = run_parsed(&[
+            "usagi",
+            "claude-sandbox",
+            "--mode",
+            "root",
+            "--cache-dir",
+            "/private/var/folders/ab/cd/C",
+            "--",
+            "claude",
+        ]);
         assert_eq!(
             outcome,
             RunOutcome::ClaudeSandbox {
@@ -114,6 +127,7 @@ mod tests {
                 backend: None,
                 tmpdir: None,
                 home: None,
+                cache_dir: Some(PathBuf::from("/private/var/folders/ab/cd/C")),
                 writable_roots: vec![],
                 command: vec!["claude".to_owned()],
             }

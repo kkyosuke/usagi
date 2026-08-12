@@ -120,6 +120,8 @@ pub enum RunOutcome {
         tmpdir: Option<PathBuf>,
         /// daemon bootstrap が確定した home directory。
         home: Option<PathBuf>,
+        /// daemon bootstrap が確定した per-user cache directory（macOS の MDS cache に使う）。
+        cache_dir: Option<PathBuf>,
         /// sandbox が書き込みを許す起動固有 root（複数指定可）。
         writable_roots: Vec<PathBuf>,
         /// sandbox の中で exec する program と引数（`claude …`）。
@@ -243,6 +245,9 @@ pub enum Command {
         /// daemon bootstrap が確定した home directory
         #[arg(long)]
         home: Option<PathBuf>,
+        /// daemon bootstrap が確定した per-user cache directory（macOS の MDS cache）
+        #[arg(long = "cache-dir")]
+        cache_dir: Option<PathBuf>,
         /// sandbox が書き込みを許す起動固有 root（複数指定可）
         #[arg(long = "writable-root")]
         writable_root: Vec<PathBuf>,
@@ -391,6 +396,7 @@ impl Command {
                 backend,
                 tmpdir,
                 home,
+                cache_dir,
                 writable_root,
                 command,
             } => Box::new(hooks::ClaudeSandbox {
@@ -399,6 +405,7 @@ impl Command {
                 backend,
                 tmpdir,
                 home,
+                cache_dir,
                 writable_roots: writable_root,
                 command,
             }),

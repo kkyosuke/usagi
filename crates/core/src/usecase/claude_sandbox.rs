@@ -10,9 +10,15 @@
 //!
 //! session の writable root は provisioner が渡す own worktree だけである。root coordinator では、
 //! その起動固有 root に platform / 環境由来の普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・起動する
-//! agent CLI 自身の state・macOS の Keychain / MDS cache）を加える。
+//! agent CLI 自身の state・macOS の Keychain と system / per-user の MDS cache）を加える。
 //! sandbox は書き込みだけをこの root 集合に閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
+//!
+//! macOS の Keychain 検索は Module Directory Service (MDS) の cache を更新するため、system の
+//! `/private/var/db/mds` だけでなく **per-user cache**（`$DARWIN_USER_CACHE_DIR/mds`）にも書ける
+//! 必要がある。これが無いと `SecKeychainSearchCreateFromAttributes` が "A Module Directory Service
+//! error has occurred." で失敗し、agent CLI は Keychain の credential を読めないまま古い file 側の
+//! credential へ fallback して認証エラー（401）で起動できなくなる。
 //!
 //! agent state は `~/.claude` 固定ではなく、[`agent_state_directory`] が **exec する program**
 //! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.codex-fugu`）。
@@ -94,6 +100,9 @@ pub struct SandboxRequest {
     pub tmpdir: Option<PathBuf>,
     /// `$HOME`（あれば）。Claude state・macOS の Keychain に使う。
     pub home: Option<PathBuf>,
+    /// macOS の per-user cache root（`$DARWIN_USER_CACHE_DIR`。あれば）。Keychain 検索が更新する
+    /// MDS cache（`<cache>/mds`）を writable にするために使う。
+    pub cache_dir: Option<PathBuf>,
     /// テスト専用 seam。true なら backend で包まず command をそのまま exec する。合成ルートは
     /// [`passthrough_requested`] の結果だけをここへ入れる（release ビルドでは常に false）。
     pub passthrough: bool,
@@ -235,6 +244,11 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
         // 認証に使う system Keychain と Metadata (MDS) cache。
         roots.insert(PathBuf::from("/Library/Keychains"));
         roots.insert(PathBuf::from("/private/var/db/mds"));
+        // per-user の MDS cache。Keychain 検索はここを更新するため、system 側だけでは
+        // "A Module Directory Service error has occurred." で検索が失敗する。
+        if let Some(cache) = &request.cache_dir {
+            roots.insert(cache.join("mds"));
+        }
     }
     roots.into_iter().collect()
 }
@@ -256,6 +270,12 @@ fn macos_argv(
 }
 
 /// 読み取りは許可し、書き込みを writable root の subpath だけに閉じ込める `sandbox-exec` profile。
+///
+/// 最後の 1 行だけが例外で、`/dev` 配下の device node への **data 書き込み**を許す。`/dev/null` を
+/// `O_RDWR` で開けないと `git` すら
+/// "fatal: could not open '/dev/null' for reading and writing" で失敗するためである
+/// （Linux の `bwrap` は `--dev /dev` で新しい devtmpfs を張るため、この差は macOS だけに出る）。
+/// `file-write-data` に限るので、`/dev` への node 作成・削除・属性変更は deny のままである。
 fn macos_profile(mode: SandboxMode, roots: &[PathBuf]) -> String {
     let subpaths = macos_write_roots(roots)
         .iter()
@@ -265,7 +285,7 @@ fn macos_profile(mode: SandboxMode, roots: &[PathBuf]) -> String {
             acc
         });
     format!(
-        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n",
+        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n(allow file-write-data (subpath \"/dev\"))\n",
         mode.as_str()
     )
 }
@@ -361,6 +381,7 @@ mod tests {
             launch_roots: vec![PathBuf::from("/repo/.usagi/sessions/work")],
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
+            cache_dir: Some(PathBuf::from("/private/var/folders/ab/cd/C")),
             passthrough: false,
             command: vec!["claude".to_owned(), "--print".to_owned()],
         }
@@ -431,9 +452,15 @@ mod tests {
         assert!(profile.contains("(subpath \"/home/dev/.claude\")"));
         assert!(profile.contains("(subpath \"/home/dev/Library/Keychains\")"));
         assert!(profile.contains("(subpath \"/Library/Keychains\")"));
+        // Keychain 検索が更新する system / per-user の MDS cache。
+        assert!(profile.contains("(subpath \"/private/var/db/mds\")"));
+        assert!(profile.contains("(subpath \"/private/var/folders/ab/cd/C/mds\")"));
         // macOS firmlink 側（実書き込み先）も許可する。
         assert!(profile.contains("(subpath \"/private/tmp\")"));
         assert!(profile.contains("(subpath \"/private/var/tmp\")"));
+        // device node の data 書き込みだけは許す（`/dev/null` が開けないと git すら動かない）。
+        assert!(profile.contains("(allow file-write-data (subpath \"/dev\"))"));
+        assert!(!profile.contains("file-write-create"));
         // program と引数が profile の後ろに続く。
         assert_eq!(&argv[2..], ["claude", "--print"]);
     }
@@ -566,6 +593,33 @@ mod tests {
         // TMPDIR / HOME が無ければ由来 root は増えない。
         assert!(!roots.iter().any(|root| root.ends_with(".claude")));
         assert_eq!(roots.len(), 2);
+    }
+
+    #[test]
+    fn a_macos_root_launch_grants_the_per_user_mds_cache_keychain_search_updates() {
+        // per-user の MDS cache が writable でないと Keychain 検索が
+        // "A Module Directory Service error has occurred." で失敗し、agent CLI は
+        // 古い file 側 credential へ fallback して 401 で起動できない。
+        let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+        request.mode = SandboxMode::Root;
+        request.launch_roots.clear();
+        assert!(
+            writable_roots(&request).contains(&PathBuf::from("/private/var/folders/ab/cd/C/mds"))
+        );
+        // cache root が無ければ増やさない（他の普遍領域は残る）。
+        request.cache_dir = None;
+        let without = writable_roots(&request);
+        assert!(!without.iter().any(|root| root.ends_with("C/mds")));
+        assert!(without.contains(&PathBuf::from("/private/var/db/mds")));
+        // Linux の MDS は存在しないため、cache root があっても足さない。
+        let mut linux = request.clone();
+        linux.platform = Platform::Linux;
+        linux.cache_dir = Some(PathBuf::from("/private/var/folders/ab/cd/C"));
+        assert!(
+            !writable_roots(&linux)
+                .iter()
+                .any(|root| root.ends_with("mds"))
+        );
     }
 
     #[test]
