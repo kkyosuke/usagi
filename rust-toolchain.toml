@@ -1,3 +1,12 @@
 [toolchain]
-channel = "nightly"
-components = ["llvm-tools-preview"]
+# nightly は日付で pin する。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、
+# 新しく安定化した lint（例: clippy の `assert_is_empty`）が既存コードで一斉に発火して、
+# 無関係な PR まで Rust lint で落ちる。実際 2026-08-11 の main はこの drift だけで赤になった。
+# 更新は「pin を上げる PR」で意図的に行い、そこで新 lint の対応もまとめる。
+#
+# 2026-08-07 = rustc 1.99.0-nightly (84b36a78a 2026-08-06)。CI が最後に green だった toolchain。
+channel = "nightly-2026-08-07"
+# CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は
+# 日付なしの `nightly` である。pin した toolchain へ component を届けるのはこの一覧なので、
+# fmt / clippy / coverage が使うものをすべてここで持つ。
+components = ["llvm-tools-preview", "rustfmt", "clippy"]
