@@ -46,10 +46,124 @@ pub fn is_session_worktree(cwd: &Path) -> bool {
 /// が command 単位で検査し、read-only な shell / git は通す）。
 const WRITE_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit"];
 
+/// リポジトリを変更しないと分かっているツール。ここに載るのは高速路であって安全性の根拠では
+/// なく、載っていない未知のツールは [`classify_tool`] の input shape で判定される。
+const NON_MUTATING_TOOLS: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "Agent",
+    "Skill",
+    "ToolSearch",
+    "TodoWrite",
+    "AskUserQuestion",
+];
+
+/// `tool_input` の key がファイルを名指しすると判断する末尾の語。key は完全一致ではなく
+/// `snake_case` に正規化した最後の segment で照合するため、`file_path` / `notebook_path` /
+/// `target_file` / `output_dir` / camelCase の `filePath` / 複数形の `paths` がすべて当たり、
+/// `profile` のように語の一部が偶然一致するだけの key は当たらない。
+const PATH_KEY_WORDS: &[&str] = &[
+    "path",
+    "file",
+    "filename",
+    "dir",
+    "directory",
+    "destination",
+];
+
+/// `tool_input` の key が shell command を運ぶと判断する末尾の語。[`PATH_KEY_WORDS`] と同じく
+/// 正規化した最後の segment で照合する。
+const COMMAND_KEY_WORDS: &[&str] = &["command", "cmd", "script", "shell"];
+
 /// `tool_name` が root モードで一律拒否される file 書き込みツールかどうか。
 #[must_use]
 pub fn is_write_tool(tool_name: &str) -> bool {
     WRITE_TOOLS.contains(&tool_name)
+}
+
+/// key を `snake_case` へ正規化し、最後の segment を返す（複数形の `s` は落とす）。
+/// `filePath` → `path`、`file_paths` → `path`、`profile` → `profile`。
+fn key_word(key: &str) -> String {
+    let mut snake = String::with_capacity(key.len() + 4);
+    for character in key.chars() {
+        if character.is_ascii_uppercase() && !snake.is_empty() {
+            snake.push('_');
+        }
+        snake.push(character.to_ascii_lowercase());
+    }
+    let last = snake.rsplit(['_', '-']).next().unwrap_or_default();
+    last.strip_suffix('s').unwrap_or(last).to_string()
+}
+
+/// `tool_input` の key がファイルを名指しするか。guard のシムが書き込み先候補を拾うために使う。
+#[must_use]
+pub fn is_path_input_key(key: &str) -> bool {
+    PATH_KEY_WORDS.contains(&key_word(key).as_str())
+}
+
+/// `tool_input` の key が shell command を運ぶか。guard のシムが検査対象の command を拾うために使う。
+#[must_use]
+pub fn is_command_input_key(key: &str) -> bool {
+    COMMAND_KEY_WORDS.contains(&key_word(key).as_str())
+}
+
+/// guard がツール呼び出しに課す制限の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolGuard {
+    /// ファイルを書きうる。session モードでは書き込み先を worktree 内へ閉じ込め、root モードでは
+    /// パスによらず拒否する。
+    FileWrite,
+    /// shell command。command 単位で [`command_mutates_repo`] が検査する。
+    Shell,
+    /// リポジトリを変更しない。両モードとも通す。
+    Unrestricted,
+}
+
+/// ツール呼び出しの分類。名前と `tool_input` の key だけで決まるため、JSON 語彙を持たない
+/// usecase 層に閉じている（シムが key を渡す）。
+///
+/// 判定は「未知の名前を拒否する」closed allowlist ではなく、**変更能力を持つ shape** を捕まえる。
+/// harness は tool を追加・改名し続けるため（`Task` → `Agent`、`TodoWrite` → task 系、`ToolSearch`
+/// の追加…）、名前の allowlist は更新のたびに壊れて agent の手足を無関係に奪う。guard が守る
+/// 性質（worktree 外への書き込みと root の repository mutation を止める）は書き込み先の閉じ込めと
+/// command の検査が担っており、名前を知らないことは変更能力の証拠ではない。
+///
+/// したがって未知のツールは shape で倒す。file を名指しする key（[`is_path_input_key`]）を持てば
+/// [`ToolGuard::FileWrite`]、command を運ぶ key（[`is_command_input_key`]）を持てば
+/// [`ToolGuard::Shell`] として扱い、どちらも持たないものだけを通す。`Bash` が改名されたり別の
+/// 実行系ツールが増えたりしても、root の read-only shell allowlist が素通りされない。
+#[must_use]
+pub fn classify_tool<'a>(
+    tool_name: &str,
+    input_keys: impl IntoIterator<Item = &'a str>,
+) -> ToolGuard {
+    if is_write_tool(tool_name) {
+        return ToolGuard::FileWrite;
+    }
+    if tool_name == "Bash" {
+        return ToolGuard::Shell;
+    }
+    // MCP tool は user が明示的に配線した server の面であり、usagi 自身の server は root からの
+    // tracked store 書き込みを自前で拒否する。
+    if tool_name.starts_with("mcp__") || NON_MUTATING_TOOLS.contains(&tool_name) {
+        return ToolGuard::Unrestricted;
+    }
+    // 書き込み先の閉じ込めのほうが強い制約なので、両方の shape を持つ呼び出しは FileWrite に倒す。
+    let mut shell = false;
+    for key in input_keys {
+        if is_path_input_key(key) {
+            return ToolGuard::FileWrite;
+        }
+        shell |= is_command_input_key(key);
+    }
+    if shell {
+        return ToolGuard::Shell;
+    }
+    ToolGuard::Unrestricted
 }
 
 /// リポジトリを読むだけの git サブコマンド。root モードで許可する。これ以外で `git` に届く
@@ -283,6 +397,86 @@ mod tests {
     use super::*;
 
     const WT: &str = "/repo/.usagi/sessions/work";
+
+    #[test]
+    fn write_tools_and_shell_are_classified_by_name() {
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            assert!(is_write_tool(tool));
+            assert_eq!(classify_tool(tool, []), ToolGuard::FileWrite);
+        }
+        assert!(!is_write_tool("Bash"));
+        assert_eq!(classify_tool("Bash", ["command"]), ToolGuard::Shell);
+    }
+
+    #[test]
+    fn known_non_mutating_tools_pass_even_when_they_name_a_file() {
+        // `Read` / `Grep` は path を取るが読むだけなので、worktree の外でも通す。
+        for tool in ["Read", "Glob", "Grep", "ToolSearch", "Agent"] {
+            assert_eq!(
+                classify_tool(tool, ["file_path", "path"]),
+                ToolGuard::Unrestricted,
+                "{tool}"
+            );
+        }
+        // MCP tool は配線した server の面としてそのまま通す。
+        assert_eq!(
+            classify_tool("mcp__usagi__issue_get", ["number"]),
+            ToolGuard::Unrestricted
+        );
+    }
+
+    #[test]
+    fn an_unknown_tool_is_classified_by_its_input_shape() {
+        // 名前を知らないだけでは変更能力の証拠にならない（harness は tool を増やし続ける）。
+        assert_eq!(
+            classify_tool("FutureReader", ["query", "max_results"]),
+            ToolGuard::Unrestricted
+        );
+        // ファイルを名指しするなら書き込みうるとみなす（fail-closed）。
+        for key in [
+            "file_path",
+            "notebook_path",
+            "path",
+            "paths",
+            "target_file",
+            "output_dir",
+            "filePath",
+            "destination",
+        ] {
+            assert!(is_path_input_key(key), "{key}");
+            assert_eq!(
+                classify_tool("FutureMutator", [key]),
+                ToolGuard::FileWrite,
+                "{key}"
+            );
+        }
+        // command を運ぶなら shell として検査する。`Bash` が改名されても root の allowlist が残る。
+        for key in ["command", "cmd", "script", "shell_command", "commands"] {
+            assert!(is_command_input_key(key), "{key}");
+            assert_eq!(
+                classify_tool("FutureRunner", [key]),
+                ToolGuard::Shell,
+                "{key}"
+            );
+        }
+        // 両方持つなら、より強い制約である書き込み先の閉じ込めに倒す。
+        assert_eq!(
+            classify_tool("FutureBoth", ["command", "file_path"]),
+            ToolGuard::FileWrite
+        );
+        // 語の一部が偶然一致するだけの key は当たらない（`profile` は `file` ではない）。
+        for key in ["query", "profile", "max_results", "prompt", "description"] {
+            assert!(!is_path_input_key(key), "{key}");
+            assert!(!is_command_input_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn an_empty_key_normalizes_without_panicking() {
+        // 空の key は語を持たないため、どちらの shape にも当たらない。
+        assert!(!is_path_input_key(""));
+        assert!(!is_command_input_key(""));
+    }
 
     #[test]
     fn a_file_under_the_worktree_stays_inside() {
