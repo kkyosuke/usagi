@@ -1840,20 +1840,22 @@ fn remove_operation_matches(
     if operation.semantic_key != semantic_key(SessionAction::Remove, name) {
         return false;
     }
-    state.sessions.iter().any(|session| {
+    for session in &state.sessions {
         if session.name != name || session.operation_id != Some(operation.operation_id) {
-            return false;
+            continue;
         }
-        session.delete_plan.as_ref().is_some_and(|plan| {
-            let branch_delete_matches = match kind {
-                RemoveKind::Compensating => plan.delete_branch && plan.force_delete_branch,
-                // Legacy requested plans preserved the branch; current requested
-                // plans delete it safely. Neither may force branch deletion.
-                RemoveKind::Requested => !plan.force_delete_branch,
-            };
-            plan.force == force && branch_delete_matches
-        })
-    })
+        let Some(plan) = session.delete_plan.as_ref() else {
+            return false;
+        };
+        let branch_delete_matches = match kind {
+            RemoveKind::Compensating => plan.delete_branch && plan.force_delete_branch,
+            // Legacy requested plans preserved the branch; current requested
+            // plans delete it safely. Neither may force branch deletion.
+            RemoveKind::Requested => !plan.force_delete_branch,
+        };
+        return plan.force == force && branch_delete_matches;
+    }
+    false
 }
 
 /// Whether one journaled semantic key names this action and session.
@@ -4510,6 +4512,17 @@ instructions = "code"
             true,
             &requested_key,
         ));
+
+        let saved_plan = state.sessions[0].delete_plan.take();
+        assert!(!remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+        state.sessions[0].delete_plan = saved_plan;
 
         let plan = state.sessions[0].delete_plan.as_mut().unwrap();
         plan.delete_branch = false;
