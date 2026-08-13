@@ -127,6 +127,24 @@ daemon lifecycle / Agent phase
 `GardenSession` は表示に必要な `id`、safe label、lifecycle、Agent phase、safe failure summary だけを持つ。
 filesystem path、provider-native ID、terminal output、raw error は renderer に渡さない。
 
+## UI sample
+
+純粋 renderer と固定データを使う sample は、次の 4 場面を標準出力へ描く。
+
+| 場面 | 確認できること |
+|---|---|
+| 100×24 · 全 lifecycle | 状態別 pose・状態ラベル・3 列 2 行の plot |
+| 100×24 · reduced motion | 全 pose が静止姿勢に固定される |
+| 100×24 · session 0 件 | 空の庭と `No sessions in the garden` |
+| 64×14 · 最小サイズ | 2 列 1 行への縮退と `+ N more in session list` |
+
+```bash
+cargo run -p usagi-tui --example garden_sample
+```
+
+sample は idle timer、Home overlay、click dispatch には接続しない。状態別 pose、複数 plot、端末幅、色と文言を
+production 配線より先に確認するための presentation-only surface である。
+
 ## 実装順序と受け入れ条件
 
 1. 固定 snapshot から ANSI-safe / width-safe な Garden frame と hitbox を返す widget / unit test を追加する。
