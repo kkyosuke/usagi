@@ -87,6 +87,8 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 
 - 解決は最大 4 worker の bounded queue で行う（1 参照 = 1 subprocess）。1 件あたり 30 秒の deadline を持つ。
   binding の結果は完了順でなく名前順へ戻して merge する。
+- `op` の stdout / stderr は stream ごとに最大 64 KiB だけ保持する。上限後も pipe は EOF まで drain して child を
+  backpressure で停止させず、どちらかが上限を超えた binding は raw output を返さない安全な failure として落とす。
 - deadline を超えた `op` は、その child handle の owner が exact child だけへ graceful terminate を送り、2 秒の bounded wait
   後も残る場合は kill する。その後は wait/reap と stdout / stderr reader の join を終えてから failure を返す。任意 PID や
   owner が証明できない process は signal 対象にしない。
