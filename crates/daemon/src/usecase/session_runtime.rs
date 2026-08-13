@@ -1290,14 +1290,20 @@ impl SessionRuntime {
                     semantic_key(SessionAction::Create, &session.name),
                     semantic_key(SessionAction::Remove, &session.name),
                 ];
-                let operation = state.operations.iter().rev().find(|operation| {
-                    owning
-                        .iter()
-                        .any(|key| names_session_operation(&operation.semantic_key, key))
-                })?;
-                (names_session_operation(&operation.semantic_key, &delegated)
-                    && operation.status == OperationStatus::Succeeded)
-                    .then(|| DelegatedCreate {
+                state
+                    .operations
+                    .iter()
+                    .rev()
+                    .find(|operation| {
+                        owning
+                            .iter()
+                            .any(|key| names_session_operation(&operation.semantic_key, key))
+                    })
+                    .filter(|operation| {
+                        names_session_operation(&operation.semantic_key, &delegated)
+                            && operation.status == OperationStatus::Succeeded
+                    })
+                    .map(|operation| DelegatedCreate {
                         session_id: session.session_id,
                         name: session.name.clone(),
                         operation_id: operation.operation_id,
