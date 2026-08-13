@@ -41,9 +41,32 @@ fn main() {
             AgentPhase::Ended,
         ),
     ];
-    let frame = render(24, 100, "my-project", &sessions, 1, false)
-        .expect("the sample uses a Garden-compatible terminal size");
-    println!("{}", frame.rows.join("\n"));
+    scene("100x24 · 全 lifecycle", 24, 100, &sessions, 1, false);
+    scene("100x24 · reduced motion", 24, 100, &sessions, 1, true);
+    scene("100x24 · session 0 件", 24, 100, &[], 1, false);
+    // 最小サイズでは plot が 2 列 1 行に減り、残りは session list へ畳まれる。
+    scene(
+        "64x14 · 最小サイズ（表示上限超過）",
+        14,
+        64,
+        &sessions,
+        1,
+        false,
+    );
+}
+
+fn scene(
+    caption: &str,
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) {
+    let frame = render(height, width, "my-project", sessions, tick, reduced_motion)
+        .expect("the sample uses Garden-compatible terminal sizes");
+    println!("--- {caption} ---");
+    println!("{}\n", frame.rows.join("\n"));
 }
 
 fn sample(

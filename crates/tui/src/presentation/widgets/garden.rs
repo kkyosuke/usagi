@@ -21,6 +21,16 @@ const HEADER_ROWS: usize = 3;
 const FOOTER_ROWS: usize = 2;
 const PLOT_WIDTH: usize = 28;
 const PLOT_HEIGHT: usize = 7;
+/// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
+const SPRITE_ROWS: usize = 4;
+
+/// 地面は plot 幅ちょうどにして、隣り合う plot が 1 本の地面としてつながるようにする。
+/// 草の位置だけ column ごとに変え、同じ絵が横に並ぶ tiling に見せない。
+const GROUND: [&str; 3] = [
+    "--v-------v-----------v-----",
+    "------v---------v----v------",
+    "---v----------v-------v-----",
+];
 
 /// Garden に渡す、表示に必要な session 情報だけの projection。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,16 +100,19 @@ pub fn render(
     rows.push(Role::Feature.style().paint(&"·".repeat(width)));
     rows.push(" ".repeat(width));
 
+    // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
+    let used_rows = visible.div_ceil(columns);
+    let grid_top = HEADER_ROWS + garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2;
+    rows.resize_with(grid_top, || " ".repeat(width));
+
     let mut hitboxes = Vec::with_capacity(visible);
-    for plot_row in 0..plot_rows {
+    for plot_row in 0..used_rows {
         let start = plot_row * columns;
-        if start >= visible {
-            break;
-        }
         let end = (start + columns).min(visible);
         let plots = sessions[start..end]
             .iter()
-            .map(|session| plot(session, tick, reduced_motion))
+            .enumerate()
+            .map(|(column, session)| plot(session, column, tick, reduced_motion))
             .collect::<Vec<_>>();
         for local_row in 0..PLOT_HEIGHT {
             let mut line = " ".repeat(grid_left);
@@ -112,7 +125,7 @@ pub fn render(
             hitboxes.push(GardenHitbox {
                 session_id: session.id,
                 column: grid_left + column * PLOT_WIDTH,
-                row: HEADER_ROWS + plot_row * PLOT_HEIGHT,
+                row: grid_top + plot_row * PLOT_HEIGHT,
                 width: PLOT_WIDTH,
                 height: PLOT_HEIGHT,
             });
@@ -120,8 +133,6 @@ pub fn render(
     }
 
     if visible == 0 {
-        let empty_row = HEADER_ROWS + garden_height / 2;
-        rows.resize_with(empty_row, || " ".repeat(width));
         rows.push(centered(
             width,
             &Style::new().dim().paint("No sessions in the garden"),
@@ -171,7 +182,12 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
 
-fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PLOT_HEIGHT] {
+fn plot(
+    session: &GardenSession,
+    column: usize,
+    tick: u64,
+    reduced_motion: bool,
+) -> [String; PLOT_HEIGHT] {
     let phase = if reduced_motion {
         0
     } else {
@@ -182,16 +198,40 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PL
         .style()
         .bold()
         .paint(&clip_to_width(&session.label, PLOT_WIDTH - 2));
-    let ground = Style::new().dim().paint("--v---------v-----------");
+    let sprite = sprite(rabbit, rabbit_style);
+    let ground = Style::new().dim().paint(GROUND[column % GROUND.len()]);
+    let [ears, head, body, feet] = sprite;
     [
         centered(PLOT_WIDTH, &label),
         centered(PLOT_WIDTH, &status_style.paint(status)),
-        centered(PLOT_WIDTH, &rabbit_style.paint(rabbit[0])),
-        centered(PLOT_WIDTH, &rabbit_style.paint(rabbit[1])),
-        centered(PLOT_WIDTH, &rabbit_style.paint(rabbit[2])),
-        centered(PLOT_WIDTH, &rabbit_style.paint(rabbit[3])),
-        centered(PLOT_WIDTH, &ground),
+        ears,
+        head,
+        body,
+        feet,
+        pad_to_width(&ground, PLOT_WIDTH),
     ]
+}
+
+/// pose を 1 つの絵として中央へ寄せる。
+///
+/// 行ごとに中央寄せすると、行の表示桁数が違うぶんだけ耳と顔が横へずれる（例えば
+/// `Creating` の耳は頭より 2 桁右に出ていた）。うさぎが崩れないよう、pose 全体の
+/// 最大幅から左端を 1 度だけ決め、4 行に同じ padding を与える。
+fn sprite(rabbit: [&'static str; SPRITE_ROWS], style: Style) -> [String; SPRITE_ROWS] {
+    let sprite_width = rabbit
+        .iter()
+        .map(|row| display_width(row))
+        .max()
+        .unwrap_or(0);
+    let left = " ".repeat(PLOT_WIDTH.saturating_sub(sprite_width) / 2);
+    rabbit.map(|row| {
+        if row.is_empty() {
+            // 空行に色を塗らない（意味のない escape sequence を frame へ残さない）。
+            " ".repeat(PLOT_WIDTH)
+        } else {
+            pad_to_width(&format!("{left}{}", style.paint(row)), PLOT_WIDTH)
+        }
+    })
 }
 
 fn appearance(
@@ -272,10 +312,49 @@ fn centered(width: usize, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GardenSession, MIN_HEIGHT, MIN_WIDTH, render};
+    use super::{GROUND, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render};
     use crate::presentation::widgets::display_width;
     use usagi_core::domain::id::SessionId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+
+    /// animation offset が 0 になる id（先頭 2 桁が `00`）。tick をそのまま phase として扱える。
+    const STEADY_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+    fn plain(frame: &super::GardenFrame) -> Vec<String> {
+        frame
+            .rows
+            .iter()
+            .map(|row| {
+                let mut out = String::new();
+                let mut chars = row.chars();
+                while let Some(ch) = chars.next() {
+                    if ch == '\u{1b}' {
+                        for c in chars.by_ref() {
+                            if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    out.push(ch);
+                }
+                out
+            })
+            .collect()
+    }
+
+    fn only(lifecycle: SessionLifecycle, phase: AgentPhase, tick: u64) -> Vec<String> {
+        let frame = render(
+            24,
+            100,
+            "x",
+            &[session(STEADY_ID, "one", lifecycle, phase)],
+            tick,
+            false,
+        )
+        .expect("garden fits");
+        plain(&frame)
+    }
 
     fn session(
         id: &str,
@@ -380,5 +459,103 @@ mod tests {
         let still_a = render(24, 100, "x", &sessions, 0, true).expect("fits");
         let still_b = render(24, 100, "x", &sessions, 5, true).expect("fits");
         assert_eq!(still_a.rows, still_b.rows);
+    }
+
+    #[test]
+    fn every_lifecycle_and_agent_phase_states_itself_in_text() {
+        let cases = [
+            (SessionLifecycle::Creating, AgentPhase::Absent, "growing"),
+            (
+                SessionLifecycle::Initializing,
+                AgentPhase::Absent,
+                "growing",
+            ),
+            (
+                SessionLifecycle::Deleting,
+                AgentPhase::Ended,
+                "heading home",
+            ),
+            (SessionLifecycle::Failed, AgentPhase::Absent, "failed"),
+            (SessionLifecycle::Available, AgentPhase::Running, "running"),
+            (SessionLifecycle::Available, AgentPhase::Waiting, "waiting"),
+            (
+                SessionLifecycle::Available,
+                AgentPhase::Interrupted,
+                "interrupted",
+            ),
+            (SessionLifecycle::Available, AgentPhase::Ready, "available"),
+            (SessionLifecycle::Available, AgentPhase::Ended, "available"),
+            (SessionLifecycle::Available, AgentPhase::Exited, "available"),
+            (SessionLifecycle::Available, AgentPhase::Absent, "available"),
+        ];
+        for (lifecycle, phase, status) in cases {
+            let text = only(lifecycle, phase, 0).join("\n");
+            assert!(
+                text.contains(status),
+                "{lifecycle:?}/{phase:?} should read as {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_usagi_cycles_three_poses_and_an_idle_one_blinks() {
+        // phase % 3 が 0 / 1 / 2 の 3 pose すべてを踏む（offset 0 の id なので tick = phase）。
+        let poses = (0..3)
+            .map(|tick| only(SessionLifecycle::Available, AgentPhase::Running, tick).join("\n"))
+            .collect::<Vec<_>>();
+        assert_ne!(poses[0], poses[1]);
+        assert_ne!(poses[1], poses[2]);
+        assert_ne!(poses[0], poses[2]);
+
+        // idle は phase 4 でだけ瞬きする。
+        let open = only(SessionLifecycle::Available, AgentPhase::Ready, 0).join("\n");
+        let blink = only(SessionLifecycle::Available, AgentPhase::Ready, 4).join("\n");
+        assert!(open.contains("( . .)"));
+        assert!(blink.contains("( -.-)"));
+    }
+
+    #[test]
+    fn a_pose_keeps_its_ears_over_its_head() {
+        // 行ごとの中央寄せは、行幅が違う pose の耳を頭から横へずらしてしまう。
+        // 最も差が出る `Creating`（耳 `/)/)` と頭 `__(_ _)__`）で崩れないことを固定する。
+        let rows = only(SessionLifecycle::Creating, AgentPhase::Absent, 0);
+        let ears = rows
+            .iter()
+            .find_map(|row| row.find("/)/)"))
+            .expect("the growing pose shows ears");
+        let head = rows
+            .iter()
+            .find_map(|row| row.find("__(_ _)__"))
+            .expect("the growing pose shows a head");
+        let ears_center = ears + display_width("/)/)") / 2;
+        let head_center = head + display_width("__(_ _)__") / 2;
+        assert!(
+            ears_center.abs_diff(head_center) <= 1,
+            "ears at {ears_center} drifted off the head at {head_center}"
+        );
+    }
+
+    #[test]
+    fn the_ground_joins_across_neighbouring_plots() {
+        for pattern in GROUND {
+            assert_eq!(display_width(pattern), PLOT_WIDTH);
+        }
+        let sessions = (0..3)
+            .map(|index| {
+                session(
+                    &format!("0{index}000000-0000-4000-8000-000000000001"),
+                    "s",
+                    SessionLifecycle::Available,
+                    AgentPhase::Ready,
+                )
+            })
+            .collect::<Vec<_>>();
+        let frame = render(24, 100, "x", &sessions, 0, false).expect("garden fits");
+        let ground = plain(&frame)
+            .into_iter()
+            .find(|row| row.contains("--v"))
+            .expect("the garden draws ground");
+        // 3 plot 分の地面が途切れずつながる（plot 間に空白が入らない）。
+        assert!(!ground.trim().contains("  "), "ground broke: {ground:?}");
     }
 }

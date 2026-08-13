@@ -129,7 +129,14 @@ filesystem path、provider-native ID、terminal output、raw error は renderer 
 
 ## UI sample
 
-純粋 renderer と固定データを使う sample は、100×24 の Garden を標準出力へ描く。
+純粋 renderer と固定データを使う sample は、次の 4 場面を標準出力へ描く。
+
+| 場面 | 確認できること |
+|---|---|
+| 100×24 · 全 lifecycle | 状態別 pose・状態ラベル・3 列 2 行の plot |
+| 100×24 · reduced motion | 全 pose が静止姿勢に固定される |
+| 100×24 · session 0 件 | 空の庭と `No sessions in the garden` |
+| 64×14 · 最小サイズ | 2 列 1 行への縮退と `+ N more in session list` |
 
 ```bash
 cargo run -p usagi-tui --example garden_sample
