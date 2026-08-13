@@ -198,9 +198,8 @@ fn plot(
         .style()
         .bold()
         .paint(&clip_to_width(&session.label, PLOT_WIDTH - 2));
-    let sprite = sprite(rabbit, rabbit_style);
+    let [ears, head, body, feet] = sprite(rabbit, rabbit_style);
     let ground = Style::new().dim().paint(GROUND[column % GROUND.len()]);
-    let [ears, head, body, feet] = sprite;
     [
         centered(PLOT_WIDTH, &label),
         centered(PLOT_WIDTH, &status_style.paint(status)),
