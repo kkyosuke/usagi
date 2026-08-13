@@ -1128,10 +1128,12 @@ impl SessionRuntime {
         match self.begin_remove(RemoveKind::Requested, operation_id, payload)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
-                let outcome = self
-                    .io
-                    .remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
-                    .and_then(|()| {
+                let outcome = match self.io.remove_session_tree(
+                    self.git.as_ref(),
+                    &pending.session_root,
+                    pending.force,
+                ) {
+                    Ok(()) => {
                         // Every newly accepted removal carries branch deletion.
                         // Legacy branch-preserving plans can only be replayed as
                         // `Settled`, so they never reach this effect path.
@@ -1140,10 +1142,11 @@ impl SessionRuntime {
                             &pending.repository_root,
                             &session_branch(&pending.name),
                             pending.force_delete_branch,
-                        )?;
-                        Ok(())
-                    })
-                    .map_err(|error| error.to_string());
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
+                .map_err(|error| error.to_string());
                 self.finish_teardown(&pending, outcome)
             }
         }
