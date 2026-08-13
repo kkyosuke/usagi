@@ -1276,40 +1276,33 @@ impl SessionRuntime {
     /// Returns an error when the durable lifecycle state cannot be read.
     pub fn delegated_sessions(&self) -> Result<Vec<DelegatedCreate>, SessionRuntimeError> {
         let state = self.state()?;
-        Ok(state
-            .sessions
-            .iter()
-            .filter(|session| {
-                session.lifecycle
-                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-            })
-            .filter_map(|session| {
+        let mut delegated_sessions = Vec::new();
+        for session in &state.sessions {
+            if session.lifecycle
+                == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            {
                 let delegated = semantic_key(SessionAction::DelegateBrief, &session.name);
                 let owning = [
                     delegated.clone(),
                     semantic_key(SessionAction::Create, &session.name),
                     semantic_key(SessionAction::Remove, &session.name),
                 ];
-                state
-                    .operations
-                    .iter()
-                    .rev()
-                    .find(|operation| {
-                        owning
-                            .iter()
-                            .any(|key| names_session_operation(&operation.semantic_key, key))
-                    })
-                    .filter(|operation| {
-                        names_session_operation(&operation.semantic_key, &delegated)
-                            && operation.status == OperationStatus::Succeeded
-                    })
-                    .map(|operation| DelegatedCreate {
+                if let Some(operation) = state.operations.iter().rev().find(|operation| {
+                    owning
+                        .iter()
+                        .any(|key| names_session_operation(&operation.semantic_key, key))
+                }) && names_session_operation(&operation.semantic_key, &delegated)
+                    && operation.status == OperationStatus::Succeeded
+                {
+                    delegated_sessions.push(DelegatedCreate {
                         session_id: session.session_id,
                         name: session.name.clone(),
                         operation_id: operation.operation_id,
-                    })
-            })
-            .collect())
+                    });
+                }
+            }
+        }
+        Ok(delegated_sessions)
     }
 
     /// Every unfinished teardown, derived from durable state: a `Deleting`
