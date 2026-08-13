@@ -506,19 +506,25 @@ impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, 
         self.io
             .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
             .map_err(|error| error.to_string())?;
-        if !teardown.delete_branch {
-            return Ok(());
-        }
-        // Only after the worktree is gone: git refuses to delete a branch that a
-        // worktree still has checked out.
-        delete_branch(
-            &self.git,
-            &teardown.repository_root,
-            &session_branch(&teardown.name),
-            teardown.force_delete_branch,
-        )
-        .map_err(|error| error.to_string())
+        delete_teardown_branch(&self.git, teardown)
     }
+}
+
+/// Deletes a teardown branch outside the generic effect implementation so every
+/// `WorktreeTeardown<G, I>` instantiation shares one coverage region.
+fn delete_teardown_branch(git: &dyn GitRunner, teardown: &PendingTeardown) -> Result<(), String> {
+    if !teardown.delete_branch {
+        return Ok(());
+    }
+    // Only after the worktree is gone: git refuses to delete a branch that a
+    // worktree still has checked out.
+    delete_branch(
+        git,
+        &teardown.repository_root,
+        &session_branch(&teardown.name),
+        teardown.force_delete_branch,
+    )
+    .map_err(|error| error.to_string())
 }
 
 impl SessionRuntime {
@@ -1276,33 +1282,34 @@ impl SessionRuntime {
     /// Returns an error when the durable lifecycle state cannot be read.
     pub fn delegated_sessions(&self) -> Result<Vec<DelegatedCreate>, SessionRuntimeError> {
         let state = self.state()?;
-        let mut delegated_sessions = Vec::new();
-        for session in &state.sessions {
-            if session.lifecycle
-                == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-            {
+        Ok(state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .filter_map(|session| {
                 let delegated = semantic_key(SessionAction::DelegateBrief, &session.name);
                 let owning = [
                     delegated.clone(),
                     semantic_key(SessionAction::Create, &session.name),
                     semantic_key(SessionAction::Remove, &session.name),
                 ];
-                if let Some(operation) = state.operations.iter().rev().find(|operation| {
+                let operation = state.operations.iter().rev().find(|operation| {
                     owning
                         .iter()
                         .any(|key| names_session_operation(&operation.semantic_key, key))
-                }) && names_session_operation(&operation.semantic_key, &delegated)
-                    && operation.status == OperationStatus::Succeeded
-                {
-                    delegated_sessions.push(DelegatedCreate {
+                })?;
+                (names_session_operation(&operation.semantic_key, &delegated)
+                    && operation.status == OperationStatus::Succeeded)
+                    .then(|| DelegatedCreate {
                         session_id: session.session_id,
                         name: session.name.clone(),
                         operation_id: operation.operation_id,
-                    });
-                }
-            }
-        }
-        Ok(delegated_sessions)
+                    })
+            })
+            .collect())
     }
 
     /// Every unfinished teardown, derived from durable state: a `Deleting`
@@ -2267,6 +2274,14 @@ mod tests {
             delete_branch: false,
             force_delete_branch: false,
         }
+    }
+
+    #[test]
+    fn a_branch_preserving_teardown_skips_git_branch_deletion() {
+        assert_eq!(
+            delete_teardown_branch(&FakeGit::ok(), &confined_teardown()),
+            Ok(())
+        );
     }
 
     #[test]
