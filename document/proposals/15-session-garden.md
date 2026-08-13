@@ -127,6 +127,17 @@ daemon lifecycle / Agent phase
 `GardenSession` は表示に必要な `id`、safe label、lifecycle、Agent phase、safe failure summary だけを持つ。
 filesystem path、provider-native ID、terminal output、raw error は renderer に渡さない。
 
+## UI sample
+
+純粋 renderer と固定データを使う sample は、100×24 の Garden を標準出力へ描く。
+
+```bash
+cargo run -p usagi-tui --example garden_sample
+```
+
+sample は idle timer、Home overlay、click dispatch には接続しない。状態別 pose、複数 plot、端末幅、色と文言を
+production 配線より先に確認するための presentation-only surface である。
+
 ## 実装順序と受け入れ条件
 
 1. 固定 snapshot から ANSI-safe / width-safe な Garden frame と hitbox を返す widget / unit test を追加する。

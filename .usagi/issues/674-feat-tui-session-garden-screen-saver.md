@@ -1,13 +1,13 @@
 ---
 number: 674
 title: feat(tui): 無操作時に session garden screen saver を表示する
-status: todo
+status: in-progress
 priority: medium
 labels: [v2, tui, uiux]
 dependson: []
 related: []
 created_at: 2026-08-13T10:19:44.691141+00:00
-updated_at: 2026-08-13T10:19:44.691141+00:00
+updated_at: 2026-08-13T22:29:33.004535+00:00
 ---
 
 ## 背景
