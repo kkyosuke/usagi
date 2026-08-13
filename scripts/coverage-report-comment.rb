@@ -78,11 +78,20 @@ end
 # 診断候補として使う。正のcountを持つsegmentが同じ行にあればcoveredを優先する。
 def uncovered_segment_lines_for(segments)
   line_max = {}
-  (segments || []).each do |line, _, count, has_count, _, is_gap|
+  entries = segments || []
+  entries.each_with_index do |segment, index|
+    line, _, count, has_count, _, is_gap = segment
     next unless has_count
     next if is_gap
 
-    line_max[line] = [line_max[line] || 0, count].max
+    following = entries[index + 1]
+    last_line = following ? following[0] : line
+    # A following segment at column 1 starts before any source on that line, so
+    # the current segment covers only through the preceding line.
+    last_line -= 1 if following && following[1] == 1 && last_line > line
+    (line..last_line).each do |covered_line|
+      line_max[covered_line] = [line_max[covered_line] || 0, count].max
+    end
   end
   line_max.select { |_, count| count.zero? }.keys.sort
 end
