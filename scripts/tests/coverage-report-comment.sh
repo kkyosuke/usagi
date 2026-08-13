@@ -156,4 +156,15 @@ if gen "$tmp/does-not-exist.json" >/dev/null 2>&1; then
   exit 1
 fi
 
+# --- ケース9: function regionに座標がないline summary差分をfile segmentで診断 ---
+cat > "$tmp/segments.json" <<'JSON'
+{"data":[{
+  "files":[{"filename":"/repo/s.rs","segments":[[8,3,0,true,true,false],[8,9,0,false,false,false]],"summary":{"functions":{"count":1,"covered":1,"percent":100},"lines":{"count":2,"covered":1,"percent":50}}}],
+  "functions":[{"name":"s::f","count":1,"filenames":["/repo/s.rs"],"regions":[[1,1,1,10,1,0,0,0]]}],
+  "totals":{"functions":{"count":1,"covered":1,"percent":100},"lines":{"count":2,"covered":1,"percent":50}}
+}]}
+JSON
+out=$(gen "$tmp/segments.json")
+grep -Fqe '- 📈 未達行 (1): L8' <<<"$out"
+
 echo "coverage-report-comment: ok"

@@ -73,6 +73,20 @@ def uncovered_lines_for(entries_regions)
   line_max.select { |_, c| c.zero? }.keys.sort
 end
 
+# Macro expansionや一部のclosureでは file summary の line と functions[].regions の
+# 対応が欠けることがある。その場合も空の詳細を出さないよう、file segments の開始行を
+# 診断候補として使う。正のcountを持つsegmentが同じ行にあればcoveredを優先する。
+def uncovered_segment_lines_for(segments)
+  line_max = {}
+  (segments || []).each do |line, _, count, has_count, _, is_gap|
+    next unless has_count
+    next if is_gap
+
+    line_max[line] = [line_max[line] || 0, count].max
+  end
+  line_max.select { |_, count| count.zero? }.keys.sort
+end
+
 regions_by_file = Hash.new { |h, k| h[k] = [] }
 data.fetch("functions", []).each do |fn|
   file = fn["filenames"][0]
@@ -80,6 +94,7 @@ data.fetch("functions", []).each do |fn|
 end
 
 Row = Struct.new(:path, :fnf, :fnh, :lf, :lh, :uncovered_fns, :uncovered_lines,
+                 :uncovered_segment_lines,
                  keyword_init: true)
 
 rows = data.fetch("files").map do |f|
@@ -89,7 +104,8 @@ rows = data.fetch("files").map do |f|
   Row.new(path: rel(file, root),
           fnf: fs["count"], fnh: fs["covered"], lf: ls["count"], lh: ls["covered"],
           uncovered_fns: uncovered_fns_for(fn_groups[file]),
-          uncovered_lines: uncovered_lines_for(regions_by_file[file]))
+          uncovered_lines: uncovered_lines_for(regions_by_file[file]),
+          uncovered_segment_lines: uncovered_segment_lines_for(f["segments"]))
 end
 
 totals = data.fetch("totals")
@@ -203,9 +219,11 @@ else
       extra = row.uncovered_fns.length - max_funcs
       out << "  - …ほか #{extra} 関数" if extra.positive?
     end
-    next if row.uncovered_lines.empty?
+    lines = row.uncovered_lines
+    lines = row.uncovered_segment_lines if lines.empty? && row.lh < row.lf
+    next if lines.empty?
 
-    labels, hidden = compress(row.uncovered_lines, max_ranges)
+    labels, hidden = compress(lines, max_ranges)
     suffix = hidden.positive? ? " …ほか #{hidden} 箇所" : ""
     out << "" if row.uncovered_fns.empty?
     out << "- 📈 未達行 (#{row.lf - row.lh}): #{labels.join(', ')}#{suffix}"
