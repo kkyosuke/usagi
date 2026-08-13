@@ -391,8 +391,8 @@ pub fn perform_remove(
 
 /// Undoes a delegated create completely: the worktree and the branch it made.
 ///
-/// The removal is forced and deletes the branch. A requested removal normally
-/// preserves the branch, but also deletes it when retiring a failed session.
+/// The removal is forced and deletes the branch. A requested removal also
+/// deletes its branch, but uses Git's safe mode so unmerged work is preserved.
 /// Compensation is safe because it is reached exclusively for a session whose
 /// dispatch definitively never started, so nothing on the branch is anybody's
 /// work. Undoing the branch too is what lets the caller retry the same session
@@ -506,18 +506,25 @@ impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, 
         self.io
             .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
             .map_err(|error| error.to_string())?;
-        if !teardown.delete_branch {
-            return Ok(());
-        }
-        // Only after the worktree is gone: git refuses to delete a branch that a
-        // worktree still has checked out.
-        delete_branch(
-            &self.git,
-            &teardown.repository_root,
-            &session_branch(&teardown.name),
-        )
-        .map_err(|error| error.to_string())
+        delete_teardown_branch(&self.git, teardown)
     }
+}
+
+/// Deletes a teardown branch outside the generic effect implementation so every
+/// `WorktreeTeardown<G, I>` instantiation shares one coverage region.
+fn delete_teardown_branch(git: &dyn GitRunner, teardown: &PendingTeardown) -> Result<(), String> {
+    if !teardown.delete_branch {
+        return Ok(());
+    }
+    // Only after the worktree is gone: git refuses to delete a branch that a
+    // worktree still has checked out.
+    delete_branch(
+        git,
+        &teardown.repository_root,
+        &session_branch(&teardown.name),
+        teardown.force_delete_branch,
+    )
+    .map_err(|error| error.to_string())
 }
 
 impl SessionRuntime {
@@ -1127,20 +1134,25 @@ impl SessionRuntime {
         match self.begin_remove(RemoveKind::Requested, operation_id, payload)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
-                let outcome = self
-                    .io
-                    .remove_session_tree(self.git.as_ref(), &pending.session_root, pending.force)
-                    .and_then(|()| {
-                        if pending.delete_branch {
-                            delete_branch(
-                                self.git.as_ref(),
-                                &pending.repository_root,
-                                &session_branch(&pending.name),
-                            )?;
-                        }
-                        Ok(())
-                    })
-                    .map_err(|error| error.to_string());
+                let outcome = match self.io.remove_session_tree(
+                    self.git.as_ref(),
+                    &pending.session_root,
+                    pending.force,
+                ) {
+                    Ok(()) => {
+                        // Every newly accepted removal carries branch deletion.
+                        // Legacy branch-preserving plans can only be replayed as
+                        // `Settled`, so they never reach this effect path.
+                        delete_branch(
+                            self.git.as_ref(),
+                            &pending.repository_root,
+                            &session_branch(&pending.name),
+                            pending.force_delete_branch,
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
+                .map_err(|error| error.to_string());
                 self.finish_teardown(&pending, outcome)
             }
         }
@@ -1157,9 +1169,9 @@ impl SessionRuntime {
     ) -> Result<SessionRemoveStep, SessionRuntimeError> {
         let name = session_name(payload)?;
         // A compensation is not a client request: it forces the removal and
-        // deletes the branch, and neither is negotiable through a payload.
-        // A failed session is also fully retired so its stale branch cannot
-        // block recreating the same session name.
+        // branch deletion, and neither is negotiable through a payload. A
+        // requested removal also attempts to delete the branch, but only with
+        // Git's safe `-d` mode so unmerged work leaves a diagnosable failed row.
         let compensating = kind == RemoveKind::Compensating;
         let force = compensating || force(payload)?;
         let operation_id =
@@ -1203,8 +1215,8 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
-        let delete_branch = compensating
-            || session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Failed;
+        let delete_branch = true;
+        let force_delete_branch = compensating;
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
         let removing = self
@@ -1218,6 +1230,7 @@ impl SessionRuntime {
                         targets: vec![name.clone()],
                         force,
                         delete_branch,
+                        force_delete_branch,
                     },
                 },
                 Utc::now(),
@@ -1242,6 +1255,7 @@ impl SessionRuntime {
                 name,
                 force,
                 delete_branch,
+                force_delete_branch,
             },
         })
     }
@@ -1329,6 +1343,7 @@ impl SessionRuntime {
                     name: session.name.clone(),
                     force: plan.force,
                     delete_branch: plan.delete_branch,
+                    force_delete_branch: plan.force_delete_branch,
                 })
             })
             .collect())
@@ -1834,13 +1849,22 @@ fn remove_operation_matches(
     if operation.semantic_key != semantic_key(SessionAction::Remove, name) {
         return false;
     }
-    state.sessions.iter().any(|session| {
-        session.name == name
-            && session.operation_id == Some(operation.operation_id)
-            && session.delete_plan.as_ref().is_some_and(|plan| {
-                plan.force == force && plan.delete_branch == (kind == RemoveKind::Compensating)
-            })
-    })
+    for session in &state.sessions {
+        if session.name != name || session.operation_id != Some(operation.operation_id) {
+            continue;
+        }
+        let Some(plan) = session.delete_plan.as_ref() else {
+            return false;
+        };
+        let branch_delete_matches = match kind {
+            RemoveKind::Compensating => plan.delete_branch && plan.force_delete_branch,
+            // Legacy requested plans preserved the branch; current requested
+            // plans delete it safely. Neither may force branch deletion.
+            RemoveKind::Requested => !plan.force_delete_branch,
+        };
+        return plan.force == force && branch_delete_matches;
+    }
+    false
 }
 
 /// Whether one journaled semantic key names this action and session.
@@ -2248,7 +2272,16 @@ mod tests {
             session_root: PathBuf::from("/repo/.usagi/sessions/one"),
             force: false,
             delete_branch: false,
+            force_delete_branch: false,
         }
+    }
+
+    #[test]
+    fn a_branch_preserving_teardown_skips_git_branch_deletion() {
+        assert_eq!(
+            delete_teardown_branch(&FakeGit::ok(), &confined_teardown()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -3695,6 +3728,7 @@ instructions = "direct"
             targets: vec!["missing-operation".into()],
             force: false,
             delete_branch: false,
+            force_delete_branch: false,
         });
         missing_operation.operation_id = None;
 
@@ -3883,6 +3917,7 @@ instructions = "code"
         assert_eq!(pending.len(), 1);
         assert!(pending[0].force);
         assert!(pending[0].delete_branch);
+        assert!(pending[0].force_delete_branch);
 
         let git = RecordingGit::new();
         let calls = Arc::clone(&git.calls);
@@ -3917,9 +3952,9 @@ instructions = "code"
         assert_eq!(candidates(), 0);
     }
 
-    /// Removing an available session keeps the branch: it holds the work.
+    /// Removing an available session safely deletes a fully merged branch.
     #[test]
-    fn removing_an_available_session_leaves_its_branch_alone() {
+    fn removing_an_available_session_safely_deletes_its_branch() {
         let (tmp, rt) = runtime(FakeGit::ok());
         let runtime = Arc::new(Mutex::new(rt));
         perform_create(
@@ -3934,7 +3969,9 @@ instructions = "code"
         std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
         let signal = TeardownSignal::new();
         perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
-        assert!(!runtime.lock().unwrap().pending_teardowns().unwrap()[0].delete_branch);
+        let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
+        assert!(pending[0].delete_branch);
+        assert!(!pending[0].force_delete_branch);
 
         let git = RecordingGit::new();
         let calls = Arc::clone(&git.calls);
@@ -3943,12 +3980,86 @@ instructions = "code"
             &WorktreeTeardown::new(git, SystemSessionWorktreeIo),
             &|| false,
         );
+        assert!(calls.lock().unwrap().iter().any(|(repo, args)| {
+            repo == tmp.path() && args == &["branch", "-d", "--", "usagi/one"]
+        }));
+    }
+
+    #[test]
+    fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
+        struct UnmergedBranchGit {
+            calls: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+        impl GitRunner for UnmergedBranchGit {
+            fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(if args.first() == Some(&"branch") {
+                    GitOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "error: the branch 'usagi/one' is not fully merged".into(),
+                    }
+                } else {
+                    GitOutput {
+                        success: true,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }
+                })
+            }
+        }
+
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        let signal = TeardownSignal::new();
+        perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let reports = drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(
+                UnmergedBranchGit {
+                    calls: Arc::clone(&calls),
+                },
+                SystemSessionWorktreeIo,
+            ),
+            &|| false,
+        );
+
+        assert!(
+            reports[0]
+                .effect_error
+                .as_deref()
+                .is_some_and(|error| error.contains("not fully merged"))
+        );
+        let state = runtime.lock().unwrap().state().unwrap();
+        assert_eq!(state.sessions[0].name, "one");
+        assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Failed);
+        assert!(
+            state.sessions[0]
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.summary.contains("not fully merged"))
+        );
         assert!(
             calls
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|(_, args)| args[0] != "branch")
+                .any(|args| { args == &["branch", "-d", "--", "usagi/one"] })
         );
     }
 
@@ -3980,7 +4091,9 @@ instructions = "code"
 
         let signal = TeardownSignal::new();
         perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
-        assert!(runtime.lock().unwrap().pending_teardowns().unwrap()[0].delete_branch);
+        let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
+        assert!(pending[0].delete_branch);
+        assert!(!pending[0].force_delete_branch);
 
         let git = RecordingGit::new();
         let calls = Arc::clone(&git.calls);
@@ -3994,7 +4107,7 @@ instructions = "code"
         assert!(!session_root.exists());
         assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
         assert!(calls.lock().unwrap().iter().any(|(repo, args)| {
-            repo == tmp.path() && args == &["branch", "-D", "--", "usagi/one"]
+            repo == tmp.path() && args == &["branch", "-d", "--", "usagi/one"]
         }));
     }
 
@@ -4080,7 +4193,7 @@ instructions = "code"
         );
         assert_eq!(reports[0].effect_error, None);
         assert_eq!(reports[0].finalize_error, None);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(!session_root.exists());
         assert!(
             runtime.lock().unwrap().snapshot().unwrap()["sessions"]
@@ -4220,10 +4333,10 @@ instructions = "code"
                 ),
                 &|| false,
             );
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
             let succeeded = perform_remove(&runtime, &signal, &operation, &request).unwrap();
             assert_eq!(succeeded.operation_id, operation);
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
             drop(runtime);
 
             // A terminal successful outcome also survives restart without a
@@ -4242,7 +4355,7 @@ instructions = "code"
             ));
             let after_restart = perform_remove(&restarted, &signal, &operation, &request).unwrap();
             assert_eq!(after_restart.operation_id, operation);
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
             assert_eq!(
                 perform_remove(
                     &restarted,
@@ -4366,6 +4479,89 @@ instructions = "code"
                 .unwrap()
                 .delete_branch
         );
+    }
+
+    #[test]
+    fn legacy_compensation_replay_requires_a_matching_session_and_forced_branch_delete_flags() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_delegated_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"triage"}),
+        )
+        .unwrap();
+        let operation_id = operation();
+        let signal = TeardownSignal::new();
+        perform_compensating_remove(&runtime, &signal, &operation_id, "triage").unwrap();
+
+        let mut state = runtime.lock().unwrap().state().unwrap();
+        let mut legacy_operation = state.operations.last().unwrap().clone();
+        legacy_operation.semantic_key = semantic_key(SessionAction::Remove, "triage");
+        let requested_key = remove_semantic_key(RemoveKind::Compensating, "triage", true);
+        assert!(remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+
+        let mut wrong_name_operation = legacy_operation.clone();
+        wrong_name_operation.semantic_key = semantic_key(SessionAction::Remove, "missing");
+        assert!(!remove_operation_matches(
+            &state,
+            &wrong_name_operation,
+            RemoveKind::Compensating,
+            "missing",
+            true,
+            &remove_semantic_key(RemoveKind::Compensating, "missing", true),
+        ));
+        let mut wrong_id_operation = legacy_operation.clone();
+        wrong_id_operation.operation_id = OperationId::new();
+        assert!(!remove_operation_matches(
+            &state,
+            &wrong_id_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+
+        let saved_plan = state.sessions[0].delete_plan.take();
+        assert!(!remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+        state.sessions[0].delete_plan = saved_plan;
+
+        let plan = state.sessions[0].delete_plan.as_mut().unwrap();
+        plan.delete_branch = false;
+        assert!(!remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
+        let plan = state.sessions[0].delete_plan.as_mut().unwrap();
+        plan.delete_branch = true;
+        plan.force_delete_branch = false;
+        assert!(!remove_operation_matches(
+            &state,
+            &legacy_operation,
+            RemoveKind::Compensating,
+            "triage",
+            true,
+            &requested_key,
+        ));
     }
 
     #[test]
@@ -4561,6 +4757,7 @@ instructions = "code"
             session_root: container.join("one"),
             force: true,
             delete_branch: false,
+            force_delete_branch: false,
         };
 
         let result = WorktreeTeardown::new(
@@ -4936,6 +5133,7 @@ instructions = "code"
                     session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                     force: false,
                     delete_branch: false,
+                    force_delete_branch: false,
                 }
             ),
             Err("injected remove failure".into())
@@ -5255,6 +5453,7 @@ instructions = "code"
             session_root: tmp.path().join("missing"),
             force: false,
             delete_branch: false,
+            force_delete_branch: false,
         };
         assert_eq!(
             SharedSessionTeardown::new(shared).finish(&pending, Ok(())),

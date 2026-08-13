@@ -41,6 +41,9 @@ pub struct PendingTeardown {
     /// durable delete plan so a resumed teardown undoes exactly as much as the
     /// admission promised.
     pub delete_branch: bool,
+    /// Whether branch deletion may discard unmerged commits. This is reserved
+    /// for daemon-owned compensation; requested deletion remains safe.
+    pub force_delete_branch: bool,
 }
 
 /// The durable side of a teardown: which teardowns are unfinished, and how one
@@ -175,6 +178,7 @@ mod tests {
             session_root: PathBuf::from("/repo/.usagi/sessions").join(name),
             force: false,
             delete_branch: false,
+            force_delete_branch: false,
         }
     }
 

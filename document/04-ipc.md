@@ -402,7 +402,7 @@ create の durable outcome と wire response / hook の対応は次の表を正�
 | `failed`（effect failure または interrupted reconcile） | safe `error` | なし |
 | 同じ `OperationId`、異なる action / canonical intent（target / origin / `force`） | `idempotency_conflict` | なし |
 
-旧 daemon が書いた `remove:<name>` semantic key は origin と `force` を証明しない。対象 session が同じ operation と durable `DeletePlan` を保持し、その plan の `force` / `delete_branch` が現行 request と一致する間だけ互換 replay する。完了後など plan が残らない旧 journal は同一 intent と推測せず、同じ `OperationId` の再利用を `idempotency_conflict` で fail closed に拒否する。compensating teardown は常に `force: true` / branch delete の内部 intent であり、通常の client remove と相関しない。
+旧 daemon が書いた `remove:<name>` semantic key は origin と `force` を証明しない。対象 session が同じ operation と durable `DeletePlan` を保持し、その plan の `force` と branch 削除 mode が現行 request と一致する間だけ互換 replay する。旧 client remove の branch 保持 plan と現行 client remove の safe branch 削除 plan は、どちらも強制 branch 削除を許可しない同じ client intent として replay できる。完了後など plan が残らない旧 journal は同一 intent と推測せず、同じ `OperationId` の再利用を `idempotency_conflict` で fail closed に拒否する。compensating teardown は常に `force: true` / forced branch delete の内部 intent であり、通常の client remove と相関しない。
 
 **remove の応答は durable outcome ではなく受理の時点で返る**（[5. daemon の session teardown
 worker](05-daemon.md#session-teardown-worker) が正本）。worktree 撤去は daemon 所有 worker が続けるため、応答が返った

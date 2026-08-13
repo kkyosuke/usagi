@@ -512,15 +512,24 @@ mod tests {
     fn the_resident_worker_fetches_and_publishes_without_the_caller_blocking() {
         let calls = Arc::new(AtomicU64::new(0));
         let worker = Arc::clone(&calls);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let pump = RefreshPump::spawn(cadence(), move || {
+            release_rx.recv().unwrap();
             Ok(worker.fetch_add(1, Ordering::SeqCst) + 1)
         });
         pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut release = Some(release_tx);
         loop {
             if let Some(result) = pump.take() {
                 assert_eq!(result, Ok(1));
                 break;
+            }
+            // A zero-capacity channel makes the first empty observation
+            // deterministic: sending blocks until the resident worker is
+            // waiting in `recv`, then lets it publish for the next iteration.
+            if let Some(release) = release.take() {
+                release.send(()).unwrap();
             }
             assert!(Instant::now() < deadline, "the lane published no result");
             std::thread::sleep(Duration::from_millis(5));

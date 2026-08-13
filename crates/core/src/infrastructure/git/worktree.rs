@@ -83,19 +83,21 @@ pub fn remove_worktree(
     bail!("git worktree remove failed: {}", output.stderr.trim());
 }
 
-/// Delete the local branch `branch`, discarding unmerged commits.
+/// Delete the local branch `branch`.
 ///
 /// A branch git does not know is already in the desired end state — a create
 /// whose worktree add failed before branching, or a repeated deletion — so it is
-/// treated as a no-op. This exists for the branch half of undoing a create; it
-/// is never how a session the user worked in is removed.
+/// treated as a no-op. When `force` is false Git refuses to delete a branch with
+/// unmerged commits; compensating teardown passes true only for a branch that
+/// never became user-owned work.
 ///
 /// # Errors
 ///
-/// Returns an error when the `git` process cannot be spawned, or `git branch -D`
-/// fails for any reason other than the branch not existing.
-pub fn delete_branch(runner: &dyn GitRunner, repo: &Path, branch: &str) -> Result<()> {
-    let output = runner.run(repo, &["branch", "-D", "--", branch])?;
+/// Returns an error when the `git` process cannot be spawned, or `git branch -d`
+/// / `git branch -D` fails for any reason other than the branch not existing.
+pub fn delete_branch(runner: &dyn GitRunner, repo: &Path, branch: &str, force: bool) -> Result<()> {
+    let delete_flag = if force { "-D" } else { "-d" };
+    let output = runner.run(repo, &["branch", delete_flag, "--", branch])?;
     if output.success || output.stderr.contains("not found") {
         return Ok(());
     }
@@ -237,11 +239,24 @@ mod tests {
     #[test]
     fn delete_branch_forces_the_deletion_and_swallows_an_unknown_branch() {
         let git = FakeGit::new(vec![ok("Deleted branch usagi/x")]);
-        delete_branch(&git, Path::new("/repo"), "usagi/x").unwrap();
+        delete_branch(&git, Path::new("/repo"), "usagi/x", true).unwrap();
         assert_eq!(git.calls.borrow()[0], vec!["branch", "-D", "--", "usagi/x"]);
 
         let missing = FakeGit::new(vec![fail("error: branch 'usagi/x' not found.")]);
-        delete_branch(&missing, Path::new("/repo"), "usagi/x").unwrap();
+        delete_branch(&missing, Path::new("/repo"), "usagi/x", true).unwrap();
+    }
+
+    #[test]
+    fn delete_branch_uses_safe_delete_and_surfaces_unmerged_work() {
+        let git = FakeGit::new(vec![fail(
+            "error: the branch 'usagi/x' is not fully merged",
+        )]);
+        let err = delete_branch(&git, Path::new("/repo"), "usagi/x", false)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(git.calls.borrow()[0], vec!["branch", "-d", "--", "usagi/x"]);
+        assert!(err.contains("git branch delete failed"));
+        assert!(err.contains("not fully merged"));
     }
 
     #[test]
@@ -249,7 +264,7 @@ mod tests {
         let git = FakeGit::new(vec![fail(
             "error: cannot delete branch 'usagi/x' used by worktree",
         )]);
-        let err = delete_branch(&git, Path::new("/repo"), "usagi/x")
+        let err = delete_branch(&git, Path::new("/repo"), "usagi/x", true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("git branch delete failed"));

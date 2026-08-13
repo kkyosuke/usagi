@@ -197,13 +197,16 @@ pub struct DeletePlan {
     pub force: bool,
     /// Whether the session's branch is deleted along with its worktree.
     ///
-    /// An available session's branch is kept because it holds the work. A failed
-    /// session removal and the compensation of a create that never produced any
-    /// work undo the branch too, so a retry under the same session name is not
-    /// blocked by it. Absent in records written before this field existed, which
-    /// is exactly the branch-preserving behaviour those removals had.
+    /// New removals delete a fully merged branch so the session name is reusable.
+    /// Records written before this field existed preserve the branch.
     #[serde(default)]
     pub delete_branch: bool,
+    /// Whether branch deletion may discard unmerged commits.
+    ///
+    /// Only daemon-owned compensation sets this. User-requested removal always
+    /// uses Git's safe `-d` mode, independently of worktree `force`.
+    #[serde(default)]
+    pub force_delete_branch: bool,
 }
 /// A safe failure classification, not raw worker output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,6 +889,7 @@ mod tests {
                     targets: vec!["x".into()],
                     force: false,
                     delete_branch: false,
+                    force_delete_branch: false,
                 },
             },
             now(),
@@ -1106,7 +1110,8 @@ mod tests {
                     delete_plan: DeletePlan {
                         targets: vec![],
                         force: false,
-                        delete_branch: false
+                        delete_branch: false,
+                        force_delete_branch: false
                     }
                 },
                 now()
@@ -1122,7 +1127,8 @@ mod tests {
                     delete_plan: DeletePlan {
                         targets: vec![],
                         force: false,
-                        delete_branch: false
+                        delete_branch: false,
+                        force_delete_branch: false
                     }
                 },
                 now()
@@ -1200,6 +1206,7 @@ mod tests {
                     targets: vec![],
                     force: true,
                     delete_branch: false,
+                    force_delete_branch: false,
                 },
             },
             now(),
@@ -1277,6 +1284,7 @@ mod tests {
                     targets: vec!["legacy".into()],
                     force: false,
                     delete_branch: false,
+                    force_delete_branch: false,
                 },
             },
             now(),
