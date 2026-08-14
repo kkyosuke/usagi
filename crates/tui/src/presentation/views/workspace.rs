@@ -16,7 +16,9 @@ use chrono::{DateTime, Utc};
 use usagi_core::domain::agent::{AgentInventory, ProviderResumeProjection, ProviderResumeReason};
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
-use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
+use usagi_core::domain::session_lifecycle::{
+    AgentPhase, SessionLifecycle, SessionLifecycleProjection,
+};
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::usecase::client::{AgentConcurrency, DaemonMetrics};
@@ -244,6 +246,9 @@ pub struct HomeProjection {
     overview_modal: Option<OverviewModal>,
     /// Overview の `daemon` command が開く読み取り専用 status surface。
     daemon_overlay: bool,
+    /// Overview の `garden` command が開く screen saver の描画素材。overlay が閉じている
+    /// 間は `None` で、開いている frame だけ session を庭の projection へ写す。
+    garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
     daemon_runtimes: Option<Vec<daemon_modal::AgentRuntimeRow>>,
     /// Persisted Closeup action-modal input, when its overlay is open.
@@ -357,6 +362,21 @@ impl HomeProjection {
         // Derived before the sessions move into the projection: the counts are a
         // fold of the same daemon-authoritative rows, not a second source.
         let session_states = session_state_counts(state, &sessions);
+        // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
+        // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
+        let garden_sessions = (state.overlay()
+            == Some(crate::usecase::application::controller::Overlay::Garden))
+        .then(|| {
+            sessions
+                .iter()
+                .map(|session| widgets::garden::GardenSession {
+                    id: session.id,
+                    label: session.label.clone(),
+                    lifecycle: session.lifecycle,
+                    agent_phase: garden_phase(state.phase_for(Target::Session(session.id))),
+                })
+                .collect::<Vec<_>>()
+        });
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
@@ -401,6 +421,7 @@ impl HomeProjection {
             overview_modal: None,
             daemon_overlay: state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
+            garden_sessions,
             daemon_runtimes: None,
             closeup_modal: None,
             create_draft,
@@ -1481,6 +1502,33 @@ pub fn terminal_point_at(
     })
 }
 
+/// controller が集約した phase を、Garden が描く Agent phase へ写す。
+///
+/// controller の [`TargetPhase`] は `Interrupted` を `Done` へ畳んだあとの集約値なので、
+/// Garden も同じ集約だけを見る（表示のために別の情報源を作らない）。したがって
+/// production の庭に `interrupted` の pose は出ない。
+const fn garden_phase(phase: TargetPhase) -> AgentPhase {
+    match phase {
+        TargetPhase::Absent => AgentPhase::Absent,
+        TargetPhase::Ready => AgentPhase::Ready,
+        TargetPhase::Running => AgentPhase::Running,
+        TargetPhase::Waiting => AgentPhase::Waiting,
+        TargetPhase::Done => AgentPhase::Ended,
+    }
+}
+
+/// 壁時計から Garden の animation tick を導く。
+///
+/// Garden 専用 timer を持たず、frame の素材である `now` だけから決まるので、同じ
+/// 時刻の再描画は同じ frame になる。
+///
+/// 解像度は **1 秒**である。interactive shell は frame material の壁時計を秒へ切り捨てて
+/// 再描画を間引くため、それより細かい tick は観測できない（描画されない animation を
+/// 定義しても、pose が飛ぶだけで滑らかにはならない）。
+fn garden_tick(now: DateTime<Utc>) -> u64 {
+    now.timestamp().unsigned_abs() % 6
+}
+
 /// controller projection の Home frame を描く。
 ///
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は
@@ -1505,6 +1553,21 @@ pub fn render_home_at(
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    // Garden は Home の全幅レイヤーなので、収まるなら frame をそのまま置き換える。
+    // 収まらない端末では Garden を開かず Home を保つ（操作できる一覧を警告画面で
+    // 覆わない）。
+    if let Some(sessions) = &home.garden_sessions
+        && let Some(frame) = widgets::garden::render(
+            height,
+            width,
+            &home.workspace_name,
+            sessions,
+            garden_tick(now),
+            false,
+        )
+    {
+        return frame.rows;
+    }
     let split = panes::split(width, LEFT_WIDTH);
     let body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
@@ -2310,10 +2373,11 @@ mod tests {
         DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
         LEFT_WIDTH, MEBIBYTE, ProjectedSession, SIDECAR_GUTTER, SidebarDiffColumns,
         TerminalViewProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, health_badge, health_reason_label, home_header_action_at,
-        home_header_layout, home_left_pane, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, short_id, sidecar_labels, terminal_point_at, with_footer_gap,
+        feedback_label, format_memory, garden_tick, health_badge, health_reason_label,
+        home_header_action_at, home_header_layout, home_left_pane, home_row_lines_at,
+        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
+        pane_tab_selected, phase_label, render_home, render_home_at, resume_label, short_id,
+        sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -3376,6 +3440,85 @@ mod tests {
             message: SafeMessage::new("gh unavailable"),
             error_id: "pr".into(),
         }
+    }
+
+    #[test]
+    fn render_home_replaces_the_frame_with_the_garden_opened_from_overview() {
+        let workspace = WorkspaceId::new();
+        // controller が集約する phase をすべて踏み、Garden の pose 対応を固定する。
+        // `Ended` は `Done` へ畳まれる（`Interrupted` も同じ class）。
+        let phases = [
+            None,
+            Some(AgentPhase::Ready),
+            Some(AgentPhase::Running),
+            Some(AgentPhase::Waiting),
+            Some(AgentPhase::Ended),
+        ];
+        let ids = phases.iter().map(|_| SessionId::new()).collect::<Vec<_>>();
+        let mut state = AppState::home(workspace, ids.clone());
+        let mut projected = Vec::new();
+        for (index, phase) in phases.iter().enumerate() {
+            if let Some(phase) = *phase {
+                let _ = update(
+                    &mut state,
+                    AppEvent::Backend(BackendEvent::RuntimePhase {
+                        runtime: runtime_ref(workspace, ids[index]),
+                        phase,
+                    }),
+                );
+            }
+            projected.push(projected_session(ids[index], &format!("s{index}"), "/work"));
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
+
+        let frame = render_home_at(24, 100, &home, now());
+        let text = frame
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(frame.len(), 24);
+        // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
+        assert!(text.contains("Garden · click a usagi to visit · any key to return"));
+        assert!(text.contains("running"));
+        assert!(text.contains("waiting"));
+        assert!(text.contains("s0"));
+
+        // 最小サイズに満たない端末では Garden を開かず Home を保つ。操作できる一覧を
+        // screen saver で覆わない。
+        let small = render_home_at(13, 100, &home, now());
+        let small_text = small
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!small_text.contains("any key to return"));
+    }
+
+    #[test]
+    fn the_garden_tick_advances_with_the_frame_clock() {
+        let base = now();
+        assert_eq!(garden_tick(base), garden_tick(base));
+        // 1 秒で pose が 1 つ進み、6 秒で一周する。frame material の壁時計は秒へ
+        // 切り捨てられるので、これが観測できる最小の刻みである。
+        assert_ne!(
+            garden_tick(base),
+            garden_tick(base + chrono::Duration::seconds(1))
+        );
+        assert_eq!(
+            garden_tick(base),
+            garden_tick(base + chrono::Duration::seconds(6))
+        );
+        // 秒未満は同じ frame（間引きと同じ解像度）。
+        assert_eq!(
+            garden_tick(base),
+            garden_tick(base + chrono::Duration::milliseconds(400))
+        );
     }
 
     #[test]
