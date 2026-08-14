@@ -21,11 +21,13 @@ const HEADER_ROWS: usize = 3;
 const FOOTER_ROWS: usize = 2;
 const PLOT_WIDTH: usize = 28;
 const PLOT_HEIGHT: usize = 7;
+/// plot のうち、うさぎと label が占める行数（残り 1 行が地面）。
+const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - 1;
 /// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
 const SPRITE_ROWS: usize = 4;
 
-/// 地面は plot 幅ちょうどにして、隣り合う plot が 1 本の地面としてつながるようにする。
-/// 草の位置だけ column ごとに変え、同じ絵が横に並ぶ tiling に見せない。
+/// 地面のタイル。庭の幅いっぱいに敷き詰めるため、隣り合うタイルで草の位置を変えて
+/// 同じ絵が横に並ぶ tiling に見せない。
 const GROUND: [&str; 3] = [
     "--v-------v-----------v-----",
     "------v---------v----v------",
@@ -92,8 +94,6 @@ pub fn render(
     let capacity = columns.saturating_mul(plot_rows);
     let visible = sessions.len().min(capacity);
     let hidden_sessions = sessions.len().saturating_sub(visible);
-    let grid_width = columns * PLOT_WIDTH;
-    let grid_left = SIDE_PADDING + content_width.saturating_sub(grid_width) / 2;
 
     let mut rows = Vec::with_capacity(height);
     rows.push(header_line(width, workspace_name, sessions));
@@ -109,22 +109,27 @@ pub fn render(
     for plot_row in 0..used_rows {
         let start = plot_row * columns;
         let end = (start + columns).min(visible);
+        // 埋まった列数ではなく、その行に実際に並ぶ数で中央へ寄せる。容量ぶんの幅で
+        // 中央寄せすると、session が列数に満たない行が左へ寄って庭が偏る。
+        let row_left = SIDE_PADDING + content_width.saturating_sub((end - start) * PLOT_WIDTH) / 2;
         let plots = sessions[start..end]
             .iter()
-            .enumerate()
-            .map(|(column, session)| plot(session, column, tick, reduced_motion))
+            .map(|session| plot(session, tick, reduced_motion))
             .collect::<Vec<_>>();
-        for local_row in 0..PLOT_HEIGHT {
-            let mut line = " ".repeat(grid_left);
+        for local_row in 0..PLOT_CONTENT_ROWS {
+            let mut line = " ".repeat(row_left);
             for plot in &plots {
                 line.push_str(&pad_to_width(&plot[local_row], PLOT_WIDTH));
             }
             rows.push(pad_to_width(&line, width));
         }
+        // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
+        // 中央の島のように見えるため。
+        rows.push(ground_row(width, content_width));
         for (column, session) in sessions[start..end].iter().enumerate() {
             hitboxes.push(GardenHitbox {
                 session_id: session.id,
-                column: grid_left + column * PLOT_WIDTH,
+                column: row_left + column * PLOT_WIDTH,
                 row: grid_top + plot_row * PLOT_HEIGHT,
                 width: PLOT_WIDTH,
                 height: PLOT_HEIGHT,
@@ -182,12 +187,7 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
 
-fn plot(
-    session: &GardenSession,
-    column: usize,
-    tick: u64,
-    reduced_motion: bool,
-) -> [String; PLOT_HEIGHT] {
+fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PLOT_CONTENT_ROWS] {
     let phase = if reduced_motion {
         0
     } else {
@@ -199,7 +199,6 @@ fn plot(
         .bold()
         .paint(&clip_to_width(&session.label, PLOT_WIDTH - 2));
     let [ears, head, body, feet] = sprite(rabbit, rabbit_style);
-    let ground = Style::new().dim().paint(GROUND[column % GROUND.len()]);
     [
         centered(PLOT_WIDTH, &label),
         centered(PLOT_WIDTH, &status_style.paint(status)),
@@ -207,8 +206,28 @@ fn plot(
         head,
         body,
         feet,
-        pad_to_width(&ground, PLOT_WIDTH),
     ]
+}
+
+/// 庭の幅いっぱいに敷いた地面の 1 行。
+///
+/// [`GROUND`] のタイルを順に並べて `content_width` 桁ちょうどで切る。タイルは ASCII
+/// なので 1 文字 = 1 桁で、途中で切っても桁がずれない。
+fn ground_row(width: usize, content_width: usize) -> String {
+    let soil = GROUND
+        .iter()
+        .cycle()
+        .flat_map(|tile| tile.chars())
+        .take(content_width)
+        .collect::<String>();
+    pad_to_width(
+        &format!(
+            "{}{}",
+            " ".repeat(SIDE_PADDING),
+            Style::new().dim().paint(&soil)
+        ),
+        width,
+    )
 }
 
 /// pose を 1 つの絵として中央へ寄せる。
@@ -532,6 +551,30 @@ mod tests {
             ears_center.abs_diff(head_center) <= 1,
             "ears at {ears_center} drifted off the head at {head_center}"
         );
+    }
+
+    #[test]
+    fn a_partly_filled_row_stays_centered_on_a_wide_terminal() {
+        // 145 桁は plot 5 列ぶん入るが、session は 2 つしかない。容量ぶんの幅で中央寄せ
+        // すると 2 羽が左へ寄って庭が偏るので、その行に実際に並ぶ数で中央へ寄せる。
+        let sessions = fixtures()[..2].to_vec();
+        let frame = render(41, 145, "x", &sessions, 1, false).expect("garden fits");
+        assert_eq!(frame.hitboxes.len(), 2);
+        let left = frame.hitboxes[0].column;
+        let right_gap = 145 - (frame.hitboxes[1].column + frame.hitboxes[1].width);
+        assert!(
+            left.abs_diff(right_gap) <= 1,
+            "the row is off-centre: {left} left vs {right_gap} right"
+        );
+
+        // 地面は庭の幅いっぱいに伸び、うさぎの数で途切れない。
+        let ground = plain(&frame)
+            .into_iter()
+            .find(|row| row.contains("--v"))
+            .expect("the garden draws ground");
+        assert_eq!(display_width(&ground), 145);
+        assert_eq!(ground.trim_end().len(), 145 - super::SIDE_PADDING);
+        assert!(!ground.trim().contains("  "));
     }
 
     #[test]
