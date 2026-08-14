@@ -13,7 +13,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -60,9 +59,16 @@ fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
 const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Each case starts the shipping daemon binary. Serialising those startups
-/// avoids starving a loaded CI worker and turning socket publication into a
+/// avoids starving a loaded worker and turning socket publication into a
 /// spurious readiness timeout.
-static DAEMON_START_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+///
+/// The lock is shared with every other heavy E2E in this checkout and is held
+/// across processes, because an in-process mutex leaves the two cargo
+/// invocations of the same tree (`cargo test` and `cargo llvm-cov`) free to run
+/// their real daemons and real PTYs at the same time.
+fn serial() -> daemon_fixture::HeavyE2eLock {
+    daemon_fixture::heavy_e2e_lock()
+}
 
 fn short_dir(prefix: &str) -> tempfile::TempDir {
     daemon_fixture::short_dir(prefix)
@@ -228,9 +234,50 @@ fn client_incarnation() -> &'static str {
     INCARNATION.get_or_init(|| usagi_core::domain::id::ClientId::new().as_str())
 }
 
+/// Everything the daemon recorded in this data directory, or a note that it
+/// recorded nothing.
+///
+/// The daemon installs a process-wide panic hook that writes every thread's
+/// panic here before it unwinds ([5. daemon](../document/05-daemon.md)), and its
+/// stderr goes to `/dev/null` exactly as in production. This log is therefore the
+/// only place a failing run can tell "the daemon refused/closed for a bounded,
+/// expected reason" apart from "a daemon worker panicked".
+fn daemon_error_log(data_dir: &Path) -> String {
+    let logs = data_dir.join("logs");
+    let Ok(entries) = fs::read_dir(&logs) else {
+        return format!("daemon error log: none ({})", logs.display());
+    };
+    let mut recorded = Vec::new();
+    for entry in entries.flatten() {
+        if let Ok(text) = fs::read_to_string(entry.path())
+            && !text.trim().is_empty()
+        {
+            recorded.push(format!("--- {}\n{text}", entry.path().display()));
+        }
+    }
+    if recorded.is_empty() {
+        return "daemon error log: empty".to_owned();
+    }
+    format!("daemon error log:\n{}", recorded.join("\n"))
+}
+
+/// Fails the moment a daemon thread panicked, instead of letting a bounded
+/// retry spend its deadline on a process that has already lost a worker.
+///
+/// Every retry below is allowed to absorb a *transient* refusal; none of them
+/// may absorb a panic, which is the product failure this suite exists to catch.
+fn assert_no_daemon_panic(data_dir: &Path, context: &str) {
+    let recorded = daemon_error_log(data_dir);
+    assert!(
+        !recorded.contains("daemon panicked"),
+        "a daemon thread panicked while {context}\n{recorded}"
+    );
+}
+
 fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
     let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
     let daemon_dir = data_dir.join("daemon");
+    let mut last_transport_failure = None;
     loop {
         // `connect_current` creates a missing endpoint directory for general
         // callers. This fixture starts the daemon concurrently, so wait for
@@ -238,7 +285,7 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
         if daemon_dir.exists()
             && let Ok(stream) = connect_current(data_dir)
         {
-            return IpcClient::connect(
+            match IpcClient::connect(
                 stream,
                 // A canonical, process-stable client incarnation, exactly as the
                 // composition root declares. The daemon keys durable per-client
@@ -249,12 +296,30 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
                 ClientPolicy::cli(),
                 shipping_build_identity(),
                 daemon_fixture::client_workspace(data_dir),
-            )
-            .expect("Unix IPC handshake succeeds");
+            ) {
+                Ok(client) => return client,
+                // A socket that closes without a framed answer is a *transport*
+                // failure, not a refusal: the daemon can still be publishing its
+                // endpoint, retiring a listener a locator read a moment earlier
+                // still named, or failing an accepted connection closed under its
+                // pre-handshake bounds. Production treats exactly these as
+                // retryable on a fresh connection, because nothing was dispatched
+                // (`PolicyClient` in `usagi_core::usecase::client`), so this
+                // readiness wait does too rather than turning one lost connection
+                // into a suite failure. A *framed* refusal is definitive and is
+                // surfaced immediately below.
+                Err(error) if error.is_transport_failure() => {
+                    assert_no_daemon_panic(data_dir, "a client was completing its handshake");
+                    last_transport_failure = Some(error);
+                }
+                Err(error) => panic!("Unix IPC handshake is refused: {error:?}"),
+            }
         }
         assert!(
             Instant::now() < deadline,
-            "daemon did not publish its socket"
+            "daemon did not publish a connectable socket; \
+             last transport failure: {last_transport_failure:?}\n{}",
+            daemon_error_log(data_dir)
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -545,9 +610,7 @@ fn safe_readiness_error(error: ClientError) {
 
 #[test]
 fn root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -664,9 +727,7 @@ fn root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded() {
 
 #[test]
 fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -756,9 +817,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
 
 #[test]
 fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     for ready_status in [None, Some(1)] {
         let repo = fixture_repo();
         let home = short_dir("usagi-");
@@ -789,9 +848,7 @@ fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
 
 #[test]
 fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -878,9 +935,7 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
 /// an authenticated fixture must reach a live conversation.
 #[test]
 fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     for ready_status in [None, Some(1)] {
         let repo = fixture_repo();
         let home = short_dir("usagi-");
@@ -965,9 +1020,7 @@ fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
 /// credential can bind the report to a runtime.
 #[test]
 fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -1003,9 +1056,7 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
 #[test]
 #[allow(clippy::too_many_lines)] // One generic-terminal product flow, asserted end to end.
 fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -1153,9 +1204,7 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
 #[test]
 #[allow(clippy::too_many_lines)] // One real-daemon detach/reattach/input flow.
 fn drawer_close_reopen_continues_input_on_the_same_daemon_connection() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -1307,9 +1356,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
         accept_replacement, project, resume_command,
     };
 
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -1518,9 +1565,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
 #[test]
 #[allow(clippy::too_many_lines)] // One two-process rollover contract, asserted end to end.
 fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
@@ -1726,14 +1771,38 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
         }) {
             Ok(DaemonReply::Ok(body)) => break body,
             Ok(other) => panic!("successor generic terminal launch is synchronous: {other:?}"),
-            Err(error) if error.code() == ErrorCode::GenerationRolledOver => {
+            // Two spellings of "the successor is not answering launches yet":
+            // the control gate is still closed, or the connection went away
+            // before the reply. Both belong to the same bounded wait. Re-sending
+            // is safe because `successor_intent` carries one fixed producer
+            // `OperationId` for the whole loop, so the daemon converges it onto a
+            // single durable launch — and the `shell_spawns` assertions below
+            // still fail any run that actually spawned twice.
+            Err(error)
+                if error.code() == ErrorCode::GenerationRolledOver
+                    || error.is_transport_failure() =>
+            {
+                // A retry may absorb the rollover window. It may never absorb a
+                // successor that panicked or died: both are the product failure
+                // this case exists to catch, so they fail here rather than as a
+                // deadline timeout twenty seconds later.
+                assert_no_daemon_panic(&data_dir, "the successor was admitting a launch");
+                assert!(
+                    alive(new_pid),
+                    "the successor daemon exited instead of admitting a launch: {error:?}\n{}",
+                    daemon_error_log(&data_dir)
+                );
                 assert!(
                     Instant::now() < deadline,
-                    "the successor never opened its control gate"
+                    "the successor never opened its control gate; last refusal: {error:?}\n{}",
+                    daemon_error_log(&data_dir)
                 );
                 thread::sleep(Duration::from_millis(20));
             }
-            Err(error) => panic!("the successor refused a launch: {error:?}"),
+            Err(error) => panic!(
+                "the successor refused a launch: {error:?}\n{}",
+                daemon_error_log(&data_dir)
+            ),
         }
     };
     let successor_terminal: TerminalRef =
@@ -1814,9 +1883,7 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
 /// by #574; this test keeps the unchanged `daemon stop` refusal (#507).
 #[test]
 fn root_planned_stop_refuses_while_a_terminal_is_live() {
-    let _serial = DAEMON_START_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = serial();
     let repo = fixture_repo();
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");

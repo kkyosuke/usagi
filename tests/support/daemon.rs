@@ -22,8 +22,10 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::ipc::ClientWorkspace;
 
@@ -31,6 +33,99 @@ use usagi_core::infrastructure::ipc::ClientWorkspace;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM / SIGKILL 後に終了を待つ上限。
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 重い E2E がロックを取れるまで待つ上限。
+///
+/// 直列列の前に別 process の重い E2E binary がまるごと 1 本入りうるので、単一 test の
+/// deadline よりずっと長い。上限を持つのは「先行 process が hang したまま」を無期限の停止では
+/// なく、lock file を名指しした失敗として出すためである。
+const HEAVY_E2E_LOCK_TIMEOUT: Duration = Duration::from_mins(15);
+/// ロック取得の再試行間隔。
+const HEAVY_E2E_LOCK_POLL: Duration = Duration::from_millis(50);
+
+/// 同じ test binary の中だけを直列化する内側のロック。
+///
+/// 外側の file lock だけでも thread 間は排他できるが（`flock` は open file description 単位）、
+/// process 内の直列性を言語の型で保証しておくほうが、platform ごとの `flock` 差異に依存しない。
+static HEAVY_E2E_PROCESS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// 重い E2E（shipping binary・実 daemon・fixture provider・実 PTY）の直列実行権。
+///
+/// drop でチェックアウト内の直列列を次へ譲る。
+pub struct HeavyE2eLock {
+    // 宣言順＝取得順。drop は逆順なので、file lock を先に手放してから process lock を返す。
+    file: std::fs::File,
+    _process: MutexGuard<'static, ()>,
+}
+
+impl Drop for HeavyE2eLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// このチェックアウトの重い E2E lock file。
+///
+/// `target/` の下に置かない。`cargo test` と `cargo llvm-cov` は別の target directory を使うため、
+/// target 配下だと**同じ tree の 2 つの実行が別のロックを取ってしまい**、直列化したい当の組み合わせ
+/// だけが漏れる。チェックアウト path の digest を temp directory 上のファイル名にすることで、
+/// target directory が違っても同じ tree なら同じ 1 本になる。
+///
+/// digest が衝突しても起きるのは「無関係な tree と直列化する」だけで、取り違えて並行させることは
+/// ないため、暗号学的 hash は要らない（FNV-1a で十分）。
+fn heavy_e2e_lock_path() -> PathBuf {
+    let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in env!("CARGO_MANIFEST_DIR").bytes() {
+        digest ^= u64::from(byte);
+        digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    std::env::temp_dir().join(format!("usagi-heavy-e2e-{digest:016x}.lock"))
+}
+
+/// 重い E2E を**プロセスを跨いで**直列化する。
+///
+/// test binary 内の `Mutex` は同じ process の thread しか直列化しない。`cargo test --workspace` は
+/// test binary を直列に実行するため 1 回の実行ではそれで足りるが、同じチェックアウトで
+/// `cargo test` と `cargo llvm-cov` を同時に走らせると、別 process の重い E2E が同時に実 daemon と
+/// 実 PTY を掴む。そのとき frame 待ちや readiness 待ちは product の失敗ではなく CPU 競合による
+/// timeout として落ち、無関係な変更の PR を落とす偽陽性になる。
+///
+/// このロックは同じチェックアウトから走ったすべての重い E2E を 1 本の直列列に載せる
+/// （正本は [重い E2E の直列化](../../document/06-conventions.md#重い-e2e-の直列化)）。
+/// 別チェックアウト・別マシン利用者の負荷までは覆えないため、それは環境側の条件として残る。
+#[must_use]
+pub fn heavy_e2e_lock() -> HeavyE2eLock {
+    let process = HEAVY_E2E_PROCESS_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let path = heavy_e2e_lock_path();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|error| {
+            panic!("heavy E2E lock file {} is usable: {error}", path.display())
+        });
+    let deadline = Instant::now() + HEAVY_E2E_LOCK_TIMEOUT;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => {
+                return HeavyE2eLock {
+                    file,
+                    _process: process,
+                };
+            }
+            Err(error) => assert!(
+                Instant::now() < deadline,
+                "another process still holds the heavy E2E lock {} after {}s: {error}",
+                path.display(),
+                HEAVY_E2E_LOCK_TIMEOUT.as_secs()
+            ),
+        }
+        std::thread::sleep(HEAVY_E2E_LOCK_POLL);
+    }
+}
 
 /// テストが使う runtime channel。data directory の割り付けは
 /// `usagi_core::infrastructure::paths` の mode 別レイアウトに従う。

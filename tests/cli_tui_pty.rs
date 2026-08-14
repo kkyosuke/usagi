@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -46,14 +46,11 @@ const SANDBOX_PASSTHROUGH: &str =
     usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE;
 
 /// 実 PTY テストは shipping binary・daemon・fixture provider を同時に走らせるため CPU を占有する。
-/// 1 binary 内で並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になるので、
-/// この file のテストは直列に実行する（`tests/agent_ipc_e2e.rs` の daemon 起動 lock と同じ方針）。
-static PTY_SERIAL: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    PTY_SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// 並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になるので、この file の
+/// テストは直列に実行する。列は `tests/agent_ipc_e2e.rs` と共有し、同じチェックアウトの別 process
+/// （`cargo test` と `cargo llvm-cov`）も同じ 1 本に載せる。
+fn serial() -> daemon_fixture::HeavyE2eLock {
+    daemon_fixture::heavy_e2e_lock()
 }
 
 fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
@@ -1252,6 +1249,12 @@ fn real_pty_roles_editor_ctrl_s_persists_workspace_catalog() {
     }
 
     send(&mut master, b"\x1b");
+    // Esc closes the editor, but the status bar keeps printing `[switch]` *while
+    // the overlay is still drawn* — so `quit_from_switch`'s own wait is already
+    // satisfied and would send Ctrl-Q into the editor, which swallows it and
+    // never opens the leave prompt. Observe the overlay actually closing instead
+    // of assuming the redraw won the race with the next keystroke.
+    wait_for_screen_absent_since(&captured, baseline, "Ctrl-S: validate + save");
     assert!(quit_from_switch(&mut master, &mut child, &captured, baseline).success());
     drop(slave);
     drop(master);
