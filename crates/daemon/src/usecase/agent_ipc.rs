@@ -2340,7 +2340,7 @@ impl AgentRuntime {
             TerminalRequest::Resume { after_offset, .. } => {
                 let output = self
                     .coordinator
-                    .replay_from(runtime, after_offset)
+                    .replay_from(runtime, after_offset, Some(&client))
                     .map_err(map_runtime_error)?;
                 // Parity with the generic terminal Resume: a polling client
                 // observes the hosting terminal's exit on the incremental poll,
@@ -2361,13 +2361,13 @@ impl AgentRuntime {
             TerminalRequest::Resize { geometry, .. } => {
                 let geometry = terminal_geometry(geometry)?;
                 self.coordinator
-                    .resize(runtime, geometry, &mut *self.pty)
+                    .resize(runtime, geometry, Some(&client), &mut *self.pty)
                     .map(TerminalResponse::Snapshot)
                     .map_err(map_runtime_error)
             }
             TerminalRequest::Detach { subscription, .. } => self
                 .coordinator
-                .detach(runtime, subscription, connection)
+                .detach(runtime, subscription, connection, &mut *self.pty)
                 .map(|()| TerminalResponse::Detached)
                 .map_err(map_runtime_error),
             TerminalRequest::Input {
@@ -2535,7 +2535,7 @@ impl AgentTerminalActor for AgentRuntime {
     }
 
     fn disconnect(&mut self, connection: ConnectionId) {
-        self.coordinator.disconnect(connection);
+        self.coordinator.disconnect(connection, &mut *self.pty);
     }
 }
 

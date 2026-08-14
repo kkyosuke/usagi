@@ -200,7 +200,12 @@ pub trait AgentCommandPort: Send {
         Err("terminal launch is unavailable".to_owned())
     }
 
-    /// Resize a daemon-owned terminal to the visible pane viewport.
+    /// Ask a daemon-owned terminal to take the visible pane viewport, and
+    /// answer with the geometry it holds.
+    ///
+    /// One daemon terminal may be open in several windows, and its single PTY
+    /// takes the smallest viewport among them, so the answer is not always the
+    /// request ([`TerminalStreamPort::resize`]).
     ///
     /// # Errors
     ///
@@ -208,9 +213,9 @@ pub trait AgentCommandPort: Send {
     fn resize_terminal(
         &mut self,
         _terminal: &TerminalRef,
-        _geometry: Geometry,
-    ) -> Result<(), TerminalError> {
-        Ok(())
+        geometry: Geometry,
+    ) -> Result<Geometry, TerminalError> {
+        Ok(geometry)
     }
 
     /// Attach to a daemon-owned terminal, taking its retained replay and cursor.
@@ -581,7 +586,11 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         self.0.terminal_connection_epoch()
     }
 
-    fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+    fn resize(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<Geometry, TerminalError> {
         self.0.resize_terminal(terminal, geometry)
     }
 
@@ -8048,6 +8057,9 @@ mod tests {
         inputs: Vec<Vec<u8>>,
         resizes: usize,
         resize_geometries: Vec<(TerminalRef, Geometry)>,
+        /// The shared viewport this daemon answers a resize with, when it is not
+        /// the request (another window holds this terminal smaller).
+        effective_geometry: Option<Geometry>,
         detaches: usize,
     }
 
@@ -8107,11 +8119,11 @@ mod tests {
             &mut self,
             terminal: &TerminalRef,
             geometry: Geometry,
-        ) -> Result<(), TerminalError> {
+        ) -> Result<Geometry, TerminalError> {
             let mut calls = self.0.lock().unwrap();
             calls.resizes += 1;
             calls.resize_geometries.push((terminal.clone(), geometry));
-            Ok(())
+            Ok(calls.effective_geometry.unwrap_or(geometry))
         }
 
         fn detach_terminal(
@@ -12547,8 +12559,8 @@ mod tests {
         fn resize_terminal(
             &mut self,
             terminal: &TerminalRef,
-            _geometry: Geometry,
-        ) -> Result<(), TerminalError> {
+            geometry: Geometry,
+        ) -> Result<Geometry, TerminalError> {
             let label = self.label(terminal);
             // `Resize` rides its own deadline-bounded lane, so even its transport
             // failure leaves the shared connection — and every attachment on it —
@@ -12558,7 +12570,7 @@ mod tests {
                 return Err(TerminalError::Unavailable);
             }
             self.record(format!("e{} resize {label}", self.epoch));
-            Ok(())
+            Ok(geometry)
         }
 
         fn attach_terminal(
@@ -20935,7 +20947,7 @@ mod tests {
         );
         assert_eq!(
             port.resize_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
-            Ok(())
+            Ok(Geometry { cols: 80, rows: 24 })
         );
         assert_eq!(
             port.attach_terminal(&terminal, Geometry { cols: 80, rows: 24 }),

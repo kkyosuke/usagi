@@ -1197,11 +1197,12 @@ impl RuntimeCoordinator {
         runtime: &AgentRuntimeRef,
         subscription: u64,
         connection: ConnectionId,
+        writer: &mut dyn PtyWriter,
     ) -> Result<(), RuntimeError> {
         self.record(runtime)?;
         let detached = self
             .terminals
-            .detach(&runtime.terminal, subscription, connection)
+            .detach(&runtime.terminal, subscription, connection, writer)
             .map_err(RuntimeError::Terminal);
         // A final nobody is draining any more is an ordinary GC candidate.
         let attached = self.terminals.is_attached(&runtime.terminal);
@@ -1214,11 +1215,12 @@ impl RuntimeCoordinator {
         &mut self,
         runtime: &AgentRuntimeRef,
         geometry: Geometry,
+        client: Option<&ClientId>,
         writer: &mut dyn PtyWriter,
     ) -> Result<Snapshot, RuntimeError> {
         self.running(runtime)?;
         self.terminals
-            .resize(&runtime.terminal, geometry, writer)
+            .resize(&runtime.terminal, geometry, client, writer)
             .map_err(RuntimeError::Terminal)
     }
 
@@ -1264,17 +1266,18 @@ impl RuntimeCoordinator {
         &self,
         runtime: &AgentRuntimeRef,
         offset: u64,
+        client: Option<&ClientId>,
     ) -> Result<Vec<Output>, RuntimeError> {
         self.record(runtime)?;
         self.terminals
-            .replay_from(&runtime.terminal, offset)
+            .replay_from(&runtime.terminal, offset, client)
             .map_err(RuntimeError::Terminal)
     }
 
     /// Drops only this connection's subscriptions across every runtime terminal.
     /// It never kills an Agent process, its PTY, or the completion worker.
-    pub fn disconnect(&mut self, connection: ConnectionId) {
-        self.terminals.disconnect(connection);
+    pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
+        self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
         let exited: Vec<TerminalRef> = self
             .records
@@ -2444,7 +2447,7 @@ mod tests {
         );
         let connection = usagi_core::domain::id::ConnectionId::new();
         let attached = c.terminals.attach(&runtime.terminal, connection).unwrap();
-        c.terminals.disconnect(connection);
+        c.terminals.disconnect(connection, &mut Writer::default());
         assert_eq!(attached.snapshot.replay, b"hello");
         assert_eq!(c.occupied_slots(), 1);
     }
@@ -2612,11 +2615,16 @@ mod tests {
             InputAck::Written
         );
         assert_eq!(writer.0, b"go\n");
-        c.detach(&runtime, attached.subscription, connection)
-            .unwrap();
+        c.detach(
+            &runtime,
+            attached.subscription,
+            connection,
+            &mut Writer::default(),
+        )
+        .unwrap();
         let reattached = c.attach(&runtime, connection).unwrap();
         assert_eq!(reattached.snapshot.replay, b"boot\n");
-        assert_eq!(c.replay_from(&runtime, 0).unwrap()[0].data, b"boot\n");
+        assert_eq!(c.replay_from(&runtime, 0, None).unwrap()[0].data, b"boot\n");
         let mut resize_writer = Writer::default();
         assert_eq!(
             c.resize(
@@ -2625,6 +2633,7 @@ mod tests {
                     cols: 120,
                     rows: 40
                 },
+                None,
                 &mut resize_writer,
             )
             .unwrap()
@@ -2632,7 +2641,7 @@ mod tests {
             .cols,
             120
         );
-        c.disconnect(connection);
+        c.disconnect(connection, &mut Writer::default());
         assert!(c.terminal_snapshot(&runtime).is_ok());
     }
     #[test]
@@ -2896,10 +2905,13 @@ mod tests {
             Err(RuntimeError::UnknownRuntime)
         );
         assert_eq!(
-            c.detach(&stale, 1, ConnectionId::new()),
+            c.detach(&stale, 1, ConnectionId::new(), &mut Writer::default()),
             Err(RuntimeError::UnknownRuntime)
         );
-        assert_eq!(c.replay_from(&stale, 0), Err(RuntimeError::UnknownRuntime));
+        assert_eq!(
+            c.replay_from(&stale, 0, None),
+            Err(RuntimeError::UnknownRuntime)
+        );
         assert_eq!(
             c.input(
                 &stale,
@@ -3407,7 +3419,12 @@ mod tests {
         assert_eq!(coordinator.collect_garbage(&mut store), 0);
 
         coordinator
-            .detach(&runtime, attached.subscription, connection)
+            .detach(
+                &runtime,
+                attached.subscription,
+                connection,
+                &mut Writer::default(),
+            )
             .unwrap();
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
@@ -3436,7 +3453,7 @@ mod tests {
         coordinator.attach(&runtime, connection).unwrap();
         coordinator.exit(&runtime, 0, &mut store).unwrap();
         clock.advance(1000);
-        coordinator.disconnect(connection);
+        coordinator.disconnect(connection, &mut Writer::default());
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
     }
