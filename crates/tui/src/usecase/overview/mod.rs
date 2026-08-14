@@ -41,6 +41,7 @@ pub enum Command {
     Config { arguments: String },
     Daemon { arguments: String },
     Env { arguments: String },
+    Garden { arguments: String },
     Issue { arguments: String },
     Roles { arguments: String },
     Session { arguments: String },
@@ -105,6 +106,15 @@ const DEFINITIONS: &[CommandDefinition] = &[
             long_description: "View and edit environment variables used by workspace commands.",
         },
         factory: |arguments| Command::Env { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
+            name: "garden",
+            description: "Watch this workspace's sessions as usagi in a garden",
+            usage: "garden",
+            long_description: "Open the session garden screen saver. Any key returns to Home.",
+        },
+        factory: |arguments| Command::Garden { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -281,6 +291,7 @@ impl Command {
             Self::Config { .. } => "config",
             Self::Daemon { .. } => "daemon",
             Self::Env { .. } => "env",
+            Self::Garden { .. } => "garden",
             Self::Issue { .. } => "issue",
             Self::Roles { .. } => "roles",
             Self::Session { .. } => "session",
@@ -295,6 +306,7 @@ impl Command {
             Self::Config { arguments } => Box::new(h::Config { arguments }),
             Self::Daemon { arguments } => Box::new(h::Daemon { arguments }),
             Self::Env { arguments } => Box::new(h::Env { arguments }),
+            Self::Garden { arguments } => Box::new(h::Garden { arguments }),
             Self::Issue { arguments } => Box::new(h::Issue { arguments }),
             Self::Roles { arguments } => Box::new(h::Roles { arguments }),
             Self::Session { arguments } => Box::new(h::Session { arguments }),
@@ -397,7 +409,9 @@ mod tests {
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
         assert_eq!(
             names,
-            ["config", "daemon", "env", "issue", "roles", "session"]
+            [
+                "config", "daemon", "env", "garden", "issue", "roles", "session"
+            ]
         );
         assert!(
             definitions
@@ -415,6 +429,9 @@ mod tests {
                 Command::Env {
                     arguments: String::new()
                 },
+                Command::Garden {
+                    arguments: String::new()
+                },
                 Command::Issue {
                     arguments: String::new()
                 },
@@ -426,7 +443,9 @@ mod tests {
                 },
             ]
             .map(|command| command.name()),
-            ["config", "daemon", "env", "issue", "roles", "session"]
+            [
+                "config", "daemon", "env", "garden", "issue", "roles", "session"
+            ]
         );
     }
 

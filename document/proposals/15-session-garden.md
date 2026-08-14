@@ -142,8 +142,13 @@ filesystem path、provider-native ID、terminal output、raw error は renderer 
 cargo run -p usagi-tui --example garden_sample
 ```
 
-sample は idle timer、Home overlay、click dispatch には接続しない。状態別 pose、複数 plot、端末幅、色と文言を
+sample は idle timer、click dispatch には接続しない。状態別 pose、複数 plot、端末幅、色と文言を
 production 配線より先に確認するための presentation-only surface である。
+
+実際の workspace で見るには、Overview の `garden` command で手動で開く（仕様は
+[3. TUI](../03-tui.md#overview-と-modal)）。自動表示（idle threshold）と click 遷移はまだ接続しておらず、
+現時点の Garden は「開く / 眺める / 最初の入力で戻る」だけである。production の庭に出る pose は controller が
+集約した phase に従うため、`interrupted` は `Done` へ畳まれて `available` の pose になる。
 
 ## 実装順序と受け入れ条件
 

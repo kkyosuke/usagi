@@ -71,6 +71,9 @@ pub enum Overlay {
     Preview,
     /// session 作成が accept 後に失敗したことを伝える dialog。表示は safe message だけ。
     CreateSessionError,
+    /// session を庭のうさぎとして眺める screen saver。読み取り専用で、最初の入力を
+    /// wake-up として消費して Home へ戻る。
+    Garden,
 }
 
 /// session name に許される最大文字数（表示・path 双方の実害を避ける上限）。
@@ -3326,6 +3329,12 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             state.overlay = None;
             Vec::new()
         }
+        // 設計どおり、最初の入力を wake-up として消費して Home へ戻す。背面の
+        // terminal や form へは渡さない。
+        Overlay::Garden => {
+            state.overlay = None;
+            Vec::new()
+        }
         Overlay::CreateSessionError | Overlay::Daemon => Vec::new(),
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
@@ -4049,6 +4058,15 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
                 state.notice = None;
             } else {
                 state.notice = Some(Notice::new("daemon takes no arguments (usage: daemon)"));
+            }
+            Vec::new()
+        }
+        Ok(overview::Command::Garden { arguments }) => {
+            if arguments.trim().is_empty() {
+                state.overlay = Some(Overlay::Garden);
+                state.notice = None;
+            } else {
+                state.notice = Some(Notice::new("garden takes no arguments (usage: garden)"));
             }
             Vec::new()
         }
@@ -5883,7 +5901,8 @@ mod tests {
                 | Overlay::Daemon
                 | Overlay::Closeup
                 | Overlay::QuitConfirmation
-                | Overlay::CreateSessionError => {}
+                | Overlay::CreateSessionError
+                | Overlay::Garden => {}
             }
             for key in [AppKey::ToggleDirectorDrawer, AppKey::OpenDirectorNew] {
                 assert!(update(&mut state, AppEvent::Key(key)).is_empty());
@@ -7676,6 +7695,52 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::Key(AppKey::SubmitOverview("daemon extra".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
+        );
+    }
+
+    #[test]
+    fn overview_garden_opens_a_screen_saver_that_any_key_wakes() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Overview);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("garden".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert!(state.notice().is_none());
+
+        // 設計どおり、最初の入力は wake-up として消費され Home へ戻る。Escape 専用では
+        // なく、drawer を開く key でも「起こすだけ」で背面へ渡らない。
+        for key in [
+            AppKey::Escape,
+            AppKey::Down,
+            AppKey::ToggleDirectorDrawer,
+            AppKey::OpenDirectorNew,
+        ] {
+            state.overlay = Some(Overlay::Garden);
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(state.overlay(), None);
+            assert!(!state.director_drawer_open());
+        }
+
+        state.overlay = Some(Overlay::Overview);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("garden extra".into()))
             )
             .is_empty()
         );

@@ -6,6 +6,7 @@
 mod config;
 mod daemon;
 mod env;
+mod garden;
 mod issue;
 mod roles;
 mod session;
@@ -13,6 +14,7 @@ mod session;
 pub(super) use config::Config;
 pub(super) use daemon::Daemon;
 pub(super) use env::Env;
+pub(super) use garden::Garden;
 pub(super) use issue::Issue;
 pub(super) use roles::Roles;
 pub(super) use session::Session;
