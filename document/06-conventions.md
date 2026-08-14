@@ -342,6 +342,15 @@ harness が profile を書き出す瞬間と競合する。counter の増分は�
   遷移の前後どちらの画面にも出る文字列を待つと、その待ちは即座に満たされて次の入力が前の状態へ入る。
   overlay を閉じてから次のキーを送るなら、閉じたことを**不在**で観測する（`cli_tui_pty` の
   `wait_for_screen_absent_since`）。負荷が高い run だけ落ちる E2E は、まずこの形を疑う。
+- **「遅い」と「落ちた」を product の報告で切り分ける**。TUI は lane が reconnect / resync 中に受けた
+  keystroke を捨て、`… keystroke not delivered` と報告する。捨てられた入力は待っても現れないので、
+  deadline を伸ばしても直らない。報告を観測して**打ち直す**（`cli_tui_pty` の
+  `send_line_until_delivered`）。単に遅いだけの run では product は何も報告しないので、そのまま待つ。
+  これは `coverage` job で特に重要である。`cargo llvm-cov` は instrumentation 付きで全 test を走らせる分
+  構造的に遅く、こうした窓が広がる。**上限を実時間から「出力の停滞」へ変える形は使えない**。TUI は
+  待っている間も再描画し続けるため停滞せず、上限が永久に来なくなる。
+- **失敗時の診断は product の文言に固定リストで依存しない**。文言が変われば、まさにその原因で落ちた run が
+  「該当なし」と表示され、原因を取り違える。安定した語尾や描画行そのものを出す。
 
 ## Git Hooks（lefthook）
 

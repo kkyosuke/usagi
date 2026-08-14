@@ -73,9 +73,15 @@ impl Drop for HeavyE2eLock {
 ///
 /// digest が衝突しても起きるのは「無関係な tree と直列化する」だけで、取り違えて並行させることは
 /// ないため、暗号学的 hash は要らない（FNV-1a で十分）。
+///
+/// digest には**実 UID も混ぜる**。共有マシン（self-hosted runner など）の temp directory は
+/// 複数ユーザーが書き込むので、名前が UID を含まないと他ユーザーが先に作った同名ファイルを開けず、
+/// 「flake を直すはずの lock」が suite 全体を落とす原因になる。
 fn heavy_e2e_lock_path() -> PathBuf {
     let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in env!("CARGO_MANIFEST_DIR").bytes() {
+    // SAFETY: `getuid` は引数を取らず、失敗せず、呼び出し元へ何も書き込まない。
+    let uid = unsafe { libc::getuid() };
+    for byte in env!("CARGO_MANIFEST_DIR").bytes().chain(uid.to_le_bytes()) {
         digest ^= u64::from(byte);
         digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
     }

@@ -756,19 +756,77 @@ fn wait_for_screen_since(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, needle: 
                 String::from_utf8_lossy(&captured[tail_start..]).into_owned()
             };
             let all = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
-            let input_feedback = [
-                "terminal stream is unavailable",
-                "terminal session is no longer available",
-                "terminal is reconnecting; input is temporarily unavailable",
-                "terminal is disconnected; input is unavailable",
-            ]
-            .into_iter()
-            .filter(|message| all.contains(message))
-            .collect::<Vec<_>>();
+            // 固定の文言リストで照合しない。product 側の文言が変わると、実際に keystroke が
+            // 捨てられていた失敗まで `feedback=[]` と表示され、原因を取り違える（実際に起きた）。
+            // 語尾だけを手掛かりに、描画された行そのものを出す。
+            let input_feedback = dropped_keystroke_notice(output, baseline)
+                .into_iter()
+                .chain(
+                    [
+                        "terminal stream is unavailable",
+                        "terminal session is no longer available",
+                    ]
+                    .into_iter()
+                    .filter(|message| all.contains(message))
+                    .map(ToOwned::to_owned),
+                )
+                .collect::<Vec<_>>();
             panic!(
                 "timed out waiting for {needle}; feedback={input_feedback:?}; screen={screen:?}; raw tail={tail}"
             );
         }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// TUI が keystroke を届けられなかったときに status bar へ出す語尾。
+///
+/// `usagi_tui` の `terminal_session` は、lane が reconnect 中・resync 中・所有者不明などの
+/// 状態で受けた keystroke を**捨て**、理由ごとに違う前置きと この語尾で報告する。
+const KEYSTROKE_DROPPED: &str = "keystroke not delivered";
+
+/// 現在の画面が「直前の keystroke を捨てた」と言っているならその行。
+fn dropped_keystroke_notice(output: &Arc<Mutex<Vec<u8>>>, baseline: usize) -> Option<String> {
+    screen_since(output, baseline)?
+        .lines()
+        .find(|line| line.contains(KEYSTROKE_DROPPED))
+        .map(str::trim)
+        .map(ToOwned::to_owned)
+}
+
+/// 生きた pane へ 1 行入力し、TUI が「届かなかった」と報告したら送り直す。
+///
+/// 捨てられた keystroke は**待っても現れない**ので、deadline をいくら伸ばしても直らない。
+/// 逆に、instrumentation 下（`cargo llvm-cov`）のように単に遅いだけの run では、TUI は何も
+/// 報告しないのでそのまま待つ。つまり「遅い」と「落ちた」を product 自身の報告で切り分け、
+/// 落ちたときだけ送り直す。
+fn send_line_until_delivered(
+    master: &mut File,
+    output: &Arc<Mutex<Vec<u8>>>,
+    baseline: usize,
+    line: &str,
+    echo: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    // 捨てられた報告が画面に残っている間、際限なく打ち直さないための間隔。待ちの代用ではなく
+    // 「打ち直しても状況が変わらないうちは打ち直さない」ための最小間隔である。
+    let resend_interval = Duration::from_millis(200);
+    send(master, format!("{line}\r").as_bytes());
+    let mut last_send = Instant::now();
+    loop {
+        if screen_since(output, baseline).is_some_and(|screen| screen.contains(echo)) {
+            return;
+        }
+        let dropped = dropped_keystroke_notice(output, baseline);
+        if dropped.is_some() && last_send.elapsed() >= resend_interval {
+            send(master, format!("{line}\r").as_bytes());
+            last_send = Instant::now();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{echo} never echoed; last drop notice={dropped:?}; screen={:?}",
+            screen_since(output, baseline).unwrap_or_default()
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1254,7 +1312,14 @@ fn real_pty_roles_editor_ctrl_s_persists_workspace_catalog() {
     // satisfied and would send Ctrl-Q into the editor, which swallows it and
     // never opens the leave prompt. Observe the overlay actually closing instead
     // of assuming the redraw won the race with the next keystroke.
-    wait_for_screen_absent_since(&captured, baseline, "Ctrl-S: validate + save");
+    //
+    // The needle must be drawn in *every* modal state. The Ctrl-S hint is not:
+    // `render_roles_over` replaces that footer with `Saving…` until the save
+    // completion event lands, and the file above can be on disk before the TUI
+    // has processed it — so waiting for the hint's absence would be satisfied
+    // with the overlay still open, reinstating the very race this fixes. The
+    // second footer is unconditional.
+    wait_for_screen_absent_since(&captured, baseline, "PageUp/PageDown: page");
     assert!(quit_from_switch(&mut master, &mut child, &captured, baseline).success());
     drop(slave);
     drop(master);
@@ -1390,8 +1455,13 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
         first_baseline,
         &format!("generic-ready-unique:{}", original_process.1),
     );
-    send(&mut master, b"generic-initial\r");
-    wait_for_screen_since(&captured, first_baseline, "generic-input:generic-initial");
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        first_baseline,
+        "generic-initial",
+        "generic-input:generic-initial",
+    );
     let original_daemon = daemon_pid(home.path());
     let original_generation = daemon_generation(home.path());
     assert!(quit_workspace(&mut master, &mut first, &captured, first_baseline).success());
@@ -1405,10 +1475,11 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
     open_registered_workspace(&mut master, &captured, killed_baseline);
     activate_selected_live_pane(&mut master, &captured, killed_baseline);
     wait_for_screen_since(&captured, killed_baseline, "generic-input:generic-initial");
-    send(&mut master, b"generic-before-kill\r");
-    wait_for_screen_since(
+    send_line_until_delivered(
+        &mut master,
         &captured,
         killed_baseline,
+        "generic-before-kill",
         "generic-input:generic-before-kill",
     );
     killed_tui.kill().unwrap();
@@ -1430,10 +1501,11 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
         after_kill_baseline,
         "generic-input:generic-before-kill",
     );
-    send(&mut master, b"generic-after-kill\r");
-    wait_for_screen_since(
+    send_line_until_delivered(
+        &mut master,
         &captured,
         after_kill_baseline,
+        "generic-after-kill",
         "generic-input:generic-after-kill",
     );
     assert!(
@@ -1449,10 +1521,11 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
         second_reopen_baseline,
         "generic-input:generic-after-kill",
     );
-    send(&mut master, b"generic-second-reopen\r");
-    wait_for_screen_since(
+    send_line_until_delivered(
+        &mut master,
         &captured,
         second_reopen_baseline,
+        "generic-second-reopen",
         "generic-input:generic-second-reopen",
     );
     assert!(
@@ -1552,8 +1625,13 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
     open_registered_workspace(&mut master, &captured, baseline);
     submit_closeup_command(&mut master, &captured, baseline, "agent -m codex");
     wait_for_screen_since(&captured, baseline, "codex-ready-unique:");
-    send(&mut master, b"session-before\r");
-    wait_for_screen_since(&captured, baseline, "codex-input:session-before");
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        baseline,
+        "session-before",
+        "codex-input:session-before",
+    );
 
     // 指示モードで root Agent（claude）を起動する。
     click_director_button(&mut master);
@@ -1563,8 +1641,13 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
     send(&mut master, b"\x1b[A");
     send(&mut master, b"\r");
     wait_for_screen_since(&captured, baseline, "claude-ready-unique:");
-    send(&mut master, b"root-hello\r");
-    wait_for_screen_since(&captured, baseline, "claude-input:root-hello");
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        baseline,
+        "root-hello",
+        "claude-input:root-hello",
+    );
     // ここで初めて burst を起こす。managed pane は detach 済みなので、この出力は
     // 必ず「detach 中に journal を追い越す」ことになる。
     fs::write(&burst_trigger, "go\n").unwrap();
@@ -1576,8 +1659,13 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
     // 再 attach は daemon の atomic snapshot から組み直すので、detach 中に流れた
     // burst の末尾が見える。
     wait_for_screen_since(&captured, baseline, "codex-noise:1399-");
-    send(&mut master, b"session-after\r");
-    wait_for_screen_since(&captured, baseline, "codex-input:session-after");
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        baseline,
+        "session-after",
+        "codex-input:session-after",
+    );
 
     assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     stop_daemon(&home);
@@ -1710,8 +1798,13 @@ fn real_pty_hung_daemon_bounds_redraw_and_quit_with_an_attached_pane() {
     // The pane really is live and attached before the daemon is frozen, so the
     // quit below has a real subscription to release over the frozen lane rather
     // than nothing to do.
-    send(&mut master, b"before-freeze\r");
-    wait_for_screen_since(&captured, baseline, "generic-input:before-freeze");
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        baseline,
+        "before-freeze",
+        "generic-input:before-freeze",
+    );
     // Leave the pane for Switch while the daemon still answers; bare Ctrl-Q
     // belongs to the PTY while the live terminal owns input.
     send(&mut master, b"\x0f\x0f");
@@ -1840,10 +1933,11 @@ fn real_pty_background_terminal_exit_closes_its_tab_through_scope_inventory() {
     // The foreground pane kept its own stream across that observation, and
     // observing a background tab never attached or respawned anything.
     activate_selected_live_pane(&mut master, &captured, baseline);
-    send(&mut master, b"foreground-after-background-exit\r");
-    wait_for_screen_since(
+    send_line_until_delivered(
+        &mut master,
         &captured,
         baseline,
+        "foreground-after-background-exit",
         "generic-input:foreground-after-background-exit",
     );
     assert_eq!(fs::read_to_string(&spawn_count).unwrap().lines().count(), 2);

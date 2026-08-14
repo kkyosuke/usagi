@@ -275,7 +275,30 @@ fn assert_no_daemon_panic(data_dir: &Path, context: &str) {
 }
 
 fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
-    let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
+    client_ready(
+        data_dir,
+        DAEMON_READINESS_TIMEOUT,
+        None,
+        "publish its socket",
+    )
+}
+
+/// The readiness wait behind [`client`], with the bound and the liveness
+/// expectation the caller actually has.
+///
+/// `live` is the daemon this connection must reach. Passing it keeps a caller's
+/// own fast-fail reachable: without it, a successor that dies during the
+/// handshake is absorbed by this retry for the whole readiness window, and the
+/// caller's "the successor exited" assertion never runs. `what` names the thing
+/// being waited for, so a bound that expires reports the caller's question
+/// rather than a generic socket wait.
+fn client_ready(
+    data_dir: &Path,
+    timeout: Duration,
+    live: Option<u64>,
+    what: &str,
+) -> IpcClient<std::os::unix::net::UnixStream> {
+    let deadline = Instant::now() + timeout;
     let daemon_dir = data_dir.join("daemon");
     let mut last_transport_failure = None;
     loop {
@@ -315,10 +338,19 @@ fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
                 Err(error) => panic!("Unix IPC handshake is refused: {error:?}"),
             }
         }
+        if let Some(pid) = live {
+            assert!(
+                alive(pid),
+                "the daemon that had to {what} exited during the handshake; \
+                 last transport failure: {last_transport_failure:?}\n{}",
+                daemon_error_log(data_dir)
+            );
+        }
         assert!(
             Instant::now() < deadline,
-            "daemon did not publish a connectable socket; \
+            "the daemon did not {what} within {}s; \
              last transport failure: {last_transport_failure:?}\n{}",
+            timeout.as_secs(),
             daemon_error_log(data_dir)
         );
         thread::sleep(Duration::from_millis(20));
@@ -684,8 +716,18 @@ fn root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded() {
     // Capacity released by those deadlines is immediately fair to a real
     // protocol client, whose successful hello also checks generation,
     // workspace, capability, and credential behavior remained intact.
+    // Bounded at the fairness window itself. The readiness wait retries a
+    // pre-handshake refusal — which is exactly the regression measured here — so
+    // leaving it on the default 60 s budget would turn "permits are never
+    // released" into a socket-publication timeout a minute later instead of this
+    // assertion.
     let fair_start = Instant::now();
-    drop(client(&data_dir));
+    drop(client_ready(
+        &data_dir,
+        Duration::from_secs(5),
+        None,
+        "return pre-handshake capacity to a normal client",
+    ));
     assert!(
         fair_start.elapsed() < Duration::from_secs(5),
         "a normal client did not recover after pre-handshake capacity returned"
@@ -1761,7 +1803,16 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
     };
     let deadline = Instant::now() + Duration::from_secs(20);
     let successor_launch = loop {
-        let mut successor = client(&data_dir);
+        // The readiness wait is told which daemon must answer, so a successor
+        // that dies while handshaking fails here rather than being retried for
+        // the whole 60 s readiness budget — the launch loop's own liveness check
+        // below only covers failures that reach `request`.
+        let mut successor = client_ready(
+            &data_dir,
+            DAEMON_READINESS_TIMEOUT,
+            Some(new_pid),
+            "admit a connection after rollover",
+        );
         match successor.request(DaemonRequest::Terminal {
             action: TerminalAction::Launch,
             payload: serde_json::to_value(TerminalRequest::Launch {

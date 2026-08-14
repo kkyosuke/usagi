@@ -1,3 +1,18 @@
+# 重い E2E（shipping binary・実 daemon・実 PTY）は 1 本ずつ走らせる。
+#
+# これらは `tests/support/daemon.rs` の checkout 単位 file lock を取る
+# （[重い E2E の直列化](../document/06-conventions.md#重い-e2e-の直列化)）。nextest は test ごとに
+# 別 process を起こすので、group を切らないと 23 本が同時に起動してロック待ちに入り、その待ち時間が
+# **test の実行時間として計上**される。slow-timeout の terminate-after に達した test は SIGTERM され、
+# product の失敗ではないのに timeout として報告される。group で並列度を 1 にすると、待ちは
+# nextest の scheduler 側に移り、実行時間には入らない。
+[test-groups.heavy-e2e]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'binary(agent_ipc_e2e) + binary(cli_tui_pty)'
+test-group = 'heavy-e2e'
+
 [profile.metrics]
 fail-fast = false
 retries = 0
