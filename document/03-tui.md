@@ -798,13 +798,25 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 
 ## session garden
 
-session を庭のうさぎとして眺める screen saver である。Home の一時的な全幅レイヤーで、daemon 権威の
-lifecycle と controller が集約した Agent phase だけを絵に写す。背面の route・active target・pane・terminal
-subscription は変えず、閉じると表示前と同じ Home へ戻る。設計判断は
+session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
+Home の一時的な全幅レイヤーで、daemon 権威の lifecycle と controller が runtime ごとに保持する Agent phase
+だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、閉じると表示前と同じ Home
+へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
+
+### 区画とうさぎ
+
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。session の lifecycle は nameplate と区画の pose、Agent
+phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
+描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+
+複数 runtime は `Waiting` を先頭にし、残りと同 phase の tie-break を stable `AgentRuntimeId` 順にする。4 羽目
+以降は末尾から畳み、状態内訳の末尾へ `+N` を表示する。このため入力待ちの runtime は低い注目度の runtime より
+先に見える。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。workspace root の runtime は
+session 区画に属さないため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。
 
 ### 自動表示
 

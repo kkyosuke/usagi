@@ -130,7 +130,8 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
 1. 描画可能領域を、nameplate と表示上限ぶんのうさぎが収まる固定幅の plot に分割する。plot の大きさは
    agent の数で変えない（区画ごとに幅が変わると grid の決定性と hit test が崩れるため）。
 2. controller が持つ session 順を plot へ左上から割り当てる。
-3. stable `SessionId` の先頭 bytes を animation phase の offset にだけ使い、全羽が同時に跳ねないようにする。
+3. 各うさぎの stable `AgentRuntimeId` の先頭 bytes を animation phase の offset にだけ使い、全羽が同時に
+   跳ねないようにする。
 4. `tick`、projection、領域サイズが同じなら、常に同じ frame を返す。
 
 session が plot 数を超える場合は末尾を `+ N more in session list` に畳み、既存 sidebar を完全な一覧の正本として

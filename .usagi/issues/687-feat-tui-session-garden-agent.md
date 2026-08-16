@@ -1,13 +1,13 @@
 ---
 number: 687
 title: feat(tui): session garden のうさぎを agent 単位で描く
-status: todo
+status: done
 priority: medium
 labels: [v2, tui, uiux]
 dependson: []
 related: [674]
 created_at: 2026-08-16T22:38:12.153428+00:00
-updated_at: 2026-08-16T22:38:12.153428+00:00
+updated_at: 2026-08-16T23:20:34.315194+00:00
 ---
 
 ## 背景

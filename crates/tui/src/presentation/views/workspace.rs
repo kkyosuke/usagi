@@ -246,8 +246,8 @@ pub struct HomeProjection {
     overview_modal: Option<OverviewModal>,
     /// Overview の `daemon` command が開く読み取り専用 status surface。
     daemon_overlay: bool,
-    /// Overview の `garden` command が開く screen saver の描画素材。overlay が閉じている
-    /// 間は `None` で、開いている frame だけ session を庭の projection へ写す。
+    /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
+    /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
     daemon_runtimes: Option<Vec<daemon_modal::AgentRuntimeRow>>,
@@ -373,7 +373,15 @@ impl HomeProjection {
                     id: session.id,
                     label: session.label.clone(),
                     lifecycle: session.lifecycle,
-                    agent_phase: garden_phase(state.phase_for(Target::Session(session.id))),
+                    agents: state
+                        .runtimes()
+                        .iter()
+                        .filter(|entry| entry.runtime.session_id == Some(session.id))
+                        .map(|entry| widgets::garden::GardenAgent {
+                            runtime_id: entry.runtime.agent_runtime_id,
+                            phase: garden_phase(entry.phase),
+                        })
+                        .collect(),
                 })
                 .collect::<Vec<_>>()
         });
@@ -1502,11 +1510,9 @@ pub fn terminal_point_at(
     })
 }
 
-/// controller が集約した phase を、Garden が描く Agent phase へ写す。
-///
-/// controller の [`TargetPhase`] は `Interrupted` を `Done` へ畳んだあとの集約値なので、
-/// Garden も同じ集約だけを見る（表示のために別の情報源を作らない）。したがって
-/// production の庭に `interrupted` の pose は出ない。
+/// controller が runtime ごとに保持する phase を、Garden の表示語彙へ写す。
+/// `Done` は controller が runtime event の `Ended` / `Exited` / `Interrupted` を共通化した
+/// 値なので、Garden では静止した完了 pose に写す。
 const fn garden_phase(phase: TargetPhase) -> AgentPhase {
     match phase {
         TargetPhase::Absent => AgentPhase::Absent,
@@ -3501,8 +3507,8 @@ mod tests {
     #[test]
     fn render_home_replaces_the_frame_with_the_garden_opened_from_overview() {
         let workspace = WorkspaceId::new();
-        // controller が集約する phase をすべて踏み、Garden の pose 対応を固定する。
-        // `Ended` は `Done` へ畳まれる（`Interrupted` も同じ class）。
+        // controller が集約する phase をすべて踏みつつ、Garden は runtime ごとの
+        // phase を失わず投影することを固定する。
         let phases = [
             None,
             Some(AgentPhase::Ready),
@@ -3525,12 +3531,30 @@ mod tests {
             }
             projected.push(projected_session(ids[index], &format!("s{index}"), "/work"));
         }
+        // 同じ session に終了済み runtime があっても、実行中 runtime を Garden から
+        // 消さない。sidebar 用の集約は従来どおり Done のままでよい。
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime_ref(workspace, ids[2]),
+                phase: AgentPhase::Ended,
+            }),
+        );
+        assert_eq!(state.phase_for(Target::Session(ids[2])), TargetPhase::Done);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         let _ = update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("garden".into())),
         );
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
+        let garden = home.garden_sessions.as_ref().expect("garden projection");
+        assert_eq!(garden[2].agents.len(), 2);
+        assert!(
+            garden[2]
+                .agents
+                .iter()
+                .any(|agent| agent.phase == AgentPhase::Running)
+        );
 
         let frame = render_home_at(24, 100, &home, now());
         let text = frame
@@ -3543,6 +3567,7 @@ mod tests {
         assert!(text.contains("Garden · click a usagi to visit · any key to return"));
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
+        assert!(text.contains("1 run · 1 done"));
         assert!(text.contains("s0"));
 
         // 最小サイズに満たない端末では Garden を開かず Home を保つ。操作できる一覧を

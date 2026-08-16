@@ -4,7 +4,7 @@
 //! frame と同じ layout から [`GardenHitbox`] も返すため、後続実装は座標から session
 //! identity を再計算せず click target を解決できる。
 
-use usagi_core::domain::id::SessionId;
+use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
 use crate::presentation::theme::{Role, Style};
@@ -25,6 +25,8 @@ const PLOT_HEIGHT: usize = 7;
 const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - 1;
 /// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
 const SPRITE_ROWS: usize = 4;
+const COMPACT_RABBIT_WIDTH: usize = 8;
+const MAX_VISIBLE_AGENTS: usize = PLOT_WIDTH / COMPACT_RABBIT_WIDTH;
 
 /// 地面のタイル。庭の幅いっぱいに敷き詰めるため、隣り合うタイルで草の位置を変えて
 /// 同じ絵が横に並ぶ tiling に見せない。
@@ -40,7 +42,14 @@ pub struct GardenSession {
     pub id: SessionId,
     pub label: String,
     pub lifecycle: SessionLifecycle,
-    pub agent_phase: AgentPhase,
+    pub agents: Vec<GardenAgent>,
+}
+
+/// Garden に描く 1 agent。runtime identity は並び順と animation offset だけに使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GardenAgent {
+    pub runtime_id: AgentRuntimeId,
+    pub phase: AgentPhase,
 }
 
 /// 0-based terminal cell rectangle。右端・下端は含まない。
@@ -171,10 +180,9 @@ pub fn render(
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
     let running = sessions
         .iter()
-        .filter(|session| {
-            session.lifecycle == SessionLifecycle::Available
-                && session.agent_phase == AgentPhase::Running
-        })
+        .filter(|session| session.lifecycle == SessionLifecycle::Available)
+        .flat_map(|session| &session.agents)
+        .filter(|agent| agent.phase == AgentPhase::Running)
         .count();
     let left = Role::Feature.style().bold().paint(&format!(
         " usagi / {}",
@@ -188,25 +196,15 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
 }
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PLOT_CONTENT_ROWS] {
-    let phase = if reduced_motion {
-        0
-    } else {
-        (tick + phase_offset(session.id)) % 6
-    };
-    let (status, status_style, rabbit_style, rabbit) = appearance(session, phase);
     let label = Role::Accent
         .style()
         .bold()
         .paint(&clip_to_width(&session.label, PLOT_WIDTH - 2));
-    let [ears, head, body, feet] = sprite(rabbit, rabbit_style);
-    [
-        centered(PLOT_WIDTH, &label),
-        centered(PLOT_WIDTH, &status_style.paint(status)),
-        ears,
-        head,
-        body,
-        feet,
-    ]
+    let [status, ears, head, body, feet] = match session.lifecycle {
+        SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
+        lifecycle => lifecycle_plot(lifecycle),
+    };
+    [centered(PLOT_WIDTH, &label), status, ears, head, body, feet]
 }
 
 /// 庭の幅いっぱいに敷いた地面の 1 行。
@@ -235,29 +233,30 @@ fn ground_row(width: usize, content_width: usize) -> String {
 /// 行ごとに中央寄せすると、行の表示桁数が違うぶんだけ耳と顔が横へずれる（例えば
 /// `Creating` の耳は頭より 2 桁右に出ていた）。うさぎが崩れないよう、pose 全体の
 /// 最大幅から左端を 1 度だけ決め、4 行に同じ padding を与える。
-fn sprite(rabbit: [&'static str; SPRITE_ROWS], style: Style) -> [String; SPRITE_ROWS] {
+fn sprite(
+    rabbit: [&'static str; SPRITE_ROWS],
+    style: Style,
+    width: usize,
+) -> [String; SPRITE_ROWS] {
     let sprite_width = rabbit
         .iter()
         .map(|row| display_width(row))
         .max()
         .unwrap_or(0);
-    let left = " ".repeat(PLOT_WIDTH.saturating_sub(sprite_width) / 2);
+    let left = " ".repeat(width.saturating_sub(sprite_width) / 2);
     rabbit.map(|row| {
         if row.is_empty() {
             // 空行に色を塗らない（意味のない escape sequence を frame へ残さない）。
-            " ".repeat(PLOT_WIDTH)
+            " ".repeat(width)
         } else {
-            pad_to_width(&format!("{left}{}", style.paint(row)), PLOT_WIDTH)
+            pad_to_width(&format!("{left}{}", style.paint(row)), width)
         }
     })
 }
 
-fn appearance(
-    session: &GardenSession,
-    phase: u64,
-) -> (&'static str, Style, Style, [&'static str; 4]) {
+fn lifecycle_plot(lifecycle: SessionLifecycle) -> [String; PLOT_CONTENT_ROWS - 1] {
     let feature = Role::Feature.style().bold();
-    match session.lifecycle {
+    let (status, status_style, rabbit_style, rabbit) = match lifecycle {
         SessionLifecycle::Creating | SessionLifecycle::Initializing => (
             "growing",
             Role::Warning.style(),
@@ -276,15 +275,81 @@ fn appearance(
             Role::Danger.style(),
             ["", " /)/)", "( x.x)", "c(\")(\")"],
         ),
-        SessionLifecycle::Available => available_appearance(session.agent_phase, phase, feature),
-    }
+        SessionLifecycle::Available => unreachable!("available sessions use agent projection"),
+    };
+    let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+    [
+        centered(PLOT_WIDTH, &status_style.paint(status)),
+        ears,
+        head,
+        body,
+        feet,
+    ]
 }
 
-fn available_appearance(
+fn available_plot(
+    session: &GardenSession,
+    tick: u64,
+    reduced_motion: bool,
+) -> [String; PLOT_CONTENT_ROWS - 1] {
+    let agents = ordered_agents(&session.agents);
+    if agents.is_empty() {
+        return [
+            centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
+            " ".repeat(PLOT_WIDTH),
+            " ".repeat(PLOT_WIDTH),
+            " ".repeat(PLOT_WIDTH),
+            " ".repeat(PLOT_WIDTH),
+        ];
+    }
+
+    if agents.len() == 1 {
+        let agent = agents[0];
+        let phase = animation_phase(tick, reduced_motion, &agent.runtime_id.as_str());
+        let (status, status_style, rabbit_style, rabbit) = agent_appearance(agent.phase, phase);
+        let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+        return [
+            centered(PLOT_WIDTH, &status_style.paint(status)),
+            ears,
+            head,
+            body,
+            feet,
+        ];
+    }
+
+    let hidden = agents.len().saturating_sub(MAX_VISIBLE_AGENTS);
+    let visible = &agents[..agents.len().min(MAX_VISIBLE_AGENTS)];
+    let status = agent_summary(&agents, hidden);
+    let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
+    for agent in visible {
+        let phase = animation_phase(tick, reduced_motion, &agent.runtime_id.as_str());
+        let (_, _, style, rabbit) = agent_appearance(agent.phase, phase);
+        let compact = sprite(rabbit, style, COMPACT_RABBIT_WIDTH);
+        for (row, part) in rows.iter_mut().zip(compact) {
+            row.push_str(&part);
+        }
+    }
+    let [ears, head, body, feet] = rows.map(|row| centered(PLOT_WIDTH, &row));
+    [
+        centered(PLOT_WIDTH, &Style::new().dim().paint(&status)),
+        ears,
+        head,
+        body,
+        feet,
+    ]
+}
+
+fn ordered_agents(agents: &[GardenAgent]) -> Vec<GardenAgent> {
+    let mut ordered = agents.to_vec();
+    ordered.sort_by_key(|agent| (agent.phase != AgentPhase::Waiting, agent.runtime_id));
+    ordered
+}
+
+fn agent_appearance(
     agent_phase: AgentPhase,
     phase: u64,
-    feature: Style,
 ) -> (&'static str, Style, Style, [&'static str; 4]) {
+    let feature = Role::Feature.style().bold();
     match agent_phase {
         AgentPhase::Running => {
             let rabbit = match phase % 3 {
@@ -318,8 +383,41 @@ fn available_appearance(
     }
 }
 
-fn phase_offset(id: SessionId) -> u64 {
-    u64::from_str_radix(&id.as_str()[..2], 16).unwrap_or(0) % 6
+fn agent_summary(agents: &[GardenAgent], hidden: usize) -> String {
+    let count = |matches: fn(AgentPhase) -> bool| {
+        agents.iter().filter(|agent| matches(agent.phase)).count()
+    };
+    let parts = [
+        (count(|phase| phase == AgentPhase::Running), "run"),
+        (count(|phase| phase == AgentPhase::Waiting), "wait"),
+        (count(|phase| phase == AgentPhase::Ready), "ready"),
+        (
+            count(|phase| matches!(phase, AgentPhase::Ended | AgentPhase::Exited)),
+            "done",
+        ),
+        (count(|phase| phase == AgentPhase::Interrupted), "int"),
+        (count(|phase| phase == AgentPhase::Absent), "idle"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>();
+    let summary = parts.join(" · ");
+    if hidden == 0 {
+        summary
+    } else {
+        let suffix = format!(" · +{hidden}");
+        let prefix_width = PLOT_WIDTH.saturating_sub(display_width(&suffix));
+        format!("{}{suffix}", clip_to_width(&summary, prefix_width))
+    }
+}
+
+fn animation_phase(tick: u64, reduced_motion: bool, stable_id: &str) -> u64 {
+    if reduced_motion {
+        0
+    } else {
+        (tick + u64::from_str_radix(&stable_id[..2], 16).unwrap_or(0)) % 6
+    }
 }
 
 fn centered(width: usize, value: &str) -> String {
@@ -330,9 +428,9 @@ fn centered(width: usize, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GROUND, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render};
+    use super::{GROUND, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render};
     use crate::presentation::widgets::display_width;
-    use usagi_core::domain::id::SessionId;
+    use usagi_core::domain::id::{AgentRuntimeId, SessionId};
     use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
     /// animation offset が 0 になる id（先頭 2 桁が `00`）。tick をそのまま phase として扱える。
@@ -384,7 +482,17 @@ mod tests {
             id: SessionId::parse(id).expect("fixture id"),
             label: label.to_owned(),
             lifecycle,
-            agent_phase: phase,
+            agents: vec![GardenAgent {
+                runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
+                phase,
+            }],
+        }
+    }
+
+    fn agent(id: &str, phase: AgentPhase) -> GardenAgent {
+        GardenAgent {
+            runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
+            phase,
         }
     }
 
@@ -477,6 +585,71 @@ mod tests {
         let still_a = render(24, 100, "x", &sessions, 0, true).expect("fits");
         let still_b = render(24, 100, "x", &sessions, 5, true).expect("fits");
         assert_eq!(still_a.rows, still_b.rows);
+    }
+
+    #[test]
+    fn multiple_agents_are_sorted_by_attention_then_runtime_identity() {
+        let waiting = agent("f0000000-0000-4000-8000-000000000001", AgentPhase::Waiting);
+        let early_running = agent("10000000-0000-4000-8000-000000000001", AgentPhase::Running);
+        let late_running = agent("20000000-0000-4000-8000-000000000001", AgentPhase::Running);
+        let ready = agent("30000000-0000-4000-8000-000000000001", AgentPhase::Ready);
+        let ended = agent("40000000-0000-4000-8000-000000000001", AgentPhase::Ended);
+        let shuffled = vec![ended, late_running, ready, waiting, early_running];
+        let ordered = super::ordered_agents(&shuffled);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|agent| agent.runtime_id)
+                .collect::<Vec<_>>(),
+            vec![
+                waiting.runtime_id,
+                early_running.runtime_id,
+                late_running.runtime_id,
+                ready.runtime_id,
+                ended.runtime_id,
+            ]
+        );
+
+        let mut reversed = shuffled.clone();
+        reversed.reverse();
+        let make_session = |agents| GardenSession {
+            id: SessionId::parse(STEADY_ID).expect("fixture id"),
+            label: "many".to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            agents,
+        };
+        let first = render(24, 100, "x", &[make_session(shuffled)], 2, false).expect("fits");
+        let second = render(24, 100, "x", &[make_session(reversed)], 2, false).expect("fits");
+        assert_eq!(first, second);
+        let text = plain(&first).join("\n");
+        assert!(text.contains("2 run · 1 wait"));
+        assert!(text.contains("+2"));
+        assert!(
+            text.contains("( o.o)?"),
+            "the waiting agent must stay visible"
+        );
+        assert_eq!(text.matches("/)/)").count(), super::MAX_VISIBLE_AGENTS);
+    }
+
+    #[test]
+    fn an_available_session_without_an_agent_draws_an_empty_plot() {
+        let frame = render(
+            24,
+            100,
+            "x",
+            &[GardenSession {
+                id: SessionId::parse(STEADY_ID).expect("fixture id"),
+                label: "empty".to_owned(),
+                lifecycle: SessionLifecycle::Available,
+                agents: Vec::new(),
+            }],
+            0,
+            false,
+        )
+        .expect("fits");
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("no agents"));
+        assert!(!text.contains("/)/)"));
     }
 
     #[test]
