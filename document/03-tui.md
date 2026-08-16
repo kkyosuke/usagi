@@ -814,9 +814,11 @@ phase は各うさぎの pose と状態内訳へ投影する。利用可能な s
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
 複数 runtime は `Waiting` を先頭にし、残りと同 phase の tie-break を stable `AgentRuntimeId` 順にする。4 羽目
-以降は末尾から畳み、状態内訳の末尾へ `+N` を表示する。このため入力待ちの runtime は低い注目度の runtime より
-先に見える。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。workspace root の runtime は
-session 区画に属さないため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。
+以降は末尾から畳み、状態内訳の末尾へ `+N hidden` を表示する。このため入力待ちの runtime は低い注目度の runtime
+より先に見える。`Waiting` 自体が 3 羽を超える場合は、描けない羽数を `+N wait hidden`（他 phase も隠れる場合は
+`+N hidden (W wait)`）と明示する。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。
+`Ended` / `Exited` は瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さない
+ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。
 
 ### 自動表示
 

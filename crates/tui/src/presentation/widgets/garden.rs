@@ -317,8 +317,8 @@ fn available_plot(
         ];
     }
 
-    let hidden = agents.len().saturating_sub(MAX_VISIBLE_AGENTS);
     let visible = &agents[..agents.len().min(MAX_VISIBLE_AGENTS)];
+    let hidden = &agents[visible.len()..];
     let status = agent_summary(&agents, hidden);
     let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
     for agent in visible {
@@ -371,7 +371,13 @@ fn agent_appearance(
             feature,
             ["", " /)/)", "( -.-)!", "c(\")(\")"],
         ),
-        AgentPhase::Absent | AgentPhase::Ready | AgentPhase::Ended | AgentPhase::Exited => {
+        AgentPhase::Ended | AgentPhase::Exited => (
+            "done",
+            Style::new().dim(),
+            feature,
+            ["", " /)/)", "( -.-)", "c(\")(\")"],
+        ),
+        AgentPhase::Absent | AgentPhase::Ready => {
             let face = if phase == 4 { "( -.-)" } else { "( . .)" };
             (
                 "available",
@@ -383,7 +389,7 @@ fn agent_appearance(
     }
 }
 
-fn agent_summary(agents: &[GardenAgent], hidden: usize) -> String {
+fn agent_summary(agents: &[GardenAgent], hidden: &[GardenAgent]) -> String {
     let count = |matches: fn(AgentPhase) -> bool| {
         agents.iter().filter(|agent| matches(agent.phase)).count()
     };
@@ -403,10 +409,20 @@ fn agent_summary(agents: &[GardenAgent], hidden: usize) -> String {
     .map(|(count, label)| format!("{count} {label}"))
     .collect::<Vec<_>>();
     let summary = parts.join(" · ");
-    if hidden == 0 {
+    if hidden.is_empty() {
         summary
     } else {
-        let suffix = format!(" · +{hidden}");
+        let hidden_waiting = hidden
+            .iter()
+            .filter(|agent| agent.phase == AgentPhase::Waiting)
+            .count();
+        let suffix = if hidden_waiting == 0 {
+            format!(" · +{} hidden", hidden.len())
+        } else if hidden_waiting == hidden.len() {
+            format!(" · +{hidden_waiting} wait hidden")
+        } else {
+            format!(" · +{} hidden ({hidden_waiting} wait)", hidden.len())
+        };
         let prefix_width = PLOT_WIDTH.saturating_sub(display_width(&suffix));
         format!("{}{suffix}", clip_to_width(&summary, prefix_width))
     }
@@ -681,8 +697,8 @@ mod tests {
                 "interrupted",
             ),
             (SessionLifecycle::Available, AgentPhase::Ready, "available"),
-            (SessionLifecycle::Available, AgentPhase::Ended, "available"),
-            (SessionLifecycle::Available, AgentPhase::Exited, "available"),
+            (SessionLifecycle::Available, AgentPhase::Ended, "done"),
+            (SessionLifecycle::Available, AgentPhase::Exited, "done"),
             (SessionLifecycle::Available, AgentPhase::Absent, "available"),
         ];
         for (lifecycle, phase, status) in cases {
@@ -709,6 +725,47 @@ mod tests {
         let blink = only(SessionLifecycle::Available, AgentPhase::Ready, 4).join("\n");
         assert!(open.contains("( . .)"));
         assert!(blink.contains("( -.-)"));
+
+        // 終了済みの agent は idle の瞬きへ戻さず、静止した done pose を保つ。
+        let done = only(SessionLifecycle::Available, AgentPhase::Ended, 0).join("\n");
+        let done_later = only(SessionLifecycle::Available, AgentPhase::Ended, 4).join("\n");
+        assert_eq!(done, done_later);
+        assert!(done.contains("done"));
+    }
+
+    #[test]
+    fn overflow_reports_waiting_agents_that_cannot_fit() {
+        let waiting = (0..4)
+            .map(|index| {
+                agent(
+                    &format!("{index:08x}-0000-4000-8000-000000000001"),
+                    AgentPhase::Waiting,
+                )
+            })
+            .collect::<Vec<_>>();
+        let make_session = |agents| GardenSession {
+            id: SessionId::parse(STEADY_ID).expect("fixture id"),
+            label: "waiting".to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            agents,
+        };
+
+        let all_waiting =
+            render(24, 100, "x", &[make_session(waiting.clone())], 0, false).expect("fits");
+        let all_waiting_text = plain(&all_waiting).join("\n");
+        assert!(all_waiting_text.contains("+1 wait hidden"));
+        assert_eq!(
+            all_waiting_text.matches("( o.o)?").count(),
+            super::MAX_VISIBLE_AGENTS
+        );
+
+        let mut mixed = waiting;
+        mixed.push(agent(
+            "f0000000-0000-4000-8000-000000000001",
+            AgentPhase::Running,
+        ));
+        let mixed = render(24, 100, "x", &[make_session(mixed)], 0, false).expect("fits");
+        assert!(plain(&mixed).join("\n").contains("+2 hidden (1 wait)"));
     }
 
     #[test]
