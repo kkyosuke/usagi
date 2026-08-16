@@ -40,8 +40,8 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
-    AppState, CreateSessionForm, Feedback, HomeMode, Notice, PrOverlay, PreviewOverlay, Selection,
-    SessionRoleProjection, Target, TargetPhase,
+    AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, PrOverlay,
+    PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
@@ -1529,6 +1529,71 @@ fn garden_tick(now: DateTime<Utc>) -> u64 {
     now.timestamp().unsigned_abs() % 6
 }
 
+/// Garden が Home frame を置き換えている frame を、rows と hitbox の両方で返す。
+///
+/// 描画と hit test の**単一の layout 関数**である。click 解決が座標から session 順を
+/// 再計算しないのは、[`render_home_at`] が描いたのと同じ呼び出しが返した
+/// `SessionId` 付き rectangle をそのまま使うためで、CJK label・端末 resize・表示上限で
+/// click target がずれる余地がない。
+///
+/// overlay が閉じているか、端末が Garden の最小サイズに満たない場合は `None`（この
+/// frame は通常の Home であり、click も通常の Home の hit test に従う）。
+fn garden_frame(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    now: DateTime<Utc>,
+) -> Option<widgets::garden::GardenFrame> {
+    let sessions = home.garden_sessions.as_ref()?;
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    widgets::garden::render(
+        height,
+        width,
+        &home.workspace_name,
+        sessions,
+        garden_tick(now),
+        false,
+    )
+}
+
+/// Garden を描ける端末サイズか。
+///
+/// 自動表示の抑止に使う。reducer は overlay と drawer の eligibility だけを持ち、
+/// 「何桁・何行あれば庭が描けるか」は renderer の layout 事実なので presentation 側に
+/// 置く（高さ 14 行未満・幅 64 桁未満では screen saver で操作可能な一覧を覆わない）。
+/// 判定は [`widgets::garden::render`] と同じ正規化サイズで行う。
+#[must_use]
+pub fn garden_fits(raw_height: usize, raw_width: usize) -> bool {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    height >= widgets::garden::MIN_HEIGHT && width >= widgets::garden::MIN_WIDTH
+}
+
+/// Garden 上の click を、frame と同じ layout の hitbox で解決する。
+///
+/// `None` は「この frame は Garden ではない」で、呼び出し側は通常の Home の hit test
+/// を続ける。
+#[must_use]
+pub fn garden_click_at(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    now: DateTime<Utc>,
+    column: u16,
+    row: u16,
+) -> Option<GardenClick> {
+    let frame = garden_frame(raw_height, raw_width, home, now)?;
+    let (column, row) = (usize::from(column), usize::from(row));
+    Some(
+        frame
+            .hitboxes
+            .iter()
+            .find(|hitbox| hitbox.contains(column, row))
+            .map_or(GardenClick::Dismiss, |hitbox| {
+                GardenClick::Visit(hitbox.session_id)
+            }),
+    )
+}
+
 /// controller projection の Home frame を描く。
 ///
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は
@@ -1556,16 +1621,7 @@ pub fn render_home_at(
     // Garden は Home の全幅レイヤーなので、収まるなら frame をそのまま置き換える。
     // 収まらない端末では Garden を開かず Home を保つ（操作できる一覧を警告画面で
     // 覆わない）。
-    if let Some(sessions) = &home.garden_sessions
-        && let Some(frame) = widgets::garden::render(
-            height,
-            width,
-            &home.workspace_name,
-            sessions,
-            garden_tick(now),
-            false,
-        )
-    {
+    if let Some(frame) = garden_frame(raw_height, raw_width, home, now) {
         return frame.rows;
     }
     let split = panes::split(width, LEFT_WIDTH);
@@ -2373,22 +2429,22 @@ mod tests {
         DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
         LEFT_WIDTH, MEBIBYTE, ProjectedSession, SIDECAR_GUTTER, SidebarDiffColumns,
         TerminalViewProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_row_lines_at,
-        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
-        pane_tab_selected, phase_label, render_home, render_home_at, resume_label, short_id,
-        sidecar_labels, terminal_point_at, with_footer_gap,
+        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame, garden_tick,
+        health_badge, health_reason_label, home_header_action_at, home_header_layout,
+        home_left_pane, home_row_lines_at, home_viewport_start, load_style,
+        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
+        render_home_at, resume_label, short_id, sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
         DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
-    use crate::presentation::widgets::{display_width, modal, wrap_to_width};
+    use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, RoleChoice, Route, SafeError,
-        SafeMessage, Selection, SessionRoleCatalog, SessionRoleProjection, Target, TargetPhase,
-        update,
+        AppEvent, AppKey, AppState, BackendEvent, Feedback, GardenClick, HomeMode, RoleChoice,
+        Route, SafeError, SafeMessage, Selection, SessionRoleCatalog, SessionRoleProjection,
+        Target, TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -3498,6 +3554,70 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!small_text.contains("any key to return"));
+    }
+
+    /// 自動表示は renderer が庭を描ける端末サイズでだけ許す。判定は
+    /// [`render_home_at`] の縮退（0 は fallback サイズ）と同じ正規化で行う。
+    #[test]
+    fn garden_fits_matches_the_size_the_renderer_accepts() {
+        assert!(garden_fits(24, 100));
+        assert!(garden_fits(
+            widgets::garden::MIN_HEIGHT,
+            widgets::garden::MIN_WIDTH
+        ));
+        assert!(!garden_fits(widgets::garden::MIN_HEIGHT - 1, 100));
+        assert!(!garden_fits(24, widgets::garden::MIN_WIDTH - 1));
+        // 0 は「未知」であって「狭い」ではない。frame と同じ fallback (24x80) で判定する。
+        assert!(garden_fits(0, 0));
+    }
+
+    /// click 解決は frame と同じ layout 呼び出しの hitbox に当てる。うさぎに当たれば
+    /// その plot に束縛された stable `SessionId`、外れれば wake-up。
+    #[test]
+    fn a_garden_click_resolves_against_the_drawn_plots() {
+        let workspace = WorkspaceId::new();
+        let ids = (0..3).map(|_| SessionId::new()).collect::<Vec<_>>();
+        let mut state = AppState::home(workspace, ids.clone());
+        let projected = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| projected_session(*id, &format!("s{index}"), "/work"))
+            .collect::<Vec<_>>();
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
+
+        let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
+        assert_eq!(frame.hitboxes.len(), 3);
+        for hitbox in &frame.hitboxes {
+            let column = u16::try_from(hitbox.column + hitbox.width / 2).expect("fits a u16");
+            let row = u16::try_from(hitbox.row + hitbox.height / 2).expect("fits a u16");
+            assert_eq!(
+                garden_click_at(24, 100, &home, now(), column, row),
+                Some(GardenClick::Visit(hitbox.session_id)),
+                "the centre of a plot is its own usagi"
+            );
+        }
+
+        // 庭の余白（footer 行）はうさぎではないので wake-up になる。
+        assert_eq!(
+            garden_click_at(24, 100, &home, now(), 0, 23),
+            Some(GardenClick::Dismiss)
+        );
+
+        // Garden が frame でない場合は `None` を返し、呼び出し側は通常の Home の
+        // hit test を続ける（overlay が閉じている場合と、庭が収まらない端末）。
+        let plain = HomeProjection::from_state(
+            &AppState::home(workspace, ids.clone()),
+            "atlas",
+            Path::new("/work"),
+            &projected,
+        );
+        assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
+        assert_eq!(garden_click_at(13, 100, &home, now(), 10, 10), None);
     }
 
     #[test]

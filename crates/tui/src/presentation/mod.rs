@@ -55,8 +55,8 @@ use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, home_header_action_at, render_home, render_home_at,
-    terminal_point_at,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
+    render_home_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::{PaneRestoreTarget, WorkspaceRuntime};
@@ -5293,6 +5293,47 @@ fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppE
     AppEvent::Pointer { column, row, at }
 }
 
+/// Whether a key read from the terminal is a *user* interaction.
+///
+/// [`Key::Other`] is how the composition root delivers a frame wake-up: an
+/// animation tick, a drained daemon event, or terminal output arriving behind
+/// the frame. None of those is a person touching the terminal, so none of them
+/// postpones the screen saver — an Agent can work for an hour and the garden
+/// still opens. Everything else in the vocabulary — keys, paste, pointer
+/// presses and wheel, the OS copy shortcut, PTY passthrough, and a resize —
+/// is an interaction and resets the idle clock.
+const fn is_user_activity(key: &Key) -> bool {
+    !matches!(key, Key::Other)
+}
+
+/// Tracks how long the user has been away from the keyboard.
+///
+/// The clock itself stays in the frame loop, exactly as it already does for
+/// sidebar double-click detection: the shell reduces a monotonic [`Instant`] to
+/// an elapsed [`Duration`] and injects it, so neither this unit nor the reducer
+/// ever reads the wall clock.
+///
+/// [`Instant`]: std::time::Instant
+#[derive(Debug)]
+struct IdleWatch {
+    /// Elapsed reading of the shell's monotonic clock at the last interaction.
+    since: std::time::Duration,
+}
+
+impl IdleWatch {
+    const fn new(now: std::time::Duration) -> Self {
+        Self { since: now }
+    }
+
+    /// Observe one frame's key and return the idle duration to inject.
+    fn observe(&mut self, key: &Key, now: std::time::Duration) -> std::time::Duration {
+        if is_user_activity(key) {
+            self.since = now;
+        }
+        now.saturating_sub(self.since)
+    }
+}
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -5367,6 +5408,9 @@ fn drive_workspace_controller(
     // The reducer hit-tests sidebar clicks and owns stable-identity double-click
     // state. The shell's clock is reduced to a deterministic elapsed timestamp.
     let pointer_clock = std::time::Instant::now();
+    // The screen saver's idle deadline rides the same clock: the shell observes
+    // user input and monotonic time, the reducer only sees an injected duration.
+    let mut idle_watch = IdleWatch::new(pointer_clock.elapsed());
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
@@ -5645,6 +5689,14 @@ fn drive_workspace_controller(
         // Director mode owns `Ctrl-O Ctrl-N` as New; the swap happens once here
         // so PTY forwarding, pane controls, and the reducer all see one key.
         let key = retarget_director_chords(&runtime, term.read_key()?);
+        // Screen saver admission, before the key is routed anywhere: a wake-up
+        // key resets the deadline first, so the frame that wakes the user can
+        // never re-open the garden it just closed. A terminal too small to draw
+        // a garden emits no idle event at all, leaving its usable Home alone.
+        let idle = idle_watch.observe(&key, pointer_clock.elapsed());
+        if garden_fits(height, width) {
+            let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
+        }
         // Neither a tick nor a resize refreshes an inventory here any more. Both
         // used to dispatch `RefreshDecisions` + `RefreshSessions`, which ran the
         // daemon round trip on this thread at the 16ms frame cadence; the
@@ -5684,20 +5736,35 @@ fn drive_workspace_controller(
         } else if is_director_new_click(&key, &runtime, height, width) {
             runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
+            // The garden owns the whole frame while it is up, and it resolves
+            // its own clicks: the layout call that drew the rabbits returns the
+            // `SessionId`-tagged plots, so the shell hit-tests the frame the
+            // user actually saw instead of re-deriving session order from cells.
+            let garden_click = drawn_material.as_ref().and_then(|material| {
+                garden_click_at(
+                    material.height,
+                    material.width,
+                    &material.projection,
+                    material.now,
+                    column,
+                    row,
+                )
+            });
             // Header rendering and hit-testing share one layout projection, so
             // CJK breadcrumbs, notice presence, and narrow clipping cannot move
             // an action away from its clickable cells.
             let header_action = drawn_material.as_ref().and_then(|material| {
                 home_header_action_at(width, &material.projection, column, row)
             });
-            match header_action {
-                Some(HomeHeaderAction::Director) => {
+            match (garden_click, header_action) {
+                (Some(click), _) => runtime.apply_event(AppEvent::GardenClick(click)),
+                (None, Some(HomeHeaderAction::Director)) => {
                     runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
                 }
-                Some(HomeHeaderAction::Decisions) => {
+                (None, Some(HomeHeaderAction::Decisions)) => {
                     runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
                 }
-                None => {
+                (None, None) => {
                     runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
                 }
             }
@@ -6777,7 +6844,7 @@ mod tests {
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, FsSessionWorktreeScanPort, Geometry, GitDiff,
+        FixedBackendFactory, FsSessionWorktreeScanPort, Geometry, GitDiff, IdleWatch,
         MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
@@ -6792,12 +6859,13 @@ mod tests {
         WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
         WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
         copy_terminal_selection, drain_session_completions, foreground_terminal_geometry,
-        forward_live_terminal_input, handle_terminal_pointer, home_frame_material,
-        intercept_live_terminal_control, key_to_terminal_bytes, new_project_notice,
-        play_startup_splash, poll_and_project_terminals, projection_build_counts,
-        render_controller_frame, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
+        forward_live_terminal_input, garden_click_at, handle_terminal_pointer, home_frame_material,
+        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, poll_and_project_terminals,
+        projection_build_counts, render_controller_frame, render_home_material,
+        render_home_snapshot, reset_projection_build_counts, restore_open_panes,
+        retarget_director_chords, route_workspace_input_before_reducer, run as run_from_start,
+        run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -6816,9 +6884,9 @@ mod tests {
         AgentTabSlotIntent, AgentTabTargetProjection,
     };
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry, NewRequest, Overlay,
-        PendingToken, RoleEditorScope, SessionCreateIntent, SessionRoleCatalog, TabDirection,
-        Target,
+        AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
+        GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay, PendingToken,
+        RoleEditorScope, Route, SessionCreateIntent, SessionRoleCatalog, TabDirection, Target,
     };
     use crate::usecase::application::daemon_backend::{
         Completions, DaemonBackend, DecisionPort as BackendDecisionPort, ReopenAgentRequest,
@@ -7114,6 +7182,213 @@ mod tests {
                 at,
             }
         );
+    }
+
+    /// The screen saver's deadline must survive an Agent working all night and
+    /// end the moment a person touches the terminal, so the classification of
+    /// "was that a user?" is pinned over the whole key vocabulary.
+    #[test]
+    fn only_a_real_interaction_postpones_the_screen_saver() {
+        let interactions = [
+            Key::Up,
+            Key::Down,
+            Key::Left,
+            Key::Right,
+            Key::Home,
+            Key::End,
+            Key::Delete,
+            Key::LineStart,
+            Key::LineEnd,
+            Key::SelectLeft,
+            Key::SelectRight,
+            Key::SelectHome,
+            Key::SelectEnd,
+            Key::Enter,
+            Key::Backspace,
+            Key::Tab,
+            Key::Escape,
+            Key::Quit,
+            Key::CtrlQ,
+            Key::CtrlD,
+            Key::Char('g'),
+            Key::Paste("pasted".to_owned()),
+            Key::Click { column: 4, row: 9 },
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 4,
+                row: 9,
+            }),
+            Key::TerminalCopy { fallback: vec![3] },
+            Key::Passthrough(vec![b'x']),
+            Key::Live(LiveTerminalAction::ScrollUp),
+            Key::Management {
+                action: AppKey::Escape,
+                passthrough: vec![0x1b],
+            },
+            // A resize is the user dragging a window edge, and the design has it
+            // both close the garden and restart the timer.
+            Key::Resize,
+        ];
+        for key in interactions {
+            assert!(is_user_activity(&key), "{key:?} should postpone the garden");
+        }
+        // The one wake-up that is not a person: frame ticks, drained daemon
+        // events, and Agent output all arrive as `Other`.
+        assert!(!is_user_activity(&Key::Other));
+    }
+
+    /// The watch is a pure elapsed-time fold: the shell reduces its monotonic
+    /// clock to a `Duration`, so nothing below it reads a clock at all.
+    #[test]
+    fn the_idle_watch_measures_from_the_last_interaction() {
+        let ms = std::time::Duration::from_millis;
+        let mut watch = IdleWatch::new(ms(1_000));
+
+        assert_eq!(watch.observe(&Key::Other, ms(1_500)), ms(500));
+        assert_eq!(watch.observe(&Key::Other, ms(9_000)), ms(8_000));
+        // An interaction restarts the measurement in the same call.
+        assert_eq!(watch.observe(&Key::Char('a'), ms(9_000)), ms(0));
+        assert_eq!(watch.observe(&Key::Other, ms(9_400)), ms(400));
+        // A clock that appears to run backwards (it cannot, but the arithmetic
+        // must not panic if it ever did) reads as "no idle time".
+        assert_eq!(watch.observe(&Key::Other, ms(0)), ms(0));
+    }
+
+    /// The whole automatic path, minus the single thing that is genuinely the
+    /// OS's — the monotonic clock the shell injects. Frame wake-ups accumulate
+    /// idle time, an interaction throws it away, the threshold opens the
+    /// overlay, the very next frame *is* the garden, and a click resolved
+    /// against that frame's own plots lands in the rabbit's Closeup.
+    #[test]
+    fn an_idle_home_grows_a_garden_whose_usagi_is_one_click_from_its_closeup() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/alpha"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions = vec![ProjectedSession::from_record(session, &record)];
+        let root = PathBuf::from("/tmp/demo");
+        let no_diffs = BTreeMap::new();
+        let clock = now();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let material = |runtime: &WorkspaceRuntime| {
+            home_frame_material(
+                24,
+                80,
+                runtime,
+                "demo",
+                &root,
+                &sessions,
+                None,
+                health(),
+                &no_diffs,
+                None,
+                None,
+                clock,
+            )
+        };
+
+        // The composition root's frame period. Idle time is measured in these,
+        // and driving them one by one is what proves the threshold is reached
+        // rather than assumed.
+        let frame = std::time::Duration::from_millis(16);
+        let mut watch = IdleWatch::new(std::time::Duration::ZERO);
+        let mut elapsed = std::time::Duration::ZERO;
+        let wake = |runtime: &mut WorkspaceRuntime,
+                    watch: &mut IdleWatch,
+                    elapsed: &mut std::time::Duration,
+                    key: &Key| {
+            *elapsed += frame;
+            let idle = watch.observe(key, *elapsed);
+            let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
+        };
+
+        // Four minutes of ticks — an Agent streaming output the whole time —
+        // and Home is still Home.
+        let four_minutes = GARDEN_IDLE_THRESHOLD
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("the threshold is longer than a minute");
+        while elapsed < four_minutes {
+            wake(&mut runtime, &mut watch, &mut elapsed, &Key::Other);
+        }
+        assert_eq!(runtime.state().overlay(), None);
+
+        // One keypress and the four minutes are gone.
+        wake(&mut runtime, &mut watch, &mut elapsed, &Key::Down);
+        let restarted_at = elapsed;
+        while elapsed < restarted_at + GARDEN_IDLE_THRESHOLD {
+            assert_eq!(
+                runtime.state().overlay(),
+                None,
+                "the garden opened {:?} after the last interaction",
+                elapsed.saturating_sub(restarted_at)
+            );
+            wake(&mut runtime, &mut watch, &mut elapsed, &Key::Other);
+        }
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+
+        // The next frame is the garden itself, drawn full width over Home.
+        let garden = material(&runtime);
+        let rows = render_home_material(&garden);
+        let text = rows.join("\n");
+        assert_eq!(rows.len(), 24);
+        assert!(text.contains("Garden · click a usagi to visit · any key to return"));
+        assert!(text.contains("alpha"));
+
+        // Every cell of the frame resolves through the same layout that drew it,
+        // so the rabbit is reachable by clicking where it is drawn and the rest
+        // of the garden is a wake-up.
+        let resolve = |column: u16, row: u16| {
+            garden_click_at(
+                garden.height,
+                garden.width,
+                &garden.projection,
+                garden.now,
+                column,
+                row,
+            )
+        };
+        let plot = (0..24)
+            .flat_map(|row| (0..80).map(move |column| (column, row)))
+            .find(|&(column, row)| resolve(column, row) == Some(GardenClick::Visit(session)))
+            .expect("the garden draws a clickable usagi for its session");
+        assert_eq!(resolve(0, 23), Some(GardenClick::Dismiss));
+
+        let _ = runtime.apply_event(AppEvent::GardenClick(
+            resolve(plot.0, plot.1).expect("the click landed on the garden"),
+        ));
+        assert_eq!(runtime.state().active(), Some(session));
+        assert!(matches!(
+            runtime.state().route(),
+            Route::Home(HomeMode::Closeup)
+        ));
+        // Home is back: the frame after the visit is no longer the garden.
+        let after = render_home_material(&material(&runtime)).join("\n");
+        assert!(!after.contains("any key to return"));
+    }
+
+    /// Any other press is the documented wake-up: it is consumed, and the Home
+    /// from before the screen saver comes back with no target changed.
+    #[test]
+    fn a_click_beside_the_usagi_only_wakes_the_garden() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+
+        let before = runtime.state().active();
+        let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
+        assert_eq!(runtime.state().overlay(), None);
+        assert_eq!(runtime.state().active(), before);
     }
 
     fn ws(name: &str) -> Workspace {

@@ -1706,7 +1706,39 @@ pub enum AppEvent {
         row: u16,
         at: std::time::Duration,
     },
+    /// Time elapsed since the last *user* interaction, measured by the shell on a
+    /// monotonic clock. The reducer holds no clock of its own (design
+    /// `document/proposals/15-session-garden.md`): it only compares the injected
+    /// duration against [`GARDEN_IDLE_THRESHOLD`] and opens the screen saver when
+    /// the Home underneath is eligible.
+    ///
+    /// Ticks, daemon/backend events, and Agent output are not interactions and
+    /// never reach this event, so a workspace whose Agents are busy still shows
+    /// the garden once its *user* has stopped touching the keyboard.
+    IdleElapsed(std::time::Duration),
+    /// A click on the open Garden, already resolved against the frame's own
+    /// hitboxes by the presentation layer. The reducer never sees the cell, so
+    /// CJK labels, a resize, or the plot cap cannot move a rabbit away from the
+    /// session it draws.
+    GardenClick(GardenClick),
 }
+
+/// What a click on the open Garden landed on.
+///
+/// Resolved by presentation from the `SessionId`-tagged rectangles the garden
+/// renderer returns for the frame currently on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GardenClick {
+    /// A rabbit's plot. Its stable session becomes selected/active and its
+    /// existing Closeup opens.
+    Visit(SessionId),
+    /// Anywhere else in the garden. The click is consumed and the Home from
+    /// before the screen saver comes back.
+    Dismiss,
+}
+
+/// How long Home must go without a user interaction before the Garden opens.
+pub const GARDEN_IDLE_THRESHOLD: std::time::Duration = std::time::Duration::from_mins(5);
 
 impl From<RuntimeEvent<BackendEvent>> for AppEvent {
     fn from(event: RuntimeEvent<BackendEvent>) -> Self {
@@ -2764,10 +2796,23 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::Resize { width, height } => {
+            // The frame loop re-applies the real terminal size every frame, so
+            // this arrives as a *level*. Only its edge closes the Garden: a
+            // screen saver must not survive a resize the user just performed,
+            // but an unchanged re-sample is inert.
+            if state.overlay == Some(Overlay::Garden)
+                && state
+                    .size
+                    .is_some_and(|previous| previous != (width, height))
+            {
+                state.overlay = None;
+            }
             state.size = Some((width, height));
             Vec::new()
         }
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
+        AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
+        AppEvent::GardenClick(click) => update_garden_click(state, click),
         // A live input is classified by `LiveInputClassifier` before reaching
         // this reducer. It still clears a pending grace, because grace is an
         // event-based one-shot rather than a timeout.
@@ -4347,6 +4392,58 @@ fn update_pointer(
         state.pending_session_click = Some((session, at));
         Vec::new()
     }
+}
+
+/// Open the Garden once Home has been idle for [`GARDEN_IDLE_THRESHOLD`].
+///
+/// The duration is injected (see [`AppEvent::IdleElapsed`]), so this reducer
+/// stays a pure comparison and needs no clock to test.
+fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect> {
+    if elapsed >= GARDEN_IDLE_THRESHOLD && garden_may_auto_open(state) {
+        state.overlay = Some(Overlay::Garden);
+    }
+    Vec::new()
+}
+
+/// Whether an idle Home may be covered by the screen saver.
+///
+/// Any open overlay keeps the garden away: that is what protects a confirmation
+/// dialog, an unsent form draft, and the read-only surfaces alike, without this
+/// predicate having to enumerate them. The Director drawer is excluded for the
+/// same reason. Everything left — ordinary Switch, and a Closeup with no overlay
+/// in front of it, live terminal included — is eligible, and the daemon-owned
+/// processes behind it keep running.
+///
+/// Terminal size is *not* checked here. The minimum the garden needs is a
+/// renderer layout fact owned by presentation, which suppresses the event
+/// entirely on a terminal too small to draw a garden (`presentation::views::
+/// workspace::garden_fits`).
+fn garden_may_auto_open(state: &AppState) -> bool {
+    state.overlay.is_none() && !state.director_drawer_open
+}
+
+/// Reduce a click the presentation layer already resolved against the garden's
+/// own hitboxes.
+///
+/// Every click closes the Garden; only a rabbit also activates a session. A
+/// session that disappeared from the snapshot between the frame and the press is
+/// a stale target, so it closes the garden and does nothing else.
+fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> {
+    if state.overlay != Some(Overlay::Garden) {
+        return Vec::new();
+    }
+    state.overlay = None;
+    let GardenClick::Visit(session) = click else {
+        return Vec::new();
+    };
+    let selection = Selection::Target(Target::Session(session));
+    state.select_row(selection);
+    if state.selected != selection {
+        return Vec::new();
+    }
+    // The same activation the sidebar performs, including its refusal to attach
+    // an unusable checkout. The garden adds no target semantics of its own.
+    activate_selected(state)
 }
 
 /// Whether entering Closeup must open the action launcher.
@@ -7750,6 +7847,226 @@ mod tests {
                 .notice()
                 .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
         );
+    }
+
+    /// Just under the threshold nothing happens; reaching it opens the garden.
+    /// The reducer owns no clock, so the whole timer is one injected duration.
+    #[test]
+    fn the_garden_opens_only_once_home_reaches_the_idle_threshold() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+
+        let almost = GARDEN_IDLE_THRESHOLD
+            .checked_sub(std::time::Duration::from_millis(1))
+            .expect("the threshold is longer than a millisecond");
+        assert!(update(&mut state, AppEvent::IdleElapsed(almost)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+
+        // Idle keeps being reported while the garden is up; that is inert rather
+        // than a second open, and the route underneath is untouched.
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD * 4)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+    }
+
+    /// A Closeup with no overlay in front of it is eligible — including one
+    /// attached to a live terminal, which keeps running behind the garden.
+    #[test]
+    fn an_idle_closeup_is_still_eligible_for_the_garden() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        state.overlay = None;
+
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        // The garden is a layer: the route and active target behind it are the
+        // ones the wake-up returns to.
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(state.active(), Some(session));
+    }
+
+    /// Confirmations, form drafts, read-only surfaces, and the Director drawer
+    /// all stay in front: an unsent edit or a destructive prompt must never be
+    /// covered by a screen saver.
+    #[test]
+    fn a_front_surface_keeps_the_idle_garden_away() {
+        let (workspace, session, _) = ids();
+        for overlay in [
+            Overlay::Overview,
+            Overlay::Daemon,
+            Overlay::Closeup,
+            Overlay::QuitConfirmation,
+            Overlay::Notes,
+            Overlay::Environment,
+            Overlay::Roles,
+            Overlay::CreateSession,
+            Overlay::Decisions,
+            Overlay::Prs,
+            Overlay::Preview,
+            Overlay::CreateSessionError,
+            Overlay::Garden,
+        ] {
+            let mut state = sized_home(workspace, vec![session], 100, 30);
+            state.overlay = Some(overlay);
+            let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+            assert_eq!(
+                state.overlay(),
+                Some(overlay),
+                "{overlay:?} was replaced by the garden"
+            );
+        }
+
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert!(state.director_drawer_open());
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        assert_eq!(state.overlay(), None);
+        assert!(state.director_drawer_open());
+    }
+
+    /// Resize arrives as a per-frame level, so only its edge closes the garden.
+    #[test]
+    fn a_resize_closes_the_garden_but_a_resampled_size_does_not() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        state.overlay = Some(Overlay::Garden);
+
+        let _ = update(
+            &mut state,
+            AppEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Resize {
+                width: 120,
+                height: 30,
+            },
+        );
+        assert_eq!(state.overlay(), None);
+
+        // A resize with no garden up is the plain size update it always was.
+        let _ = update(
+            &mut state,
+            AppEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.size, Some((80, 24)));
+    }
+
+    /// A rabbit is a stable session: clicking it closes the garden and enters
+    /// that session's existing Closeup, with no double-click wait.
+    #[test]
+    fn clicking_a_usagi_visits_its_session_in_one_press() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Visit(second))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(second));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        // The garden is gone and the Closeup that opened is the ordinary one:
+        // a target owning no pane yet lands on its action launcher.
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+    }
+
+    /// Everything else in the garden is a wake-up: consume the press, restore
+    /// the Home from before the screen saver, and change no target.
+    #[test]
+    fn clicking_beside_the_usagi_only_returns_home() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+        let (selected, active) = (state.selected(), state.active());
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.selected(), selected);
+        assert_eq!(state.active(), active);
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+    }
+
+    /// The press and the snapshot race. A session that left the workspace
+    /// between the frame and the click is a stale target: close the garden, run
+    /// nothing.
+    #[test]
+    fn a_click_on_a_vanished_usagi_only_closes_the_garden() {
+        let (workspace, session, gone) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let (selected, active) = (state.selected(), state.active());
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Visit(gone))).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.selected(), selected);
+        assert_eq!(state.active(), active);
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+    }
+
+    /// A click resolved against a frame the garden has since left behind must
+    /// not activate anything.
+    #[test]
+    fn a_garden_click_without_an_open_garden_is_inert() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let route = state.route();
+
+        for click in [GardenClick::Visit(session), GardenClick::Dismiss] {
+            assert!(update(&mut state, AppEvent::GardenClick(click)).is_empty());
+            assert_eq!(state.overlay(), None);
+            assert_eq!(state.route(), route);
+        }
+    }
+
+    /// A Failed checkout is not usable, so the garden's visit refuses to attach
+    /// it exactly as the sidebar's activation does. The garden adds no target
+    /// semantics of its own.
+    #[test]
+    fn visiting_a_failed_usagi_selects_it_without_attaching_it() {
+        let (workspace, session, _) = ids();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycle::Failed,
+            )]))),
+        );
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Visit(session))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
     }
 
     #[test]
