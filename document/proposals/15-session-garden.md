@@ -220,9 +220,13 @@ production 配線より先に確認するための presentation-only surface で
    入力消費、overlay 復帰を固定する。
 4. `document/03-tui.md` に実装済みの入力・縮退・状態対応を移し、本提案は設計判断だけに縮約する。
 
-ここまでが実装済みである。残りは lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、
-`Deleting` の段階的 dim）、`USAGI_REDUCE_MOTION` の production 配線、選択中 session の `>` marker と nameplate
-強調、`Failed` の safe failure summary である。
+ここまでが実装済みで、うさぎは現在まだ session 単位である。残りは次のとおり。
+
+5. [うさぎは agent、区画は session](#うさぎは-agent区画は-session) の描画素材へ移す。集約後の phase ではなく
+   session に属する agent ごとの phase を描き、並び順・表示上限・`+N` の畳み込みを追加する。
+6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
+7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
+8. 選択中 session の `>` marker と nameplate 強調、`Failed` の safe failure summary を追加する。
 
 受け入れ条件は次のとおりである。
 
