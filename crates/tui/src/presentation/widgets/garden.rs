@@ -653,6 +653,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "available sessions use agent projection")]
+    fn lifecycle_plot_rejects_an_available_session() {
+        let _ = super::lifecycle_plot(SessionLifecycle::Available);
+    }
+
+    #[test]
     fn every_lifecycle_and_agent_phase_states_itself_in_text() {
         let cases = [
             (SessionLifecycle::Creating, AgentPhase::Absent, "growing"),

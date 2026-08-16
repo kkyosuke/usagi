@@ -3510,7 +3510,7 @@ mod tests {
         // controller が集約する phase をすべて踏みつつ、Garden は runtime ごとの
         // phase を失わず投影することを固定する。
         let phases = [
-            None,
+            Some(AgentPhase::Absent),
             Some(AgentPhase::Ready),
             Some(AgentPhase::Running),
             Some(AgentPhase::Waiting),
