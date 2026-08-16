@@ -1,21 +1,20 @@
 ---
 number: 671
-title: backlog: origin/main e889a6be v2 全体コードレビュー
+title: backlog: origin/main 1ef8a5cd v2 全体コードレビュー
 status: done
 priority: high
 labels: [review, v2, backlog, epic]
 dependson: []
-related: [672, 673, 675, 676, 677, 678, 679, 680]
+related: [672, 673, 675, 676, 677, 678, 679, 680, 686]
 created_at: 2026-08-13T00:02:18.580332+00:00
-updated_at: 2026-08-13T23:20:17.246881+00:00
+updated_at: 2026-08-16T22:32:31.476521+00:00
 ---
 
 ## レビュー基点
 
-- reviewed commit: `e889a6be0c681820db36bf28f8f5f876f8ad22ab`
-- reviewed at: 2026-08-13
-- commit timestamp: `2026-08-14T07:28:49+09:00`（現在日 2026-08-13 より未来の metadata。review 基点は取得できた object ID で固定する）
-- 対象: usagi v2 全体（Rust source 308 files / 約233,054 lines。tests・scripts・CI・config を含む監査集合は 367 files / 約243,790 lines）
+- reviewed commit: `1ef8a5cd6deeb91623034ac49f1b45277b6e032e`
+- reviewed at: 2026-08-16
+- 対象: usagi v2 全体（Rust source 310 files / 約234,133 lines。tests・examples・scripts・CI・config を含む監査集合は 378 files / 約255,071 lines）
 - 観点: 正しさ、resource bound、durability、process/PTY lifecycle、authority/fence、IPC/MCP schema、TUI reducer/input/rendering/worker、install/CI
 
 ## 確認領域
@@ -40,6 +39,7 @@ updated_at: 2026-08-13T23:20:17.246881+00:00
 | medium | #678 | supervisor store / scheduler history を query・snapshot・journal・runtime metadata 全体で bounded にする |
 | medium | #679 | PR refresh の `gh` child を bounded output と process-group cleanup で完了・回収する |
 | medium | #680 | system clipboard helper の wait を deadline / cleanup 付きにする |
+| medium | #686 | narrow Garden と key / pointer / wheel / resize の foreground input ownership を一致させる |
 
 ## 確定した根拠
 
@@ -51,6 +51,7 @@ updated_at: 2026-08-13T23:20:17.246881+00:00
 - `crates/core/src/infrastructure/store/supervisor.rs::events` は page 指定前に journal 全件を読む。journalだけでなく snapshot の `applied_events`、scheduler の start/wake reservations、terminal run自体にもretentionがない。
 - `src/runtime/daemon.rs::GhProcess` は 5 秒 timeout 後に parent を kill/reap するが stdout byte cap と process group ownershipを持たない。
 - `src/runtime/clipboard.rs` は TUI render thread 上で clipboard child の stdin writeと `wait()` を無期限に行い、helperがhangすると入力・描画もhangする。
+- 手動 Garden は controller で無条件に overlay を開く一方、presentation だけが 64×14 未満で Home へ fallback するため invisible overlay が残る。pointer / wheel / resize も key と同じ wake-up owner へ到達せず、documented foreground input contract と不整合である。
 
 ## 問題なし／既存対策を確認した事項
 
