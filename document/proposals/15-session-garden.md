@@ -2,7 +2,7 @@
 
 > [設計提案一覧](README.md) ｜ 関連仕様: [TUI](../03-tui.md) ｜ 実装 issue: #674
 
-session を庭にいるうさぎとして表す、Home の screen saver UI を提案する。一定時間操作がなければ Garden が
+session を庭の区画、その agent を区画にいるうさぎとして表す、Home の screen saver UI を提案する。一定時間操作がなければ Garden が
 自動的に現れ、入力すると元の画面へ戻る。目的は session 数や実行状態を一覧表より速く把握できることと、
 `usagi` らしさを操作の邪魔にならない範囲で強めることである。
 
@@ -48,28 +48,89 @@ daemon-owned process は背面で動き続ける。
 `Role::Feature`、選択中の nameplate と `>` は `Role::Accent`、失敗は `Role::Danger` で描く。色を見分けられない
 場合にも `>`、状態ラベル、顔の違いで判別できる。
 
-## 状態と動き
+## うさぎは agent、区画は session
 
-描画は現在の `ProjectedSession.lifecycle` と controller が集約済みの Agent phase だけから導出する。見た目の
-ために daemon schema、永続 session record、IPC event を増やさない。
+**1 区画（plot）= 1 session、1 うさぎ = 1 agent** とする。session は「場所」であり、実際に作業しているのは
+agent なので、動くものを agent に対応させる。
 
-| projection | 庭での表現 | animation |
+初期案は 1 session = 1 うさぎで、controller が集約した Agent phase を 1 つだけ描いていた。1 session は
+agent を複数持てる（controller の runtime 一覧を session で絞り込む）ため、この集約は次の 2 つを失う。
+
+- **何羽いるか**。agent が 1 つの session と 5 つの session が同じ絵になる。
+- **動いている agent**。集約は `Done > Waiting > Running > Ready > Absent` の最大ランクを採るため、
+  「1 つ終了・1 つ実行中」の session は `Done` に畳まれ、**休んでいるうさぎとして描かれる**。実行中の作業が
+  庭から消える。
+
+この畳み込みは sidebar の 1 行要約としては妥当である（終わった agent は「見に来て」という知らせなので
+最上位でよい）。しかし Garden の目的は実行状態を一覧表より速く把握することなので、ここでは逆効果になる。
+したがって Garden は集約後の値ではなく、**session に属する agent ごとの phase** を描画素材にする。
+
+見た目のために daemon schema、永続 session record、IPC event は増やさない。agent ごとの phase は
+controller が既に持っている runtime 一覧から導出する。
+
+### 状態の対応
+
+session の lifecycle は区画（nameplate と地面）が表し、agent の phase は個々のうさぎが表す。
+
+| 区画（session lifecycle） | 庭での表現 |
+|---|---|
+| `Available` | 通常の区画。うさぎが居る |
+| `Creating` | 土から耳だけ見える。agent はまだ居ない |
+| `Failed` | 伏せて止まる。短い safe failure label を添える |
+| `Deleting` | 奥へ帰る。位置は固定し、段階的に dim にする |
+
+| うさぎ（agent phase） | 庭での表現 | animation |
 |---|---|---|
-| `Available` + Agent `Running` | 前へ跳ねる | 低い姿勢 → 空中 → 着地の 3 pose |
-| `Available` + Agent `Waiting` | 座って首をかしげる | `?` と耳をゆっくり交互表示 |
-| `Available` + Agent `Ready` / Agent 無し | 草のそばで休む | ときどき瞬きする |
-| `Creating` | 土から耳だけ見える | 2 pose の出現 animation |
-| `Failed` | 伏せて止まる | animation しない。短い safe failure label を添える |
-| `Deleting` | 奥へ帰る | 位置は固定し、段階的に dim にする |
+| `Running` | 前へ跳ねる | 低い姿勢 → 空中 → 着地の 3 pose |
+| `Waiting` | 座って首をかしげる | `?` と耳をゆっくり交互表示 |
+| `Ready` / `Absent` | 草のそばで休む | ときどき瞬きする |
+| `Done` | 座って待つ | animation しない |
 
-motion は状態の意味を補助するだけにし、状態ラベルを省かない。画面全体が忙しくならないよう、同時に上下へ
-動くのは `Running` のうさぎだけとする。`Waiting` / idle の耳と瞬きは既存 mascot と同程度の低頻度にする。
+agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見た目になる。複数持つ session だけが複数羽になる。
+
+```text
+（モック。実装では幅が決定的な ASCII を使う）
+
+        session-auth  3
+       2 run · 1 wait
+    /)/)    /)/)    /)/)
+   ( o.o)  ( o.o)  ( -.-)?
+    / > <   / > <  c(")(")
+ --v-------v-----------v-----
+```
+
+状態ラベル（`2 run · 1 wait`）は色に依存せず内訳を読めるようにするためのもので、省かない。
+
+### 並び順と表示上限
+
+区画の幅は固定なので、横に並べられるうさぎの数には上限がある。上限を超えた分は区画に `+N` と畳む。
+
+- 並び順は **注目度（`Waiting` を先頭）→ stable な agent identity** の順で決める。phase が同じうさぎが
+  frame ごとに入れ替わると追えなくなるため、tie-break には runtime の stable ID を使う。
+- 畳むのは末尾（注目度の低いほう）からとする。人の入力を待っている agent は必ず見える。
+
+### 動きの量
+
+同時に上下へ動くのは `Running` のうさぎだけとし、`Waiting` / idle の耳と瞬きは既存 mascot と同程度の低頻度に
+する。agent 単位にすると跳ねるうさぎが増えうるため、既存の stable ID 由来の phase offset を効かせて、
+全羽が揃って跳ねないようにする。
+
+### この案で決めていないこと
+
+- **click の粒度**。現在の hitbox は区画 = session で、遷移先も session の Closeup に一本化している
+  （[起こし方とクリック遷移](#起こし方とクリック遷移)）。うさぎ単位の hitbox にして「その agent の tab へ入る」
+  ことは自然な拡張だが、遷移先が増えるため別途決める。
+- **workspace root の agent**。runtime は session に属さないもの（root 実行）を表現できる。庭は session の
+  区画しか持たないため、root の agent をどこに描くか、あるいは描かないかは決めていない。
+- **agent ごとの表示名**。現在の runtime 参照は表示用の label を持たないため、うさぎは名前ではなく状態と
+  位置で区別する。名前を出すなら projection を広げる判断が要る。
 
 ## 決定的な配置
 
 うさぎの位置をランダムにすると refresh のたびに session が移動して追いにくい。配置は次の純粋関数で決める。
 
-1. 描画可能領域を、うさぎ 1 羽と nameplate が収まる固定幅の plot に分割する。
+1. 描画可能領域を、nameplate と表示上限ぶんのうさぎが収まる固定幅の plot に分割する。plot の大きさは
+   agent の数で変えない（区画ごとに幅が変わると grid の決定性と hit test が崩れるため）。
 2. controller が持つ session 順を plot へ左上から割り当てる。
 3. stable `SessionId` の先頭 bytes を animation phase の offset にだけ使い、全羽が同時に跳ねないようにする。
 4. `tick`、projection、領域サイズが同じなら、常に同じ frame を返す。
@@ -124,7 +185,8 @@ daemon lifecycle / Agent phase
  pure garden renderer(tick, size, reduced_motion) ──► hitboxes(SessionId, rect)
 ```
 
-`GardenSession` は表示に必要な `id`、safe label、lifecycle、Agent phase、safe failure summary だけを持つ。
+`GardenSession` は表示に必要な `id`、safe label、lifecycle、**その session に属する agent ごとの phase**、
+safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、並び順の tie-break に使う。
 filesystem path、provider-native ID、terminal output、raw error は renderer に渡さない。
 
 ## UI sample
@@ -164,6 +226,10 @@ production 配線より先に確認するための presentation-only surface で
 - 同じ入力 snapshot / tick / size は byte-for-byte 同じ frame になる。
 - すべての行が端末幅以内で、CJK の session label も途中で壊れない。
 - 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストする。
+- 1 session に複数 agent があるとき、羽数と各 agent の phase が描かれ、集約によって実行中の agent が
+  休んでいる姿に化けない。
+- 表示上限を超えた agent は `+N` に畳まれ、`Waiting` の agent は畳まれずに必ず見える。
+- agent の並びは phase と stable な runtime identity だけで決まり、同じ素材の frame では入れ替わらない。
 - animation の pose が変わらない tick では frame material も変わらない。
 - 5 分未満では Garden を開かず、5 分到達時に eligible な Home だけで開く。
 - backend event と terminal output は idle deadline を延長せず、user input と resize は延長する。
