@@ -1,13 +1,13 @@
 ---
 number: 689
 title: fix(daemon): client worker の retirement が shutdown(2) の起こし損ねで無期限に hang する
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, lifecycle, bug]
 dependson: []
 related: [682, 683]
 created_at: 2026-08-16T22:56:07.535668+00:00
-updated_at: 2026-08-16T22:56:07.535668+00:00
+updated_at: 2026-08-16T23:36:17.935389+00:00
 ---
 
 ## 問題・影響
@@ -75,29 +75,41 @@ Darwin の AF_UNIX では、この起こしが**取りこぼされることが�
 
 ## 対象責務
 
-`shutdown(2)` の起こしを**唯一の手段にしない**。
+`shutdown(2)` の起こしを**唯一の手段にしない**。retirement はまず flag を公開してから socket を shutdown し、
+worker は次の frame を待つ read を毎回 bounded な readiness 待ちで囲って、待ちが空振りするたびに flag を確認する。
 
-- worker が park する read に timeout を持たせ（`SO_RCVTIMEO` 相当）、定期的に起きて
-  retirement 要求を確認して自分で抜ける。起こしの取りこぼしが「遅い」に縮退し、hang にならない。
-- `retire_workers` の join に上限を持たせ、超えたら worker を名指しして報告する。
-  barrier が黙って止まる状態を残さない（`RetireReport` に「起こしたが返ってこなかった」を追加する）。
+### なぜ receive timeout ではなく `poll(2)` か
 
-いずれも「観測できるまで駆動し、上限で失敗させる」形であり、固定 sleep や deadline 延長ではない。
+当初は socket の receive timeout（`SO_RCVTIMEO`）で足りると考えたが、**足りなかった**。
+実測（同じ socketpair・同じ dup 関係を再現した最小プログラム、各 1000 回）:
 
-## 非対象
+| 構成 | park した回数 |
+|---|---|
+| receive timeout なし（従来） | 3 / 1000 |
+| receive timeout あり、shutdown は**peer**側の複製 | 0 / 1000 |
+| receive timeout あり、shutdown は**同じ socket**の複製（＝production の形） | 2 / 1000 |
+| `poll(2)` で readiness を先に判定（採用案） | **0 / 6000** |
 
-- この test の書き換え。test は product の契約（"Retirement shuts the retained half down, which is
-  what lets the join return. A test that hung here would be reporting a real defect."）を正しく
-  主張しており、**hang しているのは defect が実在するからである**。test 側を緩めない。
+つまり、socket が shutdown 済みの状態では receive timeout も尊重されない。待ちを socket ではなく
+`poll(2)` 側に置き、**何も無い socket で `recv` に入らない**ようにして初めて解消する。
 
-## 未確認
+なお最初の再現実験が 0/2000 で「再現しない」と出たのは、その実験自身が `set_read_timeout` を
+設定していて、偶然この修正の一部を適用していたためである。
 
-- Linux（CI の ubuntu-latest）で同じ取りこぼしが起きるかは未確認。手元の再現はすべて macOS。
-  CI で `full-test` が hang した実績はまだ観測していない。ただし production の対象 platform は
-  macOS を含むため、platform 依存であっても直す価値がある。
+### write 側
+
+対象外とした。worker が無期限に park するのは「次の frame を待つ read」であって write ではなく、
+write を非 blocking 化すると同じ open file description を共有する reader 側の複製にも `O_NONBLOCK` が
+波及して frame 書き込みが壊れる。write の挙動は従来どおりで、回帰は無い。
+
+### bounded join
+
+入れなかった。readiness 待ちが flag を必ず観測するため join は必ず返る。上限を足すと、
+「起きなかった worker を abandon するのか」という barrier の安全性契約（全 worker を必ず join する）を
+変える判断が要り、しかもその分岐を決定的にテストできない。本 issue の欠陥は待ち方の問題なので、待ち方で閉じる。
 
 ## 受入条件
 
-- [ ] 上の 400 回ループで hang が 0 回。
-- [ ] `retire()` が、起こしに失敗した worker を上限つきで検出し、報告に残す。
-- [ ] daemon の shutdown / rollover collection の契約（全 worker を必ず join する）は弱まっていない。
+- [x] 上の 400 回ループで hang が 0 回（修正前は 6 回）。
+- [x] readiness 待ちが idle policy になっていない（park を観測してから frame を書き、正しく配送されることを test で固定）。
+- [x] daemon の shutdown / rollover collection の契約（全 worker を必ず join する）は弱まっていない。

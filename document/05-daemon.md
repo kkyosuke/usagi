@@ -304,6 +304,14 @@ accept worker は exit guard を持ち、panic または unexpected exit で sha
 OS signal と同じ fence を監視するため、worker を失ったまま singleton lock と record を永久保持しない。main は wake 後に
 join failure を観測しても独立 cleanup token から retirement を試み、cleanup 成功後だけ record を消去する。
 
+client worker の retirement barrier は `shutdown(2)` の起こしに依存しない。retirement は**まず flag を公開してから**
+socket を shutdown し、worker 側は次の frame を待つ read を毎回 `poll(2)` の bounded な readiness 待ちで囲って、
+待ちが空振りするたびにその flag を確認する。これは idle policy ではない（空振りは透過的に再試行され、idle な
+subscription の挙動は変わらない）。`shutdown(2)` だけに頼れないのは、Darwin では AF_UNIX socket の複製に対する
+`shutdown(2)` が `Ok` を返しながら、すでに `recv` で park している worker を返さないことがあり、しかもその状態では
+socket の receive timeout も尊重されないためである。起こしを取りこぼすと barrier が join で無期限に止まり、daemon は
+shutdown も rollover も完了できなくなる。readiness 待ちは、その取りこぼしを「1 tick 遅い」に縮退させる。
+
 `serve` は endpoint 公開と worker spawn より前に SIGINT / SIGTERM handler と同期 wait を準備する。handler は signal
 受理時点で shared shutdown flag を立てるため、重い endpoint 初期化中に停止要求が届いても、その後に起動する accept loop は
 新規 connection を受理しない。handler は process の signal mask を変更せず、その後に起動する child process へ blocked signal を
