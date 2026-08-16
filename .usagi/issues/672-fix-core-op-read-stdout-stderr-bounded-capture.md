@@ -47,6 +47,6 @@ PATH 上の `op` が壊れている、wrapper に置換されている、また�
 - `cargo test -p usagi-core`（918 unit + 6 integration + 1 doc）
 - `cargo test -p usagi-core infrastructure::env_resolver`（17 tests）
 - `cargo test --workspace --quiet`
-- `ruby scripts/coverage-off-lint.rb`（227 exclusions）
+- `ruby scripts/coverage-off-lint.rb`（228 exclusions。#689 の retirement poll 追加後の最新 main）
 - `scripts/recommend-tests.sh origin/main`
-- `lychee --config lychee.toml --no-progress ...`（1790 links / 0 errors）
+- `lychee --config lychee.toml --no-progress ...`（1799 total / 0 errors）
