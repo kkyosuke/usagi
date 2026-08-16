@@ -14,13 +14,11 @@ Garden は session の lifecycle や Agent phase を所有しない。daemon-aut
 Garden は Home の一時的な全幅レイヤーとして開く。常駐 route の Switch / Closeup は増やさず、背面の route、
 active session、pane、terminal subscription を変えない。Garden を閉じると、表示前と同じ Home へ戻る。
 
-既定の idle threshold は **5 分**とする。キー、paste、mouse button、wheel、terminal resize のいずれかを受けるたびに
-monotonic clock 上の最終操作時刻を更新する。tick、daemon/backend event、Agent/terminal 出力は利用者の操作ではないため
-idle timer を延長しない。これにより Agent が動き続けていても、人が操作していなければ Garden を表示できる。
-
-ただし、確認 modal、編集中の form、Director drawer が前面にある間は自動表示しない。未送信入力や destructive action の
-確認を Garden で覆わないためである。通常の Switch と、overlay のない Closeup（live terminal を含む）は自動表示の対象とし、
-daemon-owned process は背面で動き続ける。
+既定の idle threshold は **5 分**とする。閾値と、どの入力が idle を延ばし・どの surface が自動表示を止めるかは
+実装済みの仕様であり、[3. TUI#自動表示](../03-tui.md#自動表示) が正本である。ここでの設計判断は「idle を
+*利用者の操作*だけで測る」ことにある。tick、daemon/backend event、Agent/terminal 出力を延長に数えないため、
+Agent が動き続けていても人が操作していなければ Garden を表示できる。逆に未送信入力や destructive action の
+確認は覆えないので、前面の overlay と Director drawer は自動表示を止める。
 
 ```text
  usagi / my-project                                      3 sessions · 1 running
@@ -140,20 +138,19 @@ session が plot 数を超える場合は末尾を `+ N more in session list` �
 
 ## 起こし方とクリック遷移
 
-- **うさぎを single click**: その plot に束縛した stable `SessionId` を active / selected にして Garden を閉じ、
-  既存 Closeup へ入る。double click 待ちは入れず、screen saver 上では 1 回で訪問できる。
-- **うさぎ以外を click**: click を消費して Garden を閉じ、表示前の Home へ戻る。
-- **任意の key / paste / wheel**: 最初の入力を wake-up として消費し、表示前の Home へ戻る。入力を背面の terminal や
-  form へ渡さない。`Ctrl-C` / `Ctrl-Q` も最初の 1 回は終了操作にせず Garden を閉じる。
-- **terminal resize**: Garden を閉じて idle timer を reset する。
-- **session が 0 件の Garden**: 空の庭と `No sessions in the garden` を表示し、通常の wake-up だけを受ける。
+入力ごとの挙動は実装済みで、[3. TUI#起こし方とクリック遷移](../03-tui.md#起こし方とクリック遷移) が正本である。
+設計判断は次の 3 点にある。
 
-plot の hitbox は renderer と同じ layout 関数が返す `SessionId` 付き rectangle を使う。controller が画面座標から
-session 順を再計算しないため、CJK label、端末 resize、表示上限によって click target がずれない。click と同時に
-snapshot から session が消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
+- **最初の入力は wake-up として消費する**。`Ctrl-C` / `Ctrl-Q` も最初の 1 回は終了操作にしない。見えていない
+  terminal や modal へ意図しない入力を通さないためである。
+- **hitbox は renderer と同じ layout 関数が返す `SessionId` 付き rectangle を使う**。controller が画面座標から
+  session 順を再計算しないため、CJK label、端末 resize、表示上限によって click target がずれない。
+- **うさぎの click は double click を待たない**。screen saver 上では 1 回で訪問できるほうが速く、誤爆しても
+  遷移先は読み取り可能な既存 Closeup にすぎない。
 
 session create / remove、Agent launch などの command は Garden に複製しない。Garden から起こせる action は
-stable session への既存 Closeup 遷移だけに一本化する。
+stable session への既存 Closeup 遷移だけに一本化する。session が 0 件なら空の庭と
+`No sessions in the garden` を表示し、通常の wake-up だけを受ける。
 
 これにより Garden は「見る・選ぶ」面に留まり、かわいさのために destructive action や target semantics を
 増やさない。
@@ -170,10 +167,13 @@ stable session への既存 Closeup 遷移だけに一本化する。
 
 ## presentation 境界
 
-実装時は `crates/tui/src/presentation/widgets/garden.rs` に純粋 renderer と hitbox layout を置く。idle clock は
-interactive frame loop が monotonic time と user input を観測し、controller へ `IdleElapsed` / `WakeGarden` のような
-時刻を注入済みの event を渡す。controller 自身は `Instant::now()` を呼ばない。overlay lifetime と stable target の
-検証は `usecase/application/controller.rs`、Home frame への合成は `presentation/views/workspace.rs` が担当する。
+純粋 renderer と hitbox layout は `crates/tui/src/presentation/widgets/garden.rs` に置く。idle clock は
+interactive frame loop が monotonic time と user input を観測し、経過時間を注入済みの event として controller へ
+渡す。controller 自身は `Instant::now()` を呼ばない（sidebar の double-click 判定が既に取っている形と同じで、
+shell が `Instant` を `Duration` へ落として渡す）。overlay lifetime と stable target の検証は
+`usecase/application/controller.rs`、Home frame への合成と click の hitbox 解決は
+`presentation/views/workspace.rs` が担当する。click 解決が frame と同じ layout を使うのは、描画と hit test が
+同じ 1 つの関数呼び出しを共有しているためである。
 
 ```text
 daemon lifecycle / Agent phase
@@ -207,19 +207,26 @@ cargo run -p usagi-tui --example garden_sample
 sample は idle timer、click dispatch には接続しない。状態別 pose、複数 plot、端末幅、色と文言を
 production 配線より先に確認するための presentation-only surface である。
 
-実際の workspace で見るには、Overview の `garden` command で手動で開く（仕様は
-[3. TUI](../03-tui.md#overview-と-modal)）。自動表示（idle threshold）と click 遷移はまだ接続しておらず、
-現時点の Garden は「開く / 眺める / 最初の入力で戻る」だけである。production の庭に出る pose は controller が
+実際の workspace で見るには、Overview の `garden` command で手動で開くか、5 分間操作せずに待つ（仕様は
+[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭に出る pose は controller が
 集約した phase に従うため、`interrupted` は `Done` へ畳まれて `available` の pose になる。
 
 ## 実装順序と受け入れ条件
 
 1. 固定 snapshot から ANSI-safe / width-safe な Garden frame と hitbox を返す widget / unit test を追加する。
-2. Garden overlay、idle event、wake / single-click transition を reducer に追加し、monotonic fake clock で controller test を
+2. Garden overlay、idle event、wake / single-click transition を reducer に追加し、注入した経過時間で controller test を
    固定する。
-3. interactive frame loop の user activity 観測と Home projection を接続し、production screen graph test で自動表示、
+3. interactive frame loop の user activity 観測と Home projection を接続し、screen graph test で自動表示、
    入力消費、overlay 復帰を固定する。
 4. `document/03-tui.md` に実装済みの入力・縮退・状態対応を移し、本提案は設計判断だけに縮約する。
+
+ここまでが実装済みで、うさぎは現在まだ session 単位である。残りは次のとおり。
+
+5. [うさぎは agent、区画は session](#うさぎは-agent区画は-session) の描画素材へ移す。集約後の phase ではなく
+   session に属する agent ごとの phase を描き、並び順・表示上限・`+N` の畳み込みを追加する。
+6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
+7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
+8. 選択中 session の `>` marker と nameplate 強調、`Failed` の safe failure summary を追加する。
 
 受け入れ条件は次のとおりである。
 

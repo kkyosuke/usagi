@@ -19,6 +19,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
 - [Overview と modal](#overview-と-modal)
+- [session garden](#session-garden)
 - [PR modal と browser effect](#pr-modal-と-browser-effect)
 - [Sidebar mascot](#sidebar-mascot)
   - [daemon health indicator](#daemon-health-indicator)
@@ -704,11 +705,7 @@ Config の `Modal mode` は Overview と Closeup の command surface に共通�
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
 `config` は引数を取らず、現在開いている workspace の Config を Agent / Issue / Memory だけの overlay modal で開く。
-`garden` は引数を取らず、この workspace の session を庭のうさぎとして眺める screen saver を開く。読み取り専用の
-全幅レイヤーで、daemon 権威の lifecycle と controller が集約した Agent phase だけを絵に写す。**最初の入力を
-wake-up として消費して Home へ戻す**ため、背面の terminal や form へキーは渡らない。端末が 64 桁 × 14 行に満たない
-場合は Garden を開かず Home をそのまま保つ（操作できる一覧を screen saver で覆わない）。設計判断は
-[15. session garden](proposals/15-session-garden.md) を参照する。
+`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
@@ -798,6 +795,52 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 - 入力行が `NAME=value` の形でない、または名前が移植可能な識別子でない場合は、入力を保持したまま
   安全な error を表示する。読み込みや保存の失敗も editor に留まり、入力を失わずに再試行できる。
 - Overview から開いた editor で `Tab` を押すと相手スコープを読み直す。切り替え前の未保存の編集は破棄される。
+
+## session garden
+
+session を庭のうさぎとして眺める screen saver である。Home の一時的な全幅レイヤーで、daemon 権威の
+lifecycle と controller が集約した Agent phase だけを絵に写す。背面の route・active target・pane・terminal
+subscription は変えず、閉じると表示前と同じ Home へ戻る。設計判断は
+[15. session garden](proposals/15-session-garden.md) を参照する。
+
+開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
+自動で開く。
+
+### 自動表示
+
+**最終操作から 5 分**で開く。キー、paste、pointer の press と wheel、端末 copy、live pane への passthrough、
+terminal resize が「操作」で、受けるたびに monotonic clock 上の最終操作時刻を更新する。frame tick、
+daemon / backend event、Agent や terminal の出力は操作ではないので idle を延長しない。したがって Agent が
+動き続けていても、人が操作していなければ Garden は開く。
+
+次のいずれかが前面にある間は自動表示しない。未送信の入力や destructive action の確認を screen saver で
+覆わないためである。
+
+| 前面 | 自動表示 |
+|---|---|
+| overlay（確認 dialog・編集中の form・Overview / Closeup / Daemon などの surface） | しない |
+| Director drawer | しない |
+| overlay の無い Switch | する |
+| overlay の無い Closeup（live terminal を含む） | する |
+
+端末が 64 桁 × 14 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。閾値の判定は
+frame loop が monotonic time と user input を観測して経過時間を controller へ注入する形で行い、controller
+自身は時計を持たない。
+
+### 起こし方とクリック遷移
+
+| 入力 | 挙動 |
+|---|---|
+| 任意の key / paste | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
+| terminal resize | Garden を閉じ、idle timer を測り直す |
+| うさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入る。double click 待ちは無い |
+| うさぎ以外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
+
+click は frame を描いたのと同じ layout 関数が返す `SessionId` 付き rectangle に当てて解決する。controller は
+画面座標から session 順を再計算しないため、CJK label・端末 resize・表示上限で click target がずれない。
+click と同時に session が snapshot から消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
+うさぎの click は sidebar の activation と同じ経路を通るので、使用できない checkout（`failed`）は選択されるが
+attach されない。Garden から daemon command は発行しない。
 
 ## PR modal と browser effect
 
