@@ -2,13 +2,19 @@
 number: 690
 title: feat(cli): install.sh に binary channel 名を導入して v1 / v2 を並置する
 status: todo
-priority: high
+priority: low
 labels: [cli, build]
 dependson: []
-related: []
+related: [691, 694]
 created_at: 2026-08-17T22:49:02.982630+00:00
-updated_at: 2026-08-17T22:49:02.982630+00:00
+updated_at: 2026-08-17T23:22:06.402413+00:00
 ---
+
+> **この issue は [#694](694-feat-cli-channel-switch-usagi-1-v1-v2.md) に置き換えられた。着手しないこと。**
+> #694 が本 issue の内容を含み、任意 basename（`USAGI_BIN_NAME`）を **named channel** へ一般化する。
+> 任意の名前を持ち込めると channel helper が管理対象を列挙できないため、名前の決め方を変えている。
+> 背景は [document/proposals/17-v2-trial-channel.md](../../document/proposals/17-v2-trial-channel.md) の
+> 「P2: channel switch」を参照する。
 
 設計は [document/proposals/16-v1-v2-coexistence.md](../../document/proposals/16-v1-v2-coexistence.md) の
 「設計 1: binary を channel 名で並置する」が正本。
