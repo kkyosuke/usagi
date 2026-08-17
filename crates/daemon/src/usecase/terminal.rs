@@ -776,18 +776,28 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         connection: ConnectionId,
     ) -> Result<Attached, RegistryError> {
-        self.attach_client(reference, connection, None)
+        self.attach_client(reference, connection, None, None, None)
     }
 
-    /// Attaches on behalf of `client`, recording what geometry that client has
-    /// now been shown so a later shared-viewport change can be detected.
+    /// Attaches on behalf of `client`, stating that client's viewport and
+    /// recording what geometry it has now been shown.
+    ///
+    /// The viewport claim is stated here rather than by a separate request
+    /// because it lives exactly as long as the attachment: a window that
+    /// backgrounds a pane releases its claim, and the window that foregrounds
+    /// one must state it again. Doing it in the same exclusive section as the
+    /// capture also means the snapshot a client receives is already at the
+    /// shared geometry its own claim produced (#681).
     fn attach_client(
         &mut self,
         reference: &TerminalRef,
         connection: ConnectionId,
         client: Option<ClientId>,
+        viewport: Option<Geometry>,
+        writer: Option<&mut dyn PtyWriter>,
     ) -> Result<Attached, RegistryError> {
         let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
+        let budgets = self.screen_budgets();
         let entry = self.entry_mut(reference)?;
         let existing = entry
             .attachments
@@ -795,6 +805,22 @@ impl TerminalRegistry {
             .find_map(|(subscription, attachment)| {
                 (attachment.connection == connection).then_some(*subscription)
             });
+        if let Some(client) = client {
+            let seen = entry.geometry;
+            entry
+                .viewports
+                .entry(client)
+                .and_modify(|held| held.requested = viewport.or(held.requested))
+                .or_insert(ClientViewport {
+                    requested: viewport,
+                    seen,
+                });
+            // A caller without a writer (the internal attach) states no
+            // viewport either, so there is nothing for it to reshape.
+            if let Some(writer) = writer {
+                reconcile_geometry(entry, Some(&client), writer, budgets);
+            }
+        }
         let snapshot = snapshot(entry, checkpoint_bytes_limit)?;
         // The client leaves with a screen at this geometry, so it is no longer
         // out of date with the shared PTY even if a peer moved it earlier.
@@ -803,11 +829,7 @@ impl TerminalRegistry {
             entry
                 .viewports
                 .entry(client)
-                .and_modify(|viewport| viewport.seen = geometry)
-                .or_insert(ClientViewport {
-                    requested: None,
-                    seen: geometry,
-                });
+                .and_modify(|held| held.seen = geometry);
         }
         // Capture before the subscription is recorded: a snapshot the client
         // cannot be handed must not leave an attachment behind.
@@ -838,8 +860,11 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         connection: ConnectionId,
         client: ClientId,
+        viewport: Option<Geometry>,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Attached, RegistryError> {
-        let mut attached = self.attach_client(reference, connection, Some(client))?;
+        let mut attached =
+            self.attach_client(reference, connection, Some(client), viewport, Some(writer))?;
         let entry = self.entry(reference)?;
         attached.next_input_seq = Some(
             entry
@@ -867,7 +892,7 @@ impl TerminalRegistry {
             Some(attachment) if attachment.connection == connection => {
                 entry.attachments.remove(&subscription);
                 // The window that was holding the shared viewport down is gone.
-                reconcile_geometry(entry, writer, budgets);
+                reconcile_geometry(entry, None, writer, budgets);
                 Ok(())
             }
             _ => Err(RegistryError::UnknownSubscription),
@@ -885,7 +910,7 @@ impl TerminalRegistry {
                 .retain(|_, attachment| attachment.connection != connection);
             // A window that went away stops constraining the terminals it shared.
             if entry.attachments.len() != before {
-                reconcile_geometry(entry, writer, budgets);
+                reconcile_geometry(entry, None, writer, budgets);
             }
             // The epoch-local sequence ledger dies with its connection, exactly
             // as the client's `input_seq` restarts on a fresh transport. Durable
@@ -1041,6 +1066,7 @@ impl TerminalRegistry {
         if entry.exited.is_some() {
             return Err(RegistryError::Exited);
         }
+        let previous = entry.geometry;
         // The request states what this window wants; the terminal takes the
         // smallest request among the windows sharing it, so this is a request
         // and not a command (#681).
@@ -1066,13 +1092,18 @@ impl TerminalRegistry {
             commit_geometry(entry, target, budgets);
         }
         let entry = self.entry_mut(reference)?;
-        // The answer carries the geometry the client is now decoding at, so it
-        // is up to date with the shared PTY even when its own request lost.
         let committed = entry.geometry;
         if let Some(client) = client
             && let Some(viewport) = entry.viewports.get_mut(client)
         {
-            viewport.seen = committed;
+            // A client that was already current stays current: it reshapes its
+            // own screen exactly as this commit reshaped the authority. A client
+            // whose screen predates a *peer's* commit is not made current by
+            // asking a question — it never saw that reshape, so its resync
+            // marker stays and its next poll still sends it for a fresh screen.
+            if viewport.seen == previous {
+                viewport.seen = committed;
+            }
         }
         snapshot(entry, checkpoint_bytes_limit)
     }
@@ -1323,11 +1354,19 @@ fn key(reference: &TerminalRef) -> String {
 /// therefore no resync for the clients already at that size. A PTY that refuses
 /// the new size leaves the committed geometry untouched, so the next reconcile
 /// tries again rather than letting clients decode at a size the PTY never took.
-fn reconcile_geometry(entry: &mut Entry, writer: &mut dyn PtyWriter, budgets: ScreenBudgets) {
+fn reconcile_geometry(
+    entry: &mut Entry,
+    requester: Option<&ClientId>,
+    writer: &mut dyn PtyWriter,
+    budgets: ScreenBudgets,
+) {
     if entry.exited.is_some() {
         return;
     }
-    prune_viewports(entry, None);
+    // `requester` is the client being served right now. Its attachment is
+    // recorded only after the snapshot it is about to receive is captured, so
+    // without this it would prune the very claim this call is applying.
+    prune_viewports(entry, requester);
     let Some(geometry) = requested_geometry(entry) else {
         return;
     };
@@ -1342,12 +1381,14 @@ fn reconcile_geometry(entry: &mut Entry, writer: &mut dyn PtyWriter, budgets: Sc
 }
 
 /// Drops the viewports of clients that no longer hold an attachment, keeping
-/// `requester` even when its attach has not arrived yet.
+/// `requester` — the client being served right now, whose attachment may not be
+/// recorded yet, or which is stating a viewport on a different lane than the one
+/// its attachment lives on.
 ///
-/// A client states its viewport on one lane and attaches on another, so the
-/// request legitimately arrives first. Keeping only the attached clients plus
-/// the one being served bounds this map by the number of windows actually
-/// sharing the terminal.
+/// A claim lives exactly as long as the attachment that stated it, so this is
+/// what makes a window that closed — or merely backgrounded the pane — stop
+/// holding the terminal down. It also bounds the map by the number of windows
+/// actually sharing the terminal, plus the one being served.
 fn prune_viewports(entry: &mut Entry, requester: Option<&ClientId>) {
     let attached: std::collections::BTreeSet<ClientId> = entry
         .attachments
@@ -2418,7 +2459,9 @@ mod tests {
         let connection = ConnectionId::new();
         let client = ClientId::new();
         let mut writer = Writer::default();
-        let attached = registry.attach_for_client(&r, connection, client).unwrap();
+        let attached = registry
+            .attach_for_client(&r, connection, client, None, &mut Writer::default())
+            .unwrap();
         assert_eq!(attached.next_input_seq, Some(0));
         registry
             .write_input(
@@ -2444,12 +2487,16 @@ mod tests {
                 &mut Writer::default(),
             )
             .unwrap();
-        let reattached = registry.attach_for_client(&r, connection, client).unwrap();
+        let reattached = registry
+            .attach_for_client(&r, connection, client, None, &mut Writer::default())
+            .unwrap();
         assert_eq!(reattached.next_input_seq, Some(1));
 
         registry.disconnect(connection, &mut Writer::default());
         let fresh = ConnectionId::new();
-        let reattached = registry.attach_for_client(&r, fresh, client).unwrap();
+        let reattached = registry
+            .attach_for_client(&r, fresh, client, None, &mut Writer::default())
+            .unwrap();
         assert_eq!(reattached.next_input_seq, Some(0));
     }
 
@@ -2853,7 +2900,13 @@ mod tests {
 
         // The first window opens the terminal at its own size.
         registry
-            .attach_for_client(&r, wide_connection, wide_client)
+            .attach_for_client(
+                &r,
+                wide_connection,
+                wide_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         let first = registry
             .resize(&r, wide, Some(&wide_client), &mut pty)
@@ -2864,13 +2917,12 @@ mod tests {
         assert_eq!(registry.replay_from(&r, 0, Some(&wide_client)), Ok(vec![]));
 
         // A second window opens the same terminal in a smaller pane. The PTY
-        // takes the minimum, so neither window is handed more than it can draw.
-        registry
-            .attach_for_client(&r, narrow_connection, narrow_client)
-            .unwrap();
+        // takes the minimum, so neither window is handed more than it can draw,
+        // and the attach that stated the claim already answers at that size.
         let second = registry
-            .resize(&r, narrow, Some(&narrow_client), &mut pty)
-            .unwrap();
+            .attach_for_client(&r, narrow_connection, narrow_client, Some(narrow), &mut pty)
+            .unwrap()
+            .snapshot;
         assert_eq!(pty.resized, vec![narrow]);
         assert_eq!(second.geometry, narrow);
         assert_eq!(second.revision, first.revision + 1);
@@ -2892,7 +2944,13 @@ mod tests {
         // Reattaching hands the wide window the shared screen and lets it stream
         // again, at the geometry the PTY actually holds.
         let reattached = registry
-            .attach_for_client(&r, wide_connection, wide_client)
+            .attach_for_client(
+                &r,
+                wide_connection,
+                wide_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         assert_eq!(reattached.snapshot.geometry, narrow);
         assert!(registry.replay_from(&r, 0, Some(&wide_client)).is_ok());
@@ -2912,7 +2970,13 @@ mod tests {
         // sent to resync for it.
         let (third_connection, third_client) = (ConnectionId::new(), ClientId::new());
         registry
-            .attach_for_client(&r, third_connection, third_client)
+            .attach_for_client(
+                &r,
+                third_connection,
+                third_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         registry
             .resize(&r, narrow, Some(&third_client), &mut pty)
@@ -2934,20 +2998,34 @@ mod tests {
             (wide_connection, wide_client, wide),
             (narrow_connection, narrow_client, narrow),
         ] {
-            registry.attach_for_client(&r, connection, client).unwrap();
+            registry
+                .attach_for_client(&r, connection, client, None, &mut Writer::default())
+                .unwrap();
             registry
                 .resize(&r, geometry, Some(&client), &mut pty)
                 .unwrap();
         }
         let subscription = registry
-            .attach_for_client(&r, narrow_connection, narrow_client)
+            .attach_for_client(
+                &r,
+                narrow_connection,
+                narrow_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap()
             .subscription;
         assert_eq!(pty.resized, vec![wide, narrow]);
         // The large window has taken the shared screen after being resynced onto
         // it, which is where a second window normally sits.
         registry
-            .attach_for_client(&r, wide_connection, wide_client)
+            .attach_for_client(
+                &r,
+                wide_connection,
+                wide_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         assert!(registry.replay_from(&r, 0, Some(&wide_client)).is_ok());
 
@@ -2964,7 +3042,13 @@ mod tests {
             Err(RegistryError::ResyncRequired)
         );
         registry
-            .attach_for_client(&r, wide_connection, wide_client)
+            .attach_for_client(
+                &r,
+                wide_connection,
+                wide_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         assert!(registry.replay_from(&r, 0, Some(&wide_client)).is_ok());
 
@@ -2981,12 +3065,121 @@ mod tests {
     }
 
     #[test]
+    fn a_question_does_not_make_a_stale_window_current() {
+        let r = reference();
+        let mut registry = shared_registry(r.clone());
+        let mut pty = Writer::default();
+        let (wide_connection, wide_client, wide) = window(100, 30);
+        let (narrow_connection, narrow_client, narrow) = window(40, 10);
+        for (connection, client, geometry) in [
+            (wide_connection, wide_client, wide),
+            (narrow_connection, narrow_client, narrow),
+        ] {
+            registry
+                .attach_for_client(&r, connection, client, None, &mut Writer::default())
+                .unwrap();
+            registry
+                .resize(&r, geometry, Some(&client), &mut pty)
+                .unwrap();
+        }
+        assert_eq!(
+            registry.replay_from(&r, 0, Some(&wide_client)),
+            Err(RegistryError::ResyncRequired)
+        );
+
+        // The large window resizes before it has taken a fresh screen. Its
+        // request still loses to the smaller one, so nothing moves — and a
+        // request that moves nothing must not clear the resync marker, or the
+        // window would resume onto a screen it reflowed at the wrong moment.
+        registry
+            .resize(
+                &r,
+                Geometry { cols: 90, rows: 20 },
+                Some(&wide_client),
+                &mut pty,
+            )
+            .unwrap();
+        assert_eq!(pty.resized, vec![wide, narrow]);
+        assert_eq!(
+            registry.replay_from(&r, 0, Some(&wide_client)),
+            Err(RegistryError::ResyncRequired)
+        );
+
+        // Only taking the screen clears it.
+        registry
+            .attach_for_client(
+                &r,
+                wide_connection,
+                wide_client,
+                None,
+                &mut Writer::default(),
+            )
+            .unwrap();
+        assert!(registry.replay_from(&r, 0, Some(&wide_client)).is_ok());
+    }
+
+    #[test]
+    fn a_reattaching_window_takes_the_terminal_back_after_the_peer_leaves() {
+        // The regression this covers: a window that backgrounds a pane loses its
+        // viewport claim, so the reattach has to re-state it. Otherwise a peer's
+        // smaller viewport outlives the peer and the pane stays shrunken.
+        let r = reference();
+        let mut registry = shared_registry(r.clone());
+        let mut pty = Writer::default();
+        let (wide_connection, wide_client, wide) = window(100, 30);
+        let (narrow_connection, narrow_client, narrow) = window(40, 10);
+        let subscription = registry
+            .attach_for_client(
+                &r,
+                wide_connection,
+                wide_client,
+                None,
+                &mut Writer::default(),
+            )
+            .unwrap()
+            .subscription;
+        registry
+            .resize(&r, wide, Some(&wide_client), &mut pty)
+            .unwrap();
+
+        // The large window backgrounds this terminal, and the small one takes it.
+        registry
+            .detach(&r, subscription, wide_connection, &mut pty)
+            .unwrap();
+        registry
+            .attach_for_client(
+                &r,
+                narrow_connection,
+                narrow_client,
+                None,
+                &mut Writer::default(),
+            )
+            .unwrap();
+        registry
+            .resize(&r, narrow, Some(&narrow_client), &mut pty)
+            .unwrap();
+        assert_eq!(pty.resized, vec![wide, narrow]);
+
+        // Foregrounding it again states the large viewport on the attach itself,
+        // so closing the small window gives the terminal back rather than
+        // leaving it shrunken forever.
+        registry
+            .attach_for_client(&r, wide_connection, wide_client, Some(wide), &mut pty)
+            .unwrap();
+        registry.disconnect(narrow_connection, &mut pty);
+        assert_eq!(pty.resized, vec![wide, narrow, wide]);
+        assert_eq!(registry.snapshot(&r).unwrap().geometry, wide);
+    }
+
+    #[test]
     fn a_pty_that_refuses_the_shared_size_keeps_the_geometry_clients_decode_at() {
         let r = reference();
         let mut registry = shared_registry(r.clone());
         let mut pty = Writer::default();
         let (connection, client, pane) = window(40, 10);
-        registry.attach_for_client(&r, connection, client).unwrap();
+        registry
+            .attach_for_client(&r, connection, client, None, &mut Writer::default())
+            .unwrap();
         pty.resize_failure = true;
 
         assert_eq!(
@@ -3004,7 +3197,13 @@ mod tests {
         let (other_connection, other_client, other) = window(20, 5);
         pty.resize_failure = false;
         registry
-            .attach_for_client(&r, other_connection, other_client)
+            .attach_for_client(
+                &r,
+                other_connection,
+                other_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         let subscription = registry
             .resize(&r, other, Some(&other_client), &mut pty)
@@ -3027,9 +3226,17 @@ mod tests {
 
         // A client that only attaches states no requirement of its own.
         registry
-            .attach_for_client(&r, watcher_connection, watcher_client)
+            .attach_for_client(
+                &r,
+                watcher_connection,
+                watcher_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
-        registry.attach_for_client(&r, connection, client).unwrap();
+        registry
+            .attach_for_client(&r, connection, client, None, &mut Writer::default())
+            .unwrap();
         registry.resize(&r, pane, Some(&client), &mut pty).unwrap();
         assert_eq!(pty.resized, vec![pane]);
 
@@ -3051,12 +3258,18 @@ mod tests {
         let mut pty = Writer::default();
         let (connection, client, pane) = window(40, 10);
         let subscription = registry
-            .attach_for_client(&r, connection, client)
+            .attach_for_client(&r, connection, client, None, &mut Writer::default())
             .unwrap()
             .subscription;
         let (peer_connection, peer_client, peer) = window(100, 30);
         registry
-            .attach_for_client(&r, peer_connection, peer_client)
+            .attach_for_client(
+                &r,
+                peer_connection,
+                peer_client,
+                None,
+                &mut Writer::default(),
+            )
             .unwrap();
         registry
             .resize(&r, peer, Some(&peer_client), &mut pty)

@@ -2332,11 +2332,15 @@ impl AgentRuntime {
             request: request_id,
         } = context;
         match request {
-            TerminalRequest::Attach { .. } => self
-                .coordinator
-                .attach_for_client(runtime, connection, client)
-                .map(TerminalResponse::Attached)
-                .map_err(map_runtime_error),
+            TerminalRequest::Attach {
+                geometry: viewport, ..
+            } => {
+                let viewport = viewport.map(terminal_geometry).transpose()?;
+                self.coordinator
+                    .attach_for_client(runtime, connection, client, viewport, &mut *self.pty)
+                    .map(TerminalResponse::Attached)
+                    .map_err(map_runtime_error)
+            }
             TerminalRequest::Resume { after_offset, .. } => {
                 let output = self
                     .coordinator
@@ -2660,7 +2664,7 @@ impl<G: TerminalOwnerPort, A: AgentTerminalActor> TerminalOwnerPort for SharedTe
 
 fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
     match request {
-        TerminalRequest::Attach { terminal }
+        TerminalRequest::Attach { terminal, .. }
         | TerminalRequest::Resume { terminal, .. }
         | TerminalRequest::Resync { terminal }
         | TerminalRequest::Input { terminal, .. }
@@ -5617,6 +5621,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             SnapshotWire::RawTail,
         ));
@@ -5633,6 +5638,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             SnapshotWire::ScreenCheckpoint,
         ));
@@ -5748,6 +5754,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             SnapshotWire::RawTail,
         ));
@@ -5883,6 +5890,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             SnapshotWire::RawTail,
         ));
@@ -6663,7 +6671,8 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
-                    terminal: foreign.clone()
+                    terminal: foreign.clone(),
+                    geometry: None,
                 },
                 SnapshotWire::RawTail,
             ),
@@ -6829,6 +6838,7 @@ mod tests {
                 TerminalAction::Attach,
                 serde_json::to_value(TerminalRequest::Attach {
                     terminal: terminal.clone(),
+                    geometry: None,
                 })
                 .unwrap(),
                 SnapshotWire::RawTail,
@@ -7326,6 +7336,7 @@ mod tests {
                         session_id: None,
                         worktree_id: WorktreeId::new(),
                     },
+                    geometry: None,
                 })
                 .unwrap(),
                 SnapshotWire::RawTail,

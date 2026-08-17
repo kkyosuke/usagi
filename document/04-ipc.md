@@ -589,6 +589,11 @@ generic terminal の request vocabulary は `terminal` kind の `launch`、`inve
 `WorkspaceId` / optional `SessionId` / `WorktreeId` の scope、geometry だけを送る。command、argv、
 working directory、environment、secret は wire field ではなく、daemon が trusted profile から解決する。
 
+attach は additive optional field として自分の viewport を載せる。terminal を共有する window の要求は
+attachment と同じ寿命を持つため、attach 自体が要求を宣言し、daemon は最小値を再計算してから同じ排他区間で
+snapshot を取る。したがって attach 応答の `geometry` は、その要求を織り込んだ確定値である。field を載せない
+旧 peer は従来どおり `Resize` だけで要求する。
+
 launch の response は完全な `TerminalRef` を返す。attach は snapshot、connection-owned subscription、
 `(connection, client, terminal)` ledger が次に期待する `next_input_seq` を同時に返す。input、resize、detach は
 その `TerminalRef` と subscription を必ず含める。`next_input_seq` は generation 1 への additive optional field

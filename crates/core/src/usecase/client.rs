@@ -574,6 +574,17 @@ pub enum TerminalRequest {
     },
     Attach {
         terminal: TerminalRef,
+        /// The viewport this client is attaching with.
+        ///
+        /// A terminal is shared by every window attached to it and its single
+        /// PTY takes the smallest of their viewports, so a claim on that shared
+        /// size lives exactly as long as the attachment that stated it. Carrying
+        /// it here lets one request state the claim and take the snapshot it
+        /// produced, instead of a separate `Resize` round trip on every attach.
+        /// Additive on the wire: a peer that predates it omits the field and
+        /// states its viewport with `Resize` alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geometry: Option<TerminalGeometry>,
     },
     Resume {
         terminal: TerminalRef,

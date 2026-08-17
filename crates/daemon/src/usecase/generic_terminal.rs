@@ -426,10 +426,12 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         connection: ConnectionId,
         client: ClientId,
+        viewport: Option<Geometry>,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Attached, GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
-            .attach_for_client(terminal, connection, client)
+            .attach_for_client(terminal, connection, client, viewport, writer)
             .map_err(GenericTerminalError::Terminal)
     }
     /// Removes only the named attachment, never the daemon-owned process.

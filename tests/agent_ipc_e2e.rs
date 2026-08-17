@@ -493,6 +493,7 @@ fn attach_response(client: &mut impl DaemonClient, terminal: &TerminalRef) -> se
             action: TerminalAction::Attach,
             payload: serde_json::to_value(TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             })
             .unwrap(),
         })

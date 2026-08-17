@@ -1183,10 +1183,12 @@ impl RuntimeCoordinator {
         runtime: &AgentRuntimeRef,
         connection: ConnectionId,
         client: ClientId,
+        viewport: Option<Geometry>,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Attached, RuntimeError> {
         self.running(runtime)?;
         self.terminals
-            .attach_for_client(&runtime.terminal, connection, client)
+            .attach_for_client(&runtime.terminal, connection, client, viewport, writer)
             .map_err(RuntimeError::Terminal)
     }
 

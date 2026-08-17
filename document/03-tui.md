@@ -499,8 +499,10 @@ drawer open 時は root の selected live Agent だけを foreground attach し�
 選択中 Agent へ既存の ordered input / ACK、terminal-local な scroll / selection / feedback、copy / link を接続する。
 他の root tab と managed pane は detached background である。drawer close 時は root subscription を detach し、
 開く前の managed-session selected live tab を元の right pane geometry で attach する。detach 中の terminal は別 pane の
-geometry へ resize せず、同じ outer size で同じ terminal へ戻る attach は resize を再送しない。outer size が変わった
-場合だけ、再 attach 前にその terminal の新しい実 viewport へ 1 回 resize して checkpoint geometry を fence する。
+geometry へ resize せず、**attach 自体がその pane の viewport を宣言する**。daemon は detach と一緒にその window の
+[共有 viewport](05-daemon.md#共有-viewport複数-client-の-geometry) の要求を捨てるため、再 attach では毎回宣言し直す
+必要がある（黙って attach すると、他 window の小さい viewport がその window の終了後も残ってしまう）。宣言は
+attach request に載るので追加の往復は無く、`Resize` は pane の実サイズが変わったときだけ送る。
 どちらの操作も PTY/process を kill / spawn しない。terminal coordinator は bounded cache に保持するため、同じ connection epoch
 上の再 attach は `input_seq`、未収束 input fence、その後ろの queue、復号済み screen を引き継ぐ。cache から
 eviction された terminal も attach 応答の `next_input_seq` を採用し、daemon ledger より前へ巻き戻さない。
@@ -1327,8 +1329,8 @@ pane が要求する geometry と、terminal が実際に取っている geometr
 
 | 値 | 何か | 使い道 |
 |---|---|---|
-| 要求 geometry | 自分の pane の viewport | `Resize` で daemon へ送る。変わったときだけ送り、最小値に負けても frame ごとに再送しない |
-| 実効 geometry | resize 応答と attach snapshot が返す daemon 権威の geometry | local screen を組む幅・高さ。pane より小さければ余りは空白のまま描く |
+| 要求 geometry | 自分の pane の viewport | attach request に載せて宣言し、以後は pane のサイズが変わったときだけ `Resize` で送る。最小値に負けても frame ごとに再送しない |
+| 実効 geometry | attach snapshot と resize 応答が返す daemon 権威の geometry | local screen を組む幅・高さ。pane より小さければ余りは空白のまま描く |
 
 実効 geometry が要求より**大きい**場合は pane に収まらないため、同期 fence を解いて次の redraw で
 自分の viewport を再要求する。実効 geometry が要求と異なる間は「他の window と共有中でその viewport は

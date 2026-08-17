@@ -854,15 +854,17 @@ pane より大きい screen を渡されず、余った行・列は空白とし�
 
 | 契機 | daemon の扱い |
 |---|---|
-| `Resize` | 要求を送った client（`ClientId`）の viewport として記録し、最小値を再計算する。変化した場合だけ PTY へ適用して revision を進め、応答の snapshot には**実際に確定した geometry** を載せる |
-| `Attach` | その client に今の geometry を渡したことを記録する。viewport を宣言しない client は最小値に寄与しない |
+| `Resize` | 要求を送った client（`ClientId`）の viewport として記録し、最小値を再計算する。変化した場合だけ PTY へ適用して revision を進め、応答の snapshot には**実際に確定した geometry** を載せる。最小値が動かなかった場合、要求を送っただけの client は screen を取り直していないので、下記の resync 対象からは外れない |
+| `Attach` | request が載せた viewport をその client の要求として記録し、最小値を再計算してから snapshot を取る。したがって attach 応答の screen は、その要求を織り込んだ geometry である。viewport を載せない client（旧 peer・内部呼び出し）は最小値に寄与しない |
 | `Detach` / client disconnect | その client の viewport を外して最小値を再計算する。小さい window が閉じれば残った window の要求へ戻る |
 | `Resume`（incremental poll） | その client が最後に渡された geometry と現在の geometry がずれている間は `resync_required` を返す。client は既存の再 attach 経路で screen を取り直す |
 
 viewport は client 単位で持つ（connection 単位ではない）。1 つの TUI は per-request / terminal stream /
 poll pump の複数 lane を開くが、いずれも同じ `ClientId` を宣言するため、client が「1 つの window」の
 単位である（[4. IPC](04-ipc.md)）。attachment を持たない client の viewport は次の再計算で捨てるので、
-この表は同時に terminal を共有している window 数で bounded である。
+この表は同時に terminal を共有している window 数で bounded である。**要求の寿命は attachment の寿命と
+同じ**であり、だからこそ `Attach` 自体が要求を載せる。pane を背景へ回した window は要求を手放し、
+前面へ戻す window は attach でそれを宣言し直す（別 request を足さない）。
 
 PTY が新しい size を拒否した場合は確定 geometry を変えない。client が PTY の取っていない size で
 decode し始めないためで、次の契機で再試行する。exit 済み terminal は最終 screen をそのまま保つ。

@@ -8053,6 +8053,9 @@ mod tests {
         /// the dedicated launch client.
         launches: usize,
         attaches: usize,
+        /// The viewport each attach stated: a window claims its share of the
+        /// terminal's geometry with the attach itself.
+        attach_geometries: Vec<(TerminalRef, Geometry)>,
         polls: usize,
         inputs: Vec<Vec<u8>>,
         resizes: usize,
@@ -8080,10 +8083,13 @@ mod tests {
 
         fn attach_terminal(
             &mut self,
-            _terminal: &TerminalRef,
+            terminal: &TerminalRef,
             geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
-            self.0.lock().unwrap().attaches += 1;
+            let mut calls = self.0.lock().unwrap();
+            calls.attaches += 1;
+            calls.attach_geometries.push((terminal.clone(), geometry));
+            drop(calls);
             Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 9, epoch: 1 },
                 revision: 1,
@@ -16221,7 +16227,7 @@ mod tests {
     }
 
     #[test]
-    fn drawer_round_trip_restores_both_views_without_redundant_resize_or_resync() {
+    fn drawer_round_trip_restores_both_views_and_restates_each_viewport_without_resync() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let managed = scoped_terminal_ref(workspace, Some(session));
@@ -16317,10 +16323,16 @@ mod tests {
         );
 
         let calls = calls.lock().unwrap();
+        // Every attach states its pane's viewport, including the two that return
+        // to a size the pane already had: the daemon released this window's
+        // claim on the shared viewport together with the detached attachment.
+        // None of it costs a separate resize.
+        let round_trip = [(managed, managed_geometry), (root, drawer_geometry)];
         assert_eq!(
-            calls.resize_geometries,
-            vec![(managed, managed_geometry), (root, drawer_geometry)]
+            calls.attach_geometries,
+            [round_trip.clone(), round_trip].concat()
         );
+        assert_eq!(calls.resize_geometries, Vec::new());
         // One attach per focus transition means neither same-geometry reattach
         // entered the checkpoint-refusal retry path.
         assert_eq!(calls.attaches, 4);

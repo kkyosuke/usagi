@@ -295,7 +295,7 @@ pub fn route_terminal_request(request: &TerminalRequest) -> RouteTarget {
         TerminalRequest::Inventory { .. } | TerminalRequest::CompletedInventory { .. } => {
             RouteTarget::EveryGeneration
         }
-        TerminalRequest::Attach { terminal }
+        TerminalRequest::Attach { terminal, .. }
         | TerminalRequest::Resume { terminal, .. }
         | TerminalRequest::Resync { terminal }
         | TerminalRequest::Input { terminal, .. }

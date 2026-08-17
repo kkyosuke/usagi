@@ -317,11 +317,16 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
             TerminalRequest::Inventory { scope } => Ok(TerminalResponse::Inventory(
                 self.coordinator.inventory(&scope),
             )),
-            TerminalRequest::Attach { terminal } => self
-                .coordinator
-                .attach_for_client(&terminal, connection, client)
-                .map(TerminalResponse::Attached)
-                .map_err(map_error),
+            TerminalRequest::Attach {
+                terminal,
+                geometry: viewport,
+            } => {
+                let viewport = viewport.map(geometry).transpose()?;
+                self.coordinator
+                    .attach_for_client(&terminal, connection, client, viewport, &mut self.pty)
+                    .map(TerminalResponse::Attached)
+                    .map_err(map_error)
+            }
             TerminalRequest::Resume {
                 terminal,
                 after_offset,
@@ -1004,6 +1009,7 @@ mod tests {
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
                     terminal: terminal.clone(),
+                    geometry: None,
                 },
             )
         };
@@ -1129,6 +1135,7 @@ mod tests {
                 TerminalAction::Attach,
                 serde_json::to_value(TerminalRequest::Attach {
                     terminal: attach_terminal,
+                    geometry: None,
                 })
                 .unwrap(),
                 SnapshotWire::ScreenCheckpoint,
@@ -1230,6 +1237,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
         );
         let subscription = attached["subscription"].as_u64().unwrap();
@@ -1281,7 +1289,8 @@ mod tests {
                 client,
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
-                    terminal: terminal.clone()
+                    terminal: terminal.clone(),
+                    geometry: None,
                 }
             )["snapshot"]["output_offset"],
             6
@@ -1456,6 +1465,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             SnapshotWire::RawTail,
         );
@@ -1474,6 +1484,7 @@ mod tests {
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
                     terminal: terminal.clone(),
+                    geometry: None,
                 },
             ),
             (
@@ -1657,7 +1668,11 @@ mod tests {
                 ClientId::new(),
                 RequestId::new(),
                 TerminalAction::Launch,
-                serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal,
+                    geometry: None,
+                })
+                .unwrap(),
                 SnapshotWire::RawTail,
             )
             .unwrap_err();
@@ -1798,6 +1813,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
         )["subscription"]
             .as_u64()
@@ -1833,6 +1849,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
         )["subscription"]
             .as_u64()

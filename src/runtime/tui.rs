@@ -2183,7 +2183,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     fn attach_terminal(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,
-        _geometry: Geometry,
+        geometry: Geometry,
     ) -> Result<TerminalAttach, TerminalError> {
         // The negotiated connection decides the snapshot contract before the
         // request is sent, so a daemon without the checkpoint capability can
@@ -2195,6 +2195,13 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                // The attach states this pane's claim on the shared viewport.
+                // A daemon that predates the field ignores it and keeps the
+                // geometry its last `Resize` committed.
+                geometry: Some(TerminalGeometry {
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                }),
             },
         )?;
         let subscription = body["subscription"]
@@ -4672,6 +4679,7 @@ mod tests {
         for request in [
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             TerminalRequest::Resume {
                 terminal: terminal.clone(),

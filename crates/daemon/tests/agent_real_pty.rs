@@ -449,6 +449,7 @@ fn agent_real_pty_rebuilds_the_allowlisted_environment_and_commits_exit() {
         client,
         TerminalRequest::Attach {
             terminal: terminal.clone(),
+            geometry: None,
         },
     ));
 
@@ -990,7 +991,10 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
                 client: ClientId::new(),
                 request: RequestId::new(),
             },
-            TerminalRequest::Attach { terminal: foreign },
+            TerminalRequest::Attach {
+                terminal: foreign,
+                geometry: None
+            },
         ),
         TerminalOutcome::NotOwned
     ));
