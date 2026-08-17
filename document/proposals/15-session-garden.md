@@ -63,8 +63,9 @@ agent を複数持てる（controller の runtime 一覧を session で絞り込
 最上位でよい）。しかし Garden の目的は実行状態を一覧表より速く把握することなので、ここでは逆効果になる。
 したがって Garden は集約後の値ではなく、**session に属する agent ごとの phase** を描画素材にする。
 
-見た目のために daemon schema、永続 session record、IPC event は増やさない。agent ごとの phase は
-controller が既に持っている runtime 一覧から導出する。
+見た目のために daemon schema、永続 session record、IPC event は増やさない。agent membership は既存の coherent
+Agent inventory と controller の runtime 一覧を stable identity で結合し、agent ごとの詳細な phase は controller が
+既に持っていればそちらを優先する。これにより TUI 起動前から存在する agent も Garden から欠落しない。
 
 ### 状態の対応
 
@@ -210,9 +211,9 @@ sample は idle timer、click dispatch には接続しない。状態別 pose、
 production 配線より先に確認するための presentation-only surface である。
 
 実際の workspace で見るには、Overview の `garden` command で手動で開くか、5 分間操作せずに待つ（仕様は
-[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭は session ごとに runtime を直接参照して
-各 agent の phase を描く。controller が runtime の `Ended` / `Exited` / `Interrupted` を `TargetPhase::Done` へ
-畳んだ場合も、庭では瞬きへ戻さず静止した `done` pose になる。
+[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭は session ごとに controller の runtime-local
+phase と最新 coherent Agent inventory を結合して各 agent の phase を描く。controller が runtime の `Ended` /
+`Exited` / `Interrupted` を `TargetPhase::Done` へ畳んだ場合も、庭では瞬きへ戻さず静止した `done` pose になる。
 
 ## 実装順序と受け入れ条件
 

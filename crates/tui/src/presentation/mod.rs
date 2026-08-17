@@ -4767,6 +4767,7 @@ fn home_frame_material(
         create_pending,
         now,
     )
+    .with_garden_reduced_motion(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4799,7 +4800,6 @@ fn home_frame_material_shared(
         )
         // Last, once every surface that reads the animation clock is known.
         .collapse_animation_clock();
-    let now = projection.canonical_garden_now(height, width, now);
     HomeFrameMaterial {
         height,
         width,
@@ -4812,6 +4812,8 @@ fn home_frame_material_shared(
             .map(|error| error.message.clone()),
         environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
+        // Garden canonicalization happens only after every composition-owned
+        // source (notably Agent inventory and reduced motion) is attached.
         now: now.with_nanosecond(0).unwrap_or(now),
     }
 }
@@ -5686,8 +5688,8 @@ fn drive_workspace_controller(
                     .map(|create| create.name.as_str()),
                 now,
             )
-            .with_garden_reduced_motion(garden_reduced_motion)
-            .with_agent_inventory(ui.agent_inventory());
+            .with_agent_inventory(ui.agent_inventory())
+            .with_garden_reduced_motion(garden_reduced_motion);
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input
             // below, so nothing that makes progress depends on the redraw.

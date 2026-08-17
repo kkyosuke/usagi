@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use usagi_core::domain::agent::{AgentInventory, ProviderResumeProjection, ProviderResumeReason};
+use usagi_core::domain::agent::{
+    AgentInventory, AgentRuntimeInventoryState, ProviderResumeProjection, ProviderResumeReason,
+};
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
@@ -571,11 +573,40 @@ impl HomeProjection {
         self
     }
 
-    /// Attach the latest coherent daemon Agent inventory to the status modal.
-    /// Runtime identity is shortened for display only; scope joins use stable
-    /// `SessionId`, never the visible session label.
+    /// Attach the latest coherent daemon Agent inventory to Garden and the
+    /// status modal. Runtime identity is shortened only for the modal; Garden
+    /// joins by stable `SessionId` / `AgentRuntimeId`, never visible labels.
     #[must_use]
     pub fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
+        if let (Some(garden_sessions), Some(inventory)) = (self.garden_sessions.as_mut(), inventory)
+        {
+            for item in &inventory.runtimes {
+                let Some(session_id) = item.runtime.session_id else {
+                    // Workspace-root runtimes have no session plot.
+                    continue;
+                };
+                let Some(session) = garden_sessions
+                    .iter_mut()
+                    .find(|session| session.id == session_id)
+                else {
+                    // A stale or foreign session cannot create a new plot.
+                    continue;
+                };
+                if session
+                    .agents
+                    .iter()
+                    .any(|agent| agent.runtime_id == item.runtime.agent_runtime_id)
+                {
+                    // Runtime-local phase pushes are more precise than the
+                    // coarse durable inventory state (notably Waiting).
+                    continue;
+                }
+                session.agents.push(widgets::garden::GardenAgent {
+                    runtime_id: item.runtime.agent_runtime_id,
+                    phase: garden_inventory_phase(item.state),
+                });
+            }
+        }
         self.daemon_runtimes = inventory.map(|inventory| {
             inventory
                 .runtimes
@@ -1572,6 +1603,21 @@ const fn garden_phase(phase: TargetPhase) -> AgentPhase {
         TargetPhase::Running => AgentPhase::Running,
         TargetPhase::Waiting => AgentPhase::Waiting,
         TargetPhase::Done => AgentPhase::Ended,
+    }
+}
+
+/// Coarse fallback used when a runtime exists in the latest daemon inventory
+/// but this TUI has not observed a runtime-local phase push for it yet.
+const fn garden_inventory_phase(state: AgentRuntimeInventoryState) -> AgentPhase {
+    match state {
+        AgentRuntimeInventoryState::Reserved => AgentPhase::Ready,
+        AgentRuntimeInventoryState::Live => AgentPhase::Running,
+        AgentRuntimeInventoryState::Interrupted | AgentRuntimeInventoryState::Unavailable => {
+            AgentPhase::Interrupted
+        }
+        AgentRuntimeInventoryState::Exited | AgentRuntimeInventoryState::Reclaimed => {
+            AgentPhase::Exited
+        }
     }
 }
 
@@ -3640,6 +3686,101 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!small_text.contains("any key to return"));
+    }
+
+    #[test]
+    fn garden_joins_agents_from_inventory_without_overwriting_precise_phases() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let missing_session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let waiting = runtime_ref(workspace, session);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: waiting.clone(),
+                phase: AgentPhase::Waiting,
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+
+        let live = runtime_ref(workspace, session);
+        let missing = runtime_ref(workspace, missing_session);
+        let root_terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let root = AgentRuntimeRef::new(AgentRuntimeId::new(), root_terminal, None)
+            .expect("a root runtime owns a root terminal");
+        let item = |runtime, state| AgentRuntimeInventoryItem {
+            runtime,
+            continuation: AgentContinuationRef::new(),
+            state,
+            resumed_from: None,
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                // The duplicate inventory row must not flatten Waiting to Live.
+                item(waiting.clone(), AgentRuntimeInventoryState::Live),
+                item(live.clone(), AgentRuntimeInventoryState::Live),
+                // Inventory cannot create a plot for a session absent from Home.
+                item(missing, AgentRuntimeInventoryState::Live),
+                // Workspace-root Agents have no session plot.
+                item(root, AgentRuntimeInventoryState::Live),
+            ],
+            resumable: Vec::new(),
+        };
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "garden", "/work/garden")],
+        )
+        .with_agent_inventory(Some(&inventory));
+
+        let garden = home.garden_sessions.as_ref().expect("garden projection");
+        assert_eq!(garden.len(), 1);
+        assert_eq!(garden[0].agents.len(), 2);
+        assert!(garden[0].agents.contains(&widgets::garden::GardenAgent {
+            runtime_id: waiting.agent_runtime_id,
+            phase: AgentPhase::Waiting,
+        }));
+        assert!(garden[0].agents.contains(&widgets::garden::GardenAgent {
+            runtime_id: live.agent_runtime_id,
+            phase: AgentPhase::Running,
+        }));
+        let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        assert!(text.contains("1 run · 1 wait"));
+        assert!(!text.contains("no agents"));
+    }
+
+    #[test]
+    fn garden_maps_every_inventory_state_to_a_visible_phase() {
+        let cases = [
+            (AgentRuntimeInventoryState::Reserved, AgentPhase::Ready),
+            (AgentRuntimeInventoryState::Live, AgentPhase::Running),
+            (
+                AgentRuntimeInventoryState::Interrupted,
+                AgentPhase::Interrupted,
+            ),
+            (
+                AgentRuntimeInventoryState::Unavailable,
+                AgentPhase::Interrupted,
+            ),
+            (AgentRuntimeInventoryState::Exited, AgentPhase::Exited),
+            (AgentRuntimeInventoryState::Reclaimed, AgentPhase::Exited),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(super::garden_inventory_phase(state), expected);
+        }
     }
 
     /// 自動表示は renderer が庭を描ける端末サイズでだけ許す。判定は

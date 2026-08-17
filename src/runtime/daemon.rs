@@ -2302,6 +2302,118 @@ const CLIENT_CONNECTION_FDS: u64 = 3;
 /// write: expiry no longer takes the store lock or fsyncs unless something
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
+/// Maximum time a synchronous decision waiter may take to observe a connection
+/// cancellation when no decision state transition occurs.
+const DECISION_CANCELLATION_POLL: Duration = Duration::from_millis(250);
+
+struct DecisionWaiter {
+    token: u64,
+    notify: SyncSender<()>,
+}
+
+/// Process-local notification for durable decision state transitions.
+///
+/// The JSON document remains authoritative. This registry only prevents every
+/// synchronous MCP waiter from reading that complete document forty times per
+/// second while its decision is still pending.
+#[derive(Default)]
+struct DecisionWaiters {
+    next_token: AtomicU64,
+    waiting: Mutex<BTreeMap<usagi_core::domain::id::UserDecisionId, Vec<DecisionWaiter>>>,
+}
+
+impl DecisionWaiters {
+    fn subscribe(
+        self: &Arc<Self>,
+        decision_id: usagi_core::domain::id::UserDecisionId,
+    ) -> DecisionWaitSubscription {
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        let (notify, changes) = mpsc::sync_channel(1);
+        self.waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(decision_id)
+            .or_default()
+            .push(DecisionWaiter { token, notify });
+        DecisionWaitSubscription {
+            registry: Arc::clone(self),
+            decision_id,
+            token,
+            changes,
+        }
+    }
+
+    fn notify(&self, decision_id: usagi_core::domain::id::UserDecisionId) {
+        let waiters = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&decision_id)
+            .unwrap_or_default();
+        for waiter in waiters {
+            let _ = waiter.notify.try_send(());
+        }
+    }
+
+    fn unsubscribe(&self, decision_id: usagi_core::domain::id::UserDecisionId, token: u64) {
+        let mut waiting = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove_entry = if let Some(waiters) = waiting.get_mut(&decision_id) {
+            waiters.retain(|waiter| waiter.token != token);
+            waiters.is_empty()
+        } else {
+            false
+        };
+        if remove_entry {
+            waiting.remove(&decision_id);
+        }
+    }
+
+    #[cfg(test)]
+    fn waiting_count(&self, decision_id: usagi_core::domain::id::UserDecisionId) -> usize {
+        self.waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&decision_id)
+            .map_or(0, Vec::len)
+    }
+}
+
+struct DecisionWaitSubscription {
+    registry: Arc<DecisionWaiters>,
+    decision_id: usagi_core::domain::id::UserDecisionId,
+    token: u64,
+    changes: Receiver<()>,
+}
+
+impl Drop for DecisionWaitSubscription {
+    fn drop(&mut self) {
+        self.registry.unsubscribe(self.decision_id, self.token);
+    }
+}
+
+trait DecisionWaitCancellation {
+    fn is_cancelled(&self) -> bool;
+}
+
+#[derive(Clone, Copy)]
+struct DecisionWaitContext<'a> {
+    waiters: &'a Arc<DecisionWaiters>,
+    cancellation: &'a dyn DecisionWaitCancellation,
+}
+
+struct DecisionConnectionCancellation {
+    connection: AcceptedStream,
+    gate: AdmissionGate,
+}
+
+impl DecisionWaitCancellation for DecisionConnectionCancellation {
+    fn is_cancelled(&self) -> bool {
+        !self.gate.is_open(LeaseClass::ActiveControl) || self.connection.peer_disconnected()
+    }
+}
 
 struct ProductionRefreshClock {
     started: Instant,
@@ -2691,10 +2803,12 @@ fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?);
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
+    let decision_waiters = Arc::new(DecisionWaiters::default());
     consume_user_decision_events(&decisions)
         .map_err(|error| std::io::Error::other(error.message))?;
     background_workers.push(start_decision_maintenance(
         Arc::clone(&decisions),
+        Arc::clone(&decision_waiters),
         Arc::clone(&shutdown),
     )?);
     background_workers.push(start_pr_refresh_worker(
@@ -2757,6 +2871,7 @@ fn spawn_ipc_server(
         pr_inventory,
         projection,
         decisions,
+        decision_waiters,
         Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
             agent_concurrency,
             shutdown.background_worker_health(),
@@ -3336,15 +3451,17 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 /// resumes from the JSON store.
 fn start_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
+    waiters: Arc<DecisionWaiters>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    spawn_decision_maintenance(decisions, shutdown, DECISION_MAINTENANCE_TICK)
+    spawn_decision_maintenance(decisions, waiters, shutdown, DECISION_MAINTENANCE_TICK)
 }
 
 /// The loop, with the tick injected so a test can drive it without waiting out
 /// the production cadence.
 fn spawn_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
+    waiters: Arc<DecisionWaiters>,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -3354,7 +3471,11 @@ fn spawn_decision_maintenance(
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::DecisionMaintenance);
             while !shutdown.is_requested() {
-                let _ = decisions.expire_due(chrono::Utc::now());
+                if let Ok(expired) = decisions.expire_due(chrono::Utc::now()) {
+                    for decision_id in expired {
+                        waiters.notify(decision_id);
+                    }
+                }
                 let _ = consume_user_decision_events(&decisions);
                 if shutdown.wait_for_tick(tick) {
                     break;
@@ -3779,6 +3900,7 @@ fn start_ipc_accept_loop(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
     decisions: Arc<UserDecisionStore>,
+    decision_waiters: Arc<DecisionWaiters>,
     metrics: SharedMetricsBroker,
     process_metrics: SharedProcessResourceSampler,
     pipeline_metrics: Arc<TerminalPipelineMetrics>,
@@ -3877,6 +3999,7 @@ fn start_ipc_accept_loop(
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
                         let decisions = Arc::clone(&decisions);
+                        let decision_waiters = Arc::clone(&decision_waiters);
                         let metrics = Arc::clone(&metrics);
                         let process_metrics = Arc::clone(&process_metrics);
                         let pipeline_metrics = Arc::clone(&pipeline_metrics);
@@ -3899,6 +4022,10 @@ fn start_ipc_accept_loop(
                         };
                         let worker_completion = Some(unblock.clone());
                         let retirement = unblock.retirement();
+                        let decision_cancellation = DecisionConnectionCancellation {
+                            connection: unblock.clone(),
+                            gate: connection_fence.gate.clone(),
+                        };
                         let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -4017,12 +4144,12 @@ fn start_ipc_accept_loop(
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
-                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, request_id, &body, hello),
+                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                         }
                                     },
@@ -4207,6 +4334,7 @@ fn dispatch_dispatch_tool(
     agent: &SharedAgentRuntime,
     sessions: &SharedSessionRuntime,
     decisions: &UserDecisionStore,
+    wait: DecisionWaitContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -4231,7 +4359,7 @@ fn dispatch_dispatch_tool(
     }) {
         dispatch_agent_tool(agent, sessions, request_id, body, hello)
     } else {
-        dispatch_user_decision(agent, sessions, decisions, request_id, body, hello)
+        dispatch_user_decision(agent, sessions, decisions, wait, request_id, body, hello)
     }
 }
 
@@ -4986,11 +5114,24 @@ fn dispatch_pr_snapshot(
 /// never carries an owner: it is reconstructed from the one active durable
 /// dispatch binding.  Ambiguity is deliberately fail-closed, preventing an
 /// agent from choosing another workspace, caller, or run.
+#[derive(Debug)]
+enum UserDecisionDispatchError {
+    Decision(usagi_core::domain::user_decision::UserDecisionError),
+    Cancelled,
+}
+
+impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecisionDispatchError {
+    fn from(error: usagi_core::domain::user_decision::UserDecisionError) -> Self {
+        Self::Decision(error)
+    }
+}
+
 #[allow(clippy::too_many_lines)] // The complete wire-to-store error mapping is one atomic routing contract.
 fn dispatch_user_decision(
     agent: &SharedAgentRuntime,
     sessions: &SharedSessionRuntime,
     store: &UserDecisionStore,
+    wait: DecisionWaitContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5161,57 +5302,106 @@ fn dispatch_user_decision(
             Ok(decision)
         };
         let now = Utc::now();
-        let result = (|| -> Result<serde_json::Value, UserDecisionError> { match action {
-            DispatchToolAction::UserDecisionRequest => {
-                let owner = owner.ok_or(UserDecisionError::Terminal)?;
-                let input = serde_json::from_value::<RequestPayload>(payload)
-                    .map_err(|_| UserDecisionError::Terminal)?;
-                let decision = store
-                    .create(UserDecision {
-                        decision_id: UserDecisionId::new(), owner, title: input.title, prompt: input.prompt,
-                        options: input.options, allow_freeform: input.allow_freeform, expires_at: input.expires_at,
-                        idempotency_key: input.idempotency_key, status: UserDecisionStatus::Pending, answer: None,
-                        created_at: now, resolved_at: None,
-                    })
-                    .map_err(|_| UserDecisionError::Terminal)?
-                    ?;
-                wait_for_user_decision(store, workspace, &decision)
+        let result = (|| -> Result<serde_json::Value, UserDecisionDispatchError> {
+            match action {
+                DispatchToolAction::UserDecisionRequest => {
+                    let owner = owner.ok_or(UserDecisionError::Terminal)?;
+                    let input = serde_json::from_value::<RequestPayload>(payload)
+                        .map_err(|_| UserDecisionError::Terminal)?;
+                    let decision = store
+                        .create(UserDecision {
+                            decision_id: UserDecisionId::new(),
+                            owner,
+                            title: input.title,
+                            prompt: input.prompt,
+                            options: input.options,
+                            allow_freeform: input.allow_freeform,
+                            expires_at: input.expires_at,
+                            idempotency_key: input.idempotency_key,
+                            status: UserDecisionStatus::Pending,
+                            answer: None,
+                            created_at: now,
+                            resolved_at: None,
+                        })
+                        .map_err(|_| UserDecisionError::Terminal)??;
+                    wait_for_user_decision(
+                        store,
+                        wait.waiters,
+                        wait.cancellation,
+                        workspace,
+                        &decision,
+                    )
+                }
+                DispatchToolAction::UserDecisionGet => {
+                    let input = serde_json::from_value::<DecisionIdPayload>(payload)
+                        .map_err(|_| UserDecisionError::Terminal)?;
+                    Ok(serde_json::json!(decision_for(input.decision_id)?))
+                }
+                DispatchToolAction::UserDecisionList => {
+                    let decisions = store
+                        .pending(workspace)
+                        .map_err(|_| UserDecisionError::Terminal)?;
+                    let decisions = decisions
+                        .into_iter()
+                        .filter(|decision| {
+                            owner
+                                .as_ref()
+                                .is_none_or(|expected| decision.owner == *expected)
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(serde_json::json!({"workspace": workspace, "decisions": decisions}))
+                }
+                DispatchToolAction::UserDecisionResolve => {
+                    let input = serde_json::from_value::<ResolvePayload>(payload)
+                        .map_err(|_| UserDecisionError::Terminal)?;
+                    let _ = decision_for(input.decision_id)?;
+                    let decision = store
+                        .resolve(workspace, input.decision_id, input.answer, now)
+                        .map_err(|_| UserDecisionError::Terminal)??;
+                    wait.waiters.notify(input.decision_id);
+                    Ok(serde_json::json!(decision))
+                }
+                DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
+                    let input = serde_json::from_value::<DecisionIdPayload>(payload)
+                        .map_err(|_| UserDecisionError::Terminal)?;
+                    let _ = decision_for(input.decision_id)?;
+                    let status = if action == DispatchToolAction::UserDecisionCancel {
+                        UserDecisionStatus::Cancelled
+                    } else {
+                        UserDecisionStatus::Expired
+                    };
+                    let decision = store
+                        .terminal(workspace, input.decision_id, status, now)
+                        .map_err(|_| UserDecisionError::Terminal)??;
+                    wait.waiters.notify(input.decision_id);
+                    Ok(serde_json::json!(decision))
+                }
+                _ => unreachable!(),
             }
-            DispatchToolAction::UserDecisionGet => {
-                let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
-                decision_for(input.decision_id).map(|decision| serde_json::json!(decision))
-            }
-            DispatchToolAction::UserDecisionList => store.pending(workspace)
-                .map_err(|_| UserDecisionError::Terminal)
-                .map(|decisions| decisions.into_iter().filter(|decision| {
-                    owner.as_ref().is_none_or(|expected| decision.owner == *expected)
-                }).collect::<Vec<_>>())
-                .map(|decisions| serde_json::json!({"workspace": workspace, "decisions": decisions})),
-            DispatchToolAction::UserDecisionResolve => {
-                let input = serde_json::from_value::<ResolvePayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
-                let _ = decision_for(input.decision_id)?;
-                let decision = store.resolve(workspace, input.decision_id, input.answer, now)
-                    .map_err(|_| UserDecisionError::Terminal)?
-                    ?;
-                Ok(serde_json::json!(decision))
-            }
-            DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
-                let input = serde_json::from_value::<DecisionIdPayload>(payload).map_err(|_| UserDecisionError::Terminal)?;
-                let _ = decision_for(input.decision_id)?;
-                let status = if action == DispatchToolAction::UserDecisionCancel { UserDecisionStatus::Cancelled } else { UserDecisionStatus::Expired };
-                store.terminal(workspace, input.decision_id, status, now)
-                    .map_err(|_| UserDecisionError::Terminal)?
-                    .map(|decision| serde_json::json!(decision))
-            }
-            _ => unreachable!(),
-        } })();
+        })();
         let value = result.map_err(|error| {
             let (code, message) = match error {
-                UserDecisionError::IdempotencyConflict => (ErrorCode::IdempotencyConflict, "decision idempotency key conflicts"),
-                UserDecisionError::InvalidOption => (ErrorCode::InvalidArgument, "decision option is not allowed"),
-                UserDecisionError::FreeformNotAllowed => (ErrorCode::InvalidArgument, "freeform decision answer is not allowed"),
-                UserDecisionError::Expired => (ErrorCode::DeadlineExceeded, "decision has expired"),
-                UserDecisionError::Terminal => (ErrorCode::RevisionConflict, "decision is not pending or is outside this workspace"),
+                UserDecisionDispatchError::Decision(UserDecisionError::IdempotencyConflict) => (
+                    ErrorCode::IdempotencyConflict,
+                    "decision idempotency key conflicts",
+                ),
+                UserDecisionDispatchError::Decision(UserDecisionError::InvalidOption) => {
+                    (ErrorCode::InvalidArgument, "decision option is not allowed")
+                }
+                UserDecisionDispatchError::Decision(UserDecisionError::FreeformNotAllowed) => (
+                    ErrorCode::InvalidArgument,
+                    "freeform decision answer is not allowed",
+                ),
+                UserDecisionDispatchError::Decision(UserDecisionError::Expired) => {
+                    (ErrorCode::DeadlineExceeded, "decision has expired")
+                }
+                UserDecisionDispatchError::Decision(UserDecisionError::Terminal) => (
+                    ErrorCode::RevisionConflict,
+                    "decision is not pending or is outside this workspace",
+                ),
+                UserDecisionDispatchError::Cancelled => {
+                    (ErrorCode::Cancelled, "decision wait was cancelled")
+                }
             };
             ProtocolError::new(code, message)
         })?;
@@ -5231,18 +5421,41 @@ fn dispatch_user_decision(
 
 fn wait_for_user_decision(
     decisions: &UserDecisionStore,
+    waiters: &Arc<DecisionWaiters>,
+    cancellation: &dyn DecisionWaitCancellation,
     workspace: usagi_core::domain::id::WorkspaceId,
     requested: &usagi_core::domain::user_decision::UserDecision,
-) -> Result<serde_json::Value, usagi_core::domain::user_decision::UserDecisionError> {
+) -> Result<serde_json::Value, UserDecisionDispatchError> {
     use usagi_core::domain::user_decision::UserDecisionStatus;
 
+    // Subscribe before the first authoritative read. A terminal transition that
+    // races this setup either appears in that read or leaves a queued wakeup, so
+    // no state edge can be missed.
+    let subscription = waiters.subscribe(requested.decision_id);
+    let mut refresh = true;
     loop {
+        if cancellation.is_cancelled() {
+            return Err(UserDecisionDispatchError::Cancelled);
+        }
+        if !refresh {
+            match subscription
+                .changes
+                .recv_timeout(DECISION_CANCELLATION_POLL)
+            {
+                Ok(()) => refresh = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(UserDecisionDispatchError::Cancelled);
+                }
+            }
+            continue;
+        }
         let decision = decisions
             .get(workspace, requested.decision_id)
             .map_err(|_| usagi_core::domain::user_decision::UserDecisionError::Terminal)?
             .ok_or(usagi_core::domain::user_decision::UserDecisionError::Terminal)?;
         match decision.status {
-            UserDecisionStatus::Pending => std::thread::sleep(Duration::from_millis(25)),
+            UserDecisionStatus::Pending => refresh = false,
             UserDecisionStatus::Resolved => {
                 let answer = decision
                     .answer
@@ -5254,10 +5467,10 @@ fn wait_for_user_decision(
                 }));
             }
             UserDecisionStatus::Cancelled => {
-                return Err(usagi_core::domain::user_decision::UserDecisionError::Terminal);
+                return Err(usagi_core::domain::user_decision::UserDecisionError::Terminal.into());
             }
             UserDecisionStatus::Expired => {
-                return Err(usagi_core::domain::user_decision::UserDecisionError::Expired);
+                return Err(usagi_core::domain::user_decision::UserDecisionError::Expired.into());
             }
         }
     }
@@ -8252,6 +8465,78 @@ impl AcceptedStream {
     /// retirement asked it to stop.
     fn retirement(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.retired)
+    }
+
+    /// Observes a peer close without consuming bytes that may belong to a later
+    /// request. The retained duplicate is already owned for retirement, so this
+    /// adds no descriptor to a waiting decision.
+    fn peer_disconnected(&self) -> bool {
+        if self.retired.load(Ordering::Acquire) {
+            return true;
+        }
+        let stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(stream) = stream.as_ref() else {
+            return true;
+        };
+        let mut pending = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            pending.events |= libc::POLLRDHUP;
+        }
+        loop {
+            // SAFETY: one initialized `pollfd` names the live descriptor held by
+            // `stream`; a zero timeout only observes its current state.
+            let ready = unsafe { libc::poll(&raw mut pending, 1, 0) };
+            if ready >= 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return true;
+            }
+        }
+        let disconnected = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let disconnected = disconnected | libc::POLLRDHUP;
+        if pending.revents & disconnected != 0 {
+            return true;
+        }
+        let mut byte = 0_u8;
+        loop {
+            // SAFETY: `byte` is a writable one-byte buffer and `stream` owns a
+            // live descriptor for this call. MSG_PEEK never consumes payload.
+            let read = unsafe {
+                libc::recv(
+                    stream.as_raw_fd(),
+                    (&raw mut byte).cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            };
+            if read == 0 {
+                return true;
+            }
+            if read > 0 {
+                return false;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return error.kind() != std::io::ErrorKind::WouldBlock;
+        }
+    }
+}
+
+impl DecisionWaitCancellation for AcceptedStream {
+    fn is_cancelled(&self) -> bool {
+        self.peer_disconnected()
     }
 }
 
@@ -13175,6 +13460,205 @@ mod tests {
         assert!(!data_dir.exists());
     }
 
+    fn pending_decision(
+        store: &UserDecisionStore,
+    ) -> usagi_core::domain::user_decision::UserDecision {
+        use usagi_core::domain::{
+            agent::CallerRef,
+            id::{AgentId, OperationId, UserDecisionId},
+            user_decision::{
+                UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionStatus,
+            },
+        };
+
+        store
+            .create(UserDecision {
+                decision_id: UserDecisionId::new(),
+                owner: UserDecisionOwner {
+                    workspace_id: WorkspaceId::new(),
+                    session_id: Some(SessionId::new()),
+                    caller: CallerRef {
+                        session_id: Some(SessionId::new()),
+                        agent_id: AgentId::new(),
+                    },
+                    run_id: OperationId::new(),
+                },
+                title: "Choose".into(),
+                prompt: "Continue?".into(),
+                options: vec![UserDecisionOption {
+                    id: "yes".into(),
+                    label: "Yes".into(),
+                    description: None,
+                }],
+                allow_freeform: false,
+                expires_at: None,
+                idempotency_key: Some("decision-wait-test".into()),
+                status: UserDecisionStatus::Pending,
+                answer: None,
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    fn wait_until_decision_waiter_is_registered(
+        waiters: &DecisionWaiters,
+        decision_id: usagi_core::domain::id::UserDecisionId,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while waiters.waiting_count(decision_id) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "decision waiter did not register"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn decision_transition_notifies_the_synchronous_waiter() {
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+
+        struct NeverCancelled;
+        impl DecisionWaitCancellation for NeverCancelled {
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+        }
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let store = Arc::new(UserDecisionStore::new(home.path()));
+        let decision = pending_decision(&store);
+        let waiters = Arc::new(DecisionWaiters::default());
+        let waiting_store = Arc::clone(&store);
+        let waiting_registry = Arc::clone(&waiters);
+        let requested = decision.clone();
+        let handle = std::thread::spawn(move || {
+            wait_for_user_decision(
+                &waiting_store,
+                &waiting_registry,
+                &NeverCancelled,
+                requested.owner.workspace_id,
+                &requested,
+            )
+        });
+        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
+
+        store
+            .resolve(
+                decision.owner.workspace_id,
+                decision.decision_id,
+                UserDecisionAnswer::Option {
+                    option_id: "yes".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        waiters.notify(decision.decision_id);
+
+        let response = handle.join().unwrap().unwrap();
+        assert_eq!(response["status"], "resolved");
+        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
+    }
+
+    #[test]
+    fn accepted_stream_observes_peer_close_behind_buffered_data() {
+        let (server, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = AcceptedStream::new(server);
+
+        std::io::Write::write_all(&mut peer, b"pipelined request").unwrap();
+        drop(peer);
+
+        assert!(connection.peer_disconnected());
+    }
+
+    #[test]
+    fn disconnected_client_releases_a_pending_decision_waiter_without_mutating_it() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let store = Arc::new(UserDecisionStore::new(home.path()));
+        let decision = pending_decision(&store);
+        let waiters = Arc::new(DecisionWaiters::default());
+        let (server, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let cancellation = AcceptedStream::new(server);
+        let waiting_store = Arc::clone(&store);
+        let waiting_registry = Arc::clone(&waiters);
+        let requested = decision.clone();
+        let handle = std::thread::spawn(move || {
+            wait_for_user_decision(
+                &waiting_store,
+                &waiting_registry,
+                &cancellation,
+                requested.owner.workspace_id,
+                &requested,
+            )
+        });
+        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
+
+        drop(peer);
+        assert!(matches!(
+            handle.join().unwrap(),
+            Err(UserDecisionDispatchError::Cancelled)
+        ));
+        let retained = store
+            .get(decision.owner.workspace_id, decision.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.status,
+            usagi_core::domain::user_decision::UserDecisionStatus::Pending
+        );
+        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
+    }
+
+    #[test]
+    fn rollover_control_barrier_cancels_a_pending_decision_before_waiting_for_its_lease() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let store = Arc::new(UserDecisionStore::new(home.path()));
+        let decision = pending_decision(&store);
+        let waiters = Arc::new(DecisionWaiters::default());
+        let (server, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        let lease = gate.acquire(LeaseClass::ActiveControl).unwrap();
+        let cancellation = DecisionConnectionCancellation {
+            connection: AcceptedStream::new(server),
+            gate: gate.clone(),
+        };
+        let waiting_store = Arc::clone(&store);
+        let waiting_registry = Arc::clone(&waiters);
+        let requested = decision.clone();
+        let handle = std::thread::spawn(move || {
+            let _lease = lease;
+            assert!(matches!(
+                wait_for_user_decision(
+                    &waiting_store,
+                    &waiting_registry,
+                    &cancellation,
+                    requested.owner.workspace_id,
+                    &requested,
+                ),
+                Err(UserDecisionDispatchError::Cancelled)
+            ));
+        });
+        wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
+
+        let started = Instant::now();
+        gate.close(LeaseClass::ActiveControl);
+        gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        handle.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(waiters.waiting_count(decision.decision_id), 0);
+        let retained = store
+            .get(decision.owner.workspace_id, decision.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.status,
+            usagi_core::domain::user_decision::UserDecisionStatus::Pending
+        );
+    }
+
     #[test]
     fn decision_maintenance_never_writes_when_nothing_is_due_and_honors_shutdown() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
@@ -13185,8 +13669,13 @@ mod tests {
         let shutdown = Arc::new(ShutdownRequest::new());
         let stopper = Arc::clone(&shutdown);
 
-        let handle =
-            spawn_decision_maintenance(decisions, shutdown, Duration::from_millis(1)).unwrap();
+        let handle = spawn_decision_maintenance(
+            decisions,
+            Arc::new(DecisionWaiters::default()),
+            shutdown,
+            Duration::from_millis(1),
+        )
+        .unwrap();
         // Let several ticks run, then stop: the worker must observe the request
         // rather than needing its tick to be short.
         std::thread::sleep(Duration::from_millis(30));
@@ -13216,6 +13705,7 @@ mod tests {
         shutdown.request();
         spawn_decision_maintenance(
             Arc::new(UserDecisionStore::new(daemon)),
+            Arc::new(DecisionWaiters::default()),
             shutdown,
             Duration::from_secs(30),
         )
