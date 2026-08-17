@@ -781,9 +781,24 @@ impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
     }
 }
 
-#[derive(Default)]
 struct ProductionBackendFactory {
     helper_reaper: PlatformChildReaper,
+    garden_reduced_motion: bool,
+}
+
+impl Default for ProductionBackendFactory {
+    fn default() -> Self {
+        Self {
+            helper_reaper: PlatformChildReaper::default(),
+            garden_reduced_motion: reduced_motion_from_environment(
+                std::env::var_os("USAGI_REDUCE_MOTION").as_deref(),
+            ),
+        }
+    }
+}
+
+fn reduced_motion_from_environment(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
 }
 
 type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
@@ -807,6 +822,10 @@ fn project_backend_sessions(
 }
 
 impl ControllerBackendFactory for ProductionBackendFactory {
+    fn garden_reduced_motion(&self) -> bool {
+        self.garden_reduced_motion
+    }
+
     fn create(
         &mut self,
         snapshot: &WorkspaceSnapshot,
@@ -4259,15 +4278,25 @@ mod tests {
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection, reply_geometry,
-        session_cadence, session_snapshot_result, terminal_copy_key,
-        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
-        version_result_from_observation, workspace_open_error,
+        pr_snapshot_events, probe_path, provider_resume_projection,
+        reduced_motion_from_environment, reply_geometry, session_cadence, session_snapshot_result,
+        terminal_copy_key, terminal_inventory_matches_scope, validate_workspace_directory,
+        version_detail, version_result_from_observation, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
     use chrono::Utc;
     use usagi_core::infrastructure::bounded_process::ChildObservation;
+
+    #[test]
+    fn reduced_motion_environment_accepts_only_the_documented_opt_in() {
+        use std::ffi::OsStr;
+
+        assert!(reduced_motion_from_environment(Some(OsStr::new("1"))));
+        for value in [None, Some(OsStr::new("0")), Some(OsStr::new("true"))] {
+            assert!(!reduced_motion_from_environment(value));
+        }
+    }
 
     #[test]
     fn pr_snapshot_events_cover_success_scoped_and_lane_errors() {

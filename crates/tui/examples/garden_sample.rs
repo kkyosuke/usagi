@@ -83,6 +83,9 @@ fn sample(
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,
+        selected: false,
+        failure_summary: (lifecycle == SessionLifecycle::Failed)
+            .then(|| "safe sample failure".to_owned()),
         agents: vec![GardenAgent {
             runtime_id: AgentRuntimeId::parse(id).expect("sample IDs are canonical UUIDs"),
             phase: agent_phase,
@@ -100,6 +103,8 @@ fn sample_agents(
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,
+        selected: true,
+        failure_summary: None,
         agents: agents
             .iter()
             .map(|(runtime_id, phase)| GardenAgent {
