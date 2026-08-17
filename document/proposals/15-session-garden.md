@@ -48,9 +48,8 @@ Agent が動き続けていても人が操作していなければ Garden を表
 
 ## うさぎは agent、区画は session
 
-**1 区画（plot）= 1 session、runtime がある区画では 1 うさぎ = 1 agent** とする。session は「場所」であり、
-実際に作業しているのは agent なので、動くものを agent に対応させる。runtime がまだ無い区画だけは、庭を空の
-診断表示にしないため、session を表す ambient なうさぎを 1 羽置く。
+**1 区画（plot）= 1 session、1 うさぎ = 1 agent** とする。session は「場所」であり、実際に作業しているのは
+agent なので、動くものを agent に対応させる。
 
 初期案は 1 session = 1 うさぎで、controller が集約した Agent phase を 1 つだけ描いていた。1 session は
 agent を複数持てる（controller の runtime 一覧を session で絞り込む）ため、この集約は次の 2 つを失う。
@@ -64,8 +63,9 @@ agent を複数持てる（controller の runtime 一覧を session で絞り込
 最上位でよい）。しかし Garden の目的は実行状態を一覧表より速く把握することなので、ここでは逆効果になる。
 したがって Garden は集約後の値ではなく、**session に属する agent ごとの phase** を描画素材にする。
 
-見た目のために daemon schema、永続 session record、IPC event は増やさない。agent ごとの phase は
-controller が既に持っている runtime 一覧から導出する。
+見た目のために daemon schema、永続 session record、IPC event は増やさない。agent membership は既存の coherent
+Agent inventory と controller の runtime 一覧を stable identity で結合し、agent ごとの詳細な phase は controller が
+既に持っていればそちらを優先する。これにより TUI 起動前から存在する agent も Garden から欠落しない。
 
 ### 状態の対応
 
@@ -137,9 +137,7 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
 4. `tick`、projection、領域サイズが同じなら、常に同じ frame を返す。
 
 session が plot 数を超える場合は末尾を `+ N more in session list` に畳み、既存 sidebar を完全な一覧の正本として
-残す。利用可能な session に runtime がまだ無い場合は、空区画や `no agents` にはせず、stable `SessionId` を
-animation offset に使った `available` のうさぎを 1 羽描く。resize 後の再配置は許すが、同じ幅の refresh では場所を
-変えない。
+残す。resize 後の再配置は許すが、同じ幅の refresh では場所を変えない。
 
 ## 起こし方とクリック遷移
 
@@ -213,9 +211,9 @@ sample は idle timer、click dispatch には接続しない。状態別 pose、
 production 配線より先に確認するための presentation-only surface である。
 
 実際の workspace で見るには、Overview の `garden` command で手動で開くか、5 分間操作せずに待つ（仕様は
-[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭は session ごとに runtime を直接参照して
-各 agent の phase を描く。controller が runtime の `Ended` / `Exited` / `Interrupted` を `TargetPhase::Done` へ
-畳んだ場合も、庭では瞬きへ戻さず静止した `done` pose になる。
+[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭は session ごとに controller の runtime-local
+phase と最新 coherent Agent inventory を結合して各 agent の phase を描く。controller が runtime の `Ended` /
+`Exited` / `Interrupted` を `TargetPhase::Done` へ畳んだ場合も、庭では瞬きへ戻さず静止した `done` pose になる。
 
 ## 実装順序と受け入れ条件
 
@@ -239,7 +237,6 @@ production 配線より先に確認するための presentation-only surface で
 - 同じ入力 snapshot / tick / size は byte-for-byte 同じ frame になる。
 - すべての行が端末幅以内で、CJK の session label も途中で壊れない。
 - 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストする。
-- runtime がまだ無い利用可能な session も、空区画ではなく `available` のうさぎを表示する。
 - 1 session に複数 agent があるとき、羽数と各 agent の phase が描かれ、集約によって実行中の agent が
   休んでいる姿に化けない。
 - 表示上限を超えた agent は `+N` に畳まれる。表示枠は `Waiting` が先に使い、`Waiting` 自体が上限を超える

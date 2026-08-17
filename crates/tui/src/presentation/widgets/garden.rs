@@ -379,21 +379,12 @@ fn available_plot(
 ) -> [String; PLOT_CONTENT_ROWS - 1] {
     let agents = ordered_agents(&session.agents);
     if agents.is_empty() {
-        // A usable session can legitimately have no runtime yet (for example,
-        // before its first Agent is launched).  Keep the plot recognisable as
-        // part of the Garden instead of turning it into an empty diagnostic
-        // tile.  The session identity gives this ambient rabbit the same stable
-        // animation offset guarantees as runtime-backed rabbits.
-        let phase = animation_phase(tick, reduced_motion, &session.id.as_str());
-        let (status, status_style, rabbit_style, rabbit) =
-            agent_appearance(AgentPhase::Absent, phase);
-        let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
         return [
-            centered(PLOT_WIDTH, &status_style.paint(status)),
-            ears,
-            head,
-            body,
-            feet,
+            centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
+            " ".repeat(PLOT_WIDTH),
+            " ".repeat(PLOT_WIDTH),
+            " ".repeat(PLOT_WIDTH),
+            " ".repeat(PLOT_WIDTH),
         ];
     }
 
@@ -758,28 +749,26 @@ mod tests {
     }
 
     #[test]
-    fn an_available_session_without_an_agent_still_draws_a_usagi() {
-        let session = GardenSession {
-            id: SessionId::parse(STEADY_ID).expect("fixture id"),
-            label: "empty".to_owned(),
-            lifecycle: SessionLifecycle::Available,
-            selected: false,
-            failure_summary: None,
-            agents: Vec::new(),
-        };
-        let frame = render(24, 100, "x", std::slice::from_ref(&session), 0, false).expect("fits");
+    fn an_available_session_without_an_agent_draws_an_empty_plot() {
+        let frame = render(
+            24,
+            100,
+            "x",
+            &[GardenSession {
+                id: SessionId::parse(STEADY_ID).expect("fixture id"),
+                label: "empty".to_owned(),
+                lifecycle: SessionLifecycle::Available,
+                selected: false,
+                failure_summary: None,
+                agents: Vec::new(),
+            }],
+            0,
+            false,
+        )
+        .expect("fits");
         let text = plain(&frame).join("\n");
-        assert!(text.contains("available"));
-        assert!(text.contains("/)/)"));
-        assert!(text.contains("( . .)"));
-        assert!(!text.contains("no agents"));
-
-        let blink = render(24, 100, "x", std::slice::from_ref(&session), 4, false).expect("fits");
-        assert!(plain(&blink).join("\n").contains("( -.-)"));
-        assert_ne!(frame.rows, blink.rows);
-
-        let reduced = render(24, 100, "x", &[session], 4, true).expect("fits");
-        assert_eq!(frame.rows, reduced.rows);
+        assert!(text.contains("no agents"));
+        assert!(!text.contains("/)/)"));
     }
 
     #[test]
