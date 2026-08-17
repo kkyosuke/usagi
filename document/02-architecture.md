@@ -888,8 +888,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。session の書き込みは own worktree だけに閉じ込め、root coordinator は起動固有 root（cwd・
-  workspace の `.usagi`・Git common dir・usagi state）と普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  起動する。session の書き込みは own worktree だけに閉じ込め、root coordinator は普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
@@ -904,6 +903,12 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   session workspace の protected ancestor を daemon と exec 直前の両境界で検証する。
   この launcher で子を包む指示は非 durable な `SpawnProvision`（`sandbox_launcher`）に載り、durable な launch
   snapshot は素の product program（`claude`）を保つ。
+
+  root coordinator から daemon の cold start が必要な場合も、この writable root 集合は広げない。active daemon は
+  workspace fence と endpoint を確立した後、同じ実行ファイル・runtime mode・canonical workspace に固定した
+  `bootstrap-broker` を sandbox 外へ起動する。broker の private Unix socket が受理する要求は ping と cold start だけで、
+  executable、workspace、argv を client から受け取らない。root Agent が `bootstrap.lock` を書けない場合、client は
+  broker へ start を要求してから通常の build / workspace fence 付き IPC へ接続する。
 
   [`usecase::workspace_guard`]: ../crates/core/src/usecase/workspace_guard.rs
   [`usecase::claude_sandbox`]: ../crates/core/src/usecase/claude_sandbox.rs

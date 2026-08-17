@@ -524,12 +524,9 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
-            let sandbox_roots = root_agent_writable_roots(
-                self.sandbox_home.as_deref(),
-                self.program,
-                &self.data_home,
-            )
-            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            let sandbox_roots =
+                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
+                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode,
                 program: self.program,
@@ -586,45 +583,30 @@ const CLAUDE_PROGRAM: &str = "claude";
 fn root_agent_writable_roots(
     home: Option<&Path>,
     program: &str,
-    data_home: &paths::DataHome,
 ) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
-    let data_home = data_home
-        .base()
-        .canonicalize()
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-    validate_owned_directory(&data_home)?;
-    let mut roots = vec![data_home];
-    roots.extend(agent_state_writable_roots(home, program)?);
-    Ok(roots)
-}
-
-fn agent_state_writable_roots(
-    home: Option<&Path>,
-    program: &str,
-) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
-    if let (Some(home), Some(state_directory)) =
+    let (Some(home), Some(state_directory)) =
         (home, claude_sandbox::agent_state_directory(program))
+    else {
+        return Ok(Vec::new());
+    };
+    validate_owned_directory(home)?;
+    let state = home.join(state_directory);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
     {
-        validate_owned_directory(home)?;
-        let state = home.join(state_directory);
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt as _;
-            builder.mode(0o700);
-        }
-        match builder.create(&state) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
-        }
-        validate_owned_directory(&state)?;
-        return state
-            .canonicalize()
-            .map(|state| vec![state])
-            .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot);
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
     }
-    Ok(Vec::new())
+    match builder.create(&state) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+    }
+    validate_owned_directory(&state)?;
+    state
+        .canonicalize()
+        .map(|state| vec![state])
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
 }
 
 /// Codex's arg0 janitor cannot open the `.lock` inside a directory left with no
@@ -743,8 +725,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
-        let launch_roots =
-            claude_writable_roots(mode, &working_directory, Some(self.data_home.base()));
+        let launch_roots = claude_writable_roots(mode, &working_directory);
         let paths = self.launcher_paths(mode);
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -846,18 +827,13 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
 /// A session launch receives exactly its own worktree. A root coordinator receives
-/// the mode-neutral usagi data home, but no repository-local writable root. This lets
-/// the coordinator bootstrap and reconnect the daemon while the checkout, `.git`, and
-/// the workspace-local `.usagi` tree remain read-only.
-fn claude_writable_roots(
-    mode: SandboxMode,
-    working_directory: &Path,
-    data_home_base: Option<&Path>,
-) -> Vec<PathBuf> {
+/// no repository-local writable root. Daemon bootstrap is delegated to the
+/// out-of-sandbox bootstrap broker.
+fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
         vec![working_directory.to_path_buf()]
     } else {
-        data_home_base.map(Path::to_path_buf).into_iter().collect()
+        Vec::new()
     }
 }
 
@@ -916,14 +892,12 @@ fn insert_root_git_environment(spawn: &mut SpawnProvision) {
 fn validate_root_git_common_dir_policy(
     workspace_root: &Path,
     program: &str,
-    launch_roots: &[PathBuf],
     tmpdir: Option<&Path>,
     home: Option<&Path>,
     cache_dir: Option<&Path>,
 ) -> Result<(), ()> {
     let common = git_common_dir(workspace_root)?;
-    let mut writable = launch_roots.to_vec();
-    writable.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
+    let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
         writable
@@ -1039,17 +1013,10 @@ fn validate_claude_sandbox_policy(
     let backend = backend.ok_or(ClaudeSandboxPolicyError::MissingBackend)?;
     validate_sandbox_backend(backend)?;
     if mode == SandboxMode::Root {
-        validate_root_git_common_dir_policy(
-            workspace_root,
-            program,
-            launch_roots,
-            tmpdir,
-            home,
-            cache_dir,
-        )
-        // Git common dir が writable 領域に入っていれば、read-only な checkout でも
-        // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
-        .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
+        validate_root_git_common_dir_policy(workspace_root, program, tmpdir, home, cache_dir)
+            // Git common dir が writable 領域に入っていれば、read-only な checkout でも
+            // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
+            .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
     }
     let protected_workspace = workspace_root
         .canonicalize()
@@ -3403,7 +3370,7 @@ fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
         DefaultModel::OpenAi.command(),
         DefaultModel::SakanaAi.command(),
     ] {
-        if let Ok(roots) = agent_state_writable_roots(sandbox_home, program) {
+        if let Ok(roots) = root_agent_writable_roots(sandbox_home, program) {
             for root in roots {
                 if let Err(error) = repair_codex_arg0_permissions(&root) {
                     ErrorLog::record(&format!(
@@ -7533,7 +7500,12 @@ impl DaemonReady for IpcReady<'_> {
                 true,
                 Arc::clone(&self.shutdown),
             )
-        })
+        })?;
+        spawn_bootstrap_broker(
+            &std::env::current_exe()?,
+            self.data_dir,
+            self.workspace_root,
+        )
     }
 
     fn quiesce(&self) -> std::io::Result<()> {
@@ -8977,6 +8949,153 @@ impl DaemonLauncher for ServeLauncher {
     }
 }
 
+const BOOTSTRAP_BROKER_SOCKET: &str = "bootstrap-broker.sock";
+const BOOTSTRAP_BROKER_LOCK: &str = "bootstrap-broker.lock";
+const BROKER_PING: u8 = b'P';
+const BROKER_START: u8 = b'S';
+const BROKER_OK: u8 = b'O';
+const BROKER_READINESS_ATTEMPTS: u32 = 100;
+
+fn bootstrap_broker_socket(data_dir: &Path) -> PathBuf {
+    data_dir.join("daemon").join(BOOTSTRAP_BROKER_SOCKET)
+}
+
+fn request_bootstrap_broker(data_dir: &Path, request: u8) -> std::io::Result<()> {
+    let mut stream = std::os::unix::net::UnixStream::connect(bootstrap_broker_socket(data_dir))?;
+    stream.set_read_timeout(Some(Duration::from_secs(6)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(6)))?;
+    stream.write_all(&[request])?;
+    let mut reply = [0_u8; 1];
+    stream.read_exact(&mut reply)?;
+    (reply[0] == BROKER_OK)
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other("daemon bootstrap broker refused the request"))
+}
+
+fn request_broker_start(data_dir: &Path) -> std::io::Result<()> {
+    request_bootstrap_broker(data_dir, BROKER_START)?;
+    for _ in 0..BROKER_READINESS_ATTEMPTS {
+        if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+            return Ok(());
+        }
+        RealSleeper.sleep();
+    }
+    Err(std::io::Error::other(
+        "daemon bootstrap broker started no reachable daemon",
+    ))
+}
+
+fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std::io::Result<()> {
+    if std::os::unix::net::UnixStream::connect(bootstrap_broker_socket(data_dir)).is_ok() {
+        return Ok(());
+    }
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["daemon", "bootstrap-broker"])
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.spawn()?;
+    Ok(())
+}
+
+fn bootstrap_serve_command(exe: &Path, workspace: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["daemon", "serve"])
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command
+}
+
+fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::io::Result<()> {
+    if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+        return Ok(());
+    }
+    bootstrap_serve_command(exe, workspace).spawn()?;
+    for _ in 0..BROKER_READINESS_ATTEMPTS {
+        if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+            return Ok(());
+        }
+        RealSleeper.sleep();
+    }
+    Err(std::io::Error::other(
+        "brokered daemon did not become ready",
+    ))
+}
+
+fn handle_bootstrap_broker_request(
+    request: u8,
+    launch: impl FnOnce() -> std::io::Result<()>,
+) -> bool {
+    match request {
+        BROKER_PING => true,
+        BROKER_START => launch().is_ok(),
+        _ => false,
+    }
+}
+
+fn serve_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let workspace = paths::canonical_workspace_root(workspace)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    ensure_private_dir_all(data_dir)?;
+    let daemon_dir = data_dir.join("daemon");
+    ensure_private_dir(&daemon_dir)?;
+    let lock = FileInstanceLock {
+        path: daemon_dir.join(BOOTSTRAP_BROKER_LOCK),
+        held: RefCell::new(None),
+    };
+    if !lock.acquire()? {
+        return Ok(());
+    }
+    let socket = bootstrap_broker_socket(data_dir);
+    match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&socket)?,
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "daemon bootstrap broker endpoint is not a socket",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    }
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else {
+            continue;
+        };
+        if workspace.canonicalize().ok().as_deref() != Some(workspace.as_path()) {
+            break;
+        }
+        let mut request = [0_u8; 1];
+        if stream.read_exact(&mut request).is_err() {
+            continue;
+        }
+        let accepted = handle_bootstrap_broker_request(request[0], || {
+            launch_broker_daemon(exe, &workspace, data_dir)
+        });
+        let _ = stream.write_all(&[if accepted { BROKER_OK } else { b'E' }]);
+    }
+    drop(listener);
+    let _ = std::fs::remove_file(socket);
+    Ok(())
+}
+
 struct IpcRolloverRequester<'a> {
     data_dir: &'a Path,
     launcher: &'a ServeLauncher,
@@ -9230,6 +9349,35 @@ pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
     Ok(data_dir)
 }
 
+fn run_broker_lifecycle_command(
+    out: &mut dyn Write,
+    command: CliDaemonCommand,
+    info: &AppInfo,
+) -> Option<std::io::Result<()>> {
+    if command == CliDaemonCommand::BootstrapBroker {
+        return Some((|| {
+            let data_dir =
+                paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+            serve_bootstrap_broker(
+                &data_dir,
+                &std::env::current_dir()?,
+                &std::env::current_exe()?,
+            )
+        })());
+    }
+    if command == CliDaemonCommand::Start
+        && let Ok(data_dir) = paths::data_dir()
+        && request_broker_start(&data_dir).is_ok()
+    {
+        return Some(writeln!(
+            out,
+            "{}: daemon started via bootstrap broker",
+            info.describe()
+        ));
+    }
+    None
+}
+
 /// Install one process-wide panic hook for the daemon. A daemon owns several
 /// worker threads, so a boundary around its main thread alone cannot observe a
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
@@ -9258,12 +9406,16 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
         Backtrace::force_capture()
     )
 }
+#[allow(clippy::too_many_lines)] // Composition wires the closed lifecycle verbs and their IO ports.
 fn run_inner(
     out: &mut dyn Write,
     command: CliDaemonCommand,
     info: &AppInfo,
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
 ) -> std::io::Result<()> {
+    if let Some(result) = run_broker_lifecycle_command(out, command, info) {
+        return result;
+    }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
     let command = match command {
@@ -9294,6 +9446,7 @@ fn run_inner(
             ServeRole::Active
         }),
         CliDaemonCommand::Start => PresentationDaemonCommand::Start,
+        CliDaemonCommand::BootstrapBroker => unreachable!("handled before daemon state setup"),
         CliDaemonCommand::Status => PresentationDaemonCommand::Status,
         CliDaemonCommand::Stop { force } => PresentationDaemonCommand::Stop(transition_mode(force)),
         // A manual restart is a forced replacement of the artifact that is
@@ -9555,8 +9708,45 @@ fn bootstrap_client<S: Read + Write>(
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let exe =
         std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
     let expected_build = current_build();
+    let _bootstrap_lock = match acquire_bootstrap_lock(&data_dir) {
+        Ok(lock) => lock,
+        Err(lock_error) => {
+            if request_broker_start(&data_dir).is_err() {
+                return Err(lock_error);
+            }
+            for _ in 0..40 {
+                if let Ok(client) = connect(&data_dir, &expected_build) {
+                    return match build_artifact_decision(
+                        client.server_build(),
+                        &expected_build,
+                        false,
+                    ) {
+                        BuildArtifactDecision::Reuse => Ok(client),
+                        BuildArtifactDecision::ForceReplace
+                        | BuildArtifactDecision::RolloverTrigger => {
+                            Err(ClientError::RolloverRequired(
+                                build_rollover_trigger(
+                                    client.server_build(),
+                                    &expected_build,
+                                    runtime_channel(),
+                                    false,
+                                )
+                                .ok_or(ClientError::BuildIdentityUnavailable)?,
+                            ))
+                        }
+                        BuildArtifactDecision::Unknown => {
+                            Err(ClientError::BuildIdentityUnavailable)
+                        }
+                    };
+                }
+                RealSleeper.sleep();
+            }
+            return Err(ClientError::Unavailable(
+                "daemon bootstrap broker started no reachable daemon".into(),
+            ));
+        }
+    };
     let channel = runtime_channel();
     let connection = bootstrap::connect_or_start(
         || connect(&data_dir, &expected_build),
@@ -14171,41 +14361,58 @@ instructions = "{instructions}"
                 Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
             );
 
-            // 3. Root sandbox scope: the exact mode-neutral base is writable so
-            // daemon bootstrap can re-select its mode. Its parent is never granted.
-            let roots = claude_writable_roots(
-                SandboxMode::Root,
-                Path::new("/repo/.usagi/sessions/work"),
-                Some(data_home.base()),
-            );
-            assert_eq!(roots, [base.to_path_buf()]);
-            let above = base.parent().expect("a temporary directory has a parent");
-            assert!(!roots.iter().any(|root| root == above), "{roots:?}");
+            // 3. Root sandbox scope: daemon bootstrap is brokered out of process,
+            // so neither the selected directory nor its mode-neutral base is writable.
+            let roots =
+                claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
+            assert!(roots.is_empty(), "{roots:?}");
         }
     }
 
     #[test]
-    fn root_agent_writable_roots_include_exact_data_home_and_provider_state() {
+    fn root_agent_writable_roots_include_only_provider_state() {
         std::fs::create_dir_all("target").unwrap();
         let fixture = tempfile::tempdir_in("target").unwrap();
-        let data = fixture.path().join("usagi-data");
         let home = fixture.path().join("home");
-        std::fs::create_dir_all(&data).unwrap();
         std::fs::create_dir_all(&home).unwrap();
-        let data_home = paths::DataHome::new(&data, paths::RuntimeMode::Production);
 
-        let roots = root_agent_writable_roots(Some(&home), "codex", &data_home).unwrap();
-        assert_eq!(
-            roots,
-            [
-                data.canonicalize().unwrap(),
-                home.join(".codex").canonicalize().unwrap(),
-            ]
-        );
+        let roots = root_agent_writable_roots(Some(&home), "codex").unwrap();
+        assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
         assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
-        let roots = root_agent_writable_roots(None, "/bin/sh", &data_home).unwrap();
-        assert_eq!(roots, [data.canonicalize().unwrap()]);
+        let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_broker_accepts_only_ping_and_start() {
+        let launches = std::cell::Cell::new(0_u8);
+        assert!(handle_bootstrap_broker_request(BROKER_PING, || {
+            launches.set(launches.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(launches.get(), 0);
+        assert!(handle_bootstrap_broker_request(BROKER_START, || {
+            launches.set(launches.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(launches.get(), 1);
+        assert!(!handle_bootstrap_broker_request(b'X', || {
+            launches.set(launches.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(launches.get(), 1);
+        assert!(!handle_bootstrap_broker_request(BROKER_START, || {
+            Err(std::io::Error::other("launch refused"))
+        }));
+    }
+
+    #[test]
+    fn bootstrap_broker_launches_only_serve_in_its_fixed_workspace() {
+        let command = bootstrap_serve_command(Path::new("/opt/usagi"), Path::new("/repo"));
+        assert_eq!(command.get_program(), "/opt/usagi");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["daemon", "serve"]);
+        assert_eq!(command.get_current_dir(), Some(Path::new("/repo")));
     }
 
     #[test]
@@ -14335,7 +14542,6 @@ instructions = "{instructions}"
             validate_root_git_common_dir_policy(
                 safe.path(),
                 CLAUDE_PROGRAM,
-                &[],
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -14361,7 +14567,6 @@ instructions = "{instructions}"
             validate_root_git_common_dir_policy(
                 linked.path(),
                 CLAUDE_PROGRAM,
-                &[],
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -14387,7 +14592,6 @@ instructions = "{instructions}"
                 validate_root_git_common_dir_policy(
                     under_state.path(),
                     program,
-                    &[],
                     None,
                     Some(&home.path().canonicalize().unwrap()),
                     None,
@@ -14407,7 +14611,7 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&context);
         assert_eq!(mode, SandboxMode::Session);
 
-        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"), None);
+        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"));
         assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
 
         let launcher = claude_sandbox_launcher(
@@ -14672,9 +14876,9 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&provision_context(None));
         assert_eq!(mode, SandboxMode::Root);
 
-        // A root launch's cwd stays read-only; only the mode-neutral data home is writable.
-        let roots = claude_writable_roots(mode, Path::new("/repo"), Some(Path::new("/data/usagi")));
-        assert_eq!(roots, [PathBuf::from("/data/usagi")]);
+        // A root launch's cwd and daemon data stay read-only; bootstrap uses the broker.
+        let roots = claude_writable_roots(mode, Path::new("/repo"));
+        assert!(roots.is_empty());
         let launcher = claude_sandbox_launcher(
             usagi,
             mode,

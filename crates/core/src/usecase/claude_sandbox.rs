@@ -10,9 +10,8 @@
 //!
 //! session の writable root は provisioner が渡す own worktree だけである。root coordinator では、
 //! その起動固有 root に platform / 環境由来の普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・起動する
-//! agent CLI 自身の state・macOS の Keychain と system / per-user の MDS cache）を加える。root
-//! provisioner はさらに mode-neutral な `$USAGI_HOME` base を起動固有 root として渡し、daemon が
-//! 停止していても coordinator から同じ runtime mode を bootstrap できるようにする。
+//! agent CLI 自身の state・macOS の Keychain と system / per-user の MDS cache）を加える。daemon
+//! の再起動は sandbox 外の bootstrap broker に委譲し、data home は writable root に含めない。
 //! sandbox は書き込みだけをこの root 集合に閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
 //!
