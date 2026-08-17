@@ -36,6 +36,7 @@
 //! is the only part left as real IO.
 
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -109,6 +110,9 @@ pub struct PumpMetrics {
     pub fetches_with_output: u64,
     /// Fetch failures (including a request that exhausted its deadline).
     pub errors: u64,
+    /// Fetch panics converted into reconnects instead of silently terminating
+    /// the foreground worker.
+    pub panics: u64,
     /// Completions dropped because their fence no longer matched.
     pub fenced_drops: u64,
     /// Rounds where a terminal was skipped because its fetch was still in
@@ -135,11 +139,13 @@ impl PumpMetrics {
             return None;
         }
         Some(format!(
-            "foreground poll lane: {} fetches ({} with output), {} errors, \
-             {} fenced drops, {} coalesced, {} overflow resyncs, {} wakes",
+            "foreground poll lane: {} fetches ({} with output), {} errors \
+             ({} panics recovered), {} fenced drops, {} coalesced, \
+             {} overflow resyncs, {} wakes",
             self.fetches,
             self.fetches_with_output,
             self.errors,
+            self.panics,
             self.fenced_drops,
             self.coalesced,
             self.overflow_resyncs,
@@ -393,8 +399,17 @@ where
     let fences = lock(state).begin_round();
     let worked = !fences.is_empty();
     for fence in fences {
-        let result = fetch(&fence);
-        lock(state).apply_fetch(&fence, result);
+        // This is a display-only observation lane. A decoder/client panic must
+        // not kill its sole worker and leave a live Agent behind a permanently
+        // frozen screen. Surface it as the transient failure that already
+        // drives TerminalSession's bounded reattach from an atomic checkpoint.
+        if let Ok(result) = catch_unwind(AssertUnwindSafe(|| fetch(&fence))) {
+            lock(state).apply_fetch(&fence, result);
+        } else {
+            let mut state = lock(state);
+            state.metrics.panics = state.metrics.panics.saturating_add(1);
+            state.apply_fetch(&fence, Err(TerminalError::Unavailable));
+        }
     }
     worked
 }
@@ -621,6 +636,50 @@ mod tests {
         state.register(&terminal, 100, 1);
         assert_eq!(only_fence(&mut state).after_offset, 100);
         assert_eq!(state.take(&terminal, 100).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_fetch_panic_becomes_a_reconnect_and_the_worker_keeps_running() {
+        let terminal = terminal();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fetch_attempts = Arc::clone(&attempts);
+        let pump = TerminalPollPump::spawn(move |fence| {
+            assert!(
+                fetch_attempts.fetch_add(1, Ordering::SeqCst) != 0,
+                "injected terminal fetch panic"
+            );
+            Ok(vec![chunk(fence.after_offset, b"recovered")])
+        });
+        pump.register(&terminal, 0, 1);
+
+        let error = (0..100)
+            .find_map(|_| {
+                if let Err(error) = pump.take(&terminal, 0) {
+                    Some(error)
+                } else {
+                    std::thread::sleep(Duration::from_millis(2));
+                    None
+                }
+            })
+            .expect("the panic is delivered to the render thread");
+        assert_eq!(error, TerminalError::Unavailable);
+        assert_eq!(pump.metrics().panics, 1);
+
+        // Reattach re-registers at its checkpoint cursor. The same worker must
+        // still be alive and fetch output after that recovery.
+        pump.register(&terminal, 40, 1);
+        let recovered = (0..100)
+            .find_map(|_| {
+                let chunks = pump.take(&terminal, 40).unwrap();
+                if chunks.is_empty() {
+                    std::thread::sleep(Duration::from_millis(2));
+                    None
+                } else {
+                    Some(chunks)
+                }
+            })
+            .expect("the worker fetches again after re-registration");
+        assert_eq!(recovered, vec![chunk(40, b"recovered")]);
     }
 
     #[test]
