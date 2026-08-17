@@ -801,9 +801,9 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 ## session garden
 
 session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、daemon 権威の lifecycle と controller が runtime ごとに保持する Agent phase
-だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、閉じると表示前と同じ Home
-へ戻る。設計判断は
+Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新の coherent Agent inventory・controller が runtime
+ごとに保持する Agent phase だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、
+閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
@@ -814,6 +814,12 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle と contr
 1 区画は 1 session、1 うさぎは 1 Agent runtime である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+
+うさぎの membership と stable identity は、controller が既に phase を観測した runtime に加え、workspace open 時の
+最新 coherent Agent inventory から補う。同じ `AgentRuntimeId` が両方にある場合は、`Waiting` まで区別できる
+controller の runtime-local phase を優先する。inventory にだけある runtime は `reserved → ready`、`live → running`、
+`interrupted` / `unavailable → interrupted`、`exited` / `reclaimed → done` に写す。workspace root の runtime と、
+Home に存在しない session の runtime は区画へ加えない。
 
 複数 runtime は `Waiting` を先頭にし、残りと同 phase の tie-break を stable `AgentRuntimeId` 順にする。4 羽目
 以降は末尾から畳み、状態内訳の末尾へ `+N hidden` を表示する。このため入力待ちの runtime は低い注目度の runtime
