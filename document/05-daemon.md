@@ -763,6 +763,10 @@ flag を直接書くだけ（async-signal-safe だが condvar を notify でき�
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
+同期 `user_decision_request` の waiter はこの maintenance tick で store を再読込しない。resolve / cancel / expire は
+decision 単位の通知で waiter を即時に起こし、状態変化がない間は connection の切断・retirement だけを最大 250 ms
+間隔で非破壊観測する。切断・retirement は connection worker の lifetime だけを終了し、durable な `Pending` record を
+変更しない。
 
 ## session teardown worker
 

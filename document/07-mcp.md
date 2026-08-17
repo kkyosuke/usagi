@@ -156,6 +156,12 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、daemon-owned worker PTY と dispatch store/inbox を操作する |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
+`user_decision_request` の同期応答待ちは decision ごとの process-local 通知へ登録し、resolve / cancel / expire の
+durable transition で起床する。待機中の client が切断された場合、または generation が retire / shutdown された場合は
+connection worker を bounded time 内に終了するが、durable な `Pending` record は回答・取消・削除しない。caller は再接続後に
+get / list、または同じ idempotency key の request で同じ decision を観測できる。状態変化がない間に decision store を
+一定間隔で再読込しない。
+
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
 

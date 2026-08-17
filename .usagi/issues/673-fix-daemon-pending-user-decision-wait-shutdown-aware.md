@@ -1,14 +1,14 @@
 ---
 number: 673
 title: fix(daemon): pending user decision wait を切断・shutdown aware にする
-status: todo
+status: done
 priority: high
 labels: [review, v2, daemon, mcp, decision, lifecycle, availability]
 dependson: []
 related: [329, 406, 557, 658, 689]
 parent: 671
 created_at: 2026-08-13T00:13:57.985707+00:00
-updated_at: 2026-08-17T00:14:05.793542+00:00
+updated_at: 2026-08-17T22:59:31.880272+00:00
 ---
 
 ## Finding（P1 availability / lifecycle）
@@ -33,12 +33,12 @@ updated_at: 2026-08-17T00:14:05.793542+00:00
 
 ## 受入条件
 
-- [ ] `expires_at`なしで回答待ち中のclientを切断すると、decisionはdurableに残り、client worker / connection slotはbounded time内に解放される。
-- [ ] 同じ状態でdaemon shutdown / generation retirementが全client workerをbounded time内にjoinできる。
-- [ ] resolve / cancel / expireは待機中の元callを一度だけ起こし、既存の同期回答契約を維持する。
-- [ ] N件pendingでもidle read / fsync / wakeup rateがN × 40/sにならない。
-- [ ] restart、duplicate idempotency key、late resolve、foreign ownerは既存のfail-closed契約を保つ。
-- [ ] #689の通常frame read retirement回帰testと、decision handler内でparkしたworkerのdisconnect / shutdown testを両方維持する。
+- [x] `expires_at`なしで回答待ち中のclientを切断すると、decisionはdurableに残り、client worker / connection slotはbounded time内に解放される。
+- [x] 同じ状態でdaemon shutdown / generation retirementが全client workerをbounded time内にjoinできる。
+- [x] resolve / cancel / expireは待機中の元callを一度だけ起こし、既存の同期回答契約を維持する。
+- [x] N件pendingでもidle read / fsync / wakeup rateがN × 40/sにならない。
+- [x] restart、duplicate idempotency key、late resolve、foreign ownerは既存のfail-closed契約を保つ。
+- [x] #689の通常frame read retirement回帰testと、decision handler内でparkしたworkerのdisconnect / shutdown testを両方維持する。
 
 ## 根拠箇所
 
