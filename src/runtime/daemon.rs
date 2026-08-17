@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -3898,6 +3898,7 @@ fn start_ipc_accept_loop(
                             }
                         };
                         let worker_completion = Some(unblock.clone());
+                        let retirement = unblock.retirement();
                         let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -3958,7 +3959,18 @@ fn start_ipc_accept_loop(
                                     );
                                     return;
                                 }
-                                let mut reader = reader.into_inner();
+                                // Established policy: no deadline, but every read
+                                // is gated on a bounded readiness wait the worker
+                                // uses to observe retirement. `shutdown(2)` alone
+                                // can leave this thread parked forever, and the
+                                // barrier would then never join it. The writer is
+                                // untouched: a worker parks waiting for the next
+                                // frame, not waiting to send one.
+                                let mut reader = RetiringReader::new(
+                                    reader.into_inner(),
+                                    retirement,
+                                    CLIENT_RETIREMENT_POLL,
+                                );
                                 let mut writer = writer.into_inner();
                                 let mut owner =
                                     SharedTerminalOwner::with_visibility_and_retention(
@@ -8012,6 +8024,7 @@ fn spawn_standby_client_worker(
     std::thread::Builder::new()
         .name("usagi-ipc-standby-client".to_string())
         .spawn(move || {
+            let retirement = completion.retirement();
             let _completion = ShutdownAcceptedStreamOnDrop(Some(completion));
             if stream.set_nonblocking(false).is_err() {
                 return;
@@ -8052,7 +8065,10 @@ fn spawn_standby_client_worker(
                 );
                 return;
             }
-            let mut reader = reader.into_inner();
+            // Same reason as the active worker: a standby is retired by the same
+            // barrier, and `shutdown(2)` can fail to return this parked read.
+            let mut reader =
+                RetiringReader::new(reader.into_inner(), retirement, CLIENT_RETIREMENT_POLL);
             let mut writer = writer.into_inner();
             let _ = usagi_daemon::presentation::ipc::handle_admitted_connection_with(
                 &mut reader,
@@ -8194,29 +8210,63 @@ impl Write for PreHandshakeDeadlineStream {
     }
 }
 
+/// How often a parked client worker re-checks whether its connection was
+/// retired.
+///
+/// This is a backstop, not the ordinary path: `shutdown(2)` normally returns the
+/// parked read immediately. It only has to be short enough that a lost wakeup
+/// costs retirement one extra tick, and long enough that an idle connection is
+/// not a busy loop.
+const CLIENT_RETIREMENT_POLL: Duration = Duration::from_millis(250);
+
 /// The accepted stream half that can unblock a worker parked in a frame read.
 ///
 /// A retained worker is joined at collection ([`ClientWorkers::retire`]), and a
 /// thread blocked in `read` on a live socket would never return to be joined —
 /// so what is retained alongside it is a duplicate descriptor that
 /// `shutdown(2)` can close from the outside.
+///
+/// `shutdown(2)` alone is not enough. On Darwin it can return `Ok` for a
+/// duplicate of an `AF_UNIX` socket *without* returning a peer parked in an
+/// indefinite `recv`, which leaves the retirement barrier joining a thread that
+/// never wakes — a daemon that then never finishes shutting down or rolling
+/// over. Measured at roughly 1.5% of retirements on macOS. So the retired state
+/// is also published as a flag that [`RetirableStream`] observes on its own
+/// receive timeout: the syscall wakeup stays the fast path, and the flag is what
+/// makes the wakeup guaranteed.
 #[derive(Clone)]
-struct AcceptedStream(Arc<Mutex<Option<std::os::unix::net::UnixStream>>>);
+struct AcceptedStream {
+    stream: Arc<Mutex<Option<std::os::unix::net::UnixStream>>>,
+    retired: Arc<AtomicBool>,
+}
 
 impl AcceptedStream {
     fn new(stream: std::os::unix::net::UnixStream) -> Self {
-        Self(Arc::new(Mutex::new(Some(stream))))
+        Self {
+            stream: Arc::new(Mutex::new(Some(stream))),
+            retired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The flag a worker parked on this connection watches to learn that
+    /// retirement asked it to stop.
+    fn retirement(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.retired)
     }
 }
 
 impl ConnectionShutdown for AcceptedStream {
     fn shutdown(&self) -> std::io::Result<()> {
+        // Published before the syscall, so a worker that wakes for any reason —
+        // including a receive timeout that races this call — observes the
+        // retirement rather than parking again.
+        self.retired.store(true, Ordering::Release);
         // The worker and collector share one closeable duplicate, not one fd
         // each. Taking it here means normal worker completion releases the
         // retirement descriptor immediately even though the finished
         // JoinHandle remains registered until the accept loop's next reap.
         let Some(stream) = self
-            .0
+            .stream
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
@@ -8224,6 +8274,98 @@ impl ConnectionShutdown for AcceptedStream {
             return Ok(());
         };
         stream.shutdown(std::net::Shutdown::Both)
+    }
+}
+
+/// Waits for `fd` to become readable, or for `timeout` to elapse.
+///
+/// The wait deliberately lives in `poll(2)` rather than in the socket. A receive
+/// timeout is not enough: once `shutdown(2)` has been applied to the socket,
+/// Darwin can leave a `recv` that is *already* blocked parked without honouring
+/// `SO_RCVTIMEO` either, which is the state that used to park retirement forever.
+/// Deciding readability before entering `recv` means the worker is never blocked
+/// on a socket that has nothing to give it.
+///
+/// Returns whether the descriptor is readable; `false` means the timeout expired.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_retirement_poll
+fn readable_within(fd: std::os::fd::RawFd, timeout: Duration) -> std::io::Result<bool> {
+    let mut pending = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    loop {
+        // SAFETY: one initialised `pollfd` is passed with a length of one, and
+        // the descriptor is owned by the caller for the duration of the call.
+        let ready = unsafe { libc::poll(&raw mut pending, 1, millis) };
+        if ready >= 0 {
+            return Ok(ready > 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// An established connection's reader, which cannot outlive its own retirement.
+///
+/// Every read is gated on `poll(2)` with a bounded timeout, so the worker is
+/// never parked in the kernel on a socket that has nothing to give it. The
+/// timeout is *not* an idle policy: it is retried transparently, so an idle
+/// subscription behaves exactly as it did before. The only thing it adds is a
+/// point at which the worker observes [`AcceptedStream::shutdown`] and returns,
+/// which is what keeps the retirement barrier joinable when the socket wakeup is
+/// lost.
+struct RetiringReader {
+    stream: std::os::unix::net::UnixStream,
+    retired: Arc<AtomicBool>,
+    poll: Duration,
+    /// How many waits expired without readability.
+    ///
+    /// The observation seam the tests use to prove this is a retry rather than
+    /// an idle policy: a live connection must cross timeouts and still serve the
+    /// frame that eventually arrives.
+    timeouts: Arc<AtomicUsize>,
+}
+
+impl RetiringReader {
+    fn new(
+        stream: std::os::unix::net::UnixStream,
+        retired: Arc<AtomicBool>,
+        poll: Duration,
+    ) -> Self {
+        Self {
+            stream,
+            retired,
+            poll,
+            timeouts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// The timeout counter, so a test can wait until the reader has actually
+    /// parked instead of assuming it has.
+    #[cfg(test)]
+    fn timeouts(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.timeouts)
+    }
+}
+
+impl Read for RetiringReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if readable_within(std::os::fd::AsRawFd::as_raw_fd(&self.stream), self.poll)? {
+                return (&self.stream).read(bytes);
+            }
+            self.timeouts.fetch_add(1, Ordering::Release);
+            // Retirement reads as end of stream, which is the same thing the
+            // frame loop sees from a peer that hung up: it stops serving and
+            // returns, with no invented protocol state.
+            if self.retired.load(Ordering::Acquire) {
+                return Ok(0);
+            }
+        }
     }
 }
 
@@ -16826,15 +16968,27 @@ instructions = "{instructions}"
         let permit = pre_handshake
             .try_admit()
             .expect("the incomplete handshake reserves the only permit");
-        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        // Shaped exactly as the accept loop builds it: the retained half is a
+        // duplicate of the *accepted* socket, and the worker parks on that same
+        // socket armed with the retirement poll. `peer` stays open so nothing but
+        // retirement can end the read.
+        let (mut peer, accepted) = std::os::unix::net::UnixStream::pair().unwrap();
+        let unblock = accepted.try_clone().map(AcceptedStream::new);
+        let mut parked_stream = RetiringReader::new(
+            accepted,
+            unblock
+                .as_ref()
+                .expect("the accepted socket duplicates")
+                .retirement(),
+            Duration::from_millis(10),
+        );
         let parked = std::thread::spawn(move || {
             let _permit = permit;
             // Parked exactly as a client worker is: blocked reading a frame that
             // never arrives.
             let mut byte = [0_u8; 1];
-            let _ = std::io::Read::read(&mut { &server }, &mut byte);
+            let _ = parked_stream.read(&mut byte);
         });
-        let unblock = client.try_clone().map(AcceptedStream::new);
         retain_client_worker(&workers, unblock, parked);
         assert_eq!(pre_handshake.in_flight(), 1);
         assert!(pre_handshake.try_admit().is_none());
@@ -16849,9 +17003,86 @@ instructions = "{instructions}"
         assert_eq!(workers.outstanding(), 0);
         let mut byte = [0_u8; 1];
         assert_eq!(
-            client.read(&mut byte).unwrap(),
+            peer.read(&mut byte).unwrap(),
             0,
             "retirement closes the socket"
+        );
+    }
+
+    /// Builds a reader parked on a socketpair nothing ever writes to, plus the
+    /// peer that keeps it open.
+    fn parked_reader(
+        retired: &Arc<AtomicBool>,
+    ) -> (std::os::unix::net::UnixStream, RetiringReader) {
+        let (peer, accepted) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = RetiringReader::new(accepted, Arc::clone(retired), Duration::from_millis(5));
+        (peer, reader)
+    }
+
+    /// The defect this exists for: `shutdown(2)` can return `Ok` for a duplicate
+    /// of an `AF_UNIX` socket without returning a peer parked in an indefinite
+    /// `recv` — and once the socket is in that state a receive timeout is not
+    /// honoured either. The worker must therefore stop on the flag alone, with no
+    /// socket wakeup of any kind: nothing here is ever written, closed or shut
+    /// down.
+    #[test]
+    fn a_retired_reader_stops_without_any_socket_wakeup() {
+        let retired = Arc::new(AtomicBool::new(true));
+        let (_peer, mut reader) = parked_reader(&retired);
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            reader.read(&mut byte).unwrap(),
+            0,
+            "retirement reads as end of stream"
+        );
+    }
+
+    /// The readiness wait is a retirement backstop, not an idle policy. The
+    /// reader is driven until it has actually parked across several waits —
+    /// observed, not assumed — and only then is a frame written; it must still be
+    /// served.
+    #[test]
+    fn a_live_reader_crosses_its_waits_and_still_serves_the_next_frame() {
+        let retired = Arc::new(AtomicBool::new(false));
+        let (mut peer, mut reader) = parked_reader(&retired);
+        let timeouts = reader.timeouts();
+
+        let served = std::thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            let read = reader.read(&mut byte).unwrap();
+            (read, byte[0])
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while timeouts.load(Ordering::Acquire) < 3 {
+            assert!(
+                Instant::now() < deadline,
+                "the reader never parked, so this run proves nothing about retrying"
+            );
+            std::thread::yield_now();
+        }
+        peer.write_all(b"f").unwrap();
+
+        assert_eq!(served.join().unwrap(), (1, b'f'));
+        assert!(!retired.load(Ordering::Acquire));
+    }
+
+    /// The retained half is what publishes the flag, so shutting it down is what
+    /// a parked worker observes — including through the ordinary socket wakeup.
+    #[test]
+    fn shutting_the_retained_half_down_stops_the_parked_reader() {
+        let (_peer, accepted) = std::os::unix::net::UnixStream::pair().unwrap();
+        let retained = AcceptedStream::new(accepted.try_clone().unwrap());
+        let mut reader =
+            RetiringReader::new(accepted, retained.retirement(), Duration::from_millis(5));
+        retained.shutdown().unwrap();
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            reader.read(&mut byte).unwrap(),
+            0,
+            "a retired worker stops on its own"
         );
     }
 

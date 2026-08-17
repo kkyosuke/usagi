@@ -18,6 +18,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 - [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
 - [結合テストからの daemon 起動](#結合テストからの-daemon-起動)
   - [重い E2E の直列化](#重い-e2e-の直列化)
+  - [daemon E2E の transient と product 失敗を混同しない](#daemon-e2e-の-transient-と-product-失敗を混同しない)
 - [背景 worker を残したままテストを終えない](#背景-worker-を残したままテストを終えない)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
@@ -51,7 +52,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist と global/workspace `roles.toml` の解析 | 本依存 |
 | `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity、self-update の embedded installer identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
-| `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当） | 本依存 |
+| `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当）と、結合テストの重い E2E 直列化ロック | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
 | `shell-words` | `usagi-core` の usecase（`workspace_guard`）による root モードの Bash command の字句分割 | 本依存 |
@@ -76,7 +77,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、IPC contract が rollover operation ID を
 作るほか、`usagi-cli` が配布 binary に同梱した self-update installer の identity 検証にも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
-エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire も直列化する。
+エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire と、ルート結合テストの[重い E2E の直列化](#重い-e2e-の直列化)も直列化する。
 `portable-pty` は `usagi-daemon` の infrastructure に閉じ込め、daemon の usecase 層は PTY ポートを介して使う。
 `libc` は `usagi-core` の infrastructure に閉じた atomic temp file の Unix 安全性検証にも使う。
 `crossterm`（実端末 IO）・`libc`（daemon の process-start identity 観測と fenced signal）・`signal-hook`（daemon shutdown signal）・`fs2`（daemon 単一インスタンス
@@ -289,10 +290,39 @@ daemon の workspace root は**起動時 cwd** で決まるため（[5. daemon](
 
 ### 重い E2E の直列化
 
-shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E2E は CPU を占有するため、**1 test binary 内では
-直列に実行する**。`tests/agent_ipc_e2e.rs` は daemon 起動 lock、`tests/cli_tui_pty.rs` は file 全体の serial lock で
-直列化する。並行させると frame 待ちが product の失敗ではなく CPU 競合による timeout になり、偽陽性の失敗を生む。
-新しい実 PTY / 実 daemon E2E を追加するときは、同じ lock を取る。
+shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E2E は CPU を占有する。並行させると frame 待ちや
+readiness 待ちが product の失敗ではなく CPU 競合による timeout になり、無関係な変更の PR を落とす偽陽性を生む。
+そこで重い E2E は、**チェックアウト単位の 1 本の直列列**に載せる。列は `tests/support/daemon.rs` の
+`heavy_e2e_lock()` が持つ。新しい実 PTY / 実 daemon E2E を追加するときは、同じ関数を test の先頭で呼ぶ。
+
+| 競合の出どころ | この列が覆うか |
+|---|---|
+| 同じ test binary 内の別 test（libtest の thread 並行） | 覆う（プロセス内 `Mutex`） |
+| 同じ `cargo test --workspace` 実行の別 test binary | 競合しない。cargo は test binary を**直列に**実行する（full run 468 サンプルで同時実行数は常に 1） |
+| 同じチェックアウトの別 cargo 実行（`cargo test` と `cargo llvm-cov` の同時実行など） | 覆う（lock file を `flock`） |
+| 別チェックアウト・別ユーザー・マシン上の他プロセスの負荷 | 覆わない（環境側の条件として残る） |
+
+lock file は temp directory 上に置き、チェックアウト path の digest で名付ける。`target/` の下に置かない:
+`cargo test` と `cargo llvm-cov` は別の target directory を使うため、target 配下だと**同じ tree の 2 つの実行が
+別々のロックを取ってしまい**、直列化したい当の組み合わせだけが漏れる。
+
+ロック取得は上限付きで、超えたら lock file を名指しして失敗する（先行 process の hang を無期限の停止にしない）。
+
+### daemon E2E の transient と product 失敗を混同しない
+
+実 daemon を相手にする E2E は、**socket が閉じただけの transient**（endpoint 公開中、listener の retire、
+pre-handshake 上限による accept 直後の close）と、**product の失敗**（daemon の panic・異常終了・typed な拒否）を
+区別する。前者は production の client も新しい接続で retry する（`usagi_core::usecase::client` の `PolicyClient` は
+`is_transport_failure` を retry 対象にする）ため、テストの readiness 待ちでも deadline 内で retry する。
+
+区別を成立させるために、次の 2 つを守る。
+
+- daemon が close した接続を retry で吸収してよいのは、**同じ producer `OperationId` を再送する**場合か、
+  request が read-only の場合に限る。新しい operation を作り直して再送しない（二重実行を pass に読み替えてしまう）。
+- retry のたびに daemon の error log（`<data dir>/logs/`）を見て、`daemon panicked` が記録されていたら即座に失敗する。
+  daemon は process 全体の panic hook で全 thread の panic をここへ書き、stderr は production と同じく `/dev/null` へ
+  捨てるため、**この log が「transient か product 失敗か」を判定できる唯一の証拠**である。失敗時のメッセージにも
+  この log を添える。
 
 ## 背景 worker を残したままテストを終えない
 
@@ -308,6 +338,19 @@ harness が profile を書き出す瞬間と競合する。counter の増分は�
   loop を駆動し、観測できない run は上限で失敗させる**（skip が起きなかった run を pass と読み替えない）。
   `usagi-tui` の `presentation::tests::a_skipped_tick_still_admits_the_restore_retry` がこの形で、restore retry が
   frame を skip した tick で admit されるのを観測し、その job の inventory 呼び出しが静まってから quit する。
+- **待ちの needle は、待っている状態を実際に区別できるものにする**。入力を送ってから次の入力を送る E2E で、
+  遷移の前後どちらの画面にも出る文字列を待つと、その待ちは即座に満たされて次の入力が前の状態へ入る。
+  overlay を閉じてから次のキーを送るなら、閉じたことを**不在**で観測する（`cli_tui_pty` の
+  `wait_for_screen_absent_since`）。負荷が高い run だけ落ちる E2E は、まずこの形を疑う。
+- **「遅い」と「落ちた」を product の報告で切り分ける**。TUI は lane が reconnect / resync 中に受けた
+  keystroke を捨て、`… keystroke not delivered` と報告する。捨てられた入力は待っても現れないので、
+  deadline を伸ばしても直らない。報告を観測して**打ち直す**（`cli_tui_pty` の
+  `send_line_until_delivered`）。単に遅いだけの run では product は何も報告しないので、そのまま待つ。
+  これは `coverage` job で特に重要である。`cargo llvm-cov` は instrumentation 付きで全 test を走らせる分
+  構造的に遅く、こうした窓が広がる。**上限を実時間から「出力の停滞」へ変える形は使えない**。TUI は
+  待っている間も再描画し続けるため停滞せず、上限が永久に来なくなる。
+- **失敗時の診断は product の文言に固定リストで依存しない**。文言が変われば、まさにその原因で落ちた run が
+  「該当なし」と表示され、原因を取り違える。安定した語尾や描画行そのものを出す。
 
 ## Git Hooks（lefthook）
 
