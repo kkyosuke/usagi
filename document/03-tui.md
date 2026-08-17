@@ -871,9 +871,10 @@ attach されない。Garden から daemon command は発行しない。
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない先頭 PR と残件数を
 sidebar の `PR #<number> +<count>` に投影する。`p` の PR modal は focused `SessionId` について同じ
 projection を即時表示し、resident PR lane を wake する。sidebar projection は新しい revision だけで進み、
-開き直した modal は同じ cache を即時利用する。新しい URL を初めて検知したときは、他の modal や Director
-drawer が前面にない場合に、その session の PR modal を自動で開く。title / state だけの更新、重複・古い
-revision、dismissed PR は自動表示せず、前面の操作を奪わない。別 session の値は対象 session の cache にだけ反映する。
+開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
+保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
+その session の PR modal を検知した行を選択して自動で開く。title / state だけの更新、重複・古い revision、
+dismissed PR は自動表示せず、前面の操作を奪わない。別 session の値は対象 session の cache にだけ反映する。
 
 resident PR lane は render thread の外で daemon との persistent connection を所有し、1 秒以下の bounded cadence で
 現在の session 集合を観測する。session の追加・削除は集合を全置換して即時 wake し、結果は frame loop の non-blocking

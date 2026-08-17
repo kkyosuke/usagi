@@ -3073,7 +3073,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             revision,
             prs,
         } => {
-            let mut newly_detected = false;
+            let mut newly_detected = None;
             let accepted = match target {
                 Target::Root(_) => true,
                 Target::Session(session) => {
@@ -3081,11 +3081,14 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     let accepted = state.sessions.contains(session)
                         && current.is_none_or(|(current, _)| *revision > *current);
                     if accepted {
-                        newly_detected = prs.iter().any(|pr| {
-                            pr.state != PrState::Dismissed
-                                && current.is_none_or(|(_, current)| {
-                                    current.iter().all(|known| known.url != pr.url)
-                                })
+                        // The first authoritative snapshot establishes the
+                        // baseline. Only a URL added by a later revision is a
+                        // live discovery that should interrupt Home.
+                        newly_detected = current.and_then(|(_, current)| {
+                            prs.iter().position(|pr| {
+                                pr.state != PrState::Dismissed
+                                    && current.iter().all(|known| known.url != pr.url)
+                            })
                         });
                         state.session_prs.insert(*session, (*revision, prs.clone()));
                         state.session_pr_revision = state.session_pr_revision.saturating_add(1);
@@ -3099,20 +3102,25 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 .filter(|overlay| accepted && overlay.target == *target)
             {
                 overlay.prs.clone_from(prs);
-                overlay.selected = overlay.selected.min(prs.len().saturating_sub(1));
+                overlay.selected = newly_detected
+                    .unwrap_or(overlay.selected)
+                    .min(prs.len().saturating_sub(1));
                 overlay.error = None;
             }
             // A freshly discovered PR is the completion of work the user is
             // waiting for, so surface it immediately. Metadata-only refreshes,
             // duplicate snapshots, and deliberate dismissals stay quiet. An
             // existing modal or Director interaction remains the input owner.
-            if accepted && newly_detected && state.overlay.is_none() && !state.director_drawer_open
+            if accepted
+                && let Some(selected) = newly_detected
+                && state.overlay.is_none()
+                && !state.director_drawer_open
             {
                 state.overlay = Some(Overlay::Prs);
                 state.pr_overlay = Some(PrOverlay {
                     target: *target,
                     prs: prs.clone(),
-                    selected: 0,
+                    selected,
                     error: None,
                 });
                 state.preview_overlay = None;
@@ -8793,13 +8801,55 @@ mod tests {
     }
 
     #[test]
+    fn initial_pr_snapshot_is_a_baseline_and_detected_pr_is_selected() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let existing = (1..=7).map(pr_link).collect::<Vec<_>>();
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: existing.clone(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+
+        let detected = pr_link(8);
+        let mut updated = existing;
+        updated.push(detected.clone());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: updated,
+            }),
+        );
+
+        let overlay = state.pr_overlay().unwrap();
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(overlay.selected(), 7);
+        assert_eq!(overlay.selected_pr(), Some(&detected));
+    }
+
+    #[test]
     fn dismissed_pr_does_not_auto_open() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 0,
+                prs: Vec::new(),
+            }),
+        );
         let mut dismissed = pr_link(41);
         dismissed.state = PrState::Dismissed;
-
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsLoaded {
