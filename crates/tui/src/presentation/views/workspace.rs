@@ -473,15 +473,25 @@ impl HomeProjection {
         self
     }
 
-    pub(crate) fn canonical_garden_now(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+    pub(crate) fn canonical_garden_now(
+        &self,
+        raw_height: usize,
+        raw_width: usize,
+        now: DateTime<Utc>,
+    ) -> DateTime<Utc> {
         let Some(sessions) = self.garden_sessions.as_deref() else {
             return now;
         };
-        let tick = widgets::garden::canonical_tick(
+        let (height, width) = widgets::normalize_size(raw_height, raw_width);
+        let Some(tick) = widgets::garden::canonical_tick(
+            height,
+            width,
             sessions,
             garden_tick(now),
             self.garden_motion.is_reduced(),
-        );
+        ) else {
+            return now;
+        };
         DateTime::from_timestamp(i64::try_from(tick).expect("six phases fit i64"), 0)
             .expect("a six-second Unix timestamp is valid")
     }
@@ -3742,18 +3752,25 @@ mod tests {
         );
         let epoch = DateTime::from_timestamp(0, 0).expect("Unix epoch");
         assert_ne!(
-            home.canonical_garden_now(epoch),
-            home.canonical_garden_now(epoch + chrono::Duration::seconds(1))
+            home.canonical_garden_now(24, 100, epoch),
+            home.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(1))
         );
         assert_eq!(
-            home.canonical_garden_now(epoch),
-            home.canonical_garden_now(epoch + chrono::Duration::seconds(3))
+            home.canonical_garden_now(24, 100, epoch),
+            home.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(3))
         );
 
         let reduced = home.with_garden_reduced_motion(true);
         assert_eq!(
-            reduced.canonical_garden_now(epoch),
-            reduced.canonical_garden_now(epoch + chrono::Duration::seconds(5))
+            reduced.canonical_garden_now(24, 100, epoch),
+            reduced.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(5))
+        );
+
+        let ordinary_home_now = epoch + chrono::Duration::days(20_000);
+        assert_eq!(
+            reduced.canonical_garden_now(13, 63, ordinary_home_now),
+            ordinary_home_now,
+            "a Garden that does not fit must preserve the ordinary Home clock"
         );
     }
 

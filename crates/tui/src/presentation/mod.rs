@@ -4732,7 +4732,9 @@ impl HomeFrameMaterial {
 
     fn with_garden_reduced_motion(mut self, reduced_motion: bool) -> Self {
         self.projection = self.projection.with_garden_reduced_motion(reduced_motion);
-        self.now = self.projection.canonical_garden_now(self.now);
+        self.now = self
+            .projection
+            .canonical_garden_now(self.height, self.width, self.now);
         self
     }
 }
@@ -4797,7 +4799,7 @@ fn home_frame_material_shared(
         )
         // Last, once every surface that reads the animation clock is known.
         .collapse_animation_clock();
-    let now = projection.canonical_garden_now(now);
+    let now = projection.canonical_garden_now(height, width, now);
     HomeFrameMaterial {
         height,
         width,

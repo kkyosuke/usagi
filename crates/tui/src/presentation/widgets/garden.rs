@@ -84,6 +84,30 @@ pub struct GardenFrame {
     pub hidden_sessions: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GardenLayout {
+    content_width: usize,
+    columns: usize,
+    garden_height: usize,
+    capacity: usize,
+}
+
+fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
+    if height < MIN_HEIGHT || width < MIN_WIDTH {
+        return None;
+    }
+    let content_width = width.saturating_sub(SIDE_PADDING * 2);
+    let columns = (content_width / PLOT_WIDTH).max(1);
+    let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
+    let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
+    Some(GardenLayout {
+        content_width,
+        columns,
+        garden_height,
+        capacity: columns.saturating_mul(plot_rows),
+    })
+}
+
 /// Garden を描画する。最小サイズに満たない場合は `None` を返す。
 #[must_use]
 pub fn render(
@@ -94,15 +118,12 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    if height < MIN_HEIGHT || width < MIN_WIDTH {
-        return None;
-    }
-
-    let content_width = width.saturating_sub(SIDE_PADDING * 2);
-    let columns = (content_width / PLOT_WIDTH).max(1);
-    let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
-    let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
-    let capacity = columns.saturating_mul(plot_rows);
+    let GardenLayout {
+        content_width,
+        columns,
+        garden_height,
+        capacity,
+    } = garden_layout(height, width)?;
     let visible = sessions.len().min(capacity);
     let hidden_sessions = sessions.len().saturating_sub(visible);
 
@@ -179,24 +200,35 @@ pub fn render(
     })
 }
 
-/// Smallest phase in the six-tick cycle that draws the same Garden plots.
+/// Smallest phase in the six-tick cycle that draws the same visible Garden plots.
 /// Folding onto this representative lets frame material equality suppress a
-/// redraw when a slow animation holds its current pose.
+/// redraw when a slow animation holds its current pose. `None` means the Garden
+/// does not fit and the caller must preserve the ordinary Home clock.
 #[must_use]
-pub fn canonical_tick(sessions: &[GardenSession], tick: u64, reduced_motion: bool) -> u64 {
+pub fn canonical_tick(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<u64> {
+    let layout = garden_layout(height, width)?;
+    let sessions = &sessions[..sessions.len().min(layout.capacity)];
     let tick = tick % 6;
     let expected = sessions
         .iter()
         .map(|session| plot(session, tick, reduced_motion))
         .collect::<Vec<_>>();
-    (0..6)
-        .find(|candidate| {
-            sessions
-                .iter()
-                .map(|session| plot(session, *candidate, reduced_motion))
-                .eq(expected.iter().cloned())
-        })
-        .unwrap_or(tick)
+    Some(
+        (0..6)
+            .find(|candidate| {
+                sessions
+                    .iter()
+                    .map(|session| plot(session, *candidate, reduced_motion))
+                    .eq(expected.iter().cloned())
+            })
+            .unwrap_or(tick),
+    )
 }
 
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
@@ -866,12 +898,12 @@ mod tests {
             AgentPhase::Ready,
         );
         assert_eq!(
-            super::canonical_tick(std::slice::from_ref(&idle), 1, false),
-            0
+            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 1, false),
+            Some(0)
         );
         assert_eq!(
-            super::canonical_tick(std::slice::from_ref(&idle), 4, false),
-            4
+            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 4, false),
+            Some(4)
         );
 
         let running = session(
@@ -880,7 +912,10 @@ mod tests {
             SessionLifecycle::Available,
             AgentPhase::Running,
         );
-        assert_eq!(super::canonical_tick(&[running], 3, false), 0);
+        assert_eq!(
+            super::canonical_tick(24, 100, &[running], 3, false),
+            Some(0)
+        );
 
         let waiting = session(
             STEADY_ID,
@@ -889,11 +924,45 @@ mod tests {
             AgentPhase::Waiting,
         );
         assert_eq!(
-            super::canonical_tick(std::slice::from_ref(&waiting), 5, false),
-            5
+            super::canonical_tick(24, 100, std::slice::from_ref(&waiting), 5, false),
+            Some(5)
         );
-        assert_eq!(super::canonical_tick(&[waiting], 5, true), 0);
-        assert_eq!(super::canonical_tick(&[], 5, false), 0);
+        assert_eq!(super::canonical_tick(24, 100, &[waiting], 5, true), Some(0));
+        assert_eq!(super::canonical_tick(24, 100, &[], 5, false), Some(0));
+        assert_eq!(super::canonical_tick(13, 100, &[], 5, false), None);
+    }
+
+    #[test]
+    fn canonical_tick_ignores_sessions_outside_the_visible_capacity() {
+        let mut sessions = vec![
+            session(
+                STEADY_ID,
+                "still-a",
+                SessionLifecycle::Failed,
+                AgentPhase::Absent,
+            ),
+            session(
+                "01000000-0000-4000-8000-000000000001",
+                "still-b",
+                SessionLifecycle::Failed,
+                AgentPhase::Absent,
+            ),
+        ];
+        sessions.push(session(
+            "02000000-0000-4000-8000-000000000001",
+            "hidden-running",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        ));
+
+        assert_eq!(
+            super::canonical_tick(14, 64, &sessions, 0, false),
+            super::canonical_tick(14, 64, &sessions, 1, false)
+        );
+        assert_ne!(
+            super::canonical_tick(24, 100, &sessions, 0, false),
+            super::canonical_tick(24, 100, &sessions, 1, false)
+        );
     }
 
     #[test]
