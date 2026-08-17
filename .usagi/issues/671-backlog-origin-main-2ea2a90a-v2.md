@@ -1,6 +1,6 @@
 ---
 number: 671
-title: backlog: origin/main c09dddcd v2 全体コードレビュー
+title: backlog: origin/main 2ea2a90a v2 全体コードレビュー
 status: done
 priority: high
 labels: [review, v2, backlog, epic]
@@ -12,9 +12,9 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 
 ## レビュー基点
 
-- reviewed commit: `c09dddcd61198124791e6707ac86d5b72d8dec8a`
+- reviewed commit: `2ea2a90ae37b840152922ba3463c5caf9456d122`
 - reviewed at: `2026-08-17`
-- 対象: usagi v2 全体（tracked `crates/*/src/**/*.rs` + `src/**/*.rs`: 310 files / 約236,618 physical lines。tests・examples・scripts・CI・configを含む監査集合: 379 files / 約259,230 physical lines）
+- 対象: usagi v2 全体（tracked `crates/*/src/**/*.rs` + `src/**/*.rs`: 310 files / 約236,921 physical lines。tests・examples・scripts・CI・configを含む監査集合: 379 files / 約259,533 physical lines）
 - 観点: 正しさ、resource bound、durability、process/PTY lifecycle、authority/fence、IPC/MCP schema、TUI reducer/input/rendering/worker、install/CI
 
 件数はreview commitのtreeから数え、作業ブランチ上の#672修正やissue本文は含めない。レビュー基点は日付ではなく上記commit hashで固定する。
@@ -31,7 +31,7 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 
 ## 最新main増分の再レビュー
 
-最初の全体監査後に入った `1ef8a5cd..c09dddcd` は6コミットに限定されるため、同じ全tree走査を繰り返さず、変更されたGarden、daemon retirement、shared terminal geometry、E2E / CI規約を差分監査した。
+最初の全体監査後に入った `1ef8a5cd..2ea2a90a` は7コミットに限定されるため、同じ全tree走査を繰り返さず、変更されたGarden、daemon retirement、shared terminal geometry、E2E / CI規約を差分監査した。
 
 - #1492でautomatic narrow抑止、resize edge close、frame由来hitboxによるclick-to-Closeupを確認した。
 - Garden overlayがordinary character / pasteのPTY forwardingと背景pane mutationを遮断することを確認した。
@@ -41,6 +41,7 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 - #1490でclient workerのsocket readにretirement flag + bounded `poll(2)` readinessを追加し、通常のframe readでparkしたworkerを`shutdown(2)`の起こしだけに依存せずjoinできることを確認した。
 - #1490は#673の同期decision待ち自体を変更していない。`wait_for_user_decision`はsocket readへ戻らずstore pollingを続けるため、client disconnect / daemon shutdown / generation retirementを観測しない残件はそのままである。
 - #1489で複数TUIが共有するterminal geometryをdaemon権威のsmallest viewportへ一本化し、attach / resize / resume / detachのrevision fenceを更新した。`op read`、decision wait、PR refresh、clipboard、Gardenのforeground routingは変更されておらず、既存findingへの影響はない。
+- #1493で`op read`のstreamごとの64 KiB retained cap、overflow後のEOF drain、safe failure、両output readerのjoinを実装し、#672が完了した。
 - 重いE2Eのcross-process lock、transient transport retry、dropped-keystroke再送、overlay close観測はtest偽陽性と診断を改善する変更で、既存findingを解消または新規findingを追加するものではない。
 
 ## Finding 対応表
@@ -61,7 +62,7 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 
 - `confined_git_command` は inherited `GIT_*` を除去する一方、repository-local configを読む。実Git fixtureで`git worktree add`が`post-checkout`、issue source discoveryの`git ls-files`が`core.fsmonitor`、tracked `.gitattributes`のcheckoutが任意名smudge helperを実行した。failing hookはworktree / branch作成後にnonzeroを返しpartial effectを残した。
 - `wait_for_user_decision` は期限なし`Pending`を25 msごとのstore readで待ち、client disconnect / daemon shutdown / generation retirementを観測しない。#1490はsocket frame readのretirementをboundedにしたが、このhandlerはsocket readへ戻らないため、accept loopの全client worker joinを塞ぐ残件は変わらない。
-- review commitの`env_resolver`はbinding 128、secret 32、並列child 4、30秒deadlineを持つ一方、stdout / stderr readerが`read_to_end`でbyte上限を持たない。本PRの#672修正はstreamごと64 KiB retained cap、overflow後のEOF drain、safe failure、reader cleanupを実装する。
+- 初回監査時の`env_resolver`はbinding 128、secret 32、並列child 4、30秒deadlineを持つ一方、stdout / stderr readerが`read_to_end`でbyte上限を持たなかった。review commit `2ea2a90a` には#1493の修正が入り、streamごと64 KiB retained cap、overflow後のEOF drain、safe failure、両readerのjoinを実装済みである。
 - `store/dispatch.rs`はregistryとinboxを全件read-modify-atomic-rewriteしretention/GCがない。production `agent_inbox`は`since` / `unread_only`のみでlimit/cursor/ackがなく、`mark_inbox_read`はproduction callerがない。
 - `store/user_decision.rs`はterminal decisionを削除せず全stateをmutationごとに置換する。decision field / option countにもdomain hard boundがない。
 - `store/supervisor.rs::events`はpage指定前にjournal全件を読む。journalだけでなくsnapshotの`applied_events`、schedulerのstart/wake reservations、terminal run自体にもretentionがない。
@@ -80,6 +81,6 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 
 ## 完了条件
 
-- 最優先の`op read` output bound（#672）を同じPRで実装し、issueを`done`にする。
+- 最優先の`op read` output bound（#672）を実装し、issueを`done`にする。
 - 残るfindingを独立した追跡可能な子issueとして起票する。
 - fmt/check/clippy、risk-based selected tests、workspace full test、Markdown link check、PR CI required contextsを確認する。
