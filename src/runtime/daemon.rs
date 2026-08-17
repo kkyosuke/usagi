@@ -9019,13 +9019,19 @@ fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::i
     if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
         return Ok(());
     }
-    bootstrap_serve_command(exe, workspace).spawn()?;
+    let mut child = bootstrap_serve_command(exe, workspace).spawn()?;
     for _ in 0..BROKER_READINESS_ATTEMPTS {
         if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
             return Ok(());
         }
         RealSleeper.sleep();
     }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Err(std::io::Error::other(
         "brokered daemon did not become ready",
     ))
