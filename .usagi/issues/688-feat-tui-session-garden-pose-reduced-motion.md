@@ -1,13 +1,13 @@
 ---
 number: 688
 title: feat(tui): session garden の残りの pose・reduced motion・選択表示を仕上げる
-status: todo
+status: done
 priority: low
 labels: [v2, tui, uiux]
 dependson: []
 related: [674, 687]
 created_at: 2026-08-16T22:38:29.573939+00:00
-updated_at: 2026-08-16T22:38:29.573939+00:00
+updated_at: 2026-08-17T01:15:31.000000+00:00
 ---
 
 ## 背景
