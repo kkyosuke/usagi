@@ -13,7 +13,7 @@ use usagi_core::domain::id::{
     AgentContinuationRef, AgentRuntimeRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::pullrequest::PrLink;
+use usagi_core::domain::pullrequest::{PrLink, PrState};
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_core::domain::settings::{
@@ -3073,16 +3073,20 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             revision,
             prs,
         } => {
+            let mut newly_detected = false;
             let accepted = match target {
                 Target::Root(_) => true,
                 Target::Session(session) => {
-                    let current = state
-                        .session_prs
-                        .get(session)
-                        .map(|(revision, _)| *revision);
+                    let current = state.session_prs.get(session);
                     let accepted = state.sessions.contains(session)
-                        && current.is_none_or(|current| *revision > current);
+                        && current.is_none_or(|(current, _)| *revision > *current);
                     if accepted {
+                        newly_detected = prs.iter().any(|pr| {
+                            pr.state != PrState::Dismissed
+                                && current.is_none_or(|(_, current)| {
+                                    current.iter().all(|known| known.url != pr.url)
+                                })
+                        });
                         state.session_prs.insert(*session, (*revision, prs.clone()));
                         state.session_pr_revision = state.session_pr_revision.saturating_add(1);
                     }
@@ -3097,6 +3101,21 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 overlay.prs.clone_from(prs);
                 overlay.selected = overlay.selected.min(prs.len().saturating_sub(1));
                 overlay.error = None;
+            }
+            // A freshly discovered PR is the completion of work the user is
+            // waiting for, so surface it immediately. Metadata-only refreshes,
+            // duplicate snapshots, and deliberate dismissals stay quiet. An
+            // existing modal or Director interaction remains the input owner.
+            if accepted && newly_detected && state.overlay.is_none() && !state.director_drawer_open
+            {
+                state.overlay = Some(Overlay::Prs);
+                state.pr_overlay = Some(PrOverlay {
+                    target: *target,
+                    prs: prs.clone(),
+                    selected: 0,
+                    error: None,
+                });
+                state.preview_overlay = None;
             }
         }
         BackendEvent::PullRequestsError { target, error } => {
@@ -8689,6 +8708,109 @@ mod tests {
                 .map(|error| error.message.as_str()),
             Some("gh unavailable")
         );
+    }
+
+    #[test]
+    fn newly_detected_pr_auto_opens_without_reopening_or_stealing_focus() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // The empty baseline is not actionable. Its first newly discovered URL
+        // opens the modal directly from the resident snapshot lane.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 0,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        let first = pr_link(41);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![first.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.pr_overlay().unwrap().target(), target);
+        assert_eq!(
+            state.pr_overlay().unwrap().prs(),
+            std::slice::from_ref(&first)
+        );
+
+        // Closing acknowledges the discovery. A title/state refresh and a
+        // duplicate cannot reopen it because neither introduces a new URL.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let mut enriched = first.clone();
+        enriched.title = Some("ready for review".into());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: vec![enriched.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: vec![enriched.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+
+        // A frontmost interaction is never replaced. The new PR still enters
+        // the shared cache and is visible the next time the user opens `p`.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let second = pr_link(42);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 3,
+                prs: vec![enriched, second.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert!(
+            state
+                .pr_overlay()
+                .unwrap()
+                .prs()
+                .iter()
+                .any(|pr| pr.url == second.url)
+        );
+    }
+
+    #[test]
+    fn dismissed_pr_does_not_auto_open() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let mut dismissed = pr_link(41);
+        dismissed.state = PrState::Dismissed;
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![dismissed],
+            }),
+        );
+
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
     }
 
     #[test]

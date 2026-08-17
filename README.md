@@ -165,7 +165,8 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 ### 4. 状態と PR を確認する
 
 session の 2 行目には最終利用時刻、PR、base branch との差分を表示する。`p` で PR 一覧、`d` で diff、
-`n` で session の scratchpad を開く。PR を選んで Enter を押すと既定のブラウザで開く。
+`n` で session の scratchpad を開く。新しい PR を検知すると、別のモーダルを操作中でなければ PR 一覧を
+自動で開く。PR を選んで Enter を押すと既定のブラウザで開く。
 
 ## AI エージェントとの連携
 
