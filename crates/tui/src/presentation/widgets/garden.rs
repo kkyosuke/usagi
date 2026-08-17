@@ -759,27 +759,27 @@ mod tests {
 
     #[test]
     fn an_available_session_without_an_agent_still_draws_a_usagi() {
-        let frame = render(
-            24,
-            100,
-            "x",
-            &[GardenSession {
-                id: SessionId::parse(STEADY_ID).expect("fixture id"),
-                label: "empty".to_owned(),
-                lifecycle: SessionLifecycle::Available,
-                selected: false,
-                failure_summary: None,
-                agents: Vec::new(),
-            }],
-            0,
-            false,
-        )
-        .expect("fits");
+        let session = GardenSession {
+            id: SessionId::parse(STEADY_ID).expect("fixture id"),
+            label: "empty".to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            selected: false,
+            failure_summary: None,
+            agents: Vec::new(),
+        };
+        let frame = render(24, 100, "x", std::slice::from_ref(&session), 0, false).expect("fits");
         let text = plain(&frame).join("\n");
         assert!(text.contains("available"));
         assert!(text.contains("/)/)"));
         assert!(text.contains("( . .)"));
         assert!(!text.contains("no agents"));
+
+        let blink = render(24, 100, "x", std::slice::from_ref(&session), 4, false).expect("fits");
+        assert!(plain(&blink).join("\n").contains("( -.-)"));
+        assert_ne!(frame.rows, blink.rows);
+
+        let reduced = render(24, 100, "x", &[session], 4, true).expect("fits");
+        assert_eq!(frame.rows, reduced.rows);
     }
 
     #[test]
