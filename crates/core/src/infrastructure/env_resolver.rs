@@ -1,8 +1,9 @@
 //! Bounded secret resolution and the owned 1Password CLI child lifecycle.
 //!
-//! The domain owns every count limit. This adapter validates before it starts a
-//! worker, uses a bounded job queue with a fixed worker count, and funnels the
-//! ordered outcomes through [`collect`](crate::usecase::env::collect).
+//! The domain owns the binding and concurrency count limits. This adapter
+//! validates before it starts a worker, uses a bounded job queue with a fixed
+//! worker count, caps each child output stream, and funnels the ordered outcomes
+//! through [`collect`](crate::usecase::env::collect).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::{Command, Stdio};
@@ -18,6 +19,11 @@ use crate::usecase::env::{ResolvedEnvironment, SecretResolver, collect};
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 const OP_TERMINATE_GRACE: Duration = Duration::from_secs(2);
 const OP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Maximum bytes retained from each `op read` output stream.
+///
+/// Readers keep draining after this limit so a child cannot block on a full
+/// pipe, but stdout and stderr each retain at most this many bytes.
+const OP_OUTPUT_BYTES_MAX: usize = 64 * 1024;
 
 /// The 1Password CLI as a [`SecretResolver`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -154,12 +160,18 @@ struct ChildExit {
     display: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
 trait OwnedChild {
     fn try_wait(&mut self) -> Result<Option<ChildExit>, String>;
     fn terminate(&mut self) -> Result<(), String>;
     fn kill(&mut self) -> Result<(), String>;
     fn wait(&mut self) -> Result<ChildExit, String>;
-    fn join_output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String>;
+    fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String>;
 }
 
 trait ChildRunner {
@@ -229,8 +241,13 @@ fn run_owned_child(
     }
     let exit = reaped?;
     let (stdout, stderr) = output?;
+    if stdout.exceeded || stderr.exceeded {
+        return Err(format!(
+            "op output exceeded its {OP_OUTPUT_BYTES_MAX} byte per-stream limit"
+        ));
+    }
     if !exit.success {
-        let detail = String::from_utf8_lossy(&stderr).trim().to_owned();
+        let detail = String::from_utf8_lossy(&stderr.bytes).trim().to_owned();
         return Err(format!(
             "op exited with {}: {}",
             exit.display,
@@ -241,22 +258,71 @@ fn run_owned_child(
             }
         ));
     }
-    Ok(String::from_utf8_lossy(&stdout)
+    Ok(String::from_utf8_lossy(&stdout.bytes)
         .trim_end_matches(['\n', '\r'])
         .to_owned())
 }
 
+fn capture_output(reader: &mut dyn std::io::Read, limit: usize) -> std::io::Result<CapturedOutput> {
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut exceeded = false;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            break;
+        }
+        let keep = limit.saturating_sub(bytes.len()).min(read);
+        bytes.extend_from_slice(&buffer[..keep]);
+        exceeded |= keep < read;
+    }
+    Ok(CapturedOutput { bytes, exceeded })
+}
+
+type OutputReader = std::thread::JoinHandle<std::io::Result<CapturedOutput>>;
+
+fn join_output_reader(handle: &mut Option<OutputReader>) -> Result<CapturedOutput, String> {
+    handle
+        .take()
+        .ok_or_else(|| "secret resolver output already joined".to_owned())?
+        .join()
+        .map_err(|_| "secret resolver output reader panicked".to_owned())?
+        .map_err(|_| "could not read secret resolver output".to_owned())
+}
+
+/// Join both pipe readers even when the first one fails.
+///
+/// A reader error must not detach its sibling: timeout/cancellation and
+/// ordinary completion all use this function as the final output-lifecycle
+/// fence. Return the stdout error first for deterministic diagnostics, but only
+/// after both handles have been consumed and joined.
+fn join_output_readers(
+    stdout: &mut Option<OutputReader>,
+    stderr: &mut Option<OutputReader>,
+) -> Result<(CapturedOutput, CapturedOutput), String> {
+    let stdout = join_output_reader(stdout);
+    let stderr = join_output_reader(stderr);
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
 mod real {
-    #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output
+    #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output,capture_output_retains_the_limit_and_drains_to_eof
 
     use std::io::Read;
     use std::process::Child;
-    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     use super::{
-        Cancellation, ChildExit, ChildRunner, OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT,
-        OwnedChild, Time, op_read_command, run_owned_child,
+        Cancellation, CapturedOutput, ChildExit, ChildRunner, OP_OUTPUT_BYTES_MAX,
+        OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT, OutputReader, OwnedChild, Time,
+        capture_output, join_output_readers, op_read_command, run_owned_child,
     };
 
     pub(super) fn run(
@@ -299,18 +365,14 @@ mod real {
         }
     }
 
-    fn reader(mut pipe: impl Read + Send + 'static) -> JoinHandle<std::io::Result<Vec<u8>>> {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
+    fn reader(mut pipe: impl Read + Send + 'static) -> OutputReader {
+        std::thread::spawn(move || capture_output(&mut pipe, OP_OUTPUT_BYTES_MAX))
     }
 
     struct SystemChild {
         child: Child,
-        stdout: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-        stderr: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+        stdout: Option<OutputReader>,
+        stderr: Option<OutputReader>,
     }
 
     impl SystemChild {
@@ -362,20 +424,8 @@ mod real {
                 .map_err(|_| "could not reap secret resolver".to_owned())
         }
 
-        fn join_output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
-            fn join(
-                handle: &mut Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-            ) -> Result<Vec<u8>, String> {
-                handle
-                    .take()
-                    .ok_or_else(|| "secret resolver output already joined".to_owned())?
-                    .join()
-                    .map_err(|_| "secret resolver output reader panicked".to_owned())?
-                    .map_err(|_| "could not read secret resolver output".to_owned())
-            }
-            let stdout = join(&mut self.stdout)?;
-            let stderr = join(&mut self.stderr)?;
-            Ok((stdout, stderr))
+        fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String> {
+            join_output_readers(&mut self.stdout, &mut self.stderr)
         }
     }
 
@@ -666,8 +716,8 @@ mod tests {
         exit_after_terminate: bool,
         terminated: bool,
         exit: ChildExit,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
+        stdout: CapturedOutput,
+        stderr: CapturedOutput,
     }
 
     impl OwnedChild for FakeChild {
@@ -699,7 +749,7 @@ mod tests {
             Ok(self.exit.clone())
         }
 
-        fn join_output(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
+        fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String> {
             self.events.lock().unwrap().push("join_output");
             Ok((self.stdout.clone(), self.stderr.clone()))
         }
@@ -719,8 +769,14 @@ mod tests {
                         success: false,
                         display: "signal".to_owned(),
                     },
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
+                    stdout: CapturedOutput {
+                        bytes: Vec::new(),
+                        exceeded: false,
+                    },
+                    stderr: CapturedOutput {
+                        bytes: Vec::new(),
+                        exceeded: false,
+                    },
                 })),
                 spawn_error: None,
             },
@@ -770,8 +826,14 @@ mod tests {
                     success: true,
                     display: "exit status: 0".to_owned(),
                 },
-                stdout: b"secret\n".to_vec(),
-                stderr: Vec::new(),
+                stdout: CapturedOutput {
+                    bytes: b"secret\n".to_vec(),
+                    exceeded: false,
+                },
+                stderr: CapturedOutput {
+                    bytes: Vec::new(),
+                    exceeded: false,
+                },
             })),
             spawn_error: None,
         };
@@ -790,6 +852,235 @@ mod tests {
         assert_eq!(
             events.lock().unwrap().as_slice(),
             ["try_wait", "wait", "join_output"]
+        );
+    }
+
+    #[test]
+    fn exact_output_limit_succeeds_and_either_stream_overflow_fails_safely() {
+        for (stdout, stderr, success, stdout_exceeded, stderr_exceeded) in [
+            (
+                vec![b's'; OP_OUTPUT_BYTES_MAX],
+                Vec::new(),
+                true,
+                false,
+                false,
+            ),
+            (
+                vec![b's'; OP_OUTPUT_BYTES_MAX],
+                Vec::new(),
+                true,
+                true,
+                false,
+            ),
+            (
+                Vec::new(),
+                vec![b'e'; OP_OUTPUT_BYTES_MAX],
+                false,
+                false,
+                true,
+            ),
+        ] {
+            let runner = FakeRunner {
+                child: Mutex::new(Some(FakeChild {
+                    events: Arc::new(Mutex::new(Vec::new())),
+                    ready: true,
+                    try_wait_errors: 0,
+                    exit_after_terminate: false,
+                    terminated: false,
+                    exit: ChildExit {
+                        success,
+                        display: if success {
+                            "exit status: 0".to_owned()
+                        } else {
+                            "exit status: 1".to_owned()
+                        },
+                    },
+                    stdout: CapturedOutput {
+                        bytes: stdout,
+                        exceeded: stdout_exceeded,
+                    },
+                    stderr: CapturedOutput {
+                        bytes: stderr,
+                        exceeded: stderr_exceeded,
+                    },
+                })),
+                spawn_error: None,
+            };
+            let result = run_owned_child(
+                &runner,
+                &FakeTime::default(),
+                "op://vault/item",
+                &NeverCancelled,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_millis(1),
+            );
+            if stdout_exceeded || stderr_exceeded {
+                assert_eq!(
+                    result,
+                    Err(format!(
+                        "op output exceeded its {OP_OUTPUT_BYTES_MAX} byte per-stream limit"
+                    ))
+                );
+            } else {
+                assert_eq!(result.unwrap().len(), OP_OUTPUT_BYTES_MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_output_retains_the_limit_and_drains_to_eof() {
+        struct ChunkedReader {
+            bytes: std::io::Cursor<Vec<u8>>,
+            chunk: usize,
+            reads: usize,
+            reached_eof: bool,
+        }
+
+        impl std::io::Read for ChunkedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                let maximum = buffer.len().min(self.chunk);
+                let read = self.bytes.read(&mut buffer[..maximum])?;
+                self.reached_eof |= read == 0;
+                Ok(read)
+            }
+        }
+
+        let limit = 4;
+        let mut exact = std::io::Cursor::new(b"1234");
+        assert_eq!(
+            capture_output(&mut exact, limit).unwrap(),
+            CapturedOutput {
+                bytes: b"1234".to_vec(),
+                exceeded: false,
+            }
+        );
+        let mut reader = ChunkedReader {
+            bytes: std::io::Cursor::new(b"123456789".to_vec()),
+            chunk: 2,
+            reads: 0,
+            reached_eof: false,
+        };
+        let captured = capture_output(&mut reader, limit).unwrap();
+
+        assert_eq!(captured.bytes, b"1234");
+        assert!(captured.exceeded);
+        assert!(reader.reached_eof);
+        assert!(reader.reads > 3, "reader kept draining after overflow");
+    }
+
+    #[test]
+    fn capture_output_retries_interruptions_and_propagates_other_read_errors() {
+        struct InterruptedOnce {
+            interrupted: bool,
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+
+        impl std::io::Read for InterruptedOnce {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                self.bytes.read(buffer)
+            }
+        }
+
+        struct Broken;
+
+        impl std::io::Read for Broken {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected read failure"))
+            }
+        }
+
+        let mut interrupted = InterruptedOnce {
+            interrupted: false,
+            bytes: std::io::Cursor::new(b"secret".to_vec()),
+        };
+        assert_eq!(
+            capture_output(&mut interrupted, 6).unwrap(),
+            CapturedOutput {
+                bytes: b"secret".to_vec(),
+                exceeded: false,
+            }
+        );
+        assert!(capture_output(&mut Broken, 6).is_err());
+    }
+
+    #[test]
+    fn output_reader_failure_still_joins_the_other_stream() {
+        let sibling_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&sibling_completed);
+        let mut stdout = Some(std::thread::spawn(|| {
+            Err(std::io::Error::other("injected stdout failure"))
+        }));
+        let mut stderr = Some(std::thread::spawn(move || {
+            observed.store(true, Ordering::Release);
+            Ok(CapturedOutput {
+                bytes: Vec::new(),
+                exceeded: false,
+            })
+        }));
+
+        assert_eq!(
+            join_output_readers(&mut stdout, &mut stderr),
+            Err("could not read secret resolver output".to_owned())
+        );
+        assert!(stdout.is_none(), "the failed stdout reader was consumed");
+        assert!(
+            stderr.is_none(),
+            "the sibling stderr reader was also joined"
+        );
+        assert!(
+            sibling_completed.load(Ordering::Acquire),
+            "the sibling reader ran to completion before return"
+        );
+    }
+
+    #[test]
+    fn output_reader_join_reports_success_stderr_failure_panic_and_reuse_safely() {
+        let output = || CapturedOutput {
+            bytes: b"captured".to_vec(),
+            exceeded: false,
+        };
+
+        let mut stdout = Some(std::thread::spawn(move || Ok(output())));
+        let mut stderr = Some(std::thread::spawn(move || Ok(output())));
+        assert_eq!(
+            join_output_readers(&mut stdout, &mut stderr),
+            Ok((
+                CapturedOutput {
+                    bytes: b"captured".to_vec(),
+                    exceeded: false,
+                },
+                CapturedOutput {
+                    bytes: b"captured".to_vec(),
+                    exceeded: false,
+                },
+            ))
+        );
+
+        let mut stdout = Some(std::thread::spawn(move || Ok(output())));
+        let mut stderr = Some(std::thread::spawn(|| {
+            Err(std::io::Error::other("injected stderr failure"))
+        }));
+        assert_eq!(
+            join_output_readers(&mut stdout, &mut stderr),
+            Err("could not read secret resolver output".to_owned())
+        );
+
+        let mut panicked = Some(std::thread::spawn(|| -> std::io::Result<CapturedOutput> {
+            panic!("injected output reader panic");
+        }));
+        assert_eq!(
+            join_output_reader(&mut panicked),
+            Err("secret resolver output reader panicked".to_owned())
+        );
+        assert_eq!(
+            join_output_reader(&mut panicked),
+            Err("secret resolver output already joined".to_owned())
         );
     }
 
@@ -826,8 +1117,14 @@ mod tests {
                     success: false,
                     display: "signal".to_owned(),
                 },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
+                stdout: CapturedOutput {
+                    bytes: Vec::new(),
+                    exceeded: false,
+                },
+                stderr: CapturedOutput {
+                    bytes: Vec::new(),
+                    exceeded: false,
+                },
             })),
             spawn_error: None,
         };
@@ -871,8 +1168,14 @@ mod tests {
                         success: false,
                         display: "exit status: 1".to_owned(),
                     },
-                    stdout: Vec::new(),
-                    stderr,
+                    stdout: CapturedOutput {
+                        bytes: Vec::new(),
+                        exceeded: false,
+                    },
+                    stderr: CapturedOutput {
+                        bytes: stderr,
+                        exceeded: false,
+                    },
                 })),
                 spawn_error: None,
             };
