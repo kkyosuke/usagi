@@ -524,9 +524,12 @@ impl CodexProvisioner for RootCodexProvisioner {
             arguments,
         );
         if mode == SandboxMode::Root {
-            let sandbox_roots =
-                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
-                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+            let sandbox_roots = root_agent_writable_roots(
+                self.sandbox_home.as_deref(),
+                self.program,
+                &self.data_home,
+            )
+            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
             validate_claude_sandbox_policy(&SandboxPolicyInputs {
                 mode,
                 program: self.program,
@@ -583,30 +586,45 @@ const CLAUDE_PROGRAM: &str = "claude";
 fn root_agent_writable_roots(
     home: Option<&Path>,
     program: &str,
+    data_home: &paths::DataHome,
 ) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
-    let (Some(home), Some(state_directory)) =
-        (home, claude_sandbox::agent_state_directory(program))
-    else {
-        return Ok(Vec::new());
-    };
-    validate_owned_directory(home)?;
-    let state = home.join(state_directory);
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    match builder.create(&state) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
-    }
-    validate_owned_directory(&state)?;
-    state
+    let data_home = data_home
+        .base()
         .canonicalize()
-        .map(|state| vec![state])
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)
+        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    validate_owned_directory(&data_home)?;
+    let mut roots = vec![data_home];
+    roots.extend(agent_state_writable_roots(home, program)?);
+    Ok(roots)
+}
+
+fn agent_state_writable_roots(
+    home: Option<&Path>,
+    program: &str,
+) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
+    if let (Some(home), Some(state_directory)) =
+        (home, claude_sandbox::agent_state_directory(program))
+    {
+        validate_owned_directory(home)?;
+        let state = home.join(state_directory);
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match builder.create(&state) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+        }
+        validate_owned_directory(&state)?;
+        return state
+            .canonicalize()
+            .map(|state| vec![state])
+            .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot);
+    }
+    Ok(Vec::new())
 }
 
 /// Codex's arg0 janitor cannot open the `.lock` inside a directory left with no
@@ -725,7 +743,8 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
-        let launch_roots = claude_writable_roots(mode, &working_directory);
+        let launch_roots =
+            claude_writable_roots(mode, &working_directory, Some(self.data_home.base()));
         let paths = self.launcher_paths(mode);
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -827,14 +846,18 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
 /// A session launch receives exactly its own worktree. A root coordinator receives
-/// no repository-local writable root; daemon-owned MCP operations perform durable
-/// writes out of process, so the Agent child never needs write access to the checkout,
-/// `.git`, or `.usagi`.
-fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
+/// the mode-neutral usagi data home, but no repository-local writable root. This lets
+/// the coordinator bootstrap and reconnect the daemon while the checkout, `.git`, and
+/// the workspace-local `.usagi` tree remain read-only.
+fn claude_writable_roots(
+    mode: SandboxMode,
+    working_directory: &Path,
+    data_home_base: Option<&Path>,
+) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
         vec![working_directory.to_path_buf()]
     } else {
-        Vec::new()
+        data_home_base.map(Path::to_path_buf).into_iter().collect()
     }
 }
 
@@ -893,12 +916,14 @@ fn insert_root_git_environment(spawn: &mut SpawnProvision) {
 fn validate_root_git_common_dir_policy(
     workspace_root: &Path,
     program: &str,
+    launch_roots: &[PathBuf],
     tmpdir: Option<&Path>,
     home: Option<&Path>,
     cache_dir: Option<&Path>,
 ) -> Result<(), ()> {
     let common = git_common_dir(workspace_root)?;
-    let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
+    let mut writable = launch_roots.to_vec();
+    writable.extend([PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]);
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
         writable
@@ -1014,10 +1039,17 @@ fn validate_claude_sandbox_policy(
     let backend = backend.ok_or(ClaudeSandboxPolicyError::MissingBackend)?;
     validate_sandbox_backend(backend)?;
     if mode == SandboxMode::Root {
-        validate_root_git_common_dir_policy(workspace_root, program, tmpdir, home, cache_dir)
-            // Git common dir が writable 領域に入っていれば、read-only な checkout でも
-            // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
-            .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
+        validate_root_git_common_dir_policy(
+            workspace_root,
+            program,
+            launch_roots,
+            tmpdir,
+            home,
+            cache_dir,
+        )
+        // Git common dir が writable 領域に入っていれば、read-only な checkout でも
+        // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
+        .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
     }
     let protected_workspace = workspace_root
         .canonicalize()
@@ -3371,7 +3403,7 @@ fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
         DefaultModel::OpenAi.command(),
         DefaultModel::SakanaAi.command(),
     ] {
-        if let Ok(roots) = root_agent_writable_roots(sandbox_home, program) {
+        if let Ok(roots) = agent_state_writable_roots(sandbox_home, program) {
             for root in roots {
                 if let Err(error) = repair_codex_arg0_permissions(&root) {
                     ErrorLog::record(&format!(
@@ -14139,11 +14171,41 @@ instructions = "{instructions}"
                 Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
             );
 
-            // 3. Root sandbox scope: daemon state is not writable by the Agent child.
-            let roots =
-                claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
-            assert!(roots.is_empty(), "{roots:?}");
+            // 3. Root sandbox scope: the exact mode-neutral base is writable so
+            // daemon bootstrap can re-select its mode. Its parent is never granted.
+            let roots = claude_writable_roots(
+                SandboxMode::Root,
+                Path::new("/repo/.usagi/sessions/work"),
+                Some(data_home.base()),
+            );
+            assert_eq!(roots, [base.to_path_buf()]);
+            let above = base.parent().expect("a temporary directory has a parent");
+            assert!(!roots.iter().any(|root| root == above), "{roots:?}");
         }
+    }
+
+    #[test]
+    fn root_agent_writable_roots_include_exact_data_home_and_provider_state() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let data = fixture.path().join("usagi-data");
+        let home = fixture.path().join("home");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let data_home = paths::DataHome::new(&data, paths::RuntimeMode::Production);
+
+        let roots = root_agent_writable_roots(Some(&home), "codex", &data_home).unwrap();
+        assert_eq!(
+            roots,
+            [
+                data.canonicalize().unwrap(),
+                home.join(".codex").canonicalize().unwrap(),
+            ]
+        );
+        assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
+
+        let roots = root_agent_writable_roots(None, "/bin/sh", &data_home).unwrap();
+        assert_eq!(roots, [data.canonicalize().unwrap()]);
     }
 
     #[test]
@@ -14273,6 +14335,7 @@ instructions = "{instructions}"
             validate_root_git_common_dir_policy(
                 safe.path(),
                 CLAUDE_PROGRAM,
+                &[],
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -14298,6 +14361,7 @@ instructions = "{instructions}"
             validate_root_git_common_dir_policy(
                 linked.path(),
                 CLAUDE_PROGRAM,
+                &[],
                 Some(Path::new("/tmp")),
                 None,
                 None
@@ -14323,6 +14387,7 @@ instructions = "{instructions}"
                 validate_root_git_common_dir_policy(
                     under_state.path(),
                     program,
+                    &[],
                     None,
                     Some(&home.path().canonicalize().unwrap()),
                     None,
@@ -14342,7 +14407,7 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&context);
         assert_eq!(mode, SandboxMode::Session);
 
-        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"));
+        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"), None);
         assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
 
         let launcher = claude_sandbox_launcher(
@@ -14607,9 +14672,9 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&provision_context(None));
         assert_eq!(mode, SandboxMode::Root);
 
-        // A root launch's cwd is the project root, but it is not a writable root.
-        let roots = claude_writable_roots(mode, Path::new("/repo"));
-        assert!(roots.is_empty());
+        // A root launch's cwd stays read-only; only the mode-neutral data home is writable.
+        let roots = claude_writable_roots(mode, Path::new("/repo"), Some(Path::new("/data/usagi")));
+        assert_eq!(roots, [PathBuf::from("/data/usagi")]);
         let launcher = claude_sandbox_launcher(
             usagi,
             mode,

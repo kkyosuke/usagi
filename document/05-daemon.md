@@ -530,8 +530,9 @@ daemon が起動する Agent child には、mode を適用する**前**の base�
 
 この 2 つは常に 1 つの組として扱い、片方から path 操作でもう片方を導かない。production は base と selected directory が同じ directory なので、「selected directory から 1 階層上が base」と仮定すると data home の**親**（既定では利用者のホームディレクトリ）を選んでしまい、それが child の data home・sandbox の writable root として渡ることになる。
 
-- child の `$USAGI_HOME` には **base** を渡す。root coordinator の Claude sandbox にも base を writable root として
-  渡すが、session sandbox は data home を read-only とし、mutation は credential-scoped MCP/daemon IPC を使う。
+- child の `$USAGI_HOME` には **base** を渡す。root coordinator の Claude / Codex sandbox にも base を writable root として
+  渡し、daemon が停止している場合も同じ runtime mode を bootstrap・再接続できるようにする。session sandbox は data home を
+  read-only とし、mutation は credential-scoped MCP/daemon IPC を使う。
   child は mode の子 directory を自分で作る必要があるため、root coordinator に selected directory だけを渡すことは
   できない。
 - daemon 所有の global settings（local LLM の有効/無効とモデル名など）は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
