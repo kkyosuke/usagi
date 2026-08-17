@@ -8,12 +8,12 @@ dependson: []
 related: [674]
 parent: 671
 created_at: 2026-08-16T22:32:02.034334+00:00
-updated_at: 2026-08-16T23:34:22.036260+00:00
+updated_at: 2026-08-17T10:50:59.094214+00:00
 ---
 
 ## Finding（P2 usability / foreground input ownership）
 
-`origin/main` `9566554fddd98d89fb25e85fbb6aaab62f97ed2e` で #674 / #1492、後続 #1490 / #1494 / #1489 の増分を再確認した。自動表示の narrow 抑止、Garden click の hitbox 解決、resize edge での close、overlay 中の PTY forwarding 抑止は実装された。#1494はうさぎをagent runtime単位へ変更し、#1489はshared terminalのgeometry同期を変更したが、session plotのhitboxとGarden input routingは変更していないため、手動表示と一部の user activityが同じ foreground ownerに載っていない残件は継続する。
+`origin/main` `2ea2a90ae37b840152922ba3463c5caf9456d122` で #674 / #1492、後続 #1490 / #1494 / #1489 / #1495 / #1493 の増分を再確認した。自動表示の narrow 抑止、Garden click の hitbox 解決、resize edge での close、overlay 中の PTY forwarding 抑止は実装された。#1494 / #1495はうさぎのprojection・pose・motion・選択表示を変更し、#1489はshared terminalのgeometry同期、#1493はcoreのsecret resolverを変更したが、session plotのhitboxとGarden input routingは変更していないため、手動表示と一部の user activityが同じ foreground ownerに載っていない残件は継続する。
 
 ### 残っている不整合
 
