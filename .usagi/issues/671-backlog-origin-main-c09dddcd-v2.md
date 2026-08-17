@@ -1,6 +1,6 @@
 ---
 number: 671
-title: backlog: origin/main b928b74f v2 全体コードレビュー
+title: backlog: origin/main c09dddcd v2 全体コードレビュー
 status: done
 priority: high
 labels: [review, v2, backlog, epic]
@@ -12,9 +12,9 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 
 ## レビュー基点
 
-- reviewed commit: `b928b74fd58b62a5cb73f3e1ace8c5c38188ace3`
+- reviewed commit: `c09dddcd61198124791e6707ac86d5b72d8dec8a`
 - reviewed at: `2026-08-17`
-- 対象: usagi v2 全体（tracked `crates/*/src/**/*.rs` + `src/**/*.rs`: 310 files / 約234,864 physical lines。tests・examples・scripts・CI・configを含む監査集合: 379 files / 約257,433 physical lines）
+- 対象: usagi v2 全体（tracked `crates/*/src/**/*.rs` + `src/**/*.rs`: 310 files / 約236,618 physical lines。tests・examples・scripts・CI・configを含む監査集合: 379 files / 約259,230 physical lines）
 - 観点: 正しさ、resource bound、durability、process/PTY lifecycle、authority/fence、IPC/MCP schema、TUI reducer/input/rendering/worker、install/CI
 
 件数はreview commitのtreeから数え、作業ブランチ上の#672修正やissue本文は含めない。レビュー基点は日付ではなく上記commit hashで固定する。
@@ -31,14 +31,16 @@ updated_at: 2026-08-16T23:34:22.162498+00:00
 
 ## 最新main増分の再レビュー
 
-最初の全体監査後に入った `1ef8a5cd..b928b74f` は3コミットに限定されるため、同じ全tree走査を繰り返さず、変更されたGarden、daemon retirement、E2E / CI規約を差分監査した。
+最初の全体監査後に入った `1ef8a5cd..c09dddcd` は6コミットに限定されるため、同じ全tree走査を繰り返さず、変更されたGarden、daemon retirement、shared terminal geometry、E2E / CI規約を差分監査した。
 
 - #1492でautomatic narrow抑止、resize edge close、frame由来hitboxによるclick-to-Closeupを確認した。
 - Garden overlayがordinary character / pasteのPTY forwardingと背景pane mutationを遮断することを確認した。
 - #686は解消済み部分を除き、**manual narrowのinvisible overlay** と **wheel / control chord / raw input等がwake-up ownerへ届かない問題**へscopeを縮約した。
-- #687 / #688はGardenのagent単位表示・pose / reduced motion等の見た目の後続作業であり、本レビューのcorrectness findingとは分離した。
+- #1494でGardenのうさぎをagent runtime単位へ変更し、#687が完了した。session hitboxとinput routingは変更されていないため、#686のmanual narrow / wake-up ownership残件は継続する。
+- #1495でGardenのpose / reduced motion / selected marker / safe failure summaryを実装し、#688が完了した。Garden input routingは変更されていないため、#686の残件は継続する。
 - #1490でclient workerのsocket readにretirement flag + bounded `poll(2)` readinessを追加し、通常のframe readでparkしたworkerを`shutdown(2)`の起こしだけに依存せずjoinできることを確認した。
 - #1490は#673の同期decision待ち自体を変更していない。`wait_for_user_decision`はsocket readへ戻らずstore pollingを続けるため、client disconnect / daemon shutdown / generation retirementを観測しない残件はそのままである。
+- #1489で複数TUIが共有するterminal geometryをdaemon権威のsmallest viewportへ一本化し、attach / resize / resume / detachのrevision fenceを更新した。`op read`、decision wait、PR refresh、clipboard、Gardenのforeground routingは変更されておらず、既存findingへの影響はない。
 - 重いE2Eのcross-process lock、transient transport retry、dropped-keystroke再送、overlay close観測はtest偽陽性と診断を改善する変更で、既存findingを解消または新規findingを追加するものではない。
 
 ## Finding 対応表
