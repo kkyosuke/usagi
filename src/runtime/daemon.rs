@@ -15280,6 +15280,7 @@ instructions = "{instructions}"
             TerminalAction::Attach,
             serde_json::to_value(TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             })
             .unwrap(),
             SnapshotWire::RawTail,
@@ -15351,6 +15352,7 @@ instructions = "{instructions}"
             TerminalAction::Attach,
             serde_json::to_value(TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             })
             .unwrap(),
             SnapshotWire::RawTail,
@@ -16029,6 +16031,7 @@ instructions = "{instructions}"
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
                     terminal: old_terminal.clone(),
+                    geometry: None,
                 },
             ),
             (
@@ -16803,7 +16806,11 @@ instructions = "{instructions}"
         };
         serde_json::to_value(DaemonRequest::Terminal {
             action: TerminalAction::Attach,
-            payload: serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
+            payload: serde_json::to_value(TerminalRequest::Attach {
+                terminal,
+                geometry: None,
+            })
+            .unwrap(),
         })
         .unwrap()
     }

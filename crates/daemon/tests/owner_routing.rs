@@ -352,7 +352,7 @@ fn answer(
         }
         other => {
             let target = match &other {
-                TerminalRequest::Attach { terminal }
+                TerminalRequest::Attach { terminal, .. }
                 | TerminalRequest::Resync { terminal }
                 | TerminalRequest::Resize { terminal, .. }
                 | TerminalRequest::Detach { terminal, .. } => Some(terminal),
@@ -538,6 +538,7 @@ fn a_client_pointed_at_the_new_active_still_drives_the_old_generation_terminal()
     for request in [
         TerminalRequest::Attach {
             terminal: world.old.terminal.clone(),
+            geometry: None,
         },
         TerminalRequest::Input {
             terminal: world.old.terminal.clone(),
@@ -607,6 +608,7 @@ fn closing_and_reopening_the_client_re_establishes_the_old_subscription_from_its
     router
         .request(terminal_request(&TerminalRequest::Attach {
             terminal: world.old.terminal.clone(),
+            geometry: None,
         }))
         .unwrap();
     router.links_mut().advance_cursor(&world.old.terminal, 64);
@@ -716,6 +718,7 @@ fn a_forged_or_unknown_generation_cannot_name_an_endpoint() {
         router
             .request(terminal_request(&TerminalRequest::Attach {
                 terminal: terminal(DaemonGeneration::new()),
+                geometry: None,
             }))
             .is_err()
     );
@@ -825,6 +828,7 @@ fn a_single_generation_daemon_routes_from_the_published_locator_alone() {
     router
         .request(terminal_request(&TerminalRequest::Attach {
             terminal: only.terminal.clone(),
+            geometry: None,
         }))
         .unwrap();
     assert!(only.observed.actions().contains(&"Attach".to_owned()));

@@ -499,8 +499,10 @@ drawer open 時は root の selected live Agent だけを foreground attach し�
 選択中 Agent へ既存の ordered input / ACK、terminal-local な scroll / selection / feedback、copy / link を接続する。
 他の root tab と managed pane は detached background である。drawer close 時は root subscription を detach し、
 開く前の managed-session selected live tab を元の right pane geometry で attach する。detach 中の terminal は別 pane の
-geometry へ resize せず、同じ outer size で同じ terminal へ戻る attach は resize を再送しない。outer size が変わった
-場合だけ、再 attach 前にその terminal の新しい実 viewport へ 1 回 resize して checkpoint geometry を fence する。
+geometry へ resize せず、**attach 自体がその pane の viewport を宣言する**。daemon は detach と一緒にその window の
+[共有 viewport](05-daemon.md#共有-viewport複数-client-の-geometry) の要求を捨てるため、再 attach では毎回宣言し直す
+必要がある（黙って attach すると、他 window の小さい viewport がその window の終了後も残ってしまう）。宣言は
+attach request に載るので追加の往復は無く、`Resize` は pane の実サイズが変わったときだけ送る。
 どちらの操作も PTY/process を kill / spawn しない。terminal coordinator は bounded cache に保持するため、同じ connection epoch
 上の再 attach は `input_seq`、未収束 input fence、その後ろの queue、復号済み screen を引き継ぐ。cache から
 eviction された terminal も attach 応答の `next_input_seq` を採用し、daemon ledger より前へ巻き戻さない。
@@ -1332,18 +1334,36 @@ TUI は checkpoint 経路を **capability と negotiated revision の両方**で
 **一切 decode しない**（escape を文字として露出させない）。capability を真実源とするので、revision だけが
 2 に見えても capability を広告しない daemon は限定表示へ fail closed する。
 
-#### geometry / revision fence
+#### 要求 geometry と実効 geometry
 
-復元は次の 2 つの fence を通す。どちらも old / new state を混在させず、失敗した snapshot は表示しない。
+pane が要求する geometry と、terminal が実際に取っている geometry は別物である。**同じ terminal は
+複数の TUI window から同時に attach され、PTY は attach 中の全 window の要求の最小値を取る**
+（正本は [5. daemon#共有 viewport（複数 client の geometry）](05-daemon.md#共有-viewport複数-client-の-geometry)）。
+したがって client は次のように扱う。
+
+| 値 | 何か | 使い道 |
+|---|---|---|
+| 要求 geometry | 自分の pane の viewport | attach request に載せて宣言し、以後は pane のサイズが変わったときだけ `Resize` で送る。最小値に負けても frame ごとに再送しない |
+| 実効 geometry | attach snapshot と resize 応答が返す daemon 権威の geometry | local screen を組む幅・高さ。pane より小さければ余りは空白のまま描く |
+
+実効 geometry が要求より**大きい**場合は pane に収まらないため、同期 fence を解いて次の redraw で
+自分の viewport を再要求する。実効 geometry が要求と異なる間は「他の window と共有中でその viewport は
+`cols`x`rows`」を footer feedback に出す（他の失敗表示があればそちらを優先する）。
+
+#### revision fence
+
+復元は revision fence を通す。old / new state を混在させず、失敗した snapshot は表示しない。
 
 | fence | 条件 | 挙動 |
 |---|---|---|
-| geometry | pane の geometry を daemon へ同期できた attach で、checkpoint の geometry が pane と異なる（resize が capture に割り込んだ） | その snapshot を破棄して subscription を外し、同一 attach 内で 1 度だけ atomic snapshot を再取得する。なお不一致なら typed resync（`Reconnecting` + backoff）へ落とし、直前の screen をそのまま残す |
-| revision | snapshot の terminal `revision` が既に適用した revision より小さい（stale snapshot） | 同じく破棄・再取得・typed resync |
+| revision | snapshot の terminal `revision` が既に適用した revision より小さい（stale snapshot） | その snapshot を破棄して subscription を外し、同一 attach 内で 1 度だけ atomic snapshot を再取得する。なお古いなら typed resync（`Reconnecting` + backoff）へ落とし、直前の screen をそのまま残す |
 
-bound 違反で reject された checkpoint（未知 schema version・範囲外 geometry など）も同じ経路で fail closed する。
-resize が daemon へ届かなかった attach には突き合わせる geometry が無いため、daemon 権威の geometry で復元し、
-viewport 同期の失敗だけを feedback に表示する（attach 可能な terminal を隠さない）。
+checkpoint の geometry は fence の対象ではなく、**採用する**。daemon が単一 PTY の権威であり、
+自分の要求と違う geometry の snapshot を拒否すると、小さい window と共有した瞬間に再 attach を
+繰り返しながら壊れた幅で描き続けることになるためである。bound 違反で reject された checkpoint
+（未知 schema version・範囲外 geometry など）は同じ経路で fail closed する。resize が daemon へ
+届かなかった attach も daemon 権威の geometry で復元し、viewport 同期の失敗だけを feedback に
+表示する（attach 可能な terminal を隠さない）。
 
 terminal pane の接続状態と footer feedback は `TerminalSession` の状態をそのまま投影する。
 
@@ -1356,7 +1376,7 @@ terminal pane の接続状態と footer feedback は `TerminalSession` の状態
 | `Exited` | typed failure として拒否 | 最終画面を保持し、自動 retry しない |
 
 一時的な `unavailable`、input effect unknown、および
-[geometry / revision fence](#geometry--revision-fence) が拒否した snapshot が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
+[revision fence](#revision-fence) が拒否した snapshot が `Reconnecting` へ遷移する。再 attach 成功時は backoff をresetし、新しい
 connection-owned subscriptionを使う。input sequenceはclient-local connection epochが変わった場合だけ0へresetし、
 同じepoch上のcursor-gap/resync/detach→reattachではdaemon ledgerに合わせてnext sequenceを保持する。
 tab close / detach は予約済み retry を取り消す。

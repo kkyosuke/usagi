@@ -177,6 +177,7 @@ fn every_reference_addressed_request_routes_to_its_owner_generation() {
     let requests = [
         TerminalRequest::Attach {
             terminal: target.clone(),
+            geometry: None,
         },
         TerminalRequest::Resume {
             terminal: target.clone(),
@@ -245,6 +246,7 @@ fn a_payload_that_contradicts_its_action_is_refused_instead_of_routed() {
         action: TerminalAction::Input,
         payload: serde_json::to_value(TerminalRequest::Attach {
             terminal: terminal(generation(1), 7),
+            geometry: None,
         })
         .unwrap(),
     };
@@ -707,6 +709,7 @@ fn router_harness(snapshots: Vec<Result<TrustedEndpoints, DirectoryError>>) -> H
 fn attach(owner: DaemonGeneration) -> DaemonRequest {
     terminal_request(&TerminalRequest::Attach {
         terminal: terminal(owner, 10),
+        geometry: None,
     })
 }
 
@@ -743,6 +746,7 @@ fn the_router_refuses_a_payload_that_cannot_name_its_owner_without_connecting() 
         action: TerminalAction::Input,
         payload: serde_json::to_value(TerminalRequest::Attach {
             terminal: terminal(generation(1), 10),
+            geometry: None,
         })
         .unwrap(),
     };

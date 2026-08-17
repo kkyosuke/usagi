@@ -1687,6 +1687,21 @@ fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> Termi
     }
 }
 
+/// The geometry a terminal snapshot reply reports, when it carries a complete
+/// one.
+///
+/// The daemon answers a resize with the snapshot of the terminal as it now
+/// stands, which is the authoritative viewport for every window sharing it. A
+/// partial or out-of-range pair is treated as absent so the caller keeps what it
+/// asked for rather than decoding at an invented size.
+fn reply_geometry(body: &serde_json::Value) -> Option<Geometry> {
+    let geometry = &body["geometry"];
+    Some(Geometry {
+        cols: u16::try_from(geometry["cols"].as_u64()?).ok()?,
+        rows: u16::try_from(geometry["rows"].as_u64()?).ok()?,
+    })
+}
+
 const MAX_CACHED_INPUT_ACK_DEPTH: usize = 16;
 
 /// Decodes the terminal owner's sequence-consuming input acknowledgement.
@@ -2168,7 +2183,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     fn attach_terminal(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,
-        _geometry: Geometry,
+        geometry: Geometry,
     ) -> Result<TerminalAttach, TerminalError> {
         // The negotiated connection decides the snapshot contract before the
         // request is sent, so a daemon without the checkpoint capability can
@@ -2180,6 +2195,13 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                // The attach states this pane's claim on the shared viewport.
+                // A daemon that predates the field ignores it and keeps the
+                // geometry its last `Resize` committed.
+                geometry: Some(TerminalGeometry {
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                }),
             },
         )?;
         let subscription = body["subscription"]
@@ -2230,8 +2252,8 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,
         geometry: Geometry,
-    ) -> Result<(), TerminalError> {
-        self.poll_request(
+    ) -> Result<Geometry, TerminalError> {
+        let body = self.poll_request(
             TerminalAction::Resize,
             TerminalRequest::Resize {
                 terminal: terminal.clone(),
@@ -2245,7 +2267,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         // connect made every frame restart the foreground pump while capacity
         // was exhausted, amplifying one outage into a reconnect storm.
         self.pump.wake();
-        Ok(())
+        // The answer is the geometry the terminal now holds, which is the
+        // request only while no smaller window shares this terminal. A daemon
+        // that omits it left the terminal where the request asked for.
+        Ok(reply_geometry(&body).unwrap_or(geometry))
     }
 
     fn poll_terminal(
@@ -4234,10 +4259,10 @@ mod tests {
         decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, provider_resume_projection, session_cadence,
-        session_snapshot_result, terminal_copy_key, terminal_inventory_matches_scope,
-        validate_workspace_directory, version_detail, version_result_from_observation,
-        workspace_open_error,
+        pr_snapshot_events, probe_path, provider_resume_projection, reply_geometry,
+        session_cadence, session_snapshot_result, terminal_copy_key,
+        terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
+        version_result_from_observation, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -4654,6 +4679,7 @@ mod tests {
         for request in [
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             TerminalRequest::Resume {
                 terminal: terminal.clone(),
@@ -5836,6 +5862,27 @@ mod tests {
             decode_terminal_input_ack(&json!({ "ack": too_deep }), 1),
             Err(TerminalError::InputEffectUnknown)
         );
+    }
+
+    #[test]
+    fn the_resize_answer_reports_the_shared_viewport_and_ignores_a_malformed_one() {
+        // The daemon answers a resize with the terminal as it now stands, which
+        // is the viewport every window sharing it decodes at.
+        assert_eq!(
+            reply_geometry(&json!({ "geometry": { "cols": 40, "rows": 10 } })),
+            Some(Geometry { cols: 40, rows: 10 })
+        );
+        // Anything the daemon could not have produced leaves the caller with the
+        // geometry it asked for rather than an invented one.
+        for body in [
+            json!({}),
+            json!({ "geometry": {} }),
+            json!({ "geometry": { "cols": 40 } }),
+            json!({ "geometry": { "cols": -1, "rows": 10 } }),
+            json!({ "geometry": { "cols": 40, "rows": 100_000 } }),
+        ] {
+            assert_eq!(reply_geometry(&body), None, "{body}");
+        }
     }
 
     #[cfg(unix)]

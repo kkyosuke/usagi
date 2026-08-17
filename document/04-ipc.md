@@ -589,6 +589,11 @@ generic terminal の request vocabulary は `terminal` kind の `launch`、`inve
 `WorkspaceId` / optional `SessionId` / `WorktreeId` の scope、geometry だけを送る。command、argv、
 working directory、environment、secret は wire field ではなく、daemon が trusted profile から解決する。
 
+attach は additive optional field として自分の viewport を載せる。terminal を共有する window の要求は
+attachment と同じ寿命を持つため、attach 自体が要求を宣言し、daemon は最小値を再計算してから同じ排他区間で
+snapshot を取る。したがって attach 応答の `geometry` は、その要求を織り込んだ確定値である。field を載せない
+旧 peer は従来どおり `Resize` だけで要求する。
+
 launch の response は完全な `TerminalRef` を返す。attach は snapshot、connection-owned subscription、
 `(connection, client, terminal)` ledger が次に期待する `next_input_seq` を同時に返す。input、resize、detach は
 その `TerminalRef` と subscription を必ず含める。`next_input_seq` は generation 1 への additive optional field
@@ -608,13 +613,19 @@ terminal command の effect は、daemon generation、terminal、workspace、opt
 runtime ownership/state の全 fence を read-only で検証した後だけ実行する。resize はこの preflight から
 PTY effect、geometry commit まで terminal actor の排他区間を保持するため、途中の exit/replacement は
 割り込まない。PTY effect が失敗した場合は `unavailable` を返し、committed geometry を更新しない。
+
+`resize` は要求であって命令ではない。1 つの terminal は複数 client から attach されるため、daemon は
+attach 中の client の要求の最小値を PTY へ適用し、**応答の snapshot には確定した geometry を載せる**
+（policy の正本は [5. daemon#共有 viewport（複数 client の geometry）](05-daemon.md#共有-viewport複数-client-の-geometry)）。
+client は自分が要求した値ではなく、この応答と attach snapshot の `geometry` で screen を組む。
+最小値が動いた後、まだ古い geometry の screen を持つ client の `resume` は `resync_required` になる。
 output は `(start_offset, end_offset)` の連続範囲で表す。attach / resync / resize が返す snapshot の
 payload は negotiated revision で決まり（[snapshot payload と revision](#snapshot-payload-と-revision)）、
 どちらの revision でも `revision`（terminal 側の geometry/exit fence）・`geometry`・`output_offset`・
 `exited` を持つ。
 
-resume は `after_offset` が window より古い場合、または `output_offset` より未来の場合に
-`resync_required` を返す。window 内の segment
+resume は `after_offset` が window より古い場合、`output_offset` より未来の場合、または
+その client が最後に渡された geometry が現在の geometry と異なる場合に `resync_required` を返す。window 内の segment
 途中を指す場合は、その offset から始まる suffix を返し、最初の `start_offset` は必ず
 `after_offset` と一致する。client は `resync_required` 後に snapshot で画面を置換し、返された
 `output_offset` から resume する。同じ古い cursor を再送しない。この `base_offset` は protocol
@@ -665,8 +676,9 @@ tombstone ごとに screen capture を払わない。
 
 snapshot の `geometry` と `screen.geometry` は常に一致し、片方だけ新しい frame は存在しない。resize は
 preflight → PTY effect → geometry commit → screen reshape を terminal actor の排他区間で行い `revision` を
-1 つ進めるため、checkpoint の生成前後に resize が割り込んでも client は `revision` / `geometry` の
-不一致として検出し、old / new state を混ぜずに snapshot 再取得（retry / typed resync）へ落とせる。
+1 つ進めるため、checkpoint の生成前後に resize が割り込んでも client は `revision` の逆行として検出し、
+old / new state を混ぜずに snapshot 再取得（retry / typed resync）へ落とせる。geometry 自体は client の
+要求ではなく daemon 権威なので、snapshot が載せた `geometry` は拒否せず採用する。
 
 daemon 側の bound は次のとおりで、いずれも既定 1 MiB frame と process の memory peak を守る。
 

@@ -752,6 +752,7 @@ fn attach<O: DaemonOwner>(
         TerminalAction::Attach,
         TerminalRequest::Attach {
             terminal: terminal.clone(),
+            geometry: None,
         },
         SnapshotWire::ScreenCheckpoint,
     )

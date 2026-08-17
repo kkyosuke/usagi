@@ -105,12 +105,6 @@ pub enum TerminalHistory {
 /// screen untouched: an old and a new screen state are never mixed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SnapshotRefusal {
-    /// The checkpoint was captured at a geometry other than the one this pane
-    /// synchronized with the daemon (a resize interleaved the snapshot).
-    Geometry {
-        expected: Geometry,
-        snapshot: (u32, u32),
-    },
     /// The snapshot is older than one already applied, so its screen and the
     /// suffix after it cannot be trusted to belong together.
     StaleRevision { seen: u64, snapshot: u64 },
@@ -123,11 +117,6 @@ impl SnapshotRefusal {
     /// the geometry, revision and typed bound involved.
     fn message(&self) -> String {
         match self {
-            // Sizes are reported as `cols`x`rows`, matching the pane geometry.
-            Self::Geometry { expected, snapshot } => format!(
-                "terminal screen changed size during attach (snapshot {}x{}, pane {}x{}); resynchronizing",
-                snapshot.1, snapshot.0, expected.cols, expected.rows
-            ),
             Self::StaleRevision { seen, snapshot } => format!(
                 "terminal screen snapshot is stale (revision {snapshot} after {seen}); resynchronizing"
             ),
@@ -219,7 +208,14 @@ pub trait TerminalStreamPort {
         None
     }
 
-    /// Resize the daemon-owned PTY to match the pane viewport.
+    /// Ask the daemon-owned PTY to take this pane's viewport, and answer with
+    /// the geometry it actually holds.
+    ///
+    /// The request is not a command: one daemon terminal may be open in several
+    /// windows at once, and the PTY takes the smallest viewport among them so
+    /// that no window is handed a screen larger than its own pane. The answer is
+    /// therefore what this session must decode at, which is not always what it
+    /// asked for. A port with no daemon behind it clamps nothing.
     ///
     /// # Errors
     ///
@@ -227,9 +223,9 @@ pub trait TerminalStreamPort {
     fn resize(
         &mut self,
         _terminal: &TerminalRef,
-        _geometry: Geometry,
-    ) -> Result<(), TerminalError> {
-        Ok(())
+        geometry: Geometry,
+    ) -> Result<Geometry, TerminalError> {
+        Ok(geometry)
     }
 
     /// Attach and take an atomic snapshot plus a subscription.
@@ -465,16 +461,18 @@ impl InputUncertainty {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSession {
     terminal: TerminalRef,
+    /// The geometry the daemon terminal actually holds, and therefore the one
+    /// the local screen decodes at. It equals [`Self::requested_geometry`] while
+    /// this window is the only one attached, and the smaller shared viewport
+    /// while another window with a smaller pane shares the terminal.
     geometry: Geometry,
-    /// The viewport size last accepted by the daemon PTY.  This remains
+    /// The pane viewport this session asks the daemon PTY to take.
+    requested_geometry: Geometry,
+    /// The requested viewport last accepted by the daemon.  This remains
     /// `None` after a transport failure so an unchanged outer-terminal size
     /// is retried on the next redraw instead of leaving the PTY at its old
     /// width indefinitely.
     synchronized_geometry: Option<Geometry>,
-    /// One-shot permission to reuse `synchronized_geometry` after this client
-    /// explicitly released only its subscription. Transport reconnects never
-    /// set it and therefore always reassert PTY geometry.
-    detached_geometry: bool,
     screen: TerminalScreen,
     subscription: Option<TerminalSubscription>,
     cursor: u64,
@@ -512,6 +510,10 @@ pub struct TerminalSession {
     /// must not be retried by every 16 ms frame while the daemon is saturated.
     resize_retry_attempt: u32,
     resize_retry_at: Option<Instant>,
+    /// Feedback shown while the daemon holds this terminal at another window's
+    /// smaller viewport, so a user seeing a screen smaller than the pane is told
+    /// why rather than left guessing.
+    viewport_notice: Option<String>,
     /// Latest viewport requested by the shell but not yet acknowledged by the
     /// daemon. The decoded grid stays at `geometry` until that ACK arrives:
     /// shrinking it early would irreversibly clip cells while the PTY still
@@ -528,8 +530,8 @@ impl TerminalSession {
         Self {
             terminal,
             geometry,
+            requested_geometry: geometry,
             synchronized_geometry: None,
-            detached_geometry: false,
             screen,
             subscription: None,
             cursor: 0,
@@ -549,6 +551,7 @@ impl TerminalSession {
             retry_at: None,
             resize_retry_attempt: 0,
             resize_retry_at: None,
+            viewport_notice: None,
             pending_geometry: None,
         }
     }
@@ -701,16 +704,19 @@ impl TerminalSession {
         TerminalSelection::begin(self.cells(), anchor)
     }
 
-    /// Synchronizes the daemon PTY to the visible pane before attaching (or
-    /// reattaching) and rebuilding the screen from the daemon's semantic
-    /// checkpoint.  This ensures an application that redraws on `SIGWINCH` is
-    /// snapshotted at the same width as the right pane. A resize failure
-    /// therefore cannot hide an otherwise attachable terminal.
+    /// Attaches (or reattaches) with this pane's viewport and rebuilds the
+    /// screen from the daemon's semantic checkpoint.
     ///
-    /// A snapshot whose geometry or revision does not fence against this pane is
-    /// refused rather than mixed into the current view: the attempt is retried
-    /// once atomically, and a still-mismatching snapshot leaves the previous
-    /// screen intact and falls back to the ordinary reconnect backoff.
+    /// The attach states the viewport, so the daemon applies it to the shared
+    /// PTY and captures the snapshot in one exclusive section: an application
+    /// that redraws on `SIGWINCH` is snapshotted at the size this pane asked
+    /// for, and no reattach can leave this window without a claim on the size
+    /// its peers share.
+    ///
+    /// A snapshot whose revision does not fence against what this pane already
+    /// applied is refused rather than mixed into the current view: the attempt
+    /// is retried once atomically, and a still-stale snapshot leaves the
+    /// previous screen intact and falls back to the reconnect backoff.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
         self.connect_at(port, Instant::now());
     }
@@ -718,29 +724,15 @@ impl TerminalSession {
     /// Connects at an injected monotonic instant. This is the deterministic
     /// clock boundary used by reconnect tests.
     pub fn connect_at<P: TerminalStreamPort>(&mut self, port: &mut P, now: Instant) {
-        let reuse_detached_geometry = std::mem::take(&mut self.detached_geometry);
         for attempt in 0..=SNAPSHOT_RETRY_LIMIT {
-            // A retained coordinator already synchronized at this exact
-            // geometry does not need another SIGWINCH merely because its
-            // subscription was released. A refused snapshot is different: its
-            // immediate retry must reassert geometry because capture raced a
-            // resize after the preceding synchronization.
-            let target_geometry = self.pending_geometry.unwrap_or(self.geometry);
-            let resize_error = if attempt == 0
-                && reuse_detached_geometry
-                && self.synchronized_geometry == Some(target_geometry)
-            {
-                None
-            } else {
-                let error = port.resize(&self.terminal, target_geometry).err();
-                if error.is_none() {
-                    self.commit_resize(target_geometry);
-                } else {
-                    self.pending_geometry = Some(target_geometry);
-                }
-                self.record_resize_result(error, now);
-                error
-            };
+            // The attach itself states this pane's viewport, so a reattach costs
+            // no extra round trip and never leaves this pane without a claim on
+            // the shared size — the daemon released the previous claim together
+            // with the detached attachment. It also means the snapshot arrives
+            // at the geometry this claim produced, captured in the same
+            // exclusive section rather than after a separate resize.
+            let target_geometry = self.pending_geometry.unwrap_or(self.requested_geometry);
+            self.requested_geometry = target_geometry;
             let attach = match port.attach(&self.terminal, target_geometry) {
                 Ok(attach) => attach,
                 Err(error) => return self.fail_at(error, now),
@@ -757,13 +749,10 @@ impl TerminalSession {
                     {
                         port.detach(&self.terminal, previous);
                     }
+                    self.pending_geometry = None;
+                    self.resize_retry_attempt = 0;
+                    self.resize_retry_at = None;
                     self.commit(&attach);
-                    if let Some(error) = resize_error {
-                        self.set_current_error(Some(format!(
-                            "terminal attached, but viewport synchronization failed: {}",
-                            error_message(error)
-                        )));
-                    }
                     return;
                 }
                 Err(refusal) => {
@@ -844,7 +833,10 @@ impl TerminalSession {
     }
 
     fn resize_at<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry, now: Instant) {
-        if self.geometry == geometry && self.synchronized_geometry == Some(geometry) {
+        // The comparison is against what was *requested*, not what the daemon
+        // granted: a pane whose request lost to a smaller window must not re-ask
+        // on every frame, and must still re-ask as soon as its own size changes.
+        if self.requested_geometry == geometry && self.synchronized_geometry == Some(geometry) {
             if self.pending_geometry.take().is_some() {
                 self.record_resize_result(None, now);
             }
@@ -860,10 +852,13 @@ impl TerminalSession {
         {
             return;
         }
-        let error = port.resize(&self.terminal, geometry).err();
-        if error.is_none() {
-            self.commit_resize(geometry);
-        }
+        let error = match port.resize(&self.terminal, geometry) {
+            Ok(effective) => {
+                self.commit_resize(geometry, effective);
+                None
+            }
+            Err(error) => Some(error),
+        };
         self.record_resize_result(error, now);
     }
 
@@ -1078,7 +1073,9 @@ impl TerminalSession {
             port.detach(&self.terminal, subscription);
         }
         self.state = SessionState::Disconnected;
-        self.detached_geometry = true;
+        // The daemon drops this window's claim on the shared viewport with the
+        // attachment, so nothing is synchronized any more.
+        self.synchronized_geometry = None;
         self.retry_at = None;
         self.retry_attempt = 0;
         self.set_current_error(Some("terminal detached".to_owned()));
@@ -1121,40 +1118,25 @@ impl TerminalSession {
         }
         let (screen, history) = match &attach.screen {
             TerminalAttachScreen::Checkpoint(checkpoint) => {
-                self.fence_geometry(checkpoint)?;
-                (
-                    TerminalScreen::from_checkpoint(checkpoint)
-                        .map_err(SnapshotRefusal::Rejected)?,
-                    TerminalHistory::Restored,
-                )
+                let screen = TerminalScreen::from_checkpoint(checkpoint)
+                    .map_err(SnapshotRefusal::Rejected)?;
+                // The checkpoint's own dimensions are the terminal's current
+                // geometry, whether this window's request produced it or a peer
+                // window's smaller one did.
+                self.adopt_geometry(checkpoint_geometry(checkpoint));
+                (screen, TerminalHistory::Restored)
             }
             // Fail closed: the retained raw tail is never fed to the parser, so
             // this view starts blank and only live output appears.
             TerminalAttachScreen::HistoryUnavailable => {
-                (screen_for(self.geometry), TerminalHistory::Unavailable)
+                let screen = screen_for(self.geometry);
+                self.adopt_geometry(self.geometry);
+                (screen, TerminalHistory::Unavailable)
             }
         };
         self.screen = screen;
         self.history = history;
         Ok(())
-    }
-
-    /// Refuses a checkpoint captured at a geometry other than the one this pane
-    /// synchronized with the daemon. When the resize did not reach the daemon
-    /// there is nothing to fence against, so the daemon's geometry is accepted
-    /// and the unsynchronized viewport is reported separately.
-    fn fence_geometry(&self, checkpoint: &ScreenCheckpoint) -> Result<(), SnapshotRefusal> {
-        let expected = self.synchronized_geometry.filter(|_| {
-            u32::from(self.geometry.rows) != checkpoint.geometry.rows
-                || u32::from(self.geometry.cols) != checkpoint.geometry.cols
-        });
-        match expected {
-            Some(expected) => Err(SnapshotRefusal::Geometry {
-                expected,
-                snapshot: (checkpoint.geometry.rows, checkpoint.geometry.cols),
-            }),
-            None => Ok(()),
-        }
     }
 
     /// Adopts a restored view: its subscription, output cursor, revision fence
@@ -1211,12 +1193,45 @@ impl TerminalSession {
         )
     }
 
-    fn commit_resize(&mut self, geometry: Geometry) {
-        self.geometry = geometry;
-        self.screen
-            .resize(geometry.rows as usize, geometry.cols as usize);
-        self.synchronized_geometry = Some(geometry);
+    /// Records that the daemon accepted `requested` and answered with the
+    /// geometry the terminal now holds.
+    fn commit_resize(&mut self, requested: Geometry, effective: Geometry) {
+        self.requested_geometry = requested;
         self.pending_geometry = None;
+        self.adopt_geometry(effective);
+        self.screen
+            .resize(self.geometry.rows as usize, self.geometry.cols as usize);
+    }
+
+    /// Adopts the geometry the daemon reports for this terminal.
+    ///
+    /// The daemon is the authority: it owns the single PTY that every window
+    /// sharing this terminal writes to, so decoding at anything else is what
+    /// makes a second window's screen wrap and repaint at the wrong columns.
+    /// A geometry *larger* than this pane cannot be rendered whole, so it also
+    /// releases the synchronization fence — the next redraw re-asks for the pane
+    /// viewport instead of leaving the pane clipped.
+    fn adopt_geometry(&mut self, effective: Geometry) {
+        self.geometry = effective;
+        // The daemon has this pane's viewport whenever it answers with a
+        // geometry that fits inside it. A geometry that does *not* fit cannot be
+        // rendered whole, so the fence stays open and the next redraw re-asks.
+        let fits = effective.cols <= self.requested_geometry.cols
+            && effective.rows <= self.requested_geometry.rows;
+        self.synchronized_geometry = fits.then_some(self.requested_geometry);
+        // Only a viewport *smaller* than the pane is the shared one, and only
+        // that case leaves visible blank margins to explain. A larger geometry
+        // is the transient above, which the released fence resolves by itself
+        // and which naming another window would misexplain.
+        let shared = effective.cols < self.requested_geometry.cols
+            || effective.rows < self.requested_geometry.rows;
+        self.viewport_notice = shared.then(|| {
+            format!(
+                "terminal is shared with another window; its viewport is {}x{}",
+                effective.cols, effective.rows
+            )
+        });
+        self.refresh_error();
     }
 
     fn record_resize_result(&mut self, error: Option<TerminalError>, now: Instant) {
@@ -1366,7 +1381,13 @@ impl TerminalSession {
             .input_uncertainty
             .as_ref()
             .map(InputUncertainty::message);
-        self.error = match (&self.current_error, uncertainty) {
+        // A shared viewport is a standing explanation, not a failure: it only
+        // surfaces while nothing worse is being reported.
+        let current = match (&self.current_error, &self.viewport_notice) {
+            (None, notice) => notice.clone(),
+            (current, _) => current.clone(),
+        };
+        self.error = match (&current, uncertainty) {
             (Some(current), Some(uncertainty)) if current != &uncertainty => Some(format!(
                 "{current}; prior terminal input uncertainty: {uncertainty}"
             )),
@@ -1400,6 +1421,18 @@ fn error_message(error: TerminalError) -> &'static str {
 
 fn screen_for(geometry: Geometry) -> TerminalScreen {
     TerminalScreen::new(geometry.rows as usize, geometry.cols as usize)
+}
+
+/// The pane geometry a daemon checkpoint was captured at.
+///
+/// The checkpoint counts cells in `u32` while a viewport is `u16`; the daemon
+/// clamps both dimensions well below that, so a value that cannot fit is a
+/// malformed peer rather than a real screen and saturates instead of wrapping.
+fn checkpoint_geometry(checkpoint: &ScreenCheckpoint) -> Geometry {
+    Geometry {
+        cols: u16::try_from(checkpoint.geometry.cols).unwrap_or(u16::MAX),
+        rows: u16::try_from(checkpoint.geometry.rows).unwrap_or(u16::MAX),
+    }
 }
 
 #[cfg(test)]
@@ -1443,8 +1476,14 @@ mod tests {
         detached: Vec<TerminalSubscription>,
         resized: Vec<Geometry>,
         resize_error: Option<TerminalError>,
+        /// The shared viewport the daemon answers with, when another window
+        /// holds this terminal smaller than the request.
+        effective_geometry: Option<Geometry>,
         resize_count_at_attach: Vec<usize>,
         attached_terminals: Vec<TerminalRef>,
+        /// The viewport each attach stated, which is how a window claims its
+        /// share of the terminal's geometry.
+        attached_geometries: Vec<Geometry>,
         /// The shared transport epoch this port reports, when it models one.
         epoch: Option<u64>,
     }
@@ -1453,18 +1492,25 @@ mod tests {
             self.epoch
         }
 
-        fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+        fn resize(
+            &mut self,
+            _: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<Geometry, TerminalError> {
             self.resized.push(geometry);
-            self.resize_error.take().map_or(Ok(()), Err)
+            self.resize_error
+                .take()
+                .map_or_else(|| Ok(self.effective_geometry.unwrap_or(geometry)), Err)
         }
 
         fn attach(
             &mut self,
             terminal: &TerminalRef,
-            _: Geometry,
+            geometry: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
             self.resize_count_at_attach.push(self.resized.len());
             self.attached_terminals.push(terminal.clone());
+            self.attached_geometries.push(geometry);
             self.attach.remove(0)
         }
         fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
@@ -1614,7 +1660,7 @@ mod tests {
     #[test]
     fn connect_renders_replay_and_poll_appends_contiguous_output() {
         let mut default_port = DefaultResizePort;
-        assert_eq!(default_port.resize(&terminal(), geometry()), Ok(()));
+        assert_eq!(default_port.resize(&terminal(), geometry()), Ok(geometry()));
         assert_eq!(
             default_port.attach(&terminal(), geometry()),
             Err(TerminalError::Unavailable)
@@ -1642,7 +1688,8 @@ mod tests {
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
         assert_eq!(session.state(), SessionState::Live);
-        assert_eq!(port.resized, vec![geometry()]);
+        // The attach states the viewport, so connecting costs no resize.
+        assert_eq!(port.resized, Vec::new());
         assert_eq!(session.rows()[0], "$");
         session.poll(&mut port);
         // The prompt echo advances a row; the command output follows it.
@@ -1661,10 +1708,11 @@ mod tests {
         session.resize(&mut port, resized);
         session.resize(&mut port, resized);
 
-        assert_eq!(port.resized, vec![geometry(), resized]);
+        assert_eq!(port.resized, vec![resized]);
         assert_eq!(session.rows()[0], "old");
         assert_eq!(session.state(), SessionState::Live);
-        assert_eq!(port.resize_count_at_attach, vec![1]);
+        // The attach stated the viewport itself, so no resize preceded it.
+        assert_eq!(port.resize_count_at_attach, vec![0]);
     }
 
     #[test]
@@ -1749,7 +1797,6 @@ mod tests {
     fn resize_failure_does_not_prevent_attach_or_hide_replay() {
         let mut port = FakePort {
             attach: vec![Ok(attach(7, 5, b"reply", false))],
-            resize_error: Some(TerminalError::Unavailable),
             ..FakePort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
@@ -1759,22 +1806,29 @@ mod tests {
 
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "reply");
-        assert_eq!(port.resized, vec![geometry()]);
+        assert_eq!(port.resized, Vec::new());
+
+        // A pane that changes size while the daemon is unreachable keeps its
+        // replay and its attachment; only the viewport is out of sync.
+        let grown = Geometry { cols: 24, rows: 3 };
+        port.resize_error = Some(TerminalError::Unavailable);
+        session.resize_at(&mut port, grown, now);
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "reply");
+        assert_eq!(port.resized, vec![grown]);
         assert_eq!(
             session.error(),
-            Some(
-                "terminal attached, but viewport synchronization failed: daemon unavailable; reconnecting"
-            )
+            Some("terminal viewport synchronization failed: daemon unavailable; reconnecting")
         );
 
         // Frame redraws inside the backoff do not open another connection.
-        session.resize_at(&mut port, geometry(), now);
-        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL / 2);
-        assert_eq!(port.resized, vec![geometry()]);
+        session.resize_at(&mut port, grown, now);
+        session.resize_at(&mut port, grown, now + RETRY_INITIAL / 2);
+        assert_eq!(port.resized, vec![grown]);
 
         // The retry is admitted at the backoff boundary.
-        session.resize_at(&mut port, geometry(), now + RETRY_INITIAL);
-        assert_eq!(port.resized, vec![geometry(), geometry()]);
+        session.resize_at(&mut port, grown, now + RETRY_INITIAL);
+        assert_eq!(port.resized, vec![grown, grown]);
         assert_eq!(session.error(), None);
 
         let changed = Geometry { cols: 30, rows: 4 };
@@ -2762,10 +2816,11 @@ mod tests {
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.rows()[0], "back");
         assert_eq!(
-            port.resized,
-            vec![geometry()],
-            "same-geometry explicit reattach must not resend resize"
+            port.attached_geometries,
+            vec![geometry(); 2],
+            "a reattach re-states this window's claim on the shared viewport"
         );
+        assert_eq!(port.resized, Vec::new());
         assert_eq!(
             port.inputs,
             vec![(4, 0, b"before".to_vec()), (5, 1, b"after".to_vec())]
@@ -2948,8 +3003,12 @@ mod tests {
         }
 
         impl TerminalStreamPort for SocketPort {
-            fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), TerminalError> {
-                self.available()
+            fn resize(
+                &mut self,
+                _: &TerminalRef,
+                geometry: Geometry,
+            ) -> Result<Geometry, TerminalError> {
+                self.available().map(|()| geometry)
             }
 
             fn attach(
@@ -2996,7 +3055,9 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("terminal.sock");
-        let first_server = serve(UnixListener::bind(&path).unwrap(), 2);
+        // Connecting is exactly one round trip: the attach carries this pane's
+        // viewport, so nothing precedes it.
+        let first_server = serve(UnixListener::bind(&path).unwrap(), 1);
         let terminal = terminal();
         let mut port = SocketPort {
             path: path.clone(),
@@ -3012,7 +3073,8 @@ mod tests {
         assert_eq!(session.state(), SessionState::Reconnecting);
 
         std::fs::remove_file(&path).unwrap();
-        let restarted_server = serve(UnixListener::bind(&path).unwrap(), 5);
+        // Reattach, poll, input, detach.
+        let restarted_server = serve(UnixListener::bind(&path).unwrap(), 4);
         port.next_attach = attach(2, 5, b"fresh", false);
         session.poll_at(&mut port, start + RETRY_INITIAL);
 
@@ -3169,82 +3231,142 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpoint_captured_at_another_geometry_retries_then_resyncs() {
-        let interleaved = Geometry { cols: 40, rows: 4 };
-        let stale = |subscription: u64| TerminalAttach {
-            subscription: sub(subscription),
-            revision: 2,
-            output_offset: 5,
-            next_input_seq: None,
-            screen: checkpoint_at(b"wide", interleaved),
-            exited: false,
-        };
+    fn a_terminal_shared_with_a_smaller_window_is_decoded_at_the_shared_viewport() {
+        // Another window holds this terminal at 10x2 while this pane is 20x3.
+        let shared = Geometry { cols: 10, rows: 2 };
         let mut port = FakePort {
-            attach: vec![
-                Ok(attach(1, 3, b"old", false)),
-                // A resize interleaves both snapshots of the reconnect.
-                Ok(stale(2)),
-                Ok(stale(3)),
-                // The retry after the backoff converges on the pane geometry.
-                Ok(attach(4, 9, b"converged", false)),
-            ],
-            polls: vec![Err(TerminalError::ResyncRequired)],
-            ..FakePort::default()
-        };
-        let now = Instant::now();
-        let mut session = TerminalSession::new(terminal(), geometry());
-        session.connect_at(&mut port, now);
-
-        session.poll_at(&mut port, now);
-
-        // Both refused snapshots are released, then the previous subscription:
-        // neither refused view is displayed, and the previous screen stays
-        // intact rather than being mixed with the wider one.
-        assert_eq!(port.detached, [2, 3, 1].map(sub));
-        assert_eq!(session.state(), SessionState::Reconnecting);
-        assert_eq!(session.rows()[0], "old");
-        assert_eq!(session.subscription, None);
-        let error = session.error().unwrap();
-        assert!(error.contains("changed size during attach"), "{error}");
-        assert!(error.contains("snapshot 40x4"), "{error}");
-        assert!(error.contains("pane 20x3"), "{error}");
-
-        session.poll_at(&mut port, now + RETRY_INITIAL);
-        assert_eq!(session.state(), SessionState::Live);
-        assert_eq!(session.rows()[0], "converged");
-        assert_eq!(session.error(), None);
-    }
-
-    #[test]
-    fn one_interleaved_snapshot_converges_on_the_immediate_retry() {
-        let mut port = FakePort {
-            attach: vec![
-                Ok(TerminalAttach {
-                    subscription: TerminalSubscription { id: 1, epoch: 1 },
-                    revision: 2,
-                    output_offset: 4,
-                    next_input_seq: None,
-                    screen: checkpoint_at(b"wide", Geometry { cols: 40, rows: 4 }),
-                    exited: false,
-                }),
-                Ok(attach(2, 6, b"paned", false)),
-            ],
+            attach: vec![Ok(TerminalAttach {
+                subscription: sub(1),
+                revision: 2,
+                output_offset: 5,
+                next_input_seq: None,
+                screen: checkpoint_at(b"shared", shared),
+                exited: false,
+            })],
+            effective_geometry: Some(shared),
             ..FakePort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
         session.connect(&mut port);
 
+        // The daemon's geometry is adopted rather than refused: refusing it is
+        // what left the second window resyncing forever while its screen wrapped
+        // at the wrong column.
         assert_eq!(session.state(), SessionState::Live);
-        assert_eq!(session.rows()[0], "paned");
+        assert_eq!(session.geometry, shared);
+        assert_eq!(session.requested_geometry, geometry());
+        assert_eq!(session.rows().len(), usize::from(shared.rows));
+        assert_eq!(session.rows()[0], "shared");
+        let error = session.error().unwrap();
+        assert!(error.contains("shared with another window"), "{error}");
+        assert!(error.contains("10x2"), "{error}");
+
+        // The pane keeps asking for its own size only when that size changes: a
+        // claim the shared viewport overruled is not re-sent every frame.
+        assert_eq!(port.attached_geometries, vec![geometry()]);
+        session.resize(&mut port, geometry());
+        assert_eq!(port.resized, Vec::new());
+
+        // Once the small window leaves, the terminal comes back to this pane's
+        // size and the notice goes with it.
+        port.effective_geometry = None;
+        session.resize(&mut port, Geometry { cols: 20, rows: 4 });
+        assert_eq!(port.resized, vec![Geometry { cols: 20, rows: 4 }]);
+        assert_eq!(session.geometry, Geometry { cols: 20, rows: 4 });
         assert_eq!(session.error(), None);
-        assert_eq!(port.detached, [1].map(sub));
-        // Each attempt re-synchronizes the viewport before capturing.
-        assert_eq!(port.resized, vec![geometry(), geometry()]);
     }
 
     #[test]
-    fn an_unsynchronized_viewport_accepts_the_daemon_geometry_instead_of_hiding_output() {
+    fn a_reattach_restates_this_windows_viewport_even_at_an_unchanged_size() {
+        // A pane that is backgrounded and foregrounded again keeps its size, but
+        // the daemon released this window's claim on the shared viewport with the
+        // attachment. Staying silent here left a peer's smaller viewport holding
+        // the terminal down after the peer was gone.
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 0, b"", false)), Ok(attach(2, 0, b"", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        session.detach(&mut port);
+        assert_eq!(session.synchronized_geometry, None);
+
+        session.connect(&mut port);
+
+        // The claim rides on the attach itself, so it costs no extra request.
+        assert_eq!(port.attached_geometries, vec![geometry(); 2]);
+        assert_eq!(port.resized, Vec::new());
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.synchronized_geometry, Some(geometry()));
+    }
+
+    #[test]
+    fn a_pane_clipped_by_a_larger_shared_viewport_re_asserts_its_own() {
+        // A daemon that answers with more than the pane can render must not
+        // leave the pane clipped forever: the next redraw re-asks for the pane
+        // viewport even though the pane size itself never changed.
+        let larger = Geometry { cols: 40, rows: 4 };
+        let mut port = FakePort {
+            attach: vec![Ok(TerminalAttach {
+                subscription: sub(1),
+                revision: 1,
+                output_offset: 7,
+                next_input_seq: None,
+                screen: checkpoint_at(b"clipped", larger),
+                exited: false,
+            })],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+        assert_eq!(session.synchronized_geometry, None);
+
+        session.resize(&mut port, geometry());
+        assert_eq!(port.resized, vec![geometry()]);
+        assert_eq!(session.geometry, geometry());
+        assert_eq!(session.synchronized_geometry, Some(geometry()));
+    }
+
+    #[test]
+    fn one_interleaved_snapshot_converges_on_the_immediate_retry() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 3, b"applied", false)),
+                // A snapshot older than the one already applied: the immediate
+                // retry inside the same attach converges on a current one.
+                Ok(TerminalAttach {
+                    revision: 0,
+                    ..attach(2, 4, b"stale", false)
+                }),
+                Ok(TerminalAttach {
+                    revision: 2,
+                    ..attach(3, 6, b"paned", false)
+                }),
+            ],
+            polls: vec![Err(TerminalError::ResyncRequired)],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+
+        session.poll(&mut port);
+
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "paned");
+        assert_eq!(session.error(), None);
+        assert_eq!(port.detached, [sub(2), sub(1)]);
+        // Each attempt states the viewport it captures at.
+        assert_eq!(port.attached_geometries, vec![geometry(); 3]);
+    }
+
+    #[test]
+    fn a_daemon_geometry_wider_than_the_pane_is_shown_instead_of_hidden() {
+        // A daemon that could not take this pane's claim (an older peer, or one
+        // still holding a size for a window that has not released it) answers
+        // with a geometry the pane cannot draw whole. Showing it clipped beats
+        // hiding an attachable terminal.
         let daemon_geometry = Geometry { cols: 40, rows: 4 };
         let mut port = FakePort {
             attach: vec![Ok(TerminalAttach {
@@ -3255,24 +3377,19 @@ mod tests {
                 screen: checkpoint_at(b"wide", daemon_geometry),
                 exited: false,
             })],
-            resize_error: Some(TerminalError::Unavailable),
             ..FakePort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
         session.connect(&mut port);
 
-        // There is nothing to fence against when the resize never reached the
-        // daemon, so its own geometry is restored and the failure is reported.
         assert_eq!(session.state(), SessionState::Live);
         assert_eq!(session.history(), TerminalHistory::Restored);
         assert_eq!(session.rows()[0], "wide");
-        assert!(
-            session
-                .error()
-                .unwrap()
-                .contains("viewport synchronization failed")
-        );
+        assert_eq!(session.geometry, daemon_geometry);
+        // The pane keeps asking for a size it can render.
+        assert_eq!(session.synchronized_geometry, None);
+        assert_eq!(session.error(), None);
     }
 
     #[test]

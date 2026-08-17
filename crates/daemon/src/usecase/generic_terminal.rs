@@ -375,8 +375,8 @@ impl GenericTerminalCoordinator {
         }
     }
     /// Detach only removes this connection's subscriptions; the PTY stays alive.
-    pub fn disconnect(&mut self, connection: ConnectionId) {
-        self.terminals.disconnect(connection);
+    pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
+        self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
         for record in self.records.values() {
             if record.state == TerminalRuntimeState::Exited {
@@ -426,10 +426,12 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         connection: ConnectionId,
         client: ClientId,
+        viewport: Option<Geometry>,
+        writer: &mut dyn PtyWriter,
     ) -> Result<Attached, GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
-            .attach_for_client(terminal, connection, client)
+            .attach_for_client(terminal, connection, client, viewport, writer)
             .map_err(GenericTerminalError::Terminal)
     }
     /// Removes only the named attachment, never the daemon-owned process.
@@ -438,11 +440,12 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         subscription: u64,
         connection: ConnectionId,
+        writer: &mut dyn PtyWriter,
     ) -> Result<(), GenericTerminalError> {
         self.record(terminal)?;
         let detached = self
             .terminals
-            .detach(terminal, subscription, connection)
+            .detach(terminal, subscription, connection, writer)
             .map_err(GenericTerminalError::Terminal);
         // A final nobody is draining any more is an ordinary GC candidate.
         self.retention
@@ -464,11 +467,12 @@ impl GenericTerminalCoordinator {
         &mut self,
         terminal: &TerminalRef,
         geometry: Geometry,
+        client: Option<&ClientId>,
         writer: &mut dyn PtyWriter,
     ) -> Result<Snapshot, GenericTerminalError> {
         self.running(terminal)?;
         self.terminals
-            .resize(terminal, geometry, writer)
+            .resize(terminal, geometry, client, writer)
             .map_err(GenericTerminalError::Terminal)
     }
     /// Verifies durable ownership before an IPC adapter performs an effect.
@@ -509,10 +513,11 @@ impl GenericTerminalCoordinator {
         &self,
         terminal: &TerminalRef,
         offset: u64,
+        client: Option<&ClientId>,
     ) -> Result<Vec<Output>, GenericTerminalError> {
         self.replayable(terminal)?;
         self.terminals
-            .replay_from(terminal, offset)
+            .replay_from(terminal, offset, client)
             .map_err(GenericTerminalError::Terminal)
     }
     pub fn exit(
@@ -763,9 +768,25 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
     use usagi_core::domain::{
         agent::EnvironmentVariableName,
-        id::{DaemonGeneration, OperationId, SessionId, TerminalId, WorkspaceId, WorktreeId},
+        id::{
+            DaemonGeneration, OperationId, RequestId, SessionId, TerminalId, WorkspaceId,
+            WorktreeId,
+        },
         terminal_launch::{TerminalLaunchScope, TerminalProfileId},
     };
+    /// A PTY writer that accepts everything: these tests exercise the
+    /// coordinator, not the transport.
+    #[derive(Default)]
+    struct Writer(Vec<u8>);
+    impl PtyWriter for Writer {
+        fn write_all(
+            &mut self,
+            bytes: &[u8],
+        ) -> Result<(), crate::usecase::terminal::PtyWriteError> {
+            self.0.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
     #[derive(Default)]
     struct Store(Vec<TerminalStoreSnapshot>);
     impl TerminalStore for Store {
@@ -959,7 +980,7 @@ mod tests {
             .unwrap()
             .state = TerminalRuntimeState::Reclaimed;
         assert_eq!(
-            coordinator.replay_from(&terminal, 0),
+            coordinator.replay_from(&terminal, 0, None),
             Err(GenericTerminalError::ReconcileRequired(
                 TerminalReconcileState::IdentityUnknown
             ))
@@ -984,7 +1005,7 @@ mod tests {
         assert_eq!(store.0.len(), 2);
         let encoded = format!("{:?}", store.0);
         assert!(!encoded.contains("xterm-256color"));
-        c.disconnect(ConnectionId::new());
+        c.disconnect(ConnectionId::new(), &mut Writer::default());
         assert_eq!(c.occupied_slots(), 1);
         assert_eq!(c.terminal_snapshot(&terminal).unwrap().terminal, terminal);
     }
@@ -1040,7 +1061,7 @@ mod tests {
         coordinator.exit(&terminal, 0, &mut store).unwrap();
 
         assert_eq!(
-            coordinator.replay_from(&terminal, 0).unwrap()[0].data,
+            coordinator.replay_from(&terminal, 0, None).unwrap()[0].data,
             b"done"
         );
     }
@@ -1483,7 +1504,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            coordinator.replay_from(&terminal, 0),
+            coordinator.replay_from(&terminal, 0, None),
             Err(GenericTerminalError::FinalEvicted(
                 usagi_core::domain::terminal_retention::EvictionReason::AgeExpired
             ))
@@ -1520,6 +1541,25 @@ mod tests {
             .unwrap();
         let connection = ConnectionId::new();
         let attached = coordinator.attach(&terminal, connection).unwrap();
+        // A live attachment can write, and the bytes reach the PTY writer.
+        let mut pty = Writer::default();
+        assert_eq!(
+            coordinator.input(
+                &terminal,
+                InputRequest {
+                    subscription: attached.subscription,
+                    connection,
+                    client: ClientId::new(),
+                    request: RequestId::new(),
+                    input_seq: 0,
+                    operation: None,
+                },
+                b"echo ok\n",
+                &mut pty,
+            ),
+            Ok(InputAck::Written)
+        );
+        assert_eq!(pty.0, b"echo ok\n");
         coordinator.exit(&terminal, 0, &mut store).unwrap();
         clock.advance(1000);
         retention.collect();
@@ -1528,7 +1568,12 @@ mod tests {
 
         // Detaching releases the protection, and the next pass collects it.
         coordinator
-            .detach(&terminal, attached.subscription, connection)
+            .detach(
+                &terminal,
+                attached.subscription,
+                connection,
+                &mut Writer::default(),
+            )
             .unwrap();
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
@@ -1557,7 +1602,7 @@ mod tests {
         coordinator.attach(&terminal, connection).unwrap();
         coordinator.exit(&terminal, 0, &mut store).unwrap();
         clock.advance(1000);
-        coordinator.disconnect(connection);
+        coordinator.disconnect(connection, &mut Writer::default());
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
     }

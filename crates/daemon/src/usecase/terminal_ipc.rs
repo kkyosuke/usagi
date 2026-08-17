@@ -317,18 +317,23 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
             TerminalRequest::Inventory { scope } => Ok(TerminalResponse::Inventory(
                 self.coordinator.inventory(&scope),
             )),
-            TerminalRequest::Attach { terminal } => self
-                .coordinator
-                .attach_for_client(&terminal, connection, client)
-                .map(TerminalResponse::Attached)
-                .map_err(map_error),
+            TerminalRequest::Attach {
+                terminal,
+                geometry: viewport,
+            } => {
+                let viewport = viewport.map(geometry).transpose()?;
+                self.coordinator
+                    .attach_for_client(&terminal, connection, client, viewport, &mut self.pty)
+                    .map(TerminalResponse::Attached)
+                    .map_err(map_error)
+            }
             TerminalRequest::Resume {
                 terminal,
                 after_offset,
             } => {
                 let output = self
                     .coordinator
-                    .replay_from(&terminal, after_offset)
+                    .replay_from(&terminal, after_offset, Some(&client))
                     .map_err(map_error)?;
                 // Liveness only: an incremental poll must not pay for a
                 // screen capture.
@@ -350,7 +355,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
             } => {
                 let geometry = geometry(size)?;
                 self.coordinator
-                    .resize(&terminal, geometry, &mut self.pty)
+                    .resize(&terminal, geometry, Some(&client), &mut self.pty)
                     .map(TerminalResponse::Snapshot)
                     .map_err(map_error)
             }
@@ -359,7 +364,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                 subscription,
             } => {
                 self.coordinator
-                    .detach(&terminal, subscription, connection)
+                    .detach(&terminal, subscription, connection, &mut self.pty)
                     .map_err(map_error)?;
                 Ok(TerminalResponse::Detached)
             }
@@ -416,7 +421,7 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
         self.coordinator.completed_inventory(scope)
     }
     fn disconnect(&mut self, connection: ConnectionId) {
-        self.coordinator.disconnect(connection);
+        self.coordinator.disconnect(connection, &mut self.pty);
     }
 }
 
@@ -990,6 +995,100 @@ mod tests {
     }
 
     #[test]
+    fn two_windows_on_one_terminal_are_answered_with_the_shared_viewport() {
+        let (mut runtime, terminal) = launched_runtime();
+        // Two windows of the same workspace: separate lanes, separate client
+        // incarnations, one daemon terminal.
+        let (wide_connection, wide_client) = (ConnectionId::new(), ClientId::new());
+        let (narrow_connection, narrow_client) = (ConnectionId::new(), ClientId::new());
+        let attach = |runtime: &mut _, connection, client| {
+            call(
+                runtime,
+                connection,
+                client,
+                TerminalAction::Attach,
+                TerminalRequest::Attach {
+                    terminal: terminal.clone(),
+                    geometry: None,
+                },
+            )
+        };
+        let resize = |runtime: &mut _, connection, client, cols, rows| {
+            call(
+                runtime,
+                connection,
+                client,
+                TerminalAction::Resize,
+                TerminalRequest::Resize {
+                    terminal: terminal.clone(),
+                    geometry: TerminalGeometry { cols, rows },
+                },
+            )
+        };
+
+        attach(&mut runtime, wide_connection, wide_client);
+        let wide = resize(&mut runtime, wide_connection, wide_client, 100, 40);
+        assert_eq!(wide["geometry"], json!({ "cols": 100, "rows": 40 }));
+
+        // The second window is smaller, so the terminal takes its size and the
+        // large window is told so by its own next resize answer.
+        attach(&mut runtime, narrow_connection, narrow_client);
+        let narrow = resize(&mut runtime, narrow_connection, narrow_client, 40, 10);
+        assert_eq!(narrow["geometry"], json!({ "cols": 40, "rows": 10 }));
+
+        // Until the large window takes a fresh screen, its incremental poll is
+        // refused: its screen is still 100 columns wide, and the output after it
+        // was produced for a 40 column grid.
+        let resumed = runtime
+            .request(
+                wide_connection,
+                wide_client,
+                RequestId::new(),
+                TerminalAction::Resume,
+                serde_json::to_value(TerminalRequest::Resume {
+                    terminal: terminal.clone(),
+                    after_offset: 0,
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+        assert_eq!(resumed.code, ErrorCode::ResyncRequired);
+
+        let reattached = attach(&mut runtime, wide_connection, wide_client);
+        assert_eq!(
+            reattached["snapshot"]["geometry"],
+            json!({ "cols": 40, "rows": 10 })
+        );
+        assert!(
+            runtime
+                .request(
+                    wide_connection,
+                    wide_client,
+                    RequestId::new(),
+                    TerminalAction::Resume,
+                    serde_json::to_value(TerminalRequest::Resume {
+                        terminal: terminal.clone(),
+                        after_offset: 0,
+                    })
+                    .unwrap(),
+                    SnapshotWire::RawTail,
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.pty.resized,
+            vec![
+                Geometry {
+                    cols: 100,
+                    rows: 40
+                },
+                Geometry { cols: 40, rows: 10 }
+            ]
+        );
+    }
+
+    #[test]
     fn resize_holds_the_actor_lock_across_effect_and_commit() {
         use std::{
             sync::{Arc, Mutex, mpsc},
@@ -1036,6 +1135,7 @@ mod tests {
                 TerminalAction::Attach,
                 serde_json::to_value(TerminalRequest::Attach {
                     terminal: attach_terminal,
+                    geometry: None,
                 })
                 .unwrap(),
                 SnapshotWire::ScreenCheckpoint,
@@ -1137,6 +1237,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
         );
         let subscription = attached["subscription"].as_u64().unwrap();
@@ -1188,7 +1289,8 @@ mod tests {
                 client,
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
-                    terminal: terminal.clone()
+                    terminal: terminal.clone(),
+                    geometry: None,
                 }
             )["snapshot"]["output_offset"],
             6
@@ -1363,6 +1465,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
             SnapshotWire::RawTail,
         );
@@ -1381,6 +1484,7 @@ mod tests {
                 TerminalAction::Attach,
                 TerminalRequest::Attach {
                     terminal: terminal.clone(),
+                    geometry: None,
                 },
             ),
             (
@@ -1564,7 +1668,11 @@ mod tests {
                 ClientId::new(),
                 RequestId::new(),
                 TerminalAction::Launch,
-                serde_json::to_value(TerminalRequest::Attach { terminal }).unwrap(),
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal,
+                    geometry: None,
+                })
+                .unwrap(),
                 SnapshotWire::RawTail,
             )
             .unwrap_err();
@@ -1705,6 +1813,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
         )["subscription"]
             .as_u64()
@@ -1740,6 +1849,7 @@ mod tests {
             TerminalAction::Attach,
             TerminalRequest::Attach {
                 terminal: terminal.clone(),
+                geometry: None,
             },
         )["subscription"]
             .as_u64()
