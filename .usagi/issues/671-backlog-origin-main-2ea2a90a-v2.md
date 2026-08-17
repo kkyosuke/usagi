@@ -7,17 +7,24 @@ labels: [review, v2, backlog, epic]
 dependson: []
 related: [672, 673, 675, 676, 677, 678, 679, 680, 686]
 created_at: 2026-08-13T00:02:18.580332+00:00
-updated_at: 2026-08-16T23:34:22.162498+00:00
+updated_at: 2026-08-17T10:50:06.298359+00:00
 ---
 
 ## レビュー基点
 
 - reviewed commit: `2ea2a90ae37b840152922ba3463c5caf9456d122`
 - reviewed at: `2026-08-17`
-- 対象: usagi v2 全体（tracked `crates/*/src/**/*.rs` + `src/**/*.rs`: 310 files / 約236,921 physical lines。tests・examples・scripts・CI・configを含む監査集合: 379 files / 約259,533 physical lines）
+- 対象: usagi v2 全体（production `crates/*/src/**/*.rs` + `src/**/*.rs`: 310 files / 236,921 physical lines。tests・examples・scripts・CI・configを含む監査集合: 380 files / 258,257 physical lines）
 - 観点: 正しさ、resource bound、durability、process/PTY lifecycle、authority/fence、IPC/MCP schema、TUI reducer/input/rendering/worker、install/CI
 
-件数はreview commitのtreeから数え、作業ブランチ上の#672修正やissue本文は含めない。レビュー基点は日付ではなく上記commit hashで固定する。
+件数はreview commitのtreeから数え、issue本文は含めない。レビュー基点は日付ではなく上記commit hashで固定する。監査集合はreview commitのtracked pathから `v1/` `document/` `.usagi/` と `Cargo.lock` を除いたうえで、拡張子 `.rs` `.sh` `.rb` `.tsv` `.toml` `.yml` `.json` を持つものに限る（`*.md`・`LICENSE`・`.gitignore`・golden fixtureは対象外で、production集合はこの監査集合の部分集合である）。
+
+```bash
+# production: 310 files / 236,921 lines
+git ls-tree -r --name-only 2ea2a90a | grep -E '^(crates/[^/]+/src/|src/).*\.rs$'
+# 監査集合: 380 files / 258,257 lines
+git ls-tree -r --name-only 2ea2a90a | grep -Ev '^(v1|document|\.usagi)/|^Cargo\.lock$' | grep -E '\.(rs|sh|rb|tsv|toml|yml|json)$'
+```
 
 ## 確認領域
 

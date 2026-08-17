@@ -8,7 +8,7 @@ dependson: []
 related: [674]
 parent: 671
 created_at: 2026-08-16T22:32:02.034334+00:00
-updated_at: 2026-08-16T23:34:22.036260+00:00
+updated_at: 2026-08-17T10:50:59.094214+00:00
 ---
 
 ## Finding（P2 usability / foreground input ownership）
