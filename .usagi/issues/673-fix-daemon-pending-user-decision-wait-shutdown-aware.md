@@ -8,7 +8,7 @@ dependson: []
 related: [329, 406, 557, 658, 689]
 parent: 671
 created_at: 2026-08-13T00:13:57.985707+00:00
-updated_at: 2026-08-17T22:59:31.880272+00:00
+updated_at: 2026-08-17T23:18:17.883308+00:00
 ---
 
 ## Finding（P1 availability / lifecycle）

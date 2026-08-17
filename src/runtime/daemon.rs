@@ -2404,6 +2404,17 @@ struct DecisionWaitContext<'a> {
     cancellation: &'a dyn DecisionWaitCancellation,
 }
 
+struct DecisionConnectionCancellation {
+    connection: AcceptedStream,
+    gate: AdmissionGate,
+}
+
+impl DecisionWaitCancellation for DecisionConnectionCancellation {
+    fn is_cancelled(&self) -> bool {
+        !self.gate.is_open(LeaseClass::ActiveControl) || self.connection.peer_disconnected()
+    }
+}
+
 struct ProductionRefreshClock {
     started: Instant,
 }
@@ -4011,7 +4022,10 @@ fn start_ipc_accept_loop(
                         };
                         let worker_completion = Some(unblock.clone());
                         let retirement = unblock.retirement();
-                        let decision_cancellation = unblock.clone();
+                        let decision_cancellation = DecisionConnectionCancellation {
+                            connection: unblock.clone(),
+                            gate: connection_fence.gate.clone(),
+                        };
                         let spawned = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -8467,6 +8481,32 @@ impl AcceptedStream {
         let Some(stream) = stream.as_ref() else {
             return true;
         };
+        let mut pending = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            pending.events |= libc::POLLRDHUP;
+        }
+        loop {
+            // SAFETY: one initialized `pollfd` names the live descriptor held by
+            // `stream`; a zero timeout only observes its current state.
+            let ready = unsafe { libc::poll(&raw mut pending, 1, 0) };
+            if ready >= 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return true;
+            }
+        }
+        let disconnected = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let disconnected = disconnected | libc::POLLRDHUP;
+        if pending.revents & disconnected != 0 {
+            return true;
+        }
         let mut byte = 0_u8;
         loop {
             // SAFETY: `byte` is a writable one-byte buffer and `stream` owns a
@@ -13524,6 +13564,17 @@ mod tests {
     }
 
     #[test]
+    fn accepted_stream_observes_peer_close_behind_buffered_data() {
+        let (server, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let connection = AcceptedStream::new(server);
+
+        std::io::Write::write_all(&mut peer, b"pipelined request").unwrap();
+        drop(peer);
+
+        assert!(connection.peer_disconnected());
+    }
+
+    #[test]
     fn disconnected_client_releases_a_pending_decision_waiter_without_mutating_it() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let store = Arc::new(UserDecisionStore::new(home.path()));
@@ -13562,23 +13613,28 @@ mod tests {
     }
 
     #[test]
-    fn generation_retirement_joins_a_worker_waiting_for_a_pending_decision() {
+    fn rollover_control_barrier_cancels_a_pending_decision_before_waiting_for_its_lease() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let store = Arc::new(UserDecisionStore::new(home.path()));
         let decision = pending_decision(&store);
         let waiters = Arc::new(DecisionWaiters::default());
         let (server, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
-        let cancellation = AcceptedStream::new(server);
-        let worker_cancellation = cancellation.clone();
+        let gate = AdmissionGate::new(DaemonGeneration::new(), GenerationRole::Active);
+        let lease = gate.acquire(LeaseClass::ActiveControl).unwrap();
+        let cancellation = DecisionConnectionCancellation {
+            connection: AcceptedStream::new(server),
+            gate: gate.clone(),
+        };
         let waiting_store = Arc::clone(&store);
         let waiting_registry = Arc::clone(&waiters);
         let requested = decision.clone();
         let handle = std::thread::spawn(move || {
+            let _lease = lease;
             assert!(matches!(
                 wait_for_user_decision(
                     &waiting_store,
                     &waiting_registry,
-                    &worker_cancellation,
+                    &cancellation,
                     requested.owner.workspace_id,
                     &requested,
                 ),
@@ -13587,14 +13643,20 @@ mod tests {
         });
         wait_until_decision_waiter_is_registered(&waiters, decision.decision_id);
 
-        let workers = ClientWorkers::new();
-        assert!(workers.register(Box::new(cancellation), handle).is_clean());
         let started = Instant::now();
-        let report = workers.retire();
-        assert!(report.is_clean());
-        assert_eq!(report.joined, 1);
+        gate.close(LeaseClass::ActiveControl);
+        gate.await_drain(LeaseClass::ActiveControl).unwrap();
+        handle.join().unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(waiters.waiting_count(decision.decision_id), 0);
+        let retained = store
+            .get(decision.owner.workspace_id, decision.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.status,
+            usagi_core::domain::user_decision::UserDecisionStatus::Pending
+        );
     }
 
     #[test]
