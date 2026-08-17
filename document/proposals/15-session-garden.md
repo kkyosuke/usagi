@@ -105,7 +105,8 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
 
 - 並び順は **注目度（`Waiting` を先頭）→ stable な agent identity** の順で決める。phase が同じうさぎが
   frame ごとに入れ替わると追えなくなるため、tie-break には runtime の stable ID を使う。
-- 畳むのは末尾（注目度の低いほう）からとする。人の入力を待っている agent は必ず見える。
+- 畳むのは末尾（注目度の低いほう）からとする。表示枠は `Waiting` が先に使い、`Waiting` 自体が上限を超える
+  場合は隠れた `Waiting` の羽数を状態ラベルへ明示する。
 
 ### 動きの量
 
@@ -130,7 +131,8 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
 1. 描画可能領域を、nameplate と表示上限ぶんのうさぎが収まる固定幅の plot に分割する。plot の大きさは
    agent の数で変えない（区画ごとに幅が変わると grid の決定性と hit test が崩れるため）。
 2. controller が持つ session 順を plot へ左上から割り当てる。
-3. stable `SessionId` の先頭 bytes を animation phase の offset にだけ使い、全羽が同時に跳ねないようにする。
+3. 各うさぎの stable `AgentRuntimeId` の先頭 bytes を animation phase の offset にだけ使い、全羽が同時に
+   跳ねないようにする。
 4. `tick`、projection、領域サイズが同じなら、常に同じ frame を返す。
 
 session が plot 数を超える場合は末尾を `+ N more in session list` に畳み、既存 sidebar を完全な一覧の正本として
@@ -208,8 +210,9 @@ sample は idle timer、click dispatch には接続しない。状態別 pose、
 production 配線より先に確認するための presentation-only surface である。
 
 実際の workspace で見るには、Overview の `garden` command で手動で開くか、5 分間操作せずに待つ（仕様は
-[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭に出る pose は controller が
-集約した phase に従うため、`interrupted` は `Done` へ畳まれて `available` の pose になる。
+[3. TUI#session garden](../03-tui.md#session-garden)）。production の庭は session ごとに runtime を直接参照して
+各 agent の phase を描く。controller が runtime の `Ended` / `Exited` / `Interrupted` を `TargetPhase::Done` へ
+畳んだ場合も、庭では瞬きへ戻さず静止した `done` pose になる。
 
 ## 実装順序と受け入れ条件
 
@@ -219,11 +222,11 @@ production 配線より先に確認するための presentation-only surface で
 3. interactive frame loop の user activity 観測と Home projection を接続し、screen graph test で自動表示、
    入力消費、overlay 復帰を固定する。
 4. `document/03-tui.md` に実装済みの入力・縮退・状態対応を移し、本提案は設計判断だけに縮約する。
+5. [うさぎは agent、区画は session](#うさぎは-agent区画は-session) の描画素材へ移し、agent ごとの phase、
+   並び順、表示上限、`+N` の畳み込みを追加する。
 
-ここまでが実装済みで、うさぎは現在まだ session 単位である。残りは次のとおり。
+ここまでの 1〜5 が実装済みで、うさぎは agent 単位である。残りは次のとおり。
 
-5. [うさぎは agent、区画は session](#うさぎは-agent区画は-session) の描画素材へ移す。集約後の phase ではなく
-   session に属する agent ごとの phase を描き、並び順・表示上限・`+N` の畳み込みを追加する。
 6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
 7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
 8. 選択中 session の `>` marker と nameplate 強調、`Failed` の safe failure summary を追加する。
@@ -235,7 +238,8 @@ production 配線より先に確認するための presentation-only surface で
 - 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストする。
 - 1 session に複数 agent があるとき、羽数と各 agent の phase が描かれ、集約によって実行中の agent が
   休んでいる姿に化けない。
-- 表示上限を超えた agent は `+N` に畳まれ、`Waiting` の agent は畳まれずに必ず見える。
+- 表示上限を超えた agent は `+N` に畳まれる。表示枠は `Waiting` が先に使い、`Waiting` 自体が上限を超える
+  場合は隠れた `Waiting` の羽数が明示される。
 - agent の並びは phase と stable な runtime identity だけで決まり、同じ素材の frame では入れ替わらない。
 - animation の pose が変わらない tick では frame material も変わらない。
 - 5 分未満では Garden を開かず、5 分到達時に eligible な Home だけで開く。

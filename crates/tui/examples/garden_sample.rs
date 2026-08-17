@@ -1,14 +1,18 @@
-use usagi_core::domain::id::SessionId;
+use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_tui::presentation::widgets::garden::{GardenSession, render};
+use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render};
 
 fn main() {
     let sessions = [
-        sample(
+        sample_agents(
             "00000000-0000-4000-8000-000000000001",
             "session-auth",
             SessionLifecycle::Available,
-            AgentPhase::Running,
+            &[
+                ("10000000-0000-4000-8000-000000000001", AgentPhase::Running),
+                ("11000000-0000-4000-8000-000000000002", AgentPhase::Running),
+                ("12000000-0000-4000-8000-000000000003", AgentPhase::Waiting),
+            ],
         ),
         sample(
             "01000000-0000-4000-8000-000000000002",
@@ -79,6 +83,30 @@ fn sample(
         id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
         label: label.to_owned(),
         lifecycle,
-        agent_phase,
+        agents: vec![GardenAgent {
+            runtime_id: AgentRuntimeId::parse(id).expect("sample IDs are canonical UUIDs"),
+            phase: agent_phase,
+        }],
+    }
+}
+
+fn sample_agents(
+    id: &str,
+    label: &str,
+    lifecycle: SessionLifecycle,
+    agents: &[(&str, AgentPhase)],
+) -> GardenSession {
+    GardenSession {
+        id: SessionId::parse(id).expect("sample IDs are canonical UUIDs"),
+        label: label.to_owned(),
+        lifecycle,
+        agents: agents
+            .iter()
+            .map(|(runtime_id, phase)| GardenAgent {
+                runtime_id: AgentRuntimeId::parse(runtime_id)
+                    .expect("sample runtime IDs are canonical UUIDs"),
+                phase: *phase,
+            })
+            .collect(),
     }
 }
