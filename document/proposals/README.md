@@ -36,4 +36,4 @@ v1 の仕様スナップショットとして保存する。
 | 14 | [14-session-roles.md](14-session-roles.md) | director / manager / coder / reviewer などの workspace 定義と session への安定した割り当て、scope prompt との安全な合成 | [10-session-roles.md](../10-session-roles.md) へ畳み込み済み |
 | 15 | [15-session-garden.md](15-session-garden.md) | 無操作時に session を庭のうさぎとして映す screen saver、状態別 animation、click-to-Closeup と安全な wake-up | 提案（実装 issue #674） |
 | 16 | [16-v1-v2-coexistence.md](16-v1-v2-coexistence.md) | 同一インストール先での v1 / v2 共存。領域ごとの共有・分離の実態、実際に衝突する 3 点（binary path・`.gitignore` 行順・production mode）と、issue / memory / 採番を共有したまま並置する設計 | 提案（実装 issue #691 / #692。#690 は #694 へ置き換え） |
-| 17 | [17-v2-trial-channel.md](17-v2-trial-channel.md) | 「新しい UI を試す」形の opt-in beta channel。v2 prerelease の配布、symlink による channel 切替、v1 workspace 一覧の read-only seed、戻り道と告知 | 提案（実装 issue #693–#696） |
+| 17 | [17-v2-trial-channel.md](17-v2-trial-channel.md) | 「新しい UI を試す」形の opt-in beta channel。v2 prerelease の配布、v2 の Config / CLI が symlink を差し替える channel 切替、v1 workspace 一覧の read-only seed、戻り道と告知、artifact に焼き込む既定 runtime mode | 提案（実装 issue #693–#697） |

@@ -20,6 +20,7 @@ v2 の runtime mode は既定が `local` なので、v2 を試しても v1 の s
 - [P3: 新しい UI を空にしない](#p3-新しい-ui-を空にしない)
 - [P4: 戻り道と告知](#p4-戻り道と告知)
 - [試用中に共有されるもの・されないもの](#試用中に共有されるものされないもの)
+- [release build の既定 mode](#release-build-の既定-mode)
 - [却下した代替案](#却下した代替案)
 - [既知の後続作業](#既知の後続作業)
 - [実装 issue](#実装-issue)
@@ -96,26 +97,39 @@ beta channel を選んでいるときだけ prerelease を候補に含める（s
 ~/.usagi/bin/usagi-v1        v1 の実体（stable channel）
 ~/.usagi/bin/usagi-v2        v2 の実体（beta channel）
 ~/.usagi/bin/usagi        →  symlink: 現在アクティブな実体
-~/.usagi/bin/usagi-channel   切替 helper（installer が同梱する）
 ```
+
+切替は **v2 自身が持つ**。専用の helper script も compiled shim も置かない。
+
+| 面 | 経路 | 使う場面 |
+|---|---|---|
+| v2 の Global Config | `Version  [ v2 (beta) ]` の行で v1 / v2 を選び、Save で symlink を差し替える | 試用をやめて v1 へ戻る（**主経路**） |
+| v2 の CLI | `usagi channel status` / `usagi channel use <stable\|beta>` | v1 に居る状態から beta へ戻る（`usagi-v2 channel use beta` と実体名で呼ぶ） |
+| installer | `USAGI_CHANNEL=beta` で beta を install し、symlink を beta へ向ける | 最初に試し始める |
+
+**戻りたくなるのは v2 を使っている最中なので、戻り道は v2 の UI の中にあるべきである。**
+v1 は出荷物なので v1 側に導線は置けないが、**opt-in は installer という明示的な行為で始まる**ので
+v1 側の導線は要らない。UI に必要なのは戻り道だけである。
+
+symlink の扱いは次のとおり。
 
 | 決定 | 理由 |
 |---|---|
-| **symlink 自体を状態にする**（別の pref file を持たない） | pref file と実際に起動する binary が desync しうる。`readlink` すれば現在の channel が一意に判る |
-| 切替は**小さな helper script**（compiled shim にしない） | shim は毎回の起動に exec を挟む。Unix は `execvp` で置き換えられるが Windows に exec が無く、spawn + wait + signal / exit code 転送を自作することになる。PTY 中心の usagi でそこを自作する risk は、symlink 差し替え 1 回のコストに見合わない。symlink 方式は常時コストがゼロである |
+| **symlink 自体を状態にする**（`settings.json` に channel を書かない） | 実際に起動する binary を決めるのは symlink なので、設定に持つと実態と desync する。`readlink` すれば現在の channel が一意に決まる |
+| 差し替えは temp symlink + rename | `usagi` が存在しない窓を作らない |
+| 走っている v2 が自分を指す symlink を差し替えてよい | Unix では実行中の process が inode を掴んでいるため、symlink の張り替えは現に走っている v2 に影響しない |
+| Config の行は **Global Config にだけ**置く | channel は machine 全体の状態で、workspace 単位の設定ではない |
+| symlink 経由で起動していないときは行を選択不可にする | source build・`cargo run`・実体直叩きでは管理対象の symlink が無い。存在しない symlink を作らない |
+| 対象 channel が未 install なら選択不可にする | 存在しない実体を指す symlink を張らない。install 方法を案内する |
 | 既存 install からの移行は rename + symlink | 現在の `bin/usagi` は実ファイル。初回だけ `usagi-v1` へ rename して symlink を張る。同一 filesystem なので rename は atomic |
 | `update.lock` は共有のまま | 同じ directory への rename を直列化するのが目的。channel ごとに分けると、まさに直列化したい組み合わせだけが漏れる |
 
-helper の interface は最小に保つ。
-
-| command | 動作 |
-|---|---|
-| `usagi-channel status` | 現在の channel と、各 channel の install 済み version を表示する |
-| `usagi-channel use <stable\|beta>` | symlink を差し替える。対象が未 install なら**何も変更せず**、install 方法を案内して失敗する |
+適用は**次の起動から**である。`usagi update` が既に同じ契約（反映には再起動が必要）を持つので、それに揃える。
+走っている v2 を exec で v1 に置き換えることはしない（[却下した代替案](#却下した代替案)）。
 
 [#690](../../.usagi/issues/690-feat-cli-install-sh-binary-channel-v1-v2.md) の `USAGI_BIN_NAME` が
-この下敷きになる。#690 を「任意の basename」から「**named channel**」へ一般化し、install 先の名前を
-channel 定義から導く（利用者が任意の名前を持ち込めると、helper が管理対象を列挙できない）。
+install 側の下敷きになる。#690 を「任意の basename」から「**named channel**」へ一般化し、install 先の
+名前を channel 定義から導く（利用者が任意の名前を持ち込めると、channel を列挙できない）。
 
 ## P3: 新しい UI を空にしない
 
@@ -133,10 +147,20 @@ issue / memory は既に共有なので seed 不要である（[16](16-v1-v2-coe
 
 ## P4: 戻り道と告知
 
-戻すのは `usagi-channel use stable` だけで、**データ移行は要らない**。v2 の state は `<base>/local/` と
-`<repo>/.usagi/local/` に残るので、また beta に戻せば続きから使える。
+戻り道は [P2](#p2-channel-switch) の Global Config の `Version` 行で、**データ移行は要らない**。v2 の state は
+`<base>/local/` と `<repo>/.usagi/local/` に残るので、また beta へ戻せば続きから使える。
 
-ただし戻したときに見えなくなるものがある。これは試用の性質上避けられないので、**隠さずに告知する**。
+Config で v1 を選んだときに解決しなければならないのは **live runtime** である。symlink を戻しても v2 の
+daemon は動き続け、PTY と workspace fence を持ったままになる。ここは新しい規則を作らず、**既存の
+`daemon stop` の admission をそのまま使う**（[5. daemon](../05-daemon.md#daemon-process-lifecycle)）。
+
+| beta 側の状態 | Config で v1 を選んだときの動作 |
+|---|---|
+| daemon が停止している | symlink を差し替え、次の起動から v1 になることを伝える |
+| daemon は動いているが live Agent / terminal が無い | daemon を停止してから差し替える |
+| live Agent / terminal がある | **差し替えない**。件数を示して pane を閉じるか明示的に手放すことを促す（`daemon stop` が `--force` を要求するのと同じ判断） |
+
+そのうえで、戻したときに見えなくなるものを告知する。これは試用の性質上避けられないので、**隠さない**。
 
 | 試用中に v2 で作ったもの | v1 へ戻したときの見え方 |
 |---|---|
@@ -146,10 +170,9 @@ issue / memory は既に共有なので seed 不要である（[16](16-v1-v2-coe
 
 session が引き継がれないのは lifecycle state が別だからで、[16](16-v1-v2-coexistence.md#衝突しないと確認した点)
 のとおり v2 は自分の state 外の worktree を掃除しないため**壊れはしない**が、v1 から見ると
-一覧に出ない worktree が残る。`usagi-channel use stable` は、beta 側に live session がある場合に
-その数を示して確認を求める。
+一覧に出ない worktree が残る。この告知は Config で v1 を選んだ時点で出す。
 
-告知は installer の完了メッセージと `README.md` で行い、**v1 には手を入れない**
+告知は Config の確認、installer の完了メッセージ、`README.md` で行い、**v1 には手を入れない**
 （[16 の前提](16-v1-v2-coexistence.md#前提と制約)）。
 
 ## 試用中に共有されるもの・されないもの
@@ -167,12 +190,55 @@ session が引き継がれないのは lifecycle state が別だからで、[16]
 していれば同時起動は自然に起きないため、試用体験としてはこの制約が表に出にくい。それでも
 両方を同時に起動できる状態は残るので、告知に含める。
 
+## release build の既定 mode
+
+`runtime_mode()` は `USAGI_RUNTIME_MODE` が無ければ **debug / release build とも `local`** を選び、
+production は明示指定を要求する（[5. daemon](../05-daemon.md#daemon-data-directory)）。この非対称は
+意図的で、**危険な向き（実データを触る）に明示的な行為を要求する** fail-safe である。v2 は v1 が本番で
+使われている同じマシン・同じ repository の中で開発されるため、`cargo run` や test が実 state を掴めては
+ならない。
+
+この既定は**試用にとっては正しい**。beta artifact が `local` を選ぶことが、そのまま
+「試用が v1 を壊さない」根拠になる（[既に揃っているもの](#既に揃っているもの)）。
+
+一方で**正式版にとっては正しくない**。`install.sh` も release artifact も `USAGI_RUNTIME_MODE` を
+設定しないため、**今のまま v2 を出荷すると利用者のデータが `~/.usagi/local/` に入る**。`local` は
+開発時の概念であって、利用者に見せる置き場所ではない。
+
+env では解決しない。[#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md) が記録している
+とおり利用者自身の shell を統一する強制力は無く、env に依存した既定は「plain shell で起動したら別の世界に
+入る」を残す。**artifact に既定を焼き込む**のが答えである。
+
+| artifact | 既定 mode | 根拠 |
+|---|---|---|
+| source build（`cargo run` / `cargo test`） | `local` | 開発中に実 state を触らせない |
+| beta channel artifact | `local` | 試用が可逆であること |
+| stable artifact（`v3.0.0`） | `production` | 利用者のデータを `~/.usagi` 直下に置く |
+
+`USAGI_RUNTIME_MODE` は引き続きすべてを上書きできる（開発・調査の経路を塞がない）。
+
+### launchd に mode が伝わらない
+
+`daemon install-service` が書く plist は**環境変数を持たない**設計である
+（[5. daemon](../05-daemon.md#launchd-supervision)）。したがって supervise される `daemon serve` は
+env 不在から `local` を選ぶ。一方 plist の stderr log path は install した process の
+**mode-selected** data directory から作る。この 2 つが食い違うため、production mode から
+install-service すると **log は production 配下、daemon は local** という組み合わせになる。
+
+artifact に既定を焼き込めば既定同士は一致するが、`production` 既定の stable artifact では
+**plist に mode を明記する**必要がある（plist が env を持たない現在の設計を、mode だけは例外にするか、
+`daemon serve` に mode を渡す引数を足すかの判断を伴う）。
+
 ## 却下した代替案
 
 | 代替案 | 却下理由 |
 |---|---|
 | v1 の Welcome / Config に「新しい UI を試す」行を足す | 導線としては最良だが、v1 は出荷物で coverage 100% gate 対象である（[16 の前提](16-v1-v2-coexistence.md#前提と制約)）。試用の導線のために shipped code へ変更 risk を入れない |
 | compiled shim が `usagi` を受けて channel へ exec する | 毎回の起動経路に入る。Windows に exec が無く signal / exit code / stdio の転送を自作することになり、PTY 中心の usagi では失敗モードが増える。symlink 差し替えなら常時コストがゼロ |
+| 走っている v2 が exec で v1 に置き換わり「即座に切替」を実現する | v2 は daemon と PTY を持つ。live な pane を v1 へ引き継ぐ IPC は存在しないので、即座の切替は結局 live runtime の破棄を伴う。`usagi update` と同じ「次の起動から」に揃えるほうが予測可能である |
+| channel を `settings.json` に持つ | 実際に起動する binary を決めるのは symlink なので、設定と実態が desync する。symlink を単一の情報源にする |
+| 専用の `usagi-channel` helper script を installer が同梱する | 当初案。v2 の CLI に `channel` を置けば足り、install する component を増やさずに済む。さらに戻り道は v2 の Config に置くほうが発見しやすいため差し替えた |
+| release でも env（`USAGI_RUNTIME_MODE=production`）で mode を選ばせる | 利用者の shell を統一する強制力が無い（[#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md)）。plain shell 起動が別の世界に入る余地を残す |
 | 試用を production mode で走らせる | v1 と同じ path を掴むので可逆性を失う。試用の最大の価値（安全に戻れること）を捨てることになる |
 | v2 beta を専用 runtime mode（`beta` など）に置く | mode は 3 つで足りており、`local` が既にこの用途である。mode を増やすと child への転送・fence・data home の対応表がすべて広がる |
 | v2 を `2.x` の続きとして tag する | v1 が 2.9.1、root が 2.6.0 なので semver 順序が逆転する。version 比較・release notes・利用者の認識がすべて壊れる |
@@ -180,20 +246,24 @@ session が引き継がれないのは lifecycle state が別だからで、[16]
 
 ## 既知の後続作業
 
-試用の state は `<base>/local/` と `<repo>/.usagi/local/` にある。v2 が正式版になるとき
-（`v3.0.0`）は production mode へ移り、この `local/` から base への移行が必要になる。cutover の
-一部であり本設計には含めない。[16 の設計 3](16-v1-v2-coexistence.md#設計-3-production-mode-の重なりを-doctor-で可視化する)
-の doctor 警告が、その移行前に production と v1 が重なっている状態を可視化する。
+試用の state は `<base>/local/` と `<repo>/.usagi/local/` にある。stable artifact が `production` を
+既定にする（[release build の既定 mode](#release-build-の既定-mode)）ため、beta で試した利用者が
+`v3.0.0` へ上がるときに **`local/` から base への一方向 migration** が必要になる。cutover の一部であり
+本設計には含めないが、artifact 既定を決める時点でこの migration の存在を前提にする。
+[16 の設計 3](16-v1-v2-coexistence.md#設計-3-production-mode-の重なりを-doctor-で可視化する) の doctor 警告が、
+その移行前に production と v1 が重なっている状態を可視化する。
 
 ## 実装 issue
 
 | # | 対応 | 内容 |
 |---|---|---|
 | [#693](../../.usagi/issues/693-build-release-yml-manifest-prerelease-input-v2-beta-channel.md) | P1 | `release.yml` に `manifest` / `prerelease` input、v2 beta の tag 規約と release notes の channel 内 PREV_TAG |
-| [#694](../../.usagi/issues/694-feat-cli-channel-switch-usagi-1-v1-v2.md) | P2 | named channel での並置、`usagi-channel` helper、symlink 移行 |
+| [#694](../../.usagi/issues/694-feat-cli-tui-channel-switch-v2-config-cli-v1-v2.md) | P2 | named channel での並置、`usagi channel` CLI、Global Config の `Version` 行、symlink 移行 |
 | [#695](../../.usagi/issues/695-feat-core-v2-v1-workspace-read-only-seed.md) | P3 | v2 初回起動時の v1 workspace 一覧の read-only seed |
-| [#696](../../.usagi/issues/696-docs-v2-channel.md) | P4 | 戻り道の告知、live session がある場合の確認、README と installer メッセージ |
+| [#696](../../.usagi/issues/696-feat-tui-docs-v1-live-runtime-admission.md) | P4 | 戻り道の live runtime admission と告知、README と installer メッセージ |
+| [#697](../../.usagi/issues/697-fix-core-artifact-runtime-mode-launchd-plist-mode.md) | 既定 mode | artifact に既定 runtime mode を焼き込み、launchd plist へ mode を伝える |
 
 依存順は P1 →（P2, P3 は並行）→ P4。P1 が無いと試す対象が存在しないため、これが起点である。
 P2 は [#690](../../.usagi/issues/690-feat-cli-install-sh-binary-channel-v1-v2.md) を named channel へ
-一般化する形で置き換える。
+一般化する形で置き換える。#697 は試用の blocker ではないが、**stable artifact を出す前に必要**であり、
+beta artifact の既定（`local`）を明示的に選ぶ意味でも先に入れておくのが望ましい。
