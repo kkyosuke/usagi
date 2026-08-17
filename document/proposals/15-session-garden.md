@@ -161,9 +161,9 @@ stable session への既存 Closeup 遷移だけに一本化する。session が
 
 - 高さ 14 行未満、または幅 64 桁未満では idle threshold を超えても Garden を開かず、既存 Home を保つ。
   screen saver のために操作可能な一覧を警告画面で覆わない。
-- 端末の motion preference を直接取得する標準手段はないため、初期実装は設定に `Animation: full | reduced` を
-  追加しない。まず `USAGI_REDUCE_MOTION=1` を composition で読み、projection に boolean として注入する案を
-  検証する。reduced motion では全 pose を静止姿勢に固定し、状態ラベルだけ更新する。
+- 端末の motion preference を直接取得する標準手段はないため、設定に `Animation: full | reduced` は追加しない。
+  composition は起動時に `USAGI_REDUCE_MOTION=1` を読み、projection に boolean として注入する。reduced motion
+  では全 pose を静止姿勢に固定し、状態ラベルだけ更新する。
 - animation は既存 frame tick を共有する。Garden 専用 timer / thread は作らない。
 - material が同じ pose の tick は既存 mascot と同様に canonical tick へ畳み、不要な再描画を起こさない。
 
@@ -225,11 +225,11 @@ production 配線より先に確認するための presentation-only surface で
 5. [うさぎは agent、区画は session](#うさぎは-agent区画は-session) の描画素材へ移し、agent ごとの phase、
    並び順、表示上限、`+N` の畳み込みを追加する。
 
-ここまでの 1〜5 が実装済みで、うさぎは agent 単位である。残りは次のとおり。
-
 6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
 7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
 8. 選択中 session の `>` marker と nameplate 強調、`Failed` の safe failure summary を追加する。
+
+1〜8 はすべて実装済みで、うさぎは agent 単位である。
 
 受け入れ条件は次のとおりである。
 

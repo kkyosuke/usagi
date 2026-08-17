@@ -42,6 +42,8 @@ pub struct GardenSession {
     pub id: SessionId,
     pub label: String,
     pub lifecycle: SessionLifecycle,
+    pub selected: bool,
+    pub failure_summary: Option<String>,
     pub agents: Vec<GardenAgent>,
 }
 
@@ -82,6 +84,30 @@ pub struct GardenFrame {
     pub hidden_sessions: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GardenLayout {
+    content_width: usize,
+    columns: usize,
+    garden_height: usize,
+    capacity: usize,
+}
+
+fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
+    if height < MIN_HEIGHT || width < MIN_WIDTH {
+        return None;
+    }
+    let content_width = width.saturating_sub(SIDE_PADDING * 2);
+    let columns = (content_width / PLOT_WIDTH).max(1);
+    let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
+    let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
+    Some(GardenLayout {
+        content_width,
+        columns,
+        garden_height,
+        capacity: columns.saturating_mul(plot_rows),
+    })
+}
+
 /// Garden を描画する。最小サイズに満たない場合は `None` を返す。
 #[must_use]
 pub fn render(
@@ -92,15 +118,12 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    if height < MIN_HEIGHT || width < MIN_WIDTH {
-        return None;
-    }
-
-    let content_width = width.saturating_sub(SIDE_PADDING * 2);
-    let columns = (content_width / PLOT_WIDTH).max(1);
-    let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
-    let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
-    let capacity = columns.saturating_mul(plot_rows);
+    let GardenLayout {
+        content_width,
+        columns,
+        garden_height,
+        capacity,
+    } = garden_layout(height, width)?;
     let visible = sessions.len().min(capacity);
     let hidden_sessions = sessions.len().saturating_sub(visible);
 
@@ -177,6 +200,37 @@ pub fn render(
     })
 }
 
+/// Smallest phase in the six-tick cycle that draws the same visible Garden plots.
+/// Folding onto this representative lets frame material equality suppress a
+/// redraw when a slow animation holds its current pose. `None` means the Garden
+/// does not fit and the caller must preserve the ordinary Home clock.
+#[must_use]
+pub fn canonical_tick(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<u64> {
+    let layout = garden_layout(height, width)?;
+    let sessions = &sessions[..sessions.len().min(layout.capacity)];
+    let tick = tick % 6;
+    let expected = sessions
+        .iter()
+        .map(|session| plot(session, tick, reduced_motion))
+        .collect::<Vec<_>>();
+    Some(
+        (0..6)
+            .find(|candidate| {
+                sessions
+                    .iter()
+                    .map(|session| plot(session, *candidate, reduced_motion))
+                    .eq(expected.iter().cloned())
+            })
+            .unwrap_or(tick),
+    )
+}
+
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
     let running = sessions
         .iter()
@@ -196,13 +250,19 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
 }
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PLOT_CONTENT_ROWS] {
-    let label = Role::Accent
-        .style()
-        .bold()
-        .paint(&clip_to_width(&session.label, PLOT_WIDTH - 2));
+    let marker = if session.selected { '>' } else { ' ' };
+    let nameplate = format!(
+        "{marker} {}",
+        clip_to_width(&session.label, PLOT_WIDTH.saturating_sub(2))
+    );
+    let label = if session.selected {
+        Role::Accent.style().bold().paint(&nameplate)
+    } else {
+        Style::new().dim().paint(&nameplate)
+    };
     let [status, ears, head, body, feet] = match session.lifecycle {
         SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
-        lifecycle => lifecycle_plot(lifecycle),
+        _ => lifecycle_plot(session, tick, reduced_motion),
     };
     [centered(PLOT_WIDTH, &label), status, ears, head, body, feet]
 }
@@ -254,32 +314,57 @@ fn sprite(
     })
 }
 
-fn lifecycle_plot(lifecycle: SessionLifecycle) -> [String; PLOT_CONTENT_ROWS - 1] {
+fn lifecycle_plot(
+    session: &GardenSession,
+    tick: u64,
+    reduced_motion: bool,
+) -> [String; PLOT_CONTENT_ROWS - 1] {
     let feature = Role::Feature.style().bold();
-    let (status, status_style, rabbit_style, rabbit) = match lifecycle {
-        SessionLifecycle::Creating | SessionLifecycle::Initializing => (
-            "growing",
-            Role::Warning.style(),
-            feature,
-            ["", "", "  /)/)", "__(_ _)__"],
-        ),
-        SessionLifecycle::Deleting => (
-            "heading home",
-            Style::new().dim(),
-            Style::new().dim(),
-            ["", " /)/)", "( . .)", "c(\")(\")"],
-        ),
-        SessionLifecycle::Failed => (
-            "failed",
-            Role::Danger.style().bold(),
-            Role::Danger.style(),
-            ["", " /)/)", "( x.x)", "c(\")(\")"],
-        ),
+    let phase = animation_phase(tick, reduced_motion, &session.id.as_str());
+    let (status, status_style, rabbit_style, rabbit) = match session.lifecycle {
+        SessionLifecycle::Creating | SessionLifecycle::Initializing => {
+            let rabbit = if phase < 3 {
+                ["", "", "  /)/)", "__(_ _)__"]
+            } else {
+                ["", "  /)/)", " _( . .)_", "__/   \\__"]
+            };
+            ("growing".to_owned(), Role::Warning.style(), feature, rabbit)
+        }
+        SessionLifecycle::Deleting => {
+            let rabbit_style = if reduced_motion || phase >= 4 {
+                Style::new().dim()
+            } else if phase >= 2 {
+                Role::Feature.style().dim()
+            } else {
+                Role::Feature.style()
+            };
+            (
+                "heading home".to_owned(),
+                Style::new().dim(),
+                rabbit_style,
+                ["", " /)/)", "( . .)", "c(\")(\")"],
+            )
+        }
+        SessionLifecycle::Failed => {
+            let status = session.failure_summary.as_deref().map_or_else(
+                || "failed".to_owned(),
+                |summary| format!("failed · {summary}"),
+            );
+            (
+                status,
+                Role::Danger.style().bold(),
+                Role::Danger.style(),
+                ["", " /)/)", "( x.x)", "c(\")(\")"],
+            )
+        }
         SessionLifecycle::Available => unreachable!("available sessions use agent projection"),
     };
     let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
     [
-        centered(PLOT_WIDTH, &status_style.paint(status)),
+        centered(
+            PLOT_WIDTH,
+            &status_style.paint(&clip_to_width(&status, PLOT_WIDTH)),
+        ),
         ears,
         head,
         body,
@@ -359,12 +444,15 @@ fn agent_appearance(
             };
             ("running", Role::Success.style().bold(), feature, rabbit)
         }
-        AgentPhase::Waiting => (
-            "waiting",
-            Role::Warning.style().bold(),
-            feature,
-            ["", " /)/)", "( o.o)?", "c(\")(\")"],
-        ),
+        AgentPhase::Waiting => {
+            let ears = if phase == 5 { " /)(/" } else { " /)/)" };
+            (
+                "waiting",
+                Role::Warning.style().bold(),
+                feature,
+                ["", ears, "( o.o)?", "c(\")(\")"],
+            )
+        }
         AgentPhase::Interrupted => (
             "interrupted",
             Role::Warning.style(),
@@ -476,13 +564,22 @@ mod tests {
     }
 
     fn only(lifecycle: SessionLifecycle, phase: AgentPhase, tick: u64) -> Vec<String> {
+        only_with_motion(lifecycle, phase, tick, false)
+    }
+
+    fn only_with_motion(
+        lifecycle: SessionLifecycle,
+        phase: AgentPhase,
+        tick: u64,
+        reduced_motion: bool,
+    ) -> Vec<String> {
         let frame = render(
             24,
             100,
             "x",
             &[session(STEADY_ID, "one", lifecycle, phase)],
             tick,
-            false,
+            reduced_motion,
         )
         .expect("garden fits");
         plain(&frame)
@@ -498,6 +595,8 @@ mod tests {
             id: SessionId::parse(id).expect("fixture id"),
             label: label.to_owned(),
             lifecycle,
+            selected: false,
+            failure_summary: None,
             agents: vec![GardenAgent {
                 runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
                 phase,
@@ -632,6 +731,8 @@ mod tests {
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "many".to_owned(),
             lifecycle: SessionLifecycle::Available,
+            selected: false,
+            failure_summary: None,
             agents,
         };
         let first = render(24, 100, "x", &[make_session(shuffled)], 2, false).expect("fits");
@@ -657,6 +758,8 @@ mod tests {
                 id: SessionId::parse(STEADY_ID).expect("fixture id"),
                 label: "empty".to_owned(),
                 lifecycle: SessionLifecycle::Available,
+                selected: false,
+                failure_summary: None,
                 agents: Vec::new(),
             }],
             0,
@@ -671,7 +774,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "available sessions use agent projection")]
     fn lifecycle_plot_rejects_an_available_session() {
-        let _ = super::lifecycle_plot(SessionLifecycle::Available);
+        let session = session(
+            STEADY_ID,
+            "available",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        let _ = super::lifecycle_plot(&session, 0, false);
     }
 
     #[test]
@@ -734,6 +843,152 @@ mod tests {
     }
 
     #[test]
+    fn calm_lifecycle_animation_uses_bounded_poses_and_reduced_motion_is_static() {
+        let waiting = only(SessionLifecycle::Available, AgentPhase::Waiting, 0).join("\n");
+        let waiting_flop = only(SessionLifecycle::Available, AgentPhase::Waiting, 5).join("\n");
+        assert!(waiting.contains("/)/)"));
+        assert!(waiting_flop.contains("/)(/"));
+
+        let growing = only(SessionLifecycle::Creating, AgentPhase::Absent, 0).join("\n");
+        let emerged = only(SessionLifecycle::Creating, AgentPhase::Absent, 3).join("\n");
+        assert_ne!(growing, emerged);
+        assert!(growing.contains("__(_ _)__"));
+        assert!(emerged.contains("_( . .)_"));
+
+        let deleting = session(
+            STEADY_ID,
+            "leaving",
+            SessionLifecycle::Deleting,
+            AgentPhase::Ended,
+        );
+        let frame = |tick, reduced_motion| {
+            render(
+                24,
+                100,
+                "x",
+                std::slice::from_ref(&deleting),
+                tick,
+                reduced_motion,
+            )
+            .expect("fits")
+            .rows
+        };
+        assert_ne!(frame(0, false), frame(2, false));
+        assert_ne!(frame(2, false), frame(4, false));
+
+        for (lifecycle, phase) in [
+            (SessionLifecycle::Available, AgentPhase::Waiting),
+            (SessionLifecycle::Creating, AgentPhase::Absent),
+            (SessionLifecycle::Deleting, AgentPhase::Ended),
+        ] {
+            assert_eq!(
+                only_with_motion(lifecycle, phase, 0, true),
+                only_with_motion(lifecycle, phase, 5, true),
+                "{lifecycle:?}/{phase:?} must be static with reduced motion"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_tick_collapses_only_visually_identical_garden_phases() {
+        let idle = session(
+            STEADY_ID,
+            "idle",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        assert_eq!(
+            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 1, false),
+            Some(0)
+        );
+        assert_eq!(
+            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 4, false),
+            Some(4)
+        );
+
+        let running = session(
+            STEADY_ID,
+            "running",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        assert_eq!(
+            super::canonical_tick(24, 100, &[running], 3, false),
+            Some(0)
+        );
+
+        let waiting = session(
+            STEADY_ID,
+            "waiting",
+            SessionLifecycle::Available,
+            AgentPhase::Waiting,
+        );
+        assert_eq!(
+            super::canonical_tick(24, 100, std::slice::from_ref(&waiting), 5, false),
+            Some(5)
+        );
+        assert_eq!(super::canonical_tick(24, 100, &[waiting], 5, true), Some(0));
+        assert_eq!(super::canonical_tick(24, 100, &[], 5, false), Some(0));
+        assert_eq!(super::canonical_tick(13, 100, &[], 5, false), None);
+    }
+
+    #[test]
+    fn canonical_tick_ignores_sessions_outside_the_visible_capacity() {
+        let mut sessions = vec![
+            session(
+                STEADY_ID,
+                "still-a",
+                SessionLifecycle::Failed,
+                AgentPhase::Absent,
+            ),
+            session(
+                "01000000-0000-4000-8000-000000000001",
+                "still-b",
+                SessionLifecycle::Failed,
+                AgentPhase::Absent,
+            ),
+        ];
+        sessions.push(session(
+            "02000000-0000-4000-8000-000000000001",
+            "hidden-running",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        ));
+
+        assert_eq!(
+            super::canonical_tick(14, 64, &sessions, 0, false),
+            super::canonical_tick(14, 64, &sessions, 1, false)
+        );
+        assert_ne!(
+            super::canonical_tick(24, 100, &sessions, 0, false),
+            super::canonical_tick(24, 100, &sessions, 1, false)
+        );
+    }
+
+    #[test]
+    fn selected_nameplate_and_safe_failure_summary_are_visible_without_colour() {
+        let mut selected = session(
+            STEADY_ID,
+            "chosen",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        selected.selected = true;
+        let mut failed = session(
+            "01000000-0000-4000-8000-000000000001",
+            "broken",
+            SessionLifecycle::Failed,
+            AgentPhase::Absent,
+        );
+        failed.failure_summary = Some("branch exists".to_owned());
+        let frame = render(24, 100, "x", &[selected, failed], 0, false).expect("fits");
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("> chosen"));
+        assert!(text.contains("failed · branch exists"));
+        assert!(frame.rows.iter().all(|row| display_width(row) == 100));
+    }
+
+    #[test]
     fn overflow_reports_waiting_agents_that_cannot_fit() {
         let waiting = (0..4)
             .map(|index| {
@@ -747,6 +1002,8 @@ mod tests {
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
             label: "waiting".to_owned(),
             lifecycle: SessionLifecycle::Available,
+            selected: false,
+            failure_summary: None,
             agents,
         };
 

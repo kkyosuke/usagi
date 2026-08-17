@@ -1015,6 +1015,12 @@ impl RestoreConnectionPort for UnavailableRestoreConnectionPort {
 
 /// Single factory used by direct launch and every screen-graph workspace entry.
 pub trait ControllerBackendFactory {
+    /// Process-level motion preference resolved by the composition root. Fakes
+    /// keep full motion unless a test opts in explicitly.
+    fn garden_reduced_motion(&self) -> bool {
+        false
+    }
+
     fn create(
         &mut self,
         snapshot: &WorkspaceSnapshot,
@@ -4723,6 +4729,14 @@ impl HomeFrameMaterial {
         self.projection = self.projection.with_agent_inventory(inventory);
         self
     }
+
+    fn with_garden_reduced_motion(mut self, reduced_motion: bool) -> Self {
+        self.projection = self.projection.with_garden_reduced_motion(reduced_motion);
+        self.now = self
+            .projection
+            .canonical_garden_now(self.height, self.width, self.now);
+        self
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4785,6 +4799,7 @@ fn home_frame_material_shared(
         )
         // Last, once every surface that reads the animation clock is known.
         .collapse_animation_clock();
+    let now = projection.canonical_garden_now(height, width, now);
     HomeFrameMaterial {
         height,
         width,
@@ -5366,6 +5381,7 @@ fn drive_workspace_controller(
     let root_cwd = snapshot.workspace.path.clone();
     let agent_resumes = snapshot.agent_resumes.clone();
     let session_lifecycles = snapshot.session_lifecycles.clone();
+    let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
     let composition = backend_factory.create(&snapshot, host);
     let mut backend = composition.backend;
@@ -5670,6 +5686,7 @@ fn drive_workspace_controller(
                     .map(|create| create.name.as_str()),
                 now,
             )
+            .with_garden_reduced_motion(garden_reduced_motion)
             .with_agent_inventory(ui.agent_inventory());
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input

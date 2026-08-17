@@ -820,7 +820,15 @@ phase は各うさぎの pose と状態内訳へ投影する。利用可能な s
 より先に見える。`Waiting` 自体が 3 羽を超える場合は、描けない羽数を `+N wait hidden`（他 phase も隠れる場合は
 `+N hidden (W wait)`）と明示する。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。
 `Ended` / `Exited` は瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さない
-ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。
+ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。選択中の区画は `>` と Accent の nameplate、
+それ以外は dim の nameplate で区別する。`Failed` は daemon projection が安全化した短い failure summary だけを
+`failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
+
+`Running` は 3 pose、`Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
+土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は既存 frame tick を共有し、
+同じ pose を描く tick は canonical tick へ畳んで frame material の不要な再描画を抑える。
+composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
+全 pose を静止姿勢に固定し、lifecycle と Agent phase の状態ラベルだけを更新する。
 
 ### 自動表示
 

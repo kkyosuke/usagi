@@ -178,6 +178,18 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GardenMotion {
+    Full,
+    Reduced,
+}
+
+impl GardenMotion {
+    const fn is_reduced(self) -> bool {
+        matches!(self, Self::Reduced)
+    }
+}
+
 /// controller の Home state を描画可能な session / action row へ投影した値。
 ///
 /// session の順番は controller snapshot の `SessionId` 順を使い、表示情報は ID で結合する。
@@ -249,6 +261,8 @@ pub struct HomeProjection {
     /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
     /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
+    /// Composition root が一度だけ解決した Garden の motion preference。
+    garden_motion: GardenMotion,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
     daemon_runtimes: Option<Vec<daemon_modal::AgentRuntimeRow>>,
     /// Persisted Closeup action-modal input, when its overlay is open.
@@ -373,6 +387,8 @@ impl HomeProjection {
                     id: session.id,
                     label: session.label.clone(),
                     lifecycle: session.lifecycle,
+                    selected: state.selected() == Selection::Target(Target::Session(session.id)),
+                    failure_summary: session.failure_summary.clone(),
                     agents: state
                         .runtimes()
                         .iter()
@@ -430,6 +446,7 @@ impl HomeProjection {
             daemon_overlay: state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
             garden_sessions,
+            garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
             closeup_modal: None,
             create_draft,
@@ -442,6 +459,41 @@ impl HomeProjection {
                 .director_drawer_open()
                 .then(DirectorDrawerProjection::default),
         }
+    }
+
+    /// Attach the composition-owned motion preference without teaching the
+    /// renderer or reducer to read process environment.
+    #[must_use]
+    pub fn with_garden_reduced_motion(mut self, reduced_motion: bool) -> Self {
+        self.garden_motion = if reduced_motion {
+            GardenMotion::Reduced
+        } else {
+            GardenMotion::Full
+        };
+        self
+    }
+
+    pub(crate) fn canonical_garden_now(
+        &self,
+        raw_height: usize,
+        raw_width: usize,
+        now: DateTime<Utc>,
+    ) -> DateTime<Utc> {
+        let Some(sessions) = self.garden_sessions.as_deref() else {
+            return now;
+        };
+        let (height, width) = widgets::normalize_size(raw_height, raw_width);
+        let Some(tick) = widgets::garden::canonical_tick(
+            height,
+            width,
+            sessions,
+            garden_tick(now),
+            self.garden_motion.is_reduced(),
+        ) else {
+            return now;
+        };
+        DateTime::from_timestamp(i64::try_from(tick).expect("six phases fit i64"), 0)
+            .expect("a six-second Unix timestamp is valid")
     }
 
     /// Attach the name of a create request the daemon is still fulfilling, so the
@@ -1558,7 +1610,7 @@ fn garden_frame(
         &home.workspace_name,
         sessions,
         garden_tick(now),
-        false,
+        home.garden_motion.is_reduced(),
     )
 }
 
@@ -3531,6 +3583,8 @@ mod tests {
             }
             projected.push(projected_session(ids[index], &format!("s{index}"), "/work"));
         }
+        projected[4].lifecycle = SessionLifecycle::Failed;
+        projected[4].failure_summary = Some("worktree missing".to_owned());
         // 同じ session に終了済み runtime があっても、実行中 runtime を Garden から
         // 消さない。sidebar 用の集約は従来どおり Done のままでよい。
         let _ = update(
@@ -3548,6 +3602,11 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
         let garden = home.garden_sessions.as_ref().expect("garden projection");
+        assert!(garden[0].selected);
+        assert_eq!(
+            garden[4].failure_summary.as_deref(),
+            Some("worktree missing")
+        );
         assert_eq!(garden[2].agents.len(), 2);
         assert!(
             garden[2]
@@ -3568,6 +3627,8 @@ mod tests {
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 run · 1 done"));
+        assert!(text.contains("> s0"));
+        assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
 
         // 最小サイズに満たない端末では Garden を開かず Home を保つ。操作できる一覧を
@@ -3663,6 +3724,53 @@ mod tests {
         assert_eq!(
             garden_tick(base),
             garden_tick(base + chrono::Duration::milliseconds(400))
+        );
+    }
+
+    #[test]
+    fn garden_material_clock_collapses_held_poses_and_all_reduced_motion_ticks() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime_ref(workspace, session),
+                phase: AgentPhase::Running,
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "running", "/work")],
+        );
+        let epoch = DateTime::from_timestamp(0, 0).expect("Unix epoch");
+        assert_ne!(
+            home.canonical_garden_now(24, 100, epoch),
+            home.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(1))
+        );
+        assert_eq!(
+            home.canonical_garden_now(24, 100, epoch),
+            home.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(3))
+        );
+
+        let reduced = home.with_garden_reduced_motion(true);
+        assert_eq!(
+            reduced.canonical_garden_now(24, 100, epoch),
+            reduced.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(5))
+        );
+
+        let ordinary_home_now = epoch + chrono::Duration::days(20_000);
+        assert_eq!(
+            reduced.canonical_garden_now(13, 63, ordinary_home_now),
+            ordinary_home_now,
+            "a Garden that does not fit must preserve the ordinary Home clock"
         );
     }
 
