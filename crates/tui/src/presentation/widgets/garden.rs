@@ -379,12 +379,21 @@ fn available_plot(
 ) -> [String; PLOT_CONTENT_ROWS - 1] {
     let agents = ordered_agents(&session.agents);
     if agents.is_empty() {
+        // A usable session can legitimately have no runtime yet (for example,
+        // before its first Agent is launched).  Keep the plot recognisable as
+        // part of the Garden instead of turning it into an empty diagnostic
+        // tile.  The session identity gives this ambient rabbit the same stable
+        // animation offset guarantees as runtime-backed rabbits.
+        let phase = animation_phase(tick, reduced_motion, &session.id.as_str());
+        let (status, status_style, rabbit_style, rabbit) =
+            agent_appearance(AgentPhase::Absent, phase);
+        let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
         return [
-            centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
-            " ".repeat(PLOT_WIDTH),
-            " ".repeat(PLOT_WIDTH),
-            " ".repeat(PLOT_WIDTH),
-            " ".repeat(PLOT_WIDTH),
+            centered(PLOT_WIDTH, &status_style.paint(status)),
+            ears,
+            head,
+            body,
+            feet,
         ];
     }
 
@@ -749,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn an_available_session_without_an_agent_draws_an_empty_plot() {
+    fn an_available_session_without_an_agent_still_draws_a_usagi() {
         let frame = render(
             24,
             100,
@@ -767,8 +776,10 @@ mod tests {
         )
         .expect("fits");
         let text = plain(&frame).join("\n");
-        assert!(text.contains("no agents"));
-        assert!(!text.contains("/)/)"));
+        assert!(text.contains("available"));
+        assert!(text.contains("/)/)"));
+        assert!(text.contains("( . .)"));
+        assert!(!text.contains("no agents"));
     }
 
     #[test]

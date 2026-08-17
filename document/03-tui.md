@@ -811,9 +811,11 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle と contr
 
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。session の lifecycle は nameplate と区画の pose、Agent
-phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
-描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+1 区画は 1 session、runtime がある区画では 1 うさぎは 1 Agent runtime である。session の lifecycle は nameplate
+と区画の pose、Agent phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime がまだ無い場合も、
+空区画にはせず `available` の休んだうさぎを 1 羽描く。この ambient なうさぎの animation offset には stable
+`SessionId` を使う。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽
+並べる。
 
 複数 runtime は `Waiting` を先頭にし、残りと同 phase の tie-break を stable `AgentRuntimeId` 順にする。4 羽目
 以降は末尾から畳み、状態内訳の末尾へ `+N hidden` を表示する。このため入力待ちの runtime は低い注目度の runtime
