@@ -92,6 +92,8 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - deadline を超えた `op` は、その child handle の owner が exact child だけへ graceful terminate を送り、2 秒の bounded wait
   後も残る場合は kill する。その後は wait/reap と stdout / stderr reader の join を終えてから failure を返す。任意 PID や
   owner が証明できない process は signal 対象にしない。
+- 正常終了、非 zero、output 超過、deadline、reader failure のいずれでも stdout / stderr の両 reader を join してから
+  結果を返す。片方の reader が panic または read error になっても、もう片方を detach しない。
 - `op` の認証は CLI 側の通常の仕組みに従う。`op signin` セッションに加え、env editor で平文の
   `OP_SERVICE_ACCOUNT_TOKEN` を設定できる。global と workspace の両方にある場合は workspace が勝つ。
   daemon はこの値を通常の設定 env から取り除き、自身が所有する `op read` subprocess だけへ渡すため、

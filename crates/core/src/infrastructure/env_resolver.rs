@@ -283,18 +283,46 @@ fn capture_output(reader: &mut dyn std::io::Read, limit: usize) -> std::io::Resu
     Ok(CapturedOutput { bytes, exceeded })
 }
 
+type OutputReader = std::thread::JoinHandle<std::io::Result<CapturedOutput>>;
+
+fn join_output_reader(handle: &mut Option<OutputReader>) -> Result<CapturedOutput, String> {
+    handle
+        .take()
+        .ok_or_else(|| "secret resolver output already joined".to_owned())?
+        .join()
+        .map_err(|_| "secret resolver output reader panicked".to_owned())?
+        .map_err(|_| "could not read secret resolver output".to_owned())
+}
+
+/// Join both pipe readers even when the first one fails.
+///
+/// A reader error must not detach its sibling: timeout/cancellation and
+/// ordinary completion all use this function as the final output-lifecycle
+/// fence. Return the stdout error first for deterministic diagnostics, but only
+/// after both handles have been consumed and joined.
+fn join_output_readers(
+    stdout: &mut Option<OutputReader>,
+    stderr: &mut Option<OutputReader>,
+) -> Result<(CapturedOutput, CapturedOutput), String> {
+    let stdout = join_output_reader(stdout);
+    let stderr = join_output_reader(stderr);
+    match (stdout, stderr) {
+        (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
 mod real {
     #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output,capture_output_retains_the_limit_and_drains_to_eof
 
     use std::io::Read;
     use std::process::Child;
-    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     use super::{
         Cancellation, CapturedOutput, ChildExit, ChildRunner, OP_OUTPUT_BYTES_MAX,
-        OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT, OwnedChild, Time, capture_output,
-        op_read_command, run_owned_child,
+        OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT, OutputReader, OwnedChild, Time,
+        capture_output, join_output_readers, op_read_command, run_owned_child,
     };
 
     pub(super) fn run(
@@ -337,14 +365,14 @@ mod real {
         }
     }
 
-    fn reader(mut pipe: impl Read + Send + 'static) -> JoinHandle<std::io::Result<CapturedOutput>> {
+    fn reader(mut pipe: impl Read + Send + 'static) -> OutputReader {
         std::thread::spawn(move || capture_output(&mut pipe, OP_OUTPUT_BYTES_MAX))
     }
 
     struct SystemChild {
         child: Child,
-        stdout: Option<JoinHandle<std::io::Result<CapturedOutput>>>,
-        stderr: Option<JoinHandle<std::io::Result<CapturedOutput>>>,
+        stdout: Option<OutputReader>,
+        stderr: Option<OutputReader>,
     }
 
     impl SystemChild {
@@ -397,19 +425,7 @@ mod real {
         }
 
         fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String> {
-            fn join(
-                handle: &mut Option<JoinHandle<std::io::Result<CapturedOutput>>>,
-            ) -> Result<CapturedOutput, String> {
-                handle
-                    .take()
-                    .ok_or_else(|| "secret resolver output already joined".to_owned())?
-                    .join()
-                    .map_err(|_| "secret resolver output reader panicked".to_owned())?
-                    .map_err(|_| "could not read secret resolver output".to_owned())
-            }
-            let stdout = join(&mut self.stdout)?;
-            let stderr = join(&mut self.stderr)?;
-            Ok((stdout, stderr))
+            join_output_readers(&mut self.stdout, &mut self.stderr)
         }
     }
 
@@ -991,6 +1007,81 @@ mod tests {
             }
         );
         assert!(capture_output(&mut Broken, 6).is_err());
+    }
+
+    #[test]
+    fn output_reader_failure_still_joins_the_other_stream() {
+        let sibling_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&sibling_completed);
+        let mut stdout = Some(std::thread::spawn(|| {
+            Err(std::io::Error::other("injected stdout failure"))
+        }));
+        let mut stderr = Some(std::thread::spawn(move || {
+            observed.store(true, Ordering::Release);
+            Ok(CapturedOutput {
+                bytes: Vec::new(),
+                exceeded: false,
+            })
+        }));
+
+        assert_eq!(
+            join_output_readers(&mut stdout, &mut stderr),
+            Err("could not read secret resolver output".to_owned())
+        );
+        assert!(stdout.is_none(), "the failed stdout reader was consumed");
+        assert!(
+            stderr.is_none(),
+            "the sibling stderr reader was also joined"
+        );
+        assert!(
+            sibling_completed.load(Ordering::Acquire),
+            "the sibling reader ran to completion before return"
+        );
+    }
+
+    #[test]
+    fn output_reader_join_reports_success_stderr_failure_panic_and_reuse_safely() {
+        let output = || CapturedOutput {
+            bytes: b"captured".to_vec(),
+            exceeded: false,
+        };
+
+        let mut stdout = Some(std::thread::spawn(move || Ok(output())));
+        let mut stderr = Some(std::thread::spawn(move || Ok(output())));
+        assert_eq!(
+            join_output_readers(&mut stdout, &mut stderr),
+            Ok((
+                CapturedOutput {
+                    bytes: b"captured".to_vec(),
+                    exceeded: false,
+                },
+                CapturedOutput {
+                    bytes: b"captured".to_vec(),
+                    exceeded: false,
+                },
+            ))
+        );
+
+        let mut stdout = Some(std::thread::spawn(move || Ok(output())));
+        let mut stderr = Some(std::thread::spawn(|| {
+            Err(std::io::Error::other("injected stderr failure"))
+        }));
+        assert_eq!(
+            join_output_readers(&mut stdout, &mut stderr),
+            Err("could not read secret resolver output".to_owned())
+        );
+
+        let mut panicked = Some(std::thread::spawn(|| -> std::io::Result<CapturedOutput> {
+            panic!("injected output reader panic");
+        }));
+        assert_eq!(
+            join_output_reader(&mut panicked),
+            Err("secret resolver output reader panicked".to_owned())
+        );
+        assert_eq!(
+            join_output_reader(&mut panicked),
+            Err("secret resolver output already joined".to_owned())
+        );
     }
 
     #[test]
