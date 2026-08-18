@@ -827,8 +827,8 @@ Home に存在しない session の runtime は区画へ加えない。
 より先に見える。`Waiting` 自体が 3 羽を超える場合は、描けない羽数を `+N wait hidden`（他 phase も隠れる場合は
 `+N hidden (W wait)`）と明示する。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。
 `Ended` / `Exited` は瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さない
-ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。選択中の区画は `>` と Accent の nameplate、
-それ以外は dim の nameplate で区別する。`Failed` は daemon projection が安全化した短い failure summary だけを
+ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。session の選択状態は Garden に装飾せず、
+すべて同じ dim の nameplate で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
 `Running` は hop・bound・sniff・dig・look の長さが異なる 5 種類の基本動作を持つ。各 runtime の stable

@@ -3717,7 +3717,7 @@ mod tests {
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 run · 1 done"));
-        assert!(text.contains("> s0"));
+        assert!(!text.contains("> s0"));
         assert!(text.contains("failed · worktree missing"));
         assert!(text.contains("s0"));
 
