@@ -1096,6 +1096,7 @@ mod tests {
     #[test]
     fn overlay_effects_complete_with_explicit_errors_without_an_overlay_port() {
         let mut backend = backend();
+        let session = SessionId::new();
         for effect in [
             Effect::LoadPullRequests {
                 target: Target::Root(WorkspaceId::new()),
@@ -1106,10 +1107,17 @@ mod tests {
             Effect::OpenPullRequest {
                 url: "https://github.com/o/r/pull/7".to_owned(),
             },
+            Effect::CopyPullRequest {
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            },
+            Effect::DismissPullRequest {
+                session,
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            },
         ] {
             assert_eq!(backend.dispatch(effect), Flow::Continue);
         }
-        assert_eq!(backend.drain_events().len(), 3);
+        assert_eq!(backend.drain_events().len(), 5);
     }
 
     #[test]

@@ -9177,6 +9177,10 @@ mod tests {
             }),
         );
         assert!(state.celebrates_pr_merge(session));
+        for _ in 0..25 {
+            let _ = update(&mut state, AppEvent::Tick);
+        }
+        assert!(!state.celebrates_pr_merge(session));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
         assert_eq!(
@@ -9186,18 +9190,95 @@ mod tests {
             }]
         );
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Char('f'))),
-            Vec::new()
-        );
-        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
-        assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
-        assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('d'))),
             vec![Effect::DismissPullRequest {
                 session,
                 url: "https://github.com/o/r/pull/1".into()
             }]
         );
+    }
+
+    #[test]
+    fn open_pr_overlay_tracks_new_detection_and_cycles_every_filter() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let mut merged = pr_link(2);
+        merged.state = PrState::Merged;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr_link(1), merged.clone()],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let newly_detected = pr_link(3);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: vec![pr_link(1), merged, newly_detected.clone()],
+            }),
+        );
+        assert_eq!(
+            state.pr_overlay().unwrap().selected_pr(),
+            Some(&newly_detected)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
+        assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
+        for (filter, expected) in [
+            (PrFilter::Closed, 0),
+            (PrFilter::Merged, 1),
+            (PrFilter::All, 3),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+            assert_eq!(state.pr_overlay().unwrap().filter(), filter);
+            assert_eq!(state.pr_overlay().unwrap().prs().len(), expected);
+        }
+        assert_eq!(PrFilter::All.label(), "all");
+        assert_eq!(PrFilter::Open.label(), "open");
+        assert_eq!(PrFilter::Closed.label(), "closed");
+        assert_eq!(PrFilter::Merged.label(), "merged");
+
+        state.pr_overlay = None;
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('f'))).is_empty());
+    }
+
+    #[test]
+    fn explicit_pr_auto_open_modes_cover_always_notify_and_never() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        for (mode, opens, notifies) in [
+            (PrAutoOpen::Always, true, false),
+            (PrAutoOpen::NotifyOnly, false, true),
+            (PrAutoOpen::Never, false, false),
+        ] {
+            let mut state = AppState::home(workspace, vec![session]);
+            state.route = Route::Home(HomeMode::Closeup);
+            state.set_pr_auto_open(mode);
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision: 0,
+                    prs: Vec::new(),
+                }),
+            );
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision: 1,
+                    prs: vec![pr_link(7)],
+                }),
+            );
+            assert_eq!(state.overlay() == Some(Overlay::Prs), opens);
+            assert_eq!(state.notice().is_some(), notifies);
+        }
     }
 
     #[test]

@@ -1133,11 +1133,37 @@ mod tests {
                 review: None,
             })
         );
+        assert_eq!(
+            parse_gh_pr_view(
+                r#"{"title":"x","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[]}"#,
+            )
+            .unwrap()
+            .review,
+            Some(PrReviewDecision::ChangesRequested)
+        );
+        let required = parse_gh_pr_view(
+            r#"{"title":"x","state":"OPEN","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"state":"EXPECTED"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(required.review, Some(PrReviewDecision::ReviewRequired));
+        assert_eq!(required.checks, Some(PrChecksState::Pending));
+        assert_eq!(
+            parse_gh_pr_view(
+                r#"{"title":"x","state":"OPEN","statusCheckRollup":[{"conclusion":"FAILURE"}]}"#,
+            )
+            .unwrap()
+            .checks,
+            Some(PrChecksState::Failing)
+        );
         for invalid in [
             "not json",
             "{}",
             "{\"title\":1,\"state\":\"OPEN\"}",
+            "{\"title\":\"x\"}",
+            "{\"title\":\"x\",\"state\":1}",
             "{\"title\":\"x\",\"state\":\"DRAFT\"}",
+            r#"{"title":"x","state":"OPEN","reviewDecision":"UNKNOWN"}"#,
+            r#"{"title":"x","state":"OPEN","statusCheckRollup":{}}"#,
         ] {
             assert_eq!(parse_gh_pr_view(invalid), None);
         }
@@ -1205,6 +1231,37 @@ mod tests {
     }
 
     #[test]
+    fn closed_pull_requests_use_the_extended_refresh_interval() {
+        let session = SessionId::new();
+        let id = canonicalize("https://github.com/o/r/pull/15").unwrap();
+        let mut projector = OutputPrProjector::new(Store::default());
+        discover(&mut projector, session, id.as_url());
+        let clock = FakeClock::default();
+        let mut worker = RefreshWorker::new(FakeRunner::default(), clock.clone(), 1, 10_000);
+        worker.rebuild(&mut projector).unwrap();
+        assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id.clone()]);
+        assert!(
+            worker
+                .complete(
+                    &mut projector,
+                    &id,
+                    RefreshResult::Success(GhPrView {
+                        title: Some("closed".into()),
+                        state: PrState::Closed,
+                        draft: false,
+                        checks: None,
+                        review: None,
+                    }),
+                )
+                .unwrap()
+        );
+        clock.set(149_999);
+        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
+        clock.set(150_000);
+        assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id]);
+    }
+
+    #[test]
     fn restart_rebuild_is_immediate_deterministic_and_worker_bound_is_per_tick() {
         let mut projector = OutputPrProjector::new(Store::default());
         let session = SessionId::new();
@@ -1261,6 +1318,60 @@ mod tests {
     }
 
     #[test]
+    fn every_inventory_read_and_new_mutation_propagates_storage_errors() {
+        let session = SessionId::new();
+        let id = canonicalize("https://github.com/o/r/pull/16").unwrap();
+        let failing_projector = || {
+            let store = Store::default();
+            store.fail_load.set(true);
+            OutputPrProjector::new(store)
+        };
+
+        let mut projector = failing_projector();
+        let mut worker = RefreshWorker::new(FakeRunner::default(), FakeClock::default(), 1, 10);
+        assert!(worker.rebuild(&mut projector).is_err());
+        let mut projector = failing_projector();
+        assert!(worker.claim_due(&mut projector).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.refresh_candidates().is_err());
+        let mut projector = failing_projector();
+        assert!(
+            projector
+                .publish_success(
+                    &id,
+                    &GhPrView {
+                        title: None,
+                        state: PrState::Open,
+                        draft: false,
+                        checks: None,
+                        review: None,
+                    },
+                )
+                .is_err()
+        );
+        let mut projector = failing_projector();
+        assert!(projector.publish_failure(&id).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.snapshot(session).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.snapshots(&[session]).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.dismiss(session, id.as_url()).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.retain_sessions(&BTreeSet::new()).is_err());
+
+        let mut dismiss = OutputPrProjector::new(Store::default());
+        discover(&mut dismiss, session, id.as_url());
+        dismiss.store.fail_save.set(true);
+        assert!(dismiss.dismiss(session, id.as_url()).is_err());
+
+        let mut retain = OutputPrProjector::new(Store::default());
+        discover(&mut retain, session, id.as_url());
+        retain.store.fail_save.set(true);
+        assert!(retain.retain_sessions(&BTreeSet::new()).is_err());
+    }
+
+    #[test]
     fn references_do_not_auto_open_but_standalone_urls_do_and_user_can_dismiss() {
         let session = SessionId::new();
         let terminal = TerminalId::new();
@@ -1294,6 +1405,12 @@ mod tests {
         let mut projector = OutputPrProjector::new(Store::default());
         discover(&mut projector, kept, "https://github.com/o/r/pull/1");
         discover(&mut projector, removed, "https://github.com/o/r/pull/2");
+        assert!(!projector.dismiss(kept, "not-a-pr").unwrap());
+        assert!(
+            !projector
+                .dismiss(SessionId::new(), "https://github.com/o/r/pull/9")
+                .unwrap()
+        );
         assert_eq!(projector.snapshots(&[kept, removed]).unwrap().len(), 2);
         assert!(projector.retain_sessions(&BTreeSet::from([kept])).unwrap());
         assert_eq!(projector.snapshot(removed).unwrap().entries, Vec::new());

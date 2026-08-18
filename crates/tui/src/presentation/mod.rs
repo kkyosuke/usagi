@@ -9710,6 +9710,30 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_backend_reports_pr_copy_and_dismiss_errors() {
+        use crate::usecase::application::daemon_backend::OverlayPort as _;
+
+        let mut port = UnavailableBackendPort;
+        let (copy, copy_events) = Completions::channel();
+        port.copy_pull_request("https://github.com/o/r/pull/7".to_owned(), copy);
+        assert!(matches!(
+            copy_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+
+        let (dismiss, dismiss_events) = Completions::channel();
+        port.dismiss_pull_request(
+            SessionId::new(),
+            "https://github.com/o/r/pull/7".to_owned(),
+            dismiss,
+        );
+        assert!(matches!(
+            dismiss_events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+    }
+
+    #[test]
     fn session_role_catalog_filters_scope_and_falls_back_on_invalid_source() {
         let root = tempdir().unwrap();
         let data_home = root.path().join("home");

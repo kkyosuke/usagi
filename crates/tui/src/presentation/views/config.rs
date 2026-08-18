@@ -1506,6 +1506,11 @@ mod tests {
         ] {
             assert!(config.cycle_selected(true));
             assert_eq!(config.settings().pr_auto_open, expected);
+            assert!(
+                render(24, 100, &config)
+                    .join("\n")
+                    .contains(super::pr_auto_open_name(expected))
+            );
         }
         assert!(render(24, 100, &config).join("\n").contains("Auto-open"));
     }

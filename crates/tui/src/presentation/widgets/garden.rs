@@ -1392,6 +1392,7 @@ mod tests {
             AgentPhase::Ready,
         );
         merged.pr_merged = true;
+        assert!(super::session_may_animate(&merged));
         let animated =
             plain(&render(24, 100, "x", &[merged.clone()], 1, false).unwrap()).join("\n");
         let reduced = plain(&render(24, 100, "x", &[merged], 1, true).unwrap()).join("\n");

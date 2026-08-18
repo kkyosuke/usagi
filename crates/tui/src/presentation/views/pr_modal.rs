@@ -292,7 +292,9 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{PrModal, render, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
-    use usagi_core::domain::pr_inventory::{PrEntry, PrRefreshState, PrState, canonicalize};
+    use usagi_core::domain::pr_inventory::{
+        PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
+    };
     use usagi_core::domain::pullrequest::PrLink;
 
     #[test]
@@ -359,6 +361,59 @@ mod tests {
         assert_eq!(modal.prs()[0].refresh, PrRefreshState::Pending);
         let rendered = joined(&modal);
         assert!(rendered.contains("open"));
+    }
+
+    #[test]
+    fn remote_metadata_renders_every_draft_check_and_review_label() {
+        let variants = [
+            (
+                true,
+                Some(PrChecksState::Passing),
+                Some(PrReviewDecision::Approved),
+            ),
+            (
+                false,
+                Some(PrChecksState::Failing),
+                Some(PrReviewDecision::ChangesRequested),
+            ),
+            (
+                false,
+                Some(PrChecksState::Pending),
+                Some(PrReviewDecision::ReviewRequired),
+            ),
+        ];
+        let entries = variants
+            .into_iter()
+            .enumerate()
+            .map(|(index, (draft, checks, review))| PrEntry {
+                identity: canonicalize(&format!(
+                    "https://github.com/acme/widget/pull/{}",
+                    index + 1
+                ))
+                .unwrap(),
+                title: Some(format!("metadata {index}")),
+                state: PrState::Open,
+                pinned: false,
+                refresh: PrRefreshState::Idle,
+                draft,
+                checks,
+                review,
+                auto_open: true,
+            })
+            .collect::<Vec<_>>();
+
+        let rendered = joined(&PrModal::from_entries(&entries));
+        for label in [
+            "draft",
+            "ci✓",
+            "review✓",
+            "ci✗",
+            "changes",
+            "ci…",
+            "review…",
+        ] {
+            assert!(rendered.contains(label), "missing {label}: {rendered}");
+        }
     }
 
     #[test]
