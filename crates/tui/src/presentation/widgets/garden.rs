@@ -27,6 +27,36 @@ const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - 1;
 const SPRITE_ROWS: usize = 4;
 const COMPACT_RABBIT_WIDTH: usize = 8;
 const MAX_VISIBLE_AGENTS: usize = PLOT_WIDTH / COMPACT_RABBIT_WIDTH;
+const RUNNING_ACTION_CYCLE_TICKS: u64 = 25;
+const RUNNING_ACTION_SEQUENCE_ROUNDS: u64 = 4;
+const RUNNING_ANIMATION_CYCLE_TICKS: u64 =
+    RUNNING_ACTION_CYCLE_TICKS * RUNNING_ACTION_SEQUENCE_ROUNDS;
+pub(crate) const ANIMATION_CYCLE_TICKS: u64 = 300;
+
+/// Running のうさぎが繰り返す基本動作。各動作の長さを変え、runtime identity から
+/// 並び順を shuffle することで、同じ phase のうさぎも一斉に同じ動きをしない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RunningAction {
+    Hop,
+    Bound,
+    Sniff,
+    Dig,
+    Look,
+}
+
+impl RunningAction {
+    const ALL: [Self; 5] = [Self::Hop, Self::Bound, Self::Sniff, Self::Dig, Self::Look];
+
+    const fn duration(self) -> u64 {
+        match self {
+            Self::Hop => 3,
+            Self::Bound => 4,
+            Self::Sniff => 5,
+            Self::Dig => 6,
+            Self::Look => 7,
+        }
+    }
+}
 
 /// 地面のタイル。庭の幅いっぱいに敷き詰めるため、隣り合うタイルで草の位置を変えて
 /// 同じ絵が横に並ぶ tiling に見せない。
@@ -47,7 +77,7 @@ pub struct GardenSession {
     pub agents: Vec<GardenAgent>,
 }
 
-/// Garden に描く 1 agent。runtime identity は並び順と animation offset だけに使う。
+/// Garden に描く 1 agent。runtime identity は並び順と animation sequence に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GardenAgent {
     pub runtime_id: AgentRuntimeId,
@@ -200,7 +230,7 @@ pub fn render(
     })
 }
 
-/// Smallest phase in the six-tick cycle that draws the same visible Garden plots.
+/// Smallest phase in the Garden animation cycle that draws the same visible plots.
 /// Folding onto this representative lets frame material equality suppress a
 /// redraw when a slow animation holds its current pose. `None` means the Garden
 /// does not fit and the caller must preserve the ordinary Home clock.
@@ -214,13 +244,13 @@ pub fn canonical_tick(
 ) -> Option<u64> {
     let layout = garden_layout(height, width)?;
     let sessions = &sessions[..sessions.len().min(layout.capacity)];
-    let tick = tick % 6;
+    let tick = tick % ANIMATION_CYCLE_TICKS;
     let expected = sessions
         .iter()
         .map(|session| plot(session, tick, reduced_motion))
         .collect::<Vec<_>>();
     Some(
-        (0..6)
+        (0..ANIMATION_CYCLE_TICKS)
             .find(|candidate| {
                 sessions
                     .iter()
@@ -390,8 +420,12 @@ fn available_plot(
 
     if agents.len() == 1 {
         let agent = agents[0];
-        let phase = animation_phase(tick, reduced_motion, &agent.runtime_id.as_str());
-        let (status, status_style, rabbit_style, rabbit) = agent_appearance(agent.phase, phase);
+        let (status, status_style, rabbit_style, rabbit) = agent_appearance(
+            agent.phase,
+            tick,
+            reduced_motion,
+            &agent.runtime_id.as_str(),
+        );
         let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
         return [
             centered(PLOT_WIDTH, &status_style.paint(status)),
@@ -407,8 +441,12 @@ fn available_plot(
     let status = agent_summary(&agents, hidden);
     let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
     for agent in visible {
-        let phase = animation_phase(tick, reduced_motion, &agent.runtime_id.as_str());
-        let (_, _, style, rabbit) = agent_appearance(agent.phase, phase);
+        let (_, _, style, rabbit) = agent_appearance(
+            agent.phase,
+            tick,
+            reduced_motion,
+            &agent.runtime_id.as_str(),
+        );
         let compact = sprite(rabbit, style, COMPACT_RABBIT_WIDTH);
         for (row, part) in rows.iter_mut().zip(compact) {
             row.push_str(&part);
@@ -432,15 +470,19 @@ fn ordered_agents(agents: &[GardenAgent]) -> Vec<GardenAgent> {
 
 fn agent_appearance(
     agent_phase: AgentPhase,
-    phase: u64,
+    tick: u64,
+    reduced_motion: bool,
+    stable_id: &str,
 ) -> (&'static str, Style, Style, [&'static str; 4]) {
     let feature = Role::Feature.style().bold();
+    let phase = animation_phase(tick, reduced_motion, stable_id);
     match agent_phase {
         AgentPhase::Running => {
-            let rabbit = match phase % 3 {
-                0 => ["", " /)/)", "( o.o)", " / > <"],
-                1 => [" /)/)", "( o.o)", " / > <", ""],
-                _ => ["", "  /)/)", "_( o.o)_", "  > ^ <"],
+            let rabbit = if reduced_motion {
+                ["", " /)/)", "( o.o)", "c(\")(\")"]
+            } else {
+                let (action, progress) = running_action(tick, stable_id);
+                running_pose(action, progress)
             };
             ("running", Role::Success.style().bold(), feature, rabbit)
         }
@@ -474,6 +516,76 @@ fn agent_appearance(
                 ["", " /)/)", face, "c(\")(\")"],
             )
         }
+    }
+}
+
+/// One deterministic pseudo-random action and its local tick.
+///
+/// Rendering must stay pure, so this does not use process randomness. The stable runtime ID
+/// selects both a starting offset and a freshly shuffled order for each 25-tick round. Every
+/// round contains all five differently-sized actions exactly once, while different rabbits
+/// normally get different sequences.
+fn running_action(tick: u64, stable_id: &str) -> (RunningAction, u64) {
+    let seed = stable_hash(stable_id);
+    let timeline = (tick + seed.rotate_right(17)) % RUNNING_ANIMATION_CYCLE_TICKS;
+    let round = timeline / RUNNING_ACTION_CYCLE_TICKS;
+    let order = shuffled_running_actions(seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut local_tick = timeline % RUNNING_ACTION_CYCLE_TICKS;
+    for action in order {
+        if local_tick < action.duration() {
+            return (action, local_tick);
+        }
+        local_tick -= action.duration();
+    }
+    unreachable!("running action durations cover the cycle")
+}
+
+fn shuffled_running_actions(mut state: u64) -> [RunningAction; 5] {
+    let mut actions = RunningAction::ALL;
+    for index in (1..actions.len()).rev() {
+        // xorshift64: small, deterministic, and sufficient for visual variety.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let choices = u64::try_from(index + 1).expect("five actions fit u64");
+        let swap_index = usize::try_from(state % choices).expect("shuffle index fits usize");
+        actions.swap(index, swap_index);
+    }
+    actions
+}
+
+fn stable_hash(value: &str) -> u64 {
+    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+fn running_pose(action: RunningAction, progress: u64) -> [&'static str; SPRITE_ROWS] {
+    match action {
+        RunningAction::Hop => match progress {
+            0 => ["", " /)/)", "( o.o)", " / > <"],
+            1 => [" /)/)", "( o.o)", " / > <", ""],
+            _ => ["", "  /)/)", "_( o.o)_", "  > ^ <"],
+        },
+        RunningAction::Bound => match progress {
+            0 | 3 => ["", " /)/) __", "( o.o)/", "  /  \\"],
+            1 | 2 => [" /)/)___", "( o.o)  ", " /   > ", ""],
+            _ => unreachable!("bound progress is within its duration"),
+        },
+        RunningAction::Sniff => match progress {
+            1 | 3 => ["", " /)/)", "( o.o)>", "c(\")(\")"],
+            _ => ["", " /)/)", "( o.o)", "c(\")(\")"],
+        },
+        RunningAction::Dig => match progress % 3 {
+            0 => ["", " /)/)", "_( o.o)_", "  / >#"],
+            1 => ["", " /)/)", "_( o.o)_", " #< \\"],
+            _ => ["", " /)/)", "_( o.o)_", "  # #"],
+        },
+        RunningAction::Look => match progress {
+            2 | 3 => ["", " /)/)", "(o.o )", "c(\")(\")"],
+            4 | 5 => ["", " (\\(\\", "( o.o)", "c(\")(\")"],
+            _ => ["", " /)/)", "( o.o)", "c(\")(\")"],
+        },
     }
 }
 
@@ -745,7 +857,7 @@ mod tests {
             text.contains("( o.o)?"),
             "the waiting agent must stay visible"
         );
-        assert_eq!(text.matches("/)/)").count(), super::MAX_VISIBLE_AGENTS);
+        assert_eq!(text.matches("o.o").count(), super::MAX_VISIBLE_AGENTS);
     }
 
     #[test]
@@ -820,14 +932,14 @@ mod tests {
     }
 
     #[test]
-    fn a_running_usagi_cycles_three_poses_and_an_idle_one_blinks() {
-        // phase % 3 が 0 / 1 / 2 の 3 pose すべてを踏む（offset 0 の id なので tick = phase）。
-        let poses = (0..3)
+    fn a_running_usagi_uses_varied_poses_and_an_idle_one_blinks() {
+        let poses = (0..super::RUNNING_ACTION_CYCLE_TICKS)
             .map(|tick| only(SessionLifecycle::Available, AgentPhase::Running, tick).join("\n"))
-            .collect::<Vec<_>>();
-        assert_ne!(poses[0], poses[1]);
-        assert_ne!(poses[1], poses[2]);
-        assert_ne!(poses[0], poses[2]);
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            poses.len() >= 5,
+            "the five actions need visibly varied poses"
+        );
 
         // idle は phase 4 でだけ瞬きする。
         let open = only(SessionLifecycle::Available, AgentPhase::Ready, 0).join("\n");
@@ -840,6 +952,38 @@ mod tests {
         let done_later = only(SessionLifecycle::Available, AgentPhase::Ended, 4).join("\n");
         assert_eq!(done, done_later);
         assert!(done.contains("done"));
+    }
+
+    #[test]
+    fn running_actions_have_distinct_lengths_and_all_run_once_per_round() {
+        let durations = super::RunningAction::ALL.map(super::RunningAction::duration);
+        assert_eq!(durations, [3, 4, 5, 6, 7]);
+
+        for action in super::RunningAction::ALL {
+            let ticks = (0..super::RUNNING_ANIMATION_CYCLE_TICKS)
+                .filter(|tick| super::running_action(*tick, STEADY_ID).0 == action)
+                .count();
+            assert_eq!(
+                ticks as u64,
+                action.duration() * super::RUNNING_ACTION_SEQUENCE_ROUNDS
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_identity_randomizes_running_action_order() {
+        let first = super::shuffled_running_actions(super::stable_hash(STEADY_ID));
+        let second = super::shuffled_running_actions(super::stable_hash(
+            "10000000-0000-4000-8000-000000000001",
+        ));
+        assert_ne!(first, second);
+
+        let repeated = super::shuffled_running_actions(super::stable_hash(STEADY_ID));
+        assert_eq!(first, repeated, "the same runtime must not jump on refresh");
+
+        let next_round =
+            super::shuffled_running_actions(super::stable_hash(STEADY_ID) ^ 0x9e37_79b9_7f4a_7c15);
+        assert_ne!(first, next_round, "each round should reshuffle its actions");
     }
 
     #[test]
@@ -912,9 +1056,23 @@ mod tests {
             SessionLifecycle::Available,
             AgentPhase::Running,
         );
+        let tick = 3;
+        let canonical = super::canonical_tick(24, 100, std::slice::from_ref(&running), tick, false)
+            .expect("fits");
         assert_eq!(
-            super::canonical_tick(24, 100, &[running], 3, false),
-            Some(0)
+            render(24, 100, "x", std::slice::from_ref(&running), tick, false)
+                .expect("fits")
+                .rows,
+            render(
+                24,
+                100,
+                "x",
+                std::slice::from_ref(&running),
+                canonical,
+                false,
+            )
+            .expect("fits")
+            .rows
         );
 
         let waiting = session(

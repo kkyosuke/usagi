@@ -494,8 +494,8 @@ impl HomeProjection {
         ) else {
             return now;
         };
-        DateTime::from_timestamp(i64::try_from(tick).expect("six phases fit i64"), 0)
-            .expect("a six-second Unix timestamp is valid")
+        DateTime::from_timestamp(i64::try_from(tick).expect("Garden phases fit i64"), 0)
+            .expect("a Garden-cycle Unix timestamp is valid")
     }
 
     /// Attach the name of a create request the daemon is still fulfilling, so the
@@ -1630,7 +1630,7 @@ const fn garden_inventory_phase(state: AgentRuntimeInventoryState) -> AgentPhase
 /// 再描画を間引くため、それより細かい tick は観測できない（描画されない animation を
 /// 定義しても、pose が飛ぶだけで滑らかにはならない）。
 fn garden_tick(now: DateTime<Utc>) -> u64 {
-    now.timestamp().unsigned_abs() % 6
+    now.timestamp().unsigned_abs() % widgets::garden::ANIMATION_CYCLE_TICKS
 }
 
 /// Garden が Home frame を置き換えている frame を、rows と hitbox の両方で返す。
@@ -3851,7 +3851,7 @@ mod tests {
     fn the_garden_tick_advances_with_the_frame_clock() {
         let base = now();
         assert_eq!(garden_tick(base), garden_tick(base));
-        // 1 秒で pose が 1 つ進み、6 秒で一周する。frame material の壁時計は秒へ
+        // 1 秒で pose が 1 つ進み、Garden animation cycle で一周する。frame material の壁時計は秒へ
         // 切り捨てられるので、これが観測できる最小の刻みである。
         assert_ne!(
             garden_tick(base),
@@ -3859,7 +3859,12 @@ mod tests {
         );
         assert_eq!(
             garden_tick(base),
-            garden_tick(base + chrono::Duration::seconds(6))
+            garden_tick(
+                base + chrono::Duration::seconds(
+                    i64::try_from(widgets::garden::ANIMATION_CYCLE_TICKS)
+                        .expect("Garden cycle fits i64"),
+                )
+            )
         );
         // 秒未満は同じ frame（間引きと同じ解像度）。
         assert_eq!(
@@ -3892,13 +3897,22 @@ mod tests {
             &[projected_session(session, "running", "/work")],
         );
         let epoch = DateTime::from_timestamp(0, 0).expect("Unix epoch");
-        assert_ne!(
-            home.canonical_garden_now(24, 100, epoch),
-            home.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(1))
+        let canonical = (0..widgets::garden::ANIMATION_CYCLE_TICKS)
+            .map(|tick| {
+                home.canonical_garden_now(
+                    24,
+                    100,
+                    epoch + chrono::Duration::seconds(i64::try_from(tick).expect("tick fits i64")),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            canonical.windows(2).any(|ticks| ticks[0] != ticks[1]),
+            "visible motion must advance the material clock"
         );
-        assert_eq!(
-            home.canonical_garden_now(24, 100, epoch),
-            home.canonical_garden_now(24, 100, epoch + chrono::Duration::seconds(3))
+        assert!(
+            canonical.windows(2).any(|ticks| ticks[0] == ticks[1]),
+            "held poses should collapse to the same material clock"
         );
 
         let reduced = home.with_garden_reduced_motion(true);
