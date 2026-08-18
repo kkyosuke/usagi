@@ -1232,11 +1232,21 @@ mod tests {
             encode_mouse_wheel(false, 0, 0, MouseProtocolEncoding::Default),
             vec![0x1b, b'[', b'M', 97, 33, 33]
         );
+        assert_eq!(
+            encode_mouse_wheel(true, 200, 0, MouseProtocolEncoding::Utf8),
+            vec![0x1b, b'[', b'M', 96, 0xc3, 0xa9, 33]
+        );
+        assert_eq!(
+            encode_mouse_wheel(true, usize::MAX, usize::MAX, MouseProtocolEncoding::Default),
+            vec![0x1b, b'[', b'M', 96, u8::MAX, u8::MAX]
+        );
     }
 
     #[test]
     fn alternate_wheel_uses_the_program_cursor_key_mode() {
+        assert_eq!(encode_wheel_arrows(true, true), b"\x1bOA".repeat(3));
         assert_eq!(encode_wheel_arrows(true, false), b"\x1b[A".repeat(3));
         assert_eq!(encode_wheel_arrows(false, true), b"\x1bOB".repeat(3));
+        assert_eq!(encode_wheel_arrows(false, false), b"\x1b[B".repeat(3));
     }
 }

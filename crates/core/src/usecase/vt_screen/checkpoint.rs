@@ -77,6 +77,17 @@ pub enum MouseProtocolEncoding {
     Sgr,
 }
 
+/// The concrete DEC mouse tracking mode currently requested by the program.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseProtocolMode {
+    #[default]
+    None,
+    Press,
+    PressRelease,
+    ButtonMotion,
+    AnyMotion,
+}
+
 /// Decoder parser position, mirroring the private `Phase` used by the parser.
 /// Carried so a checkpoint taken mid-sequence resumes on the correct state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,9 +202,9 @@ pub struct ScreenCheckpoint {
     /// Whether the program requested application cursor-key sequences (DECCKM).
     #[serde(default)]
     pub application_cursor: bool,
-    /// Whether the program requested mouse event reporting.
+    /// Concrete mouse tracking mode requested by the program.
     #[serde(default)]
-    pub mouse_protocol: bool,
+    pub mouse_protocol_mode: MouseProtocolMode,
     /// Coordinate encoding for reported mouse events.
     #[serde(default)]
     pub mouse_encoding: MouseProtocolEncoding,

@@ -12306,6 +12306,7 @@ mod tests {
         terminal: TerminalRef,
         replay: Vec<u8>,
         inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+        input_error: bool,
     }
 
     impl AgentCommandPort for WheelRecordingPort {
@@ -12353,6 +12354,9 @@ mod tests {
             _operation: OperationId,
             bytes: &[u8],
         ) -> Result<TerminalInputOutcome, TerminalError> {
+            if self.input_error {
+                return Err(TerminalError::Unavailable);
+            }
             self.inputs.lock().unwrap().push(bytes.to_vec());
             Ok(TerminalInputOutcome::Written)
         }
@@ -13198,16 +13202,18 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers every wheel route with shared pane geometry.
     fn physical_wheel_follows_full_screen_program_input_modes() {
         let cases = [
             (
                 b"\x1b[?1000h\x1b[?1006hclaude".as_slice(),
-                b"\x1b[<64;5;1M".to_vec(),
+                Some(b"\x1b[<64;5;1M".to_vec()),
             ),
             (
                 b"\x1b[?1049h\x1b[?1hcodex".as_slice(),
-                b"\x1bOA".repeat(super::WHEEL_LINES),
+                Some(b"\x1bOA".repeat(super::WHEEL_LINES)),
             ),
+            (b"\x1b[?1000hclaude".as_slice(), None),
         ];
 
         for (replay, expected) in cases {
@@ -13223,6 +13229,7 @@ mod tests {
                     terminal,
                     replay: replay.to_vec(),
                     inputs: Arc::clone(&inputs),
+                    input_error: expected.is_none(),
                 }),
             );
             let mut controls = LiveTerminalControls::default();
@@ -13250,7 +13257,10 @@ mod tests {
                 rows_len,
                 scroll,
             ));
-            assert_eq!(inputs.lock().unwrap().as_slice(), &[expected]);
+            assert_eq!(inputs.lock().unwrap().as_slice(), expected.as_slice());
+            if expected.is_none() {
+                assert!(controls.project(Vec::new(), 1).feedback.is_some());
+            }
         }
 
         let workspace = WorkspaceId::new();
@@ -13268,9 +13278,10 @@ mod tests {
             session,
             terminal.clone(),
             Box::new(WheelRecordingPort {
-                terminal,
+                terminal: terminal.clone(),
                 replay,
                 inputs: Arc::clone(&inputs),
+                input_error: false,
             }),
         );
         let mut controls = LiveTerminalControls::default();
@@ -13280,6 +13291,23 @@ mod tests {
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
         let mut pending = std::collections::HashMap::new();
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: true,
+                column: 0,
+                row: 0,
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            rows_len,
+            scroll,
+        ));
         assert!(intercept_live_terminal_control(
             &Key::Live(LiveTerminalAction::Wheel {
                 up: true,
@@ -13301,6 +13329,69 @@ mod tests {
             poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
         assert_eq!(view.expect("primary history").scroll, super::WHEEL_LINES);
         assert!(inputs.lock().unwrap().is_empty());
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: false,
+                column: 41,
+                row: 5,
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            rows_len,
+            scroll,
+        ));
+        let (view, _, _) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        assert_eq!(view.expect("primary history").scroll, 0);
+
+        ui.close_terminal(&terminal);
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: true,
+                column: 41,
+                row: 5,
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            rows_len,
+            scroll,
+        ));
+
+        let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), state("empty"), vec![]);
+        let mut empty_ui = WorkspaceUi::new(empty_view, Box::new(UnavailableSessionCommandPort));
+        let mut empty_runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![]);
+        let _ = empty_runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let drawer = crate::presentation::director_drawer::geometry(20, 80);
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: true,
+                column: u16::try_from(drawer.left.saturating_add(2)).expect("drawer column"),
+                row: u16::try_from(drawer.top.saturating_add(4)).expect("drawer row"),
+            }),
+            &mut empty_ui,
+            &mut empty_runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            rows_len,
+            scroll,
+        ));
     }
 
     /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
