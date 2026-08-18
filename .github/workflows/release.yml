@@ -1,7 +1,16 @@
 name: Release
 
-# リリース成果物はまだ v1（v1/ に退避された旧実装）のバイナリ。
-# ルートの v2 パッケージではなく v1/Cargo.toml を対象にビルドする。
+# リリース成果物はルートの v2 パッケージのバイナリ。
+#
+# ビルドは `--features production` を付ける。この feature が無い artifact は
+# USAGI_RUNTIME_MODE 未指定時に local を既定にするため、利用者のデータが
+# ~/.usagi/local/ に入ってしまう（正本は document/05-daemon.md#artifact-の既定-mode）。
+#
+# 対象は installer（scripts/install.sh）が実際に配れる 3 プラットフォームに限る。
+# install.sh の platform_asset は darwin / linux だけを受け付け、それ以外は fail する。
+# v2 は Unix domain socket の IPC と Unix 専用の process / permission API に依存するため
+# Windows ではコンパイルできない（usagi-core だけで libc::kill / SIGKILL / pid_t /
+# std::os::unix / PermissionsExt::mode / CommandExt::process_group が解決しない）。
 
 on:
   push:
@@ -125,29 +134,28 @@ jobs:
             target: aarch64-apple-darwin
             artifact_name: usagi
             asset_name: usagi-macos-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: usagi.exe
-            asset_name: usagi-windows-amd64
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # component は日付なし nightly へ入り、実際のビルドは rust-toolchain.toml が
+      # pin した nightly で走る。target は pin した toolchain へ追加する必要があるため
+      # ここでは targets: を使わず rustup target add で入れる。
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Add release target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
-          workspaces: v1
 
       - name: Build binary
-        run: cargo +stable build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
+        run: cargo build --release --target ${{ matrix.target }} --features production
 
       - name: Prepare artifact
         shell: bash
@@ -156,15 +164,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp "v1/target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" dist/
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" dist/
           cd dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            ASSET_FILENAME="${{ matrix.asset_name }}.zip"
-            7z a "../$ASSET_FILENAME" "${{ matrix.artifact_name }}"
-          else
-            ASSET_FILENAME="${{ matrix.asset_name }}.tar.gz"
-            tar -czvf "../$ASSET_FILENAME" "${{ matrix.artifact_name }}"
-          fi
+          # installer は tar.gz の中に唯一の top-level entry `usagi` があることを検証する。
+          ASSET_FILENAME="${{ matrix.asset_name }}.tar.gz"
+          tar -czvf "../$ASSET_FILENAME" "${{ matrix.artifact_name }}"
           cd ..
           if command -v sha256sum >/dev/null 2>&1; then
             SHA256="$(sha256sum "$ASSET_FILENAME" | awk '{print $1}')"

@@ -86,7 +86,22 @@ v2 の daemon IPC と PTY 管理は Unix transport を使うため、現行の�
 
 ## インストール
 
-v2 はまだ GitHub Releases の配布対象ではない。リポジトリを clone し、ルートからビルドする。
+### installer で導入する
+
+installer は最新の公開 release を `~/.usagi/bin/usagi` へ導入する。archive の SHA-256 と release version
+artifact を検証してから差し替える。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
+```
+
+`~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
+最新版へ、`usagi update -v` で選んだ release へ更新できる（反映には再起動が必要）。
+
+対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
+使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
+
+### ソースからビルドする
 
 ```bash
 git clone https://github.com/KKyosuke/usagi.git
@@ -100,7 +115,11 @@ cargo build --release
 cargo install --path . --locked
 ```
 
-配布中の v1 を使う場合は [v1 の Installation](v1/README.md#installation) を参照する。
+> ソースからビルドしたバイナリは、`USAGI_RUNTIME_MODE` を指定しなければ状態を `~/.usagi/local/` に
+> 置く（開発中の実行が本番の状態を触らないようにするため）。公開 release の artifact は
+> `~/.usagi` 自体を使う。詳細は [artifact の既定 mode](document/05-daemon.md#artifact-の既定-mode) を参照する。
+
+退避された v1 の仕様は [v1 の README](v1/README.md) を参照する。
 
 ### Tab 補完
 
@@ -223,9 +242,6 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 `--force` は live PTY を破棄してよい場合だけ使う。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
 macOS 以外では LaunchAgent の install / uninstall は利用できない。全コマンドの現在の動作は
 [実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
-
-> 現在の公開 release は v1 である。ソースから起動した v2 で `usagi update` を実行すると、公開中の
-> v1 バイナリがインストールされる。
 
 ## アーキテクチャ
 

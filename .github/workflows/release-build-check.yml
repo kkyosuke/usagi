@@ -1,20 +1,29 @@
 name: Release Build Check
 
-# リリースは v1/Cargo.toml の version 変更を起点に v<version> タグを切って走る
-# （auto-release.yml。リリース対象はまだ v1/ に退避された旧実装）。タグ後の
-# リリースビルドは 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）を
-# 対象にするが、通常の Test ワークフローは ubuntu-latest でしかビルドしないため、
-# Windows 固有のコンパイルエラーがタグを切るまで検出できない。
+# リリースはルート Cargo.toml の version 変更を起点に v<version> タグを切って走る
+# （auto-release.yml → release.yml）。タグ後のリリースビルドは release profile で
+# 3 プラットフォーム（Linux amd64 / macOS amd64・arm64）を対象にし、通常の Test
+# ワークフローは ubuntu-latest の debug ビルドしか行わないため、cross target 固有の
+# コンパイルエラーや release profile だけで出る失敗がタグを切るまで検出できない。
 #
-# そこで v1 の version（とロックファイル）が変わる PR ＝「タグが変わる PR」で、
-# release.yml と同じターゲット行列で v1 を release ビルドして、リリースが成功する
-# ことをマージ前に検証する。
+# そこで次のいずれかを変更する PR で、release.yml と同じターゲット行列・同じ feature で
+# release ビルドし、リリースが成功することをマージ前に検証する。
+#
+#   - ルート Cargo.toml / Cargo.lock（＝タグが変わる PR）
+#   - リリース経路の workflow 自身（行列・feature・toolchain を触る PR）
+#
+# 2 つ目が必要なのは、リリース経路を変更する PR では version が動かず、version だけを
+# trigger にすると経路の変更が無検証でマージされてしまうためである。
 on:
   pull_request:
     branches: [ "main" ]
     paths:
-      - "v1/Cargo.toml"
-      - "v1/Cargo.lock"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/auto-release.yml"
+      - ".github/workflows/release-build-check.yml"
+      - "rust-toolchain.toml"
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,24 +42,44 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # component は日付なし nightly へ入り、実際のビルドは rust-toolchain.toml が
+      # pin した nightly で走る。target は pin した toolchain へ追加する必要があるため
+      # ここでは targets: を使わず rustup target add で入れる。
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Add release target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
-          workspaces: v1
 
+      # release.yml と同じ feature でビルドする。production feature の有無で
+      # 既定 runtime mode が変わるため、feature 付きのビルドが通ることを検証する
+      # （正本は document/05-daemon.md#artifact-の既定-mode）。
       - name: Build binary
-        run: cargo +stable build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
+        run: cargo build --release --target ${{ matrix.target }} --features production
+
+      # installer（scripts/install.sh）は archive 内の唯一の top-level entry が
+      # `usagi` であることと、`usagi --version` が `usagi <version>` を出すことを
+      # 検証する。host target のときだけ実行できるので、そこでだけ確認する。
+      - name: Verify the installer's version contract
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          OUTPUT="$(./target/${{ matrix.target }}/release/usagi --version)"
+          echo "version output: ${OUTPUT}"
+          EXPECTED="$(grep -m1 '^version[[:space:]]*=' Cargo.toml \
+            | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+          [ "$OUTPUT" = "usagi ${EXPECTED}" ] || {
+            echo "::error::version output '${OUTPUT}' does not match 'usagi ${EXPECTED}'"
+            exit 1
+          }
