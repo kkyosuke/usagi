@@ -38,7 +38,7 @@ unicode-width.workspace = true
 # USAGI_RUNTIME_MODE 未指定時の既定が production になり、利用者のデータが
 # $USAGI_HOME / ~/.usagi 自体へ入る。無効（既定）では local を選ぶため、
 # source build や cargo test が本番 state へ到達しない。正本は
-# document/05-daemon.md#daemon-data-directory。
+# document/05-daemon.md#artifact-の既定-mode。
 [features]
 default = []
 production-runtime-mode = []
