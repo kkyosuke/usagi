@@ -308,16 +308,8 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
 }
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PLOT_CONTENT_ROWS] {
-    let marker = if session.selected { '>' } else { ' ' };
-    let nameplate = format!(
-        "{marker} {}",
-        clip_to_width(&session.label, PLOT_WIDTH.saturating_sub(2))
-    );
-    let label = if session.selected {
-        Role::Accent.style().bold().paint(&nameplate)
-    } else {
-        Style::new().dim().paint(&nameplate)
-    };
+    let nameplate = clip_to_width(&session.label, PLOT_WIDTH);
+    let label = Style::new().dim().paint(&nameplate);
     let [status, ears, head, body, feet] = match session.lifecycle {
         SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
         _ => lifecycle_plot(session, tick, reduced_motion),
@@ -1227,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_nameplate_and_safe_failure_summary_are_visible_without_colour() {
+    fn selection_does_not_change_nameplate_and_safe_failure_summary_stays_visible() {
         let mut selected = session(
             STEADY_ID,
             "chosen",
@@ -1235,6 +1227,13 @@ mod tests {
             AgentPhase::Ready,
         );
         selected.selected = true;
+        let mut unselected = selected.clone();
+        unselected.selected = false;
+        assert_eq!(
+            super::plot(&selected, 0, false),
+            super::plot(&unselected, 0, false),
+            "Garden does not decorate the selected session"
+        );
         let mut failed = session(
             "01000000-0000-4000-8000-000000000001",
             "broken",
@@ -1244,7 +1243,8 @@ mod tests {
         failed.failure_summary = Some("branch exists".to_owned());
         let frame = render(24, 100, "x", &[selected, failed], 0, false).expect("fits");
         let text = plain(&frame).join("\n");
-        assert!(text.contains("> chosen"));
+        assert!(text.contains("chosen"));
+        assert!(!text.contains("> chosen"));
         assert!(text.contains("failed · branch exists"));
         assert!(frame.rows.iter().all(|row| display_width(row) == 100));
     }
