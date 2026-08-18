@@ -7159,6 +7159,37 @@ mod tests {
     }
 
     #[test]
+    fn closeup_live_pr_action_opens_the_active_sessions_modal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state =
+            crate::usecase::application::controller::AppState::home(workspace, vec![session]);
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Key(AppKey::Enter),
+        );
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(state.overlay(), None);
+
+        let event = app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests))
+            .expect("live PR action maps to a reducer event");
+        assert_eq!(
+            crate::usecase::application::controller::update(&mut state, event),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.pr_overlay().unwrap().target(), target);
+    }
+
+    #[test]
     fn app_event_from_key_ticks_on_wakeups_and_drops_pane_only_input() {
         // Resize / backend wakeups reach the loop as `Other` and advance the mascot.
         assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));

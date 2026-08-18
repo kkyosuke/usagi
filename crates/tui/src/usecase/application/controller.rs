@@ -4738,11 +4738,12 @@ mod tests {
     }
 
     #[test]
-    fn closeup_sidebar_pr_badge_click_opens_that_sessions_modal() {
+    fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() {
         let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let target = Target::Session(session);
-        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let active = SessionId::new();
+        let clicked = SessionId::new();
+        let target = Target::Session(clicked);
+        let mut state = sized_home(workspace, vec![active, clicked], 100, 30);
         let pr = pr_link(41);
         let _ = update(
             &mut state,
@@ -4762,16 +4763,18 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
         assert_eq!(state.overlay(), None);
+        assert_eq!(state.selected(), Selection::Target(Target::Session(active)));
 
-        // The first session's metadata is row 3. Its three-cell badge is flush
-        // right in the 36-cell sidebar, so the last cell must open PRs rather
-        // than changing selection or contributing to a double-click.
+        // The background session's metadata is row 5. Its three-cell badge is
+        // flush right in the 36-cell sidebar, so the last cell must open that
+        // session's PRs without changing the active sidebar selection or
+        // contributing to a double-click.
         assert_eq!(
             update(
                 &mut state,
                 AppEvent::Pointer {
                     column: 35,
-                    row: 3,
+                    row: 5,
                     at: std::time::Duration::ZERO,
                 },
             ),
@@ -4780,6 +4783,7 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(state.pr_overlay().unwrap().target(), target);
         assert_eq!(state.pr_overlay().unwrap().prs(), std::slice::from_ref(&pr));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(active)));
     }
 
     #[test]
