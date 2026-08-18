@@ -106,7 +106,7 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │               │   ├── director_drawer     # 指示モードの drawer（pure geometry・conversation/VT projection・overlay 合成）
 │               │   ├── overview_modal      # Overview コマンドパレット `:`（入力の前方一致で候補を絞る中央モーダル）の状態と描画
 │               │   ├── closeup_modal       # Closeup コマンドメニュー（フォーカス中セッションへの操作を選ぶ中央モーダル）の状態と描画
-│               │   └── pr_modal            # Pull Request ポップアップ（PrLink 一覧＋選択中の詳細を出す中央モーダル）の状態と描画
+│               │   └── pr_modal            # Pull Request ポップアップ（PrLink 一覧を出す中央モーダル）の状態と描画
 │               ├── widgets/          # 画面をまたぐ再利用 UI 部品（下記）＋テキスト幅の測定・切詰め・折返し・相対時刻
 │               │   ├── text_input        # 1 行キャレット編集バッファ（入力欄）
 │               │   ├── icon              # usagi マスコット AA（アイコン）

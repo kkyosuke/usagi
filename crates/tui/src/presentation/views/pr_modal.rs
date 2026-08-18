@@ -18,7 +18,7 @@ use crate::presentation::widgets::modal;
 const INNER_WIDTH: usize = 58;
 /// 一度に表示する Pull Request の最大数。
 const MAX_VISIBLE: usize = 6;
-const BODY_HEIGHT: usize = 14;
+const BODY_HEIGHT: usize = 10;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -173,42 +173,26 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
     let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
     let title = pr.title.as_deref().unwrap_or("(no title)");
-    modal::content_line(&format!("{marker} {number} {badge} {title}"), inner)
-}
-
-/// 選択中 PR の詳細ブロック（状態・URL）。
-fn detail_lines(pr: &PrLink) -> Vec<String> {
-    let (label, style) = state_label(pr);
-    let detail = if pr.refreshing {
-        format!("refresh pending · {}", pr.url)
+    let hint = if pr.refreshing {
+        Some("refresh pending")
     } else if pr.attempts != 0 {
-        format!("last refresh failed; retrying · {}", pr.url)
+        Some("refresh retrying")
     } else {
-        pr.url.clone()
+        None
     };
-    vec![
-        modal::content_line(
-            &format!(
-                "{} {}",
-                Role::Warning
-                    .style()
-                    .bold()
-                    .paint(&format!("#{}", pr.number)),
-                style.paint(label),
-            ),
-            INNER_WIDTH,
-        ),
-        modal::caption(&detail),
-    ]
+    let hint = hint.map_or_else(String::new, |hint| {
+        format!("  {}", Style::new().dim().paint(hint))
+    });
+    modal::content_line(&format!("{marker} {number} {badge} {title}{hint}"), inner)
 }
 
-/// PR ポップアップのボディ（枠の内側の行）: 一覧・選択中の詳細・フッタ。
+/// PR ポップアップのボディ（枠の内側の行）: 一覧とフッタ。
 ///
 /// list shape の共通部品を使う: 選択追従の viewport は [`modal::list_window`]、
 /// `↑/↓ N more` を挟んだ scroll 描画は [`modal::scroll_window`] に委譲する。
 fn body(state: &PrModal) -> Vec<String> {
-    let mut lines = vec![modal::caption("Pull requests")];
-    if let Some(selected) = state.selected_pr() {
+    let mut lines = Vec::new();
+    if state.selected_pr().is_some() {
         let rows: Vec<String> = state
             .prs
             .iter()
@@ -217,10 +201,7 @@ fn body(state: &PrModal) -> Vec<String> {
             .collect();
         let (start, end) = modal::list_window(state.prs.len(), state.selected, MAX_VISIBLE);
         lines.extend(modal::scroll_window(&rows, start, end));
-        lines.push(String::new());
-        lines.extend(detail_lines(selected));
     } else {
-        lines.push(String::new());
         lines.push(modal::empty_notice("no pull requests"));
     }
     lines.push(String::new());
@@ -393,26 +374,26 @@ mod tests {
     }
 
     #[test]
-    fn render_lists_prs_with_state_and_shows_the_selected_detail() {
+    fn render_lists_each_pr_once_under_one_modal_title() {
         let text = joined(&PrModal::dummy());
-        assert!(text.contains("Pull Request")); // タイトル
-        assert!(text.contains("Pull requests")); // 見出し
+        assert_eq!(text.matches("Pull Request").count(), 1);
         assert!(text.contains("#812"));
+        assert_eq!(text.matches("#812").count(), 1);
         assert!(text.contains("open"));
         assert!(text.contains("merged")); // #801 は merged
         assert!(text.contains("workspace 画面")); // タイトル
-        // 選択中 PR の URL が詳細に出る。
-        assert!(text.contains("github.com/kkyosuke/usagi/pull/812"));
+        assert!(!text.contains("github.com/kkyosuke/usagi/pull/812"));
         assert!(text.contains("Esc: close"));
         assert!(text.contains('›')); // 選択マーカー
     }
 
     #[test]
-    fn render_reflects_the_selected_pr_detail() {
+    fn moving_selection_does_not_add_a_duplicate_detail_row() {
         let mut modal = PrModal::dummy();
         modal.select_prev(); // #801（merged）を選択
         let text = joined(&modal);
-        assert!(text.contains("github.com/kkyosuke/usagi/pull/801"));
+        assert_eq!(text.matches("#801").count(), 1);
+        assert!(!text.contains("github.com/kkyosuke/usagi/pull/801"));
     }
 
     #[test]
@@ -436,7 +417,7 @@ mod tests {
 
         inventory.entries.get_mut(&identity).unwrap().refresh = PrRefreshState::BackingOff;
         let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
-        assert!(joined(&PrModal::from_entries(&entries)).contains("last refresh failed; retrying"));
+        assert!(joined(&PrModal::from_entries(&entries)).contains("refresh retrying"));
     }
 
     #[test]

@@ -183,7 +183,8 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 
 ### 4. 状態と PR を確認する
 
-session の 2 行目には最終利用時刻、PR、base branch との差分を表示する。`p` で PR 一覧、`d` で diff、
+session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
+Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックで PR 一覧を開き、`d` で diff、
 `n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR を選んで Enter を押すと既定のブラウザで開く。
 

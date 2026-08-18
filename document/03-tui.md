@@ -405,7 +405,8 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-O` | Switch | Closeup から Switch へ戻る |
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ（[指示モード](#指示モードdirector-mode)が開いている間は New） |
-| `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `p` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `Ctrl-P` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する（[指示モード](#指示モードdirector-mode)が開いている間は NextTab） |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
@@ -417,7 +418,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `n` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `n` / `p` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
 **指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
 NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は
@@ -826,11 +827,15 @@ Home に存在しない session の runtime は区画へ加えない。
 より先に見える。`Waiting` 自体が 3 羽を超える場合は、描けない羽数を `+N wait hidden`（他 phase も隠れる場合は
 `+N hidden (W wait)`）と明示する。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。
 `Ended` / `Exited` は瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さない
-ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。選択中の区画は `>` と Accent の nameplate、
-それ以外は dim の nameplate で区別する。`Failed` は daemon projection が安全化した短い failure summary だけを
+ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。session の選択状態は Garden に装飾せず、
+すべて同じ dim の nameplate で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
-`Running` は 3 pose、`Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
+`Running` は hop・bound・sniff・dig・look の長さが異なる 5 種類の基本動作を持つ。各 runtime の stable
+`AgentRuntimeId` から動作順と開始位置を疑似ランダムに決め、5 動作を終えるたびに順序を組み直すため、同じ phase の
+うさぎもそれぞれ異なる順序で動く。うさぎ本体の色も ID から 5 色の palette の 1 色を選ぶ。状態ラベルの色は
+`Running` / `Waiting` などの意味色を保つ。同じ ID・tick なら同じ色・pose になり、refresh で見た目が飛ぶことはない。
+`Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
 土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は既存 frame tick を共有し、
 同じ pose を描く tick は canonical tick へ畳んで frame material の不要な再描画を抑える。
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
@@ -874,9 +879,11 @@ attach されない。Garden から daemon command は発行しない。
 
 ## PR modal と browser effect
 
-workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない先頭 PR と残件数を
-sidebar の `PR #<number> +<count>` に投影する。`p` の PR modal は focused `SessionId` について同じ
-projection を即時表示し、resident PR lane を wake する。sidebar projection は新しい revision だけで進み、
+workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
+sidebar の右端に Nerd Font の PR アイコンとともに固定列で投影する。Switch の `p`、Closeup の
+`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について同じ PR modal を即時表示し、
+resident PR lane を wake する。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
+一覧へ 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
 保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
 その session の PR modal を検知した行を選択して自動で開く。title / state だけの更新、重複・古い revision、
@@ -1148,7 +1155,7 @@ session 作成と同じ interaction gate であり、受付時の interaction co
 （読んでいる画面から focus を奪わない）。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O p` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
 選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document tab と、daemon へ未送信の
 client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
@@ -1439,8 +1446,8 @@ Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platf
 pointer の release は PTY へ入力として転送しない。
 
 live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を除くすべての非 prefix キー入力（文字・修飾キー・paste・
-raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY へは bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、bracketed paste を要求している agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。tab 巡回や Closeup/Switch の遷移は
-`Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
+raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY へは bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、bracketed paste を要求している agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。tab 巡回、PR modal、Closeup/Switch の遷移は
+`Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O p` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
 daemon の input ACK は `Written` だけを通常成功とする。`Failed` は 0 byte 適用を表示し、`Ambiguous` は
 `applied_prefix` byte 適用後の effect が不確定であることを表示する。`Cached` は内側の outcome へ正規化する。

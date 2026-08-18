@@ -3352,6 +3352,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
+        LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
@@ -4470,7 +4471,7 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         Key::Live(LiveTerminalAction::NextTab) => {
             crate::usecase::application::controller::TabDirection::Next
         }
-        Key::Live(LiveTerminalAction::PreviousTab) => {
+        Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::OpenPullRequests) => {
             crate::usecase::application::controller::TabDirection::Previous
         }
         _ => return false,
@@ -7190,6 +7191,10 @@ mod tests {
             Some(AppEvent::Key(AppKey::CtrlP))
         );
         assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests)),
+            Some(AppEvent::Key(AppKey::OpenPrs))
+        );
+        assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Agent)),
             Some(AppEvent::Key(AppKey::CtrlA))
         );
@@ -7205,6 +7210,37 @@ mod tests {
             app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
             Some(AppEvent::Key(AppKey::OpenQuitConfirmation))
         );
+    }
+
+    #[test]
+    fn closeup_live_pr_action_opens_the_active_sessions_modal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state =
+            crate::usecase::application::controller::AppState::home(workspace, vec![session]);
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Key(AppKey::Enter),
+        );
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(state.overlay(), None);
+
+        let event = app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests))
+            .expect("live PR action maps to a reducer event");
+        assert_eq!(
+            crate::usecase::application::controller::update(&mut state, event),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.pr_overlay().unwrap().target(), target);
     }
 
     #[test]

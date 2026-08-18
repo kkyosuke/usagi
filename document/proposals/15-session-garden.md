@@ -30,21 +30,21 @@ Agent が動き続けていても人が操作していなければ Garden を表
              > ^ <
 
                  🌱                         issue-647
-       ──v────v──────────────        >    (\(\        waiting
+       ──v────v──────────────             (\(\        waiting
                                             (o.o)?
                             coder          o(_(")(")
             (\(\          available
             ( -.-)
            o(_(")(")             ·  ·  ·                  failed-build
                                                           ×(x.x)
-       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+       --v-------v-----------v-----------v----------v-------v----------v-------
        Garden  click a usagi to visit · any key to return
 ```
 
 絵文字は端末で 1 桁または 2 桁になり得るため、production の地面・草花は ASCII を基本にする。上の `🌱` は
-雰囲気を示すモックであり、実装では幅が決定的な `*` / `.` / `v` を使う。うさぎ本体は既存 mascot と同じ
-`Role::Feature`、選択中の nameplate と `>` は `Role::Accent`、失敗は `Role::Danger` で描く。色を見分けられない
-場合にも `>`、状態ラベル、顔の違いで判別できる。
+雰囲気を示すモックであり、実装では幅が決定的な `*` / `.` / `v` を使う。うさぎ本体は個体ごとの palette、
+nameplate は選択状態によらず dim、失敗は `Role::Danger` で描く。色を見分けられない場合にも状態ラベルと
+顔の違いで状態を判別できる。
 
 ## うさぎは agent、区画は session
 
@@ -228,7 +228,7 @@ phase と最新 coherent Agent inventory を結合して各 agent の phase を�
 
 6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
 7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
-8. 選択中 session の `>` marker と nameplate 強調、`Failed` の safe failure summary を追加する。
+8. `Failed` の safe failure summary を追加する。session の選択状態は Garden では装飾しない。
 
 1〜8 はすべて実装済みで、うさぎは agent 単位である。
 
@@ -256,4 +256,4 @@ phase と最新 coherent Agent inventory を結合して各 agent の phase を�
 - **Garden 上で通常キーをそのまま実行する**: 見えていない terminal や modal に意図しない入力が入るため、最初の
   入力は wake-up として消費する。
 - **物理 simulation で自由に歩かせる**: frame の決定性、hit test、テスト、低負荷 redraw と相性が悪い。
-- **状態を色だけで表す**: 端末テーマと色覚差に依存するため、顔・marker・text label を必ず併用する。
+- **状態を色だけで表す**: 端末テーマと色覚差に依存するため、太字・顔・text label を必ず併用する。
