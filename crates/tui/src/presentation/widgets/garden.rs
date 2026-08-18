@@ -7,7 +7,7 @@
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
 use super::{clip_to_width, display_width, pad_to_width};
 
@@ -230,10 +230,11 @@ pub fn render(
     })
 }
 
-/// Smallest phase in the Garden animation cycle that draws the same visible plots.
-/// Folding onto this representative lets frame material equality suppress a
-/// redraw when a slow animation holds its current pose. `None` means the Garden
-/// does not fit and the caller must preserve the ordinary Home clock.
+/// First tick of the current run of identical visible Garden plots.
+/// Folding onto this representative lets frame material equality suppress a redraw when a slow
+/// animation holds its current pose. The search normally checks only a handful of preceding ticks,
+/// instead of rendering the whole 300-tick cycle. `None` means the Garden does not fit and the
+/// caller must preserve the ordinary Home clock.
 #[must_use]
 pub fn canonical_tick(
     height: usize,
@@ -244,21 +245,48 @@ pub fn canonical_tick(
 ) -> Option<u64> {
     let layout = garden_layout(height, width)?;
     let sessions = &sessions[..sessions.len().min(layout.capacity)];
+    if reduced_motion || !sessions.iter().any(session_may_animate) {
+        return Some(0);
+    }
     let tick = tick % ANIMATION_CYCLE_TICKS;
     let expected = sessions
         .iter()
         .map(|session| plot(session, tick, reduced_motion))
         .collect::<Vec<_>>();
-    Some(
-        (0..ANIMATION_CYCLE_TICKS)
-            .find(|candidate| {
-                sessions
-                    .iter()
-                    .map(|session| plot(session, *candidate, reduced_motion))
-                    .eq(expected.iter().cloned())
-            })
-            .unwrap_or(tick),
-    )
+    let mut canonical = 0;
+    for distance in 1..ANIMATION_CYCLE_TICKS {
+        let candidate = (tick + ANIMATION_CYCLE_TICKS - distance) % ANIMATION_CYCLE_TICKS;
+        let same = sessions
+            .iter()
+            .map(|session| plot(session, candidate, reduced_motion))
+            .eq(expected.iter().cloned());
+        if !same {
+            canonical = (candidate + 1) % ANIMATION_CYCLE_TICKS;
+            break;
+        }
+    }
+    Some(canonical)
+}
+
+fn session_may_animate(session: &GardenSession) -> bool {
+    match session.lifecycle {
+        SessionLifecycle::Creating
+        | SessionLifecycle::Initializing
+        | SessionLifecycle::Deleting => true,
+        SessionLifecycle::Failed => false,
+        SessionLifecycle::Available => ordered_agents(&session.agents)
+            .into_iter()
+            .take(MAX_VISIBLE_AGENTS)
+            .any(|agent| {
+                matches!(
+                    agent.phase,
+                    AgentPhase::Running
+                        | AgentPhase::Waiting
+                        | AgentPhase::Absent
+                        | AgentPhase::Ready
+                )
+            }),
+    }
 }
 
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
@@ -349,7 +377,7 @@ fn lifecycle_plot(
     tick: u64,
     reduced_motion: bool,
 ) -> [String; PLOT_CONTENT_ROWS - 1] {
-    let feature = Role::Feature.style().bold();
+    let feature = rabbit_style(&session.id.as_str()).bold();
     let phase = animation_phase(tick, reduced_motion, &session.id.as_str());
     let (status, status_style, rabbit_style, rabbit) = match session.lifecycle {
         SessionLifecycle::Creating | SessionLifecycle::Initializing => {
@@ -474,7 +502,7 @@ fn agent_appearance(
     reduced_motion: bool,
     stable_id: &str,
 ) -> (&'static str, Style, Style, [&'static str; 4]) {
-    let feature = Role::Feature.style().bold();
+    let feature = rabbit_style(stable_id).bold();
     let phase = animation_phase(tick, reduced_motion, stable_id);
     match agent_phase {
         AgentPhase::Running => {
@@ -531,13 +559,15 @@ fn running_action(tick: u64, stable_id: &str) -> (RunningAction, u64) {
     let round = timeline / RUNNING_ACTION_CYCLE_TICKS;
     let order = shuffled_running_actions(seed ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15));
     let mut local_tick = timeline % RUNNING_ACTION_CYCLE_TICKS;
+    let mut selected = (order[0], 0);
     for action in order {
         if local_tick < action.duration() {
-            return (action, local_tick);
+            selected = (action, local_tick);
+            break;
         }
         local_tick -= action.duration();
     }
-    unreachable!("running action durations cover the cycle")
+    selected
 }
 
 fn shuffled_running_actions(mut state: u64) -> [RunningAction; 5] {
@@ -560,17 +590,24 @@ fn stable_hash(value: &str) -> u64 {
     })
 }
 
+fn rabbit_style(stable_id: &str) -> Style {
+    garden_rabbit_style(stable_hash(stable_id))
+}
+
 fn running_pose(action: RunningAction, progress: u64) -> [&'static str; SPRITE_ROWS] {
     match action {
-        RunningAction::Hop => match progress {
-            0 => ["", " /)/)", "( o.o)", " / > <"],
-            1 => [" /)/)", "( o.o)", " / > <", ""],
-            _ => ["", "  /)/)", "_( o.o)_", "  > ^ <"],
-        },
-        RunningAction::Bound => match progress {
+        RunningAction::Hop => {
+            const POSES: [[&str; SPRITE_ROWS]; 3] = [
+                ["", " /)/)", "( o.o)", " / > <"],
+                [" /)/)", "( o.o)", " / > <", ""],
+                ["", "  /)/)", "_( o.o)_", "  > ^ <"],
+            ];
+            let index = usize::from(u8::try_from(progress % 3).unwrap_or_default());
+            POSES[index]
+        }
+        RunningAction::Bound => match progress % 4 {
             0 | 3 => ["", " /)/) __", "( o.o)/", "  /  \\"],
-            1 | 2 => [" /)/)___", "( o.o)  ", " /   > ", ""],
-            _ => unreachable!("bound progress is within its duration"),
+            _ => [" /)/)___", "( o.o)  ", " /   > ", ""],
         },
         RunningAction::Sniff => match progress {
             1 | 3 => ["", " /)/)", "( o.o)>", "c(\")(\")"],
@@ -967,6 +1004,14 @@ mod tests {
                 ticks as u64,
                 action.duration() * super::RUNNING_ACTION_SEQUENCE_ROUNDS
             );
+            for progress in 0..action.duration() {
+                let pose = super::running_pose(action, progress);
+                assert!(pose.iter().any(|row| !row.is_empty()));
+                assert!(
+                    pose.iter()
+                        .all(|row| display_width(row) <= super::COMPACT_RABBIT_WIDTH)
+                );
+            }
         }
     }
 
@@ -1043,7 +1088,8 @@ mod tests {
         );
         assert_eq!(
             super::canonical_tick(24, 100, std::slice::from_ref(&idle), 1, false),
-            Some(0)
+            super::canonical_tick(24, 100, std::slice::from_ref(&idle), 0, false),
+            "a held pose stays collapsed across the cycle boundary"
         );
         assert_eq!(
             super::canonical_tick(24, 100, std::slice::from_ref(&idle), 4, false),
@@ -1088,6 +1134,63 @@ mod tests {
         assert_eq!(super::canonical_tick(24, 100, &[waiting], 5, true), Some(0));
         assert_eq!(super::canonical_tick(24, 100, &[], 5, false), Some(0));
         assert_eq!(super::canonical_tick(13, 100, &[], 5, false), None);
+    }
+
+    #[test]
+    fn rabbit_colours_are_stable_per_runtime_and_vary_between_runtimes() {
+        let first = super::rabbit_style(STEADY_ID);
+        assert_eq!(first, super::rabbit_style(STEADY_ID));
+
+        let styles = (0..16)
+            .map(|index| super::rabbit_style(&format!("{index:08x}-0000-4000-8000-000000000001")))
+            .collect::<Vec<_>>();
+        assert!(styles.iter().any(|style| *style != first));
+    }
+
+    #[test]
+    fn canonical_tick_knows_which_garden_states_can_move() {
+        let creating = session(
+            STEADY_ID,
+            "creating",
+            SessionLifecycle::Creating,
+            AgentPhase::Absent,
+        );
+        let failed = session(
+            STEADY_ID,
+            "failed",
+            SessionLifecycle::Failed,
+            AgentPhase::Absent,
+        );
+        let done = session(
+            STEADY_ID,
+            "done",
+            SessionLifecycle::Available,
+            AgentPhase::Ended,
+        );
+        assert!(super::session_may_animate(&creating));
+        assert!(!super::session_may_animate(&failed));
+        assert!(!super::session_may_animate(&done));
+
+        let hidden_running = GardenSession {
+            id: SessionId::parse(STEADY_ID).expect("fixture id"),
+            label: "hidden-running".to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            selected: false,
+            failure_summary: None,
+            agents: vec![
+                agent("10000000-0000-4000-8000-000000000001", AgentPhase::Ended),
+                agent("20000000-0000-4000-8000-000000000001", AgentPhase::Exited),
+                agent(
+                    "30000000-0000-4000-8000-000000000001",
+                    AgentPhase::Interrupted,
+                ),
+                agent("f0000000-0000-4000-8000-000000000001", AgentPhase::Running),
+            ],
+        };
+        assert!(
+            !super::session_may_animate(&hidden_running),
+            "an agent outside the plot's visible cap must not drive redraw work"
+        );
     }
 
     #[test]
