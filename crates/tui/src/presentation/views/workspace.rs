@@ -127,6 +127,11 @@ pub struct ProjectedSession {
     pub role_id: Option<String>,
 }
 
+/// Nerd Font pull-request glyph shared with v1's right-aligned sidebar badge.
+const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
+/// Keep the common one-digit badge column stable even before a PR is detected.
+const PR_RESERVE_WIDTH: usize = 3;
+
 /// Read-only Git facts supplied asynchronously by the composition layer.
 ///
 /// A missing value means inspection has not completed or Git could not provide
@@ -166,14 +171,8 @@ impl ProjectedSession {
 }
 
 pub(crate) fn pr_summary(prs: &[PrLink]) -> Option<String> {
-    let visible = prs.iter().filter(|pr| pr.is_visible()).collect::<Vec<_>>();
-    let first = visible.first()?;
-    let suffix = visible.len().saturating_sub(1);
-    Some(if suffix == 0 {
-        format!("PR #{}", first.number)
-    } else {
-        format!("PR #{} +{}", first.number, suffix)
-    })
+    let visible = prs.iter().filter(|pr| pr.is_visible()).count();
+    (visible > 0).then(|| format!("{PR_ICON} {visible}"))
 }
 
 fn short_id(id: &str) -> String {
@@ -1234,28 +1233,69 @@ fn decimal_digits(mut value: usize) -> usize {
 }
 
 fn sidebar_metadata(
-    metadata: String,
+    metadata: &str,
     diff: Option<&GitDiff>,
     columns: SidebarDiffColumns,
+    pr: Option<&str>,
+    pr_width: usize,
     width: usize,
     dim: bool,
 ) -> String {
-    if columns == SidebarDiffColumns::default() {
-        return metadata;
-    }
-    let diff = diff.map_or_else(
-        || " ".repeat(sidebar_git_summary_width(columns)),
-        |diff| git_diff_text(diff, columns, dim),
+    let diff_width = sidebar_git_summary_width(columns);
+    let diff = if diff_width == 0 {
+        String::new()
+    } else {
+        diff.map_or_else(
+            || " ".repeat(diff_width),
+            |diff| git_diff_text(diff, columns, dim),
+        )
+    };
+    let pr_badge = pr.map(|pr| Role::Info.style().underline().paint(pr));
+    let pr = pr_badge.as_ref().map_or_else(
+        || " ".repeat(pr_width),
+        |badge| {
+            format!(
+                "{}{}",
+                " ".repeat(pr_width.saturating_sub(widgets::display_width(badge))),
+                badge
+            )
+        },
     );
-    let available = width.saturating_sub(2);
-    let prefix = widgets::clip_to_width(&metadata, available);
+    let separator = usize::from(diff_width > 0 && pr_width > 0);
+    let right_width = diff_width + separator + pr_width;
+    let right = if separator == 0 {
+        format!("{diff}{pr}")
+    } else {
+        format!("{diff} {pr}")
+    };
+    let available = width;
+    if right_width > available {
+        let priority = pr_badge.as_deref().unwrap_or(&diff);
+        let clipped = widgets::clip_to_width(priority, available);
+        let gap = available.saturating_sub(widgets::display_width(&clipped));
+        return format!("{}{clipped}", " ".repeat(gap));
+    }
+    let prefix = widgets::clip_to_width(metadata, available.saturating_sub(right_width));
     let gap = available
         .saturating_sub(widgets::display_width(&prefix))
-        .saturating_sub(widgets::display_width(&diff));
-    format!("{prefix}{}{diff}", " ".repeat(gap))
+        .saturating_sub(right_width);
+    format!("{prefix}{}{right}", " ".repeat(gap))
+}
+
+fn sidebar_pr_width(sessions: &[ProjectedSession]) -> usize {
+    sessions
+        .iter()
+        .filter_map(|session| session.pr_summary.as_deref())
+        .map(widgets::display_width)
+        .max()
+        .unwrap_or_default()
+        .max(PR_RESERVE_WIDTH)
 }
 
 fn sidebar_git_summary_width(columns: SidebarDiffColumns) -> usize {
+    if columns == SidebarDiffColumns::default() {
+        return 0;
+    }
     let commits = usize::from(columns.ahead > 0) * (columns.ahead + 1)
         + usize::from(columns.ahead > 0 && columns.behind > 0)
         + usize::from(columns.behind > 0) * (columns.behind + 1);
@@ -1894,8 +1934,9 @@ fn home_left_pane(
         .map(|session| session.id)
         .collect::<Vec<_>>();
     let columns = sidebar_diff_columns(&session_ids, &home.git_diffs);
+    let pr_width = sidebar_pr_width(&home.sessions);
     if height == 1 {
-        return home_row_lines_at(width, home, rows[0], columns, now)
+        return home_row_lines_at(width, home, rows[0], columns, pr_width, now)
             .into_iter()
             .take(1)
             .collect();
@@ -1951,7 +1992,7 @@ fn home_left_pane(
         {
             lines.extend(create_skeleton_lines(width, name, home.mascot_tick));
         }
-        let row_lines = home_row_lines_at(width, home, *row, columns, now);
+        let row_lines = home_row_lines_at(width, home, *row, columns, pr_width, now);
         if row_line_count + row_lines.len() > viewport_capacity {
             break;
         }
@@ -2121,6 +2162,7 @@ fn home_row_lines_at(
     home: &HomeProjection,
     row: Selection,
     columns: SidebarDiffColumns,
+    pr_width: usize,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     // When the create form owns input, the `+ new session` row becomes an inline
@@ -2207,9 +2249,6 @@ fn home_row_lines_at(
             facts.push(resume.to_owned());
         }
         facts.push(modified);
-        if let Some(pr) = &session.pr_summary {
-            facts.push(pr.clone());
-        }
         let metadata = format!(
             "{} {}",
             home_session_continuation_marker(selected, current),
@@ -2231,9 +2270,11 @@ fn home_row_lines_at(
             Style::new().dim().paint(&metadata)
         };
         let metadata = sidebar_metadata(
-            metadata,
+            &metadata,
             home.git_diffs.get(&session.id),
             columns,
+            session.pr_summary.as_deref(),
+            pr_width,
             width,
             inactive,
         );
@@ -2531,13 +2572,14 @@ mod tests {
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
         DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, ProjectedSession, SIDECAR_GUTTER, SidebarDiffColumns,
-        TerminalViewProjection, Workspace, abnormal_daemon_speech, create_skeleton_lines,
-        feedback_label, format_memory, garden_click_at, garden_fits, garden_frame, garden_tick,
-        health_badge, health_reason_label, home_header_action_at, home_header_layout,
-        home_left_pane, home_row_lines_at, home_viewport_start, load_style,
+        LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession, SIDECAR_GUTTER,
+        SidebarDiffColumns, TerminalViewProjection, Workspace, abnormal_daemon_speech,
+        create_skeleton_lines, feedback_label, format_memory, garden_click_at, garden_fits,
+        garden_frame, garden_tick, health_badge, health_reason_label, home_header_action_at,
+        home_header_layout, home_left_pane, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, short_id, sidecar_labels, terminal_point_at, with_footer_gap,
+        render_home_at, resume_label, short_id, sidebar_metadata, sidecar_labels,
+        terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -4015,7 +4057,8 @@ mod tests {
                 prs: vec![first, second],
             }),
         );
-        // Move the cursor to the second PR so the detail reflects the selection.
+        // Move the cursor to the second PR; selection stays in the list instead
+        // of creating a duplicate detail block below it.
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let home = HomeProjection::from_state(
             &state,
@@ -4028,8 +4071,8 @@ mod tests {
         assert!(text.contains("#7"));
         assert!(text.contains("add feature"));
         assert!(text.contains("merged"));
-        // The selected PR's detail URL is the second one.
-        assert!(text.contains("github.com/o/r/pull/8"));
+        assert_eq!(text.matches("#8").count(), 1);
+        assert!(!text.contains("github.com/o/r/pull/8"));
 
         // Closing the modal leaves the same daemon projection visible as the
         // sidebar badge; no legacy SessionRecord PR data is required.
@@ -4040,7 +4083,7 @@ mod tests {
             Path::new("/work"),
             &[projected_session(session, "session", "/work/session")],
         );
-        assert!(strip(&render_home(30, 100, &home).join("\n")).contains("PR #7 +1"));
+        assert!(strip(&render_home(30, 100, &home).join("\n")).contains(&format!("{PR_ICON} 2")));
     }
 
     #[test]
@@ -4290,7 +4333,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         let mut active_session = projected_session(active, "active", "/work/active");
         active_session.last_modified = Utc::now();
-        active_session.pr_summary = Some("#42 +1".to_owned());
+        active_session.pr_summary = Some(format!("{PR_ICON} 2"));
         let home = HomeProjection::from_state(
             &state,
             "work",
@@ -4313,12 +4356,13 @@ mod tests {
 
         let metadata = render_home(30, 100, &home)
             .into_iter()
-            .find(|line| line.contains("now · #42 +1"))
+            .find(|line| line.contains("now"))
             .expect("active session metadata row");
 
-        assert!(metadata.contains("\u{1b}[2m now · #42 +1"));
+        assert!(metadata.contains("\u{1b}[2m now"));
         assert!(metadata.contains("\u{1b}[2;36m↑1"));
         assert!(metadata.contains("\u{1b}[2;35m↓2"));
+        assert!(metadata.contains(&format!("{PR_ICON} 2")));
         assert!(metadata.contains("\u{1b}[2;32m+ 3"));
         assert!(metadata.contains("\u{1b}[2;31m- 4"));
         assert!(!metadata.contains("\u{1b}[0m now"));
@@ -5459,6 +5503,67 @@ mod tests {
         assert_eq!(strip(&no_commits), "+ 1 - 2");
     }
 
+    #[test]
+    fn sidebar_metadata_keeps_the_pr_count_at_the_right_edge() {
+        let diff = GitDiff {
+            base: "origin/main".to_owned(),
+            ahead: 1,
+            behind: 2,
+            added: 188,
+            removed: 5,
+        };
+        let columns = SidebarDiffColumns {
+            ahead: 1,
+            behind: 1,
+            added: 3,
+            removed: 1,
+        };
+        let badge = format!("{PR_ICON} 2");
+        let rendered = sidebar_metadata(
+            "| 2h ago",
+            Some(&diff),
+            columns,
+            Some(&badge),
+            PR_RESERVE_WIDTH,
+            32,
+            false,
+        );
+        let plain = strip(&rendered);
+
+        assert_eq!(display_width(&rendered), 32);
+        assert!(plain.contains("↑1 ↓2 + 188 - 5"));
+        assert!(plain.ends_with(&badge));
+        assert!(!plain.contains("PR #"));
+    }
+
+    #[test]
+    fn sidebar_metadata_prioritizes_the_pr_badge_when_too_narrow() {
+        let badge = format!("{PR_ICON} 2");
+        let rendered = sidebar_metadata(
+            "| 2h ago",
+            Some(&GitDiff {
+                base: "origin/main".to_owned(),
+                ahead: 1,
+                behind: 2,
+                added: 188,
+                removed: 5,
+            }),
+            SidebarDiffColumns {
+                ahead: 1,
+                behind: 1,
+                added: 3,
+                removed: 1,
+            },
+            Some(&badge),
+            PR_RESERVE_WIDTH,
+            PR_RESERVE_WIDTH,
+            false,
+        );
+
+        assert_eq!(display_width(&rendered), PR_RESERVE_WIDTH);
+        assert_eq!(strip(&rendered), badge);
+    }
+
     fn terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -5778,14 +5883,14 @@ mod tests {
             ProjectedSession::from_record(SessionId::new(), &one)
                 .pr_summary
                 .as_deref(),
-            Some("PR #1")
+            Some(format!("{PR_ICON} 1").as_str())
         );
         one.prs.push(PrLink::new(2, "https://example.test/pull/2"));
         assert_eq!(
             ProjectedSession::from_record(SessionId::new(), &one)
                 .pr_summary
                 .as_deref(),
-            Some("PR #1 +1")
+            Some(format!("{PR_ICON} 2").as_str())
         );
 
         let target = Target::Root(WorkspaceId::new());
@@ -6070,6 +6175,7 @@ mod tests {
             &home,
             Selection::Target(Target::Root(workspace)),
             SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
             now(),
         );
         assert_eq!(stale_lines.len(), 1);
