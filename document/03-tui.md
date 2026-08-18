@@ -831,7 +831,11 @@ Home に存在しない session の runtime は区画へ加えない。
 それ以外は dim の nameplate で区別する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
-`Running` は 3 pose、`Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
+`Running` は hop・bound・sniff・dig・look の長さが異なる 5 種類の基本動作を持つ。各 runtime の stable
+`AgentRuntimeId` から動作順と開始位置を疑似ランダムに決め、5 動作を終えるたびに順序を組み直すため、同じ phase の
+うさぎもそれぞれ異なる順序で動く。うさぎ本体の色も ID から 5 色の palette の 1 色を選ぶ。状態ラベルの色は
+`Running` / `Waiting` などの意味色を保つ。同じ ID・tick なら同じ色・pose になり、refresh で見た目が飛ぶことはない。
+`Waiting` は `?` を保ったまま耳をゆっくり交互表示する。`Creating` / `Initializing` は
 土中から現れる 2 pose、`Deleting` は位置を固定して段階的に dim にする。animation は既存 frame tick を共有し、
 同じ pose を描く tick は canonical tick へ畳んで frame material の不要な再描画を抑える。
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
