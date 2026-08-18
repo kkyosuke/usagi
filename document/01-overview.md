@@ -30,9 +30,11 @@ daemon が所有する端末に attach するクライアントになる」設�
 | `/`（ルート） | v2 の実装。ビルド・CI（fmt / clippy / test / coverage 100%）の対象 |
 | `v1/` | 退避した旧実装。仕様ドキュメント（`v1/document/`）ごと独立した Cargo プロジェクトで、ルートの workspace から exclude されている |
 
-- 配布 version はルート `Cargo.toml` が v1 の version を引き継ぎ、v2 として最初に
-  リリースするときに bump する（[6. 開発規約#リリース](06-conventions.md#リリース)）。
-- v1 は `v1/` 配下で従来どおり単体ビルドできる。
+- **出荷するのはルートの v2 パッケージ**である。リリースはルート `Cargo.toml` の version 変更を起点に
+  自動化されており、v1 はリリース経路に乗らない（[6. 開発規約#リリース](06-conventions.md#リリース)）。
+- v2 として最初に出す version は既存の v1 release（`2.9.1`）より大きくする必要がある。小さいと
+  `/releases/latest` が v1 のままになり、installer が新しい v2 を選ばない。
+- v1 は `v1/` 配下で従来どおり単体ビルドでき、tree に残る間は `v1-test.yml` / `v1-coverage.yml` が検証する。
 
 ## 現在の実装状態
 
