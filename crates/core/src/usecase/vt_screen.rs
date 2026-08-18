@@ -1840,6 +1840,9 @@ mod tests {
         assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Utf8);
         screen.advance(b"\x1b[?1005l");
         assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Default);
+
+        screen.advance(b"\x1b[?9999h");
+        assert!(!screen.mouse_protocol());
     }
 
     #[test]
