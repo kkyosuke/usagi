@@ -102,6 +102,10 @@ mod tests {
             state,
             pinned: false,
             refresh: PrRefreshState::Idle,
+            draft: false,
+            checks: None,
+            review: None,
+            auto_open: true,
         }
     }
 

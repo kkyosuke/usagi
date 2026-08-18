@@ -1,6 +1,6 @@
 use super::{
     AgentReadinessCommand, AvailableModels, DEFAULT_LOCAL_LLM_MODEL, DefaultModel, EnvBindings,
-    LOCAL_LLM_MODELS, LocalLlm, LocalSettings, ModalSelectionMode, Settings, Theme,
+    LOCAL_LLM_MODELS, LocalLlm, LocalSettings, ModalSelectionMode, PrAutoOpen, Settings, Theme,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -84,6 +84,7 @@ fn settings_round_trip_through_json() {
     let settings = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
+        pr_auto_open: PrAutoOpen::Always,
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: false,
@@ -317,10 +318,24 @@ fn modal_selection_mode_tokens_round_trip_and_unknown_values_use_action() {
 }
 
 #[test]
+fn pr_auto_open_defaults_to_switch_only_and_unknown_values_disable_it() {
+    assert_eq!(PrAutoOpen::default(), PrAutoOpen::SwitchOnly);
+    assert_eq!(
+        serde_json::from_str::<PrAutoOpen>("\"notify_only\"").unwrap(),
+        PrAutoOpen::NotifyOnly
+    );
+    assert_eq!(
+        serde_json::from_str::<PrAutoOpen>("\"future\"").unwrap(),
+        PrAutoOpen::Never
+    );
+}
+
+#[test]
 fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Action,
+        pr_auto_open: PrAutoOpen::SwitchOnly,
         default_model: DefaultModel::Claude,
         issue_enabled: true,
         memory_enabled: false,
@@ -338,6 +353,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Action,
+            pr_auto_open: PrAutoOpen::SwitchOnly,
             default_model: DefaultModel::OpenAi,
             issue_enabled: false,
             memory_enabled: false,
@@ -419,6 +435,7 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
     let config_draft = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
+        pr_auto_open: PrAutoOpen::NotifyOnly,
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: false,
@@ -453,6 +470,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
     let settings = Settings {
         theme: Theme::Light,
         modal_selection_mode: ModalSelectionMode::Prompt,
+        pr_auto_open: PrAutoOpen::NotifyOnly,
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: true,
@@ -468,6 +486,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         Settings {
             theme: Theme::System,
             modal_selection_mode: ModalSelectionMode::Action,
+            pr_auto_open: PrAutoOpen::SwitchOnly,
             default_model: DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: true,

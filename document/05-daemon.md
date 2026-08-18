@@ -733,21 +733,25 @@ terminal output・terminal identity・session identity は含まない。
 PR refresh/freshness 契約の正本はこの節である。daemon は committed terminal output から検出した canonical
 GitHub PR URL を `pr-inventory.json` に保存し、単一の低優先度 worker が 250 ms ごとに schedule を進める。
 同じ URL が複数 chunk または複数 session から登録されても scheduler は identity 単位で coalesce し、1 tick
-につき最大 2 identity を canonical URL 順に claim する。remote provider は shell を介さない固定 argv の
-`gh pr view <canonical-url> --json title,state` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock
+につき最大 2 identity を canonical URL 順に claim し、2 request を並行実行する。remote provider は shell を介さない固定 argv の
+`gh pr view <canonical-url> --json title,state,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock
 を保持しないため、slow provider が terminal output の commit や IPC snapshot を停止させない。
 
 | 結果 | durable snapshot | 次回 schedule |
 |---|---|---|
 | discovery | last-known state を `open`、refresh state を `pending` として追加する | 即時 |
-| success | safe title/state を全対象 session に publish し、refresh state を `idle` に戻す | 60 秒後（freshness window） |
+| Open success | safe title/state/draft/check/review を全対象 session に publish し、refresh state を `idle` に戻す | 60 秒後（freshness window） |
+| Closed success | 同上 | 15 分後 |
+| Merged success | 同上 | schedule から除外 |
 | provider / parse failure | last-known title/state を保持し、refresh state を `backing_off` にする | 2 秒から倍増し、最大 60 秒 |
 
 schedule と retry attempt は process-local であり、inventory が durable SSoT である。daemon restart は pin 済み・
-dismissed を除く保存済み identity を canonical URL 順に即時 schedule へ rebuild する。これにより wall clock や
+dismissed・merged を除く保存済み identity を canonical URL 順に即時 schedule へ rebuild する。これにより wall clock や
 前 process の一時 timer に依存せず、同じ snapshot から同じ順序で再開する。shutdown signal を受けた worker は
 新しい claim を止める。実行中 request も 5 秒の provider timeout で bounded であり、process 終了後に publish
 されない。
+refresh worker は lifecycle SSoT の session 集合を各 tick で reconcile し、削除済み session の inventory と候補外の
+schedule を回収する。PR snapshot の公開 field が変わる操作（失敗時の `backing_off` を含む）は revision を進める。
 
 ## failure logging
 

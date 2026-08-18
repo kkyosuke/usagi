@@ -81,7 +81,7 @@ Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面
 workspace を開いて Home へ遷移する。失敗時は notice を表示し、入力中の draft を保ったまま New に留まる。
 入力検証と作成フローの詳細は [TUI の画面と入力](03-tui.md#画面と入力) を正本とする。Esc で Welcome へ戻る。
 
-Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。`Global` の Theme / Modal mode と、
+Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。`Global` の Theme / Modal mode / PR auto-open と、
 `Workspace init` の Agent / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
 Agent はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。

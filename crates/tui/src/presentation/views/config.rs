@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, ModalSelectionMode, Settings, Theme, format_env_bindings,
+    DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, Theme, format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -15,7 +15,7 @@ use crate::usecase::application::environment_source::EnvironmentSourceEditor;
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 const MODAL_INNER_WIDTH: usize = 64;
-const MODAL_BODY_HEIGHT: usize = 9;
+const MODAL_BODY_HEIGHT: usize = 12;
 const MODAL_FOOTER: &str = "↑↓: select  ←→: change  Enter: save  Esc: back";
 const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
@@ -53,6 +53,7 @@ pub enum Field {
     #[default]
     Theme,
     ModalSelectionMode,
+    PrAutoOpen,
     Environment,
     DefaultModel,
     Issue,
@@ -177,7 +178,8 @@ impl Config {
                 Field::Environment => Field::DefaultModel,
                 Field::DefaultModel => Field::Issue,
                 Field::Issue => Field::Memory,
-                Field::Memory => Field::Save,
+                Field::Memory => Field::PrAutoOpen,
+                Field::PrAutoOpen => Field::Save,
                 Field::Save => Field::Theme,
             },
             SettingsScope::Workspace => match self.field {
@@ -185,7 +187,9 @@ impl Config {
                 Field::Environment => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
-                Field::Save | Field::Theme | Field::ModalSelectionMode => Field::DefaultModel,
+                Field::Save | Field::Theme | Field::ModalSelectionMode | Field::PrAutoOpen => {
+                    Field::DefaultModel
+                }
             },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
@@ -207,14 +211,18 @@ impl Config {
                 Field::DefaultModel => Field::Environment,
                 Field::Issue => Field::DefaultModel,
                 Field::Memory => Field::Issue,
-                Field::Save => Field::Memory,
+                Field::PrAutoOpen => Field::Memory,
+                Field::Save => Field::PrAutoOpen,
             },
             SettingsScope::Workspace => match self.field {
                 Field::Environment => Field::DefaultModel,
                 Field::Issue => Field::Environment,
                 Field::Memory => Field::Issue,
                 Field::Save => Field::Memory,
-                Field::DefaultModel | Field::Theme | Field::ModalSelectionMode => Field::Save,
+                Field::DefaultModel
+                | Field::Theme
+                | Field::ModalSelectionMode
+                | Field::PrAutoOpen => Field::Save,
             },
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
@@ -266,6 +274,19 @@ impl Config {
         self.notice = None;
     }
 
+    pub fn cycle_pr_auto_open(&mut self, forward: bool) {
+        let mode = &mut self.current_mut().draft.pr_auto_open;
+        *mode = match (*mode, forward) {
+            (PrAutoOpen::Always, true) | (PrAutoOpen::SwitchOnly, false) => PrAutoOpen::SwitchOnly,
+            (PrAutoOpen::SwitchOnly, true) | (PrAutoOpen::NotifyOnly, false) => {
+                PrAutoOpen::NotifyOnly
+            }
+            (PrAutoOpen::NotifyOnly, true) | (PrAutoOpen::Never, false) => PrAutoOpen::Never,
+            (PrAutoOpen::Never, true) | (PrAutoOpen::Always, false) => PrAutoOpen::Always,
+        };
+        self.notice = None;
+    }
+
     /// Switch the default cloud model between Claude and `OpenAI`.
     pub fn cycle_default_model(&mut self) {
         let model = self.current().draft.default_model;
@@ -294,6 +315,7 @@ impl Config {
         match self.field {
             Field::Theme => self.cycle_theme(forward),
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
+            Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
             Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
@@ -621,6 +643,14 @@ fn global_rows(config: &Config) -> Vec<String> {
     lines.push(String::new());
     lines.push(section_heading("Workspace init"));
     lines.extend(workspace_setting_rows(config));
+    lines.push(String::new());
+    lines.push(section_heading("Pull requests"));
+    lines.push(select::render(
+        "Auto-open",
+        pr_auto_open_name(config.settings().pr_auto_open),
+        config.field() == Field::PrAutoOpen,
+        config.settings().pr_auto_open != config.current().saved.pr_auto_open,
+    ));
     lines
 }
 
@@ -844,6 +874,15 @@ fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
     }
 }
 
+fn pr_auto_open_name(mode: PrAutoOpen) -> &'static str {
+    match mode {
+        PrAutoOpen::Always => "always",
+        PrAutoOpen::SwitchOnly => "switch only",
+        PrAutoOpen::NotifyOnly => "notify only",
+        PrAutoOpen::Never => "never",
+    }
+}
+
 fn default_model_name(model: DefaultModel) -> &'static str {
     match model {
         DefaultModel::Claude => "Claude",
@@ -867,7 +906,9 @@ mod tests {
         EnvironmentSourceEditor, parse_environment_source,
     };
     use std::io;
-    use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
+    use usagi_core::domain::settings::{
+        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, Theme,
+    };
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     #[derive(Default)]
@@ -1300,7 +1341,7 @@ mod tests {
             .unwrap();
         assert_eq!(column_of(&dirty, "●"), changed_column);
 
-        for _ in 0..6 {
+        for _ in 0..7 {
             config.next_field();
         }
         let save_frame = render(24, 80, &config)
@@ -1449,9 +1490,31 @@ mod tests {
     }
 
     #[test]
+    fn pr_auto_open_cycles_all_safe_modes_from_global_config() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        for _ in 0..6 {
+            config.next_field();
+        }
+        assert_eq!(config.field(), Field::PrAutoOpen);
+        assert_eq!(config.settings().pr_auto_open, PrAutoOpen::SwitchOnly);
+        for expected in [
+            PrAutoOpen::NotifyOnly,
+            PrAutoOpen::Never,
+            PrAutoOpen::Always,
+            PrAutoOpen::SwitchOnly,
+        ] {
+            assert!(config.cycle_selected(true));
+            assert_eq!(config.settings().pr_auto_open, expected);
+        }
+        assert!(render(24, 100, &config).join("\n").contains("Auto-open"));
+    }
+
+    #[test]
     fn save_is_selectable_only_with_an_unsaved_change() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1466,6 +1529,7 @@ mod tests {
         config.previous_field();
         config.previous_field();
         config.previous_field();
+        config.previous_field();
         config.cycle_modal_selection_mode();
         config.cycle_modal_selection_mode();
         config.cycle_selected(true);
@@ -1473,6 +1537,7 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1496,6 +1561,8 @@ mod tests {
         assert!(!config.begin_save());
 
         config.previous_field();
+        assert_eq!(config.field(), Field::PrAutoOpen);
+        config.previous_field();
         assert_eq!(config.field(), Field::Memory);
         config.previous_field();
         assert_eq!(config.field(), Field::Issue);
@@ -1507,6 +1574,7 @@ mod tests {
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1538,6 +1606,7 @@ mod tests {
         assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1630,6 +1699,7 @@ mod tests {
         assert!(frame.contains("Memory") && frame.contains("off"));
 
         config.next_field();
+        config.next_field();
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
         assert!(!port.global.issue_enabled);
@@ -1640,6 +1710,7 @@ mod tests {
     fn dirty_on_save_row(port: &mut FakeSettingsPort) -> Config {
         let mut config = Config::load(port);
         config.cycle_theme(true);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1685,6 +1756,7 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
+            base.next_field();
             base.next_field();
             base.next_field();
             base.next_field();

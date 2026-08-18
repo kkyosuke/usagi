@@ -5375,6 +5375,7 @@ fn drive_workspace_controller(
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
+    pr_auto_open: usagi_core::domain::settings::PrAutoOpen,
     agent_models: AgentModelPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
@@ -5420,6 +5421,7 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    runtime.set_pr_auto_open(pr_auto_open);
     let data_home = usagi_core::infrastructure::paths::data_dir().ok();
     let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
@@ -5841,6 +5843,7 @@ fn drive_workspace_controller(
                 let effective =
                     usagi_core::usecase::settings::read_for_workspace_entry(context.settings);
                 runtime.set_modal_selection_mode(effective.modal_selection_mode);
+                runtime.set_pr_auto_open(effective.pr_auto_open);
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
@@ -5902,6 +5905,7 @@ pub fn run_workspace_controller_with_backend(
         snapshot,
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
         AgentModelPolicy::default(),
         None,
     )
@@ -5925,6 +5929,7 @@ pub fn run_workspace_controller_with_backend_and_settings(
         snapshot,
         backend_factory,
         settings.modal_selection_mode,
+        settings.pr_auto_open,
         AgentModelPolicy {
             default: settings.default_model,
             ..AgentModelPolicy::default()
@@ -5954,6 +5959,7 @@ pub fn run_workspace_controller_with_backend_and_config(
         snapshot,
         backend_factory,
         effective.modal_selection_mode,
+        effective.pr_auto_open,
         AgentModelPolicy {
             available: available_models,
             default: effective.default_model,
@@ -6252,6 +6258,7 @@ fn open_snapshot_via_controller(
         snapshot,
         backend_factory,
         effective.modal_selection_mode,
+        effective.pr_auto_open,
         AgentModelPolicy {
             available: available_models,
             default: effective.default_model,
@@ -19473,6 +19480,7 @@ mod tests {
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         // Enter on the dirty Save row begins the save flow (loading).
         assert!(matches!(
             step_config(&mut config, Key::Enter, &mut settings),
@@ -19665,9 +19673,10 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Environment → Agent model → Issue → Memory → Save).
-    const CONFIG_SAVE_KEYS: [Key; 8] = [
+    // Save (Theme → Modal mode → Environment → Agent model → Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 9] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,

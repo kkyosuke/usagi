@@ -271,6 +271,19 @@ pub trait OverlayPort {
     fn load_preview(&mut self, target: Target, completions: Completions);
     /// Open one already-selected Pull Request URL in the browser.
     fn open_pull_request(&mut self, url: String, completions: Completions);
+    /// Copy one selected canonical URL.
+    fn copy_pull_request(&mut self, _url: String, completions: Completions) {
+        unavailable(&completions, "clipboard is unavailable");
+    }
+    /// Persist one dismissed session PR.
+    fn dismiss_pull_request(
+        &mut self,
+        _session: SessionId,
+        _url: String,
+        completions: Completions,
+    ) {
+        unavailable(&completions, "Pull Request dismissal is unavailable");
+    }
 }
 
 struct NoOverlay;
@@ -283,6 +296,12 @@ impl OverlayPort for NoOverlay {
     }
     fn open_pull_request(&mut self, _: String, completions: Completions) {
         unavailable(&completions, "browser opening is unavailable");
+    }
+    fn copy_pull_request(&mut self, _: String, completions: Completions) {
+        unavailable(&completions, "clipboard is unavailable");
+    }
+    fn dismiss_pull_request(&mut self, _: SessionId, _: String, completions: Completions) {
+        unavailable(&completions, "Pull Request dismissal is unavailable");
     }
 }
 
@@ -480,6 +499,13 @@ impl DaemonBackend {
             }
             Effect::OpenPullRequest { url } => {
                 self.overlay.open_pull_request(url, self.completions());
+            }
+            Effect::CopyPullRequest { url } => {
+                self.overlay.copy_pull_request(url, self.completions());
+            }
+            Effect::DismissPullRequest { session, url } => {
+                self.overlay
+                    .dismiss_pull_request(session, url, self.completions());
             }
             Effect::Detach => return Flow::Exit,
             Effect::LeaveWorkspace => return Flow::Leave,

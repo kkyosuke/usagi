@@ -71,7 +71,7 @@ stale / duplicate completion が別の draft や workspace を開くことはな
 worker 内の `git clone` 自体は強制終了しないため、処理が完了するまで新しい作成は開始しない。失敗・cancel のどちらでも
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
-Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・Environment、`Workspace init` 見出しに
+Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
 `↑↓` で行を、`←→` で値を切り替える。未保存の値には `●` が付く。dirty な Save 行で `Enter` を押すと保存フローが始まり、
@@ -156,11 +156,11 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・Environment はすべての workspace に適用する。Agent・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
 | Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Issue・Memory だけを保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Modal mode・Agent・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` と `local_llm` を保持する。
 Workspace Config は Agent・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
@@ -886,14 +886,18 @@ resident PR lane を wake する。modal の枠タイトルは `Pull Request` �
 一覧へ 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
 保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
-その session の PR modal を検知した行を選択して自動で開く。title / state だけの更新、重複・古い revision、
+その session の PR modal を検知した行を選択して自動で開く。ただし行全体が PR URL の出力だけを自動表示候補とし、文章中の参考リンクは一覧に追加しても自動表示しない。title / state だけの更新、重複・古い revision、
 dismissed PR は自動表示せず、前面の操作を奪わない。別 session の値は対象 session の cache にだけ反映する。
 
+Global Config の `PR auto-open` は `always` / `switch only` / `notify only` / `never` を選ぶ。既定の
+`switch only` は live terminal の入力を奪わず Switch だけで自動表示する。`notify only` は modal の代わりに notice、
+`never` は sidebar badge だけを更新する。
+
 resident PR lane は render thread の外で daemon との persistent connection を所有し、1 秒以下の bounded cadence で
-現在の session 集合を観測する。session の追加・削除は集合を全置換して即時 wake し、結果は frame loop の non-blocking
+現在の session 集合を 1 件の batch snapshot request で観測する。session の追加・削除は集合を全置換して即時 wake し、結果は frame loop の non-blocking
 drain から controller へ戻す。したがって daemon RPC の timeout が workspace の初回 frame や入力を止めることはない。
 snapshot が取れない場合は安全な unavailable 表示に留まり、legacy workspace state
-や TUI scanner を production の fallback にしない。Open、Closed、Merged、Dismissed と title を表示し、
+や TUI scanner を production の fallback にしない。Open、Closed、Merged、Dismissed、owner/repository、draft、CI、review decision と title を表示し、
 dismissed を新規検出として通知しない。
 
 snapshot の `refresh` は daemon-owned freshness metadata である。`pending` は初回取得待ち、`idle` は freshness
@@ -901,11 +905,14 @@ window 内の成功、`backing_off` は last-known title/state を表示した�
 独自 timer、`gh` 呼び出し、失敗時の空 snapshot への置換を行わない。refresh の間隔、dedupe、backoff、restart、
 shutdown の正本は [daemon の PR refresh scheduler](05-daemon.md#pr-refresh-scheduler) とする。
 
-Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
+`f` は All / Open / Closed / Merged filter、`c` は canonical URL の clipboard copy、`d` は daemon に
+dismissed tombstone を保存する。Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
 `open`、Linux では `xdg-open`、Windows では `cmd /C start "" <url>`（空文字は `start` が消費する
 window title 引数）を argv として実行する。URL を shell command に補間せず、検証失敗、
 未対応 platform、起動失敗は TUI を終了させず safe feedback にする。同じ browser effect は
 [live terminal の URL クリック](#live-terminal-の出力表示と入力)でも再利用する。
+PR が Merged へ遷移した session は短時間の celebration state を持ち、その間 Garden が表示中なら当該 plot のうさぎが
+`PR merged!` と一度だけ喜ぶ。reduced motion では点滅を止める。
 Closeup の `close [-f|--force]` は、選択中 session の削除を Overview と同じ daemon session-command port へ
 直接依頼し、`-f` と `--force` は同値である。target、未知 flag、重複 flag は安全に拒否する。
 

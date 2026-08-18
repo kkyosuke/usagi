@@ -1,4 +1,5 @@
 use super::{PrLink, PrState};
+use crate::domain::pr_inventory::PrRefreshState;
 
 #[test]
 fn new_builds_an_open_untitled_link() {
@@ -7,8 +8,7 @@ fn new_builds_an_open_untitled_link() {
     assert_eq!(pr.title, None);
     assert_eq!(pr.state, PrState::Open);
     assert!(!pr.pinned);
-    assert_eq!(pr.attempts, 0);
-    assert!(!pr.refreshing);
+    assert_eq!(pr.refresh, PrRefreshState::Idle);
     assert!(pr.is_visible());
     assert!(!pr.is_dismissed());
 }
@@ -104,7 +104,7 @@ fn state_default_is_open_and_serializes_snake_case() {
 fn state_degrades_an_unrecognised_token_to_open() {
     assert_eq!(
         serde_json::from_str::<PrState>("\"closed\"").unwrap(),
-        PrState::Open
+        PrState::Closed
     );
     assert_eq!(
         serde_json::from_str::<PrState>("\"merged\"").unwrap(),
@@ -114,36 +114,34 @@ fn state_degrades_an_unrecognised_token_to_open() {
 
 #[test]
 fn open_pr_omits_the_defaulted_fields_but_merged_writes_state() {
-    // An open, unpinned, never-failed PR omits state / pinned / attempts.
+    // An open, unpinned, idle PR omits state / pinned.
     let open = PrLink::new(1, "https://x/pull/1");
     let json = serde_json::to_string(&open).unwrap();
     assert!(!json.contains("state"), "{json}");
     assert!(!json.contains("pinned"), "{json}");
-    assert!(!json.contains("attempts"), "{json}");
-    assert!(!json.contains("refreshing"), "{json}");
+    assert!(json.contains("\"refresh\":\"idle\""), "{json}");
 
-    // A merged / pinned / failed PR writes those fields.
+    // A merged / pinned / backing-off PR writes those fields.
     let mut rich = PrLink::new(2, "https://x/pull/2");
     rich.state = PrState::Merged;
     rich.pinned = true;
-    rich.attempts = 3;
+    rich.refresh = PrRefreshState::BackingOff;
     let json = serde_json::to_string(&rich).unwrap();
     assert!(json.contains("\"state\":\"merged\""));
     assert!(json.contains("\"pinned\":true"));
-    assert!(json.contains("\"attempts\":3"));
+    assert!(json.contains("\"refresh\":\"backing_off\""));
 }
 
 #[test]
-fn pr_link_round_trips_through_json_and_drops_the_transient_flag() {
+fn pr_link_round_trips_through_json_with_refresh_state() {
     let mut pr = PrLink::new(9, "https://x/pull/9");
     pr.title = Some("T".to_string());
     pr.state = PrState::Merged;
-    pr.refreshing = true; // transient: must not persist
+    pr.refresh = PrRefreshState::Pending;
 
     let json = serde_json::to_string(&pr).unwrap();
     let back: PrLink = serde_json::from_str(&json).unwrap();
-    // `refreshing` resets to false on load regardless of the in-memory value.
-    assert!(!back.refreshing);
+    assert_eq!(back.refresh, PrRefreshState::Pending);
     assert_eq!(back.number, 9);
     assert_eq!(back.title.as_deref(), Some("T"));
     assert_eq!(back.state, PrState::Merged);

@@ -187,6 +187,7 @@ mod tests {
         let settings = crate::domain::settings::Settings {
             theme: crate::domain::settings::Theme::Dark,
             modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
+            pr_auto_open: crate::domain::settings::PrAutoOpen::Always,
             default_model: crate::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,

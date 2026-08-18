@@ -48,8 +48,8 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, MetricsAction, PrAction, PrRequest, PrSnapshot, SessionAction, TerminalAction,
-    TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent, TerminalRequest,
+    DaemonRequest, MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction,
+    TerminalAction, TerminalGeometry, TerminalLaneBudget, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
@@ -683,6 +683,7 @@ struct ProductionOverlayPort {
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
     pr_pump: RefreshPump<PrObservations>,
     browser: PlatformBrowserOpener,
+    clipboard: PlatformClipboard,
 }
 
 impl ProductionOverlayPort {
@@ -765,6 +766,59 @@ impl BackendOverlayPort for ProductionOverlayPort {
         if let Some(event) = event {
             completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
         }
+    }
+
+    fn copy_pull_request(&mut self, url: String, completions: Completions) {
+        use usagi_tui::usecase::application::terminal_selection::ClipboardPort;
+        let event = match usagi_tui::usecase::application::pr::canonical_browser_url(&url) {
+            Some(url) => match self.clipboard.write_text(&url) {
+                Ok(()) => BackendEvent::Notice(Notice::new("PR URL copied.")),
+                Err(message) => {
+                    BackendEvent::Notice(Notice::new(format!("Could not copy PR URL: {message}")))
+                }
+            },
+            None => BackendEvent::Notice(Notice::new("Cannot copy an invalid PR URL.")),
+        };
+        completions.emit(AppEvent::Backend(event));
+    }
+
+    fn dismiss_pull_request(&mut self, session: SessionId, url: String, completions: Completions) {
+        let _ = std::thread::Builder::new()
+            .name("usagi-pr-dismiss".to_owned())
+            .spawn(move || {
+                let mut lane = LaneConnection::observing();
+                let event = lane
+                    .request(DaemonRequest::PrDismiss {
+                        payload: PrDismissRequest {
+                            session_id: session,
+                            url,
+                        },
+                    })
+                    .and_then(|reply| match reply {
+                        DaemonReply::Ok(value) => {
+                            usagi_core::usecase::client::decode_pr_snapshot(value)
+                                .map_err(|_| "invalid PR snapshot".to_owned())
+                        }
+                        DaemonReply::Accepted { .. } => {
+                            Err("PR dismissal is unavailable".to_owned())
+                        }
+                    })
+                    .map_or_else(
+                        |message| BackendEvent::PullRequestsError {
+                            target: Target::Session(session),
+                            error: SafeError {
+                                message: SafeMessage::new(message),
+                                error_id: "pr-dismiss".to_owned(),
+                            },
+                        },
+                        |snapshot| BackendEvent::PullRequestsLoaded {
+                            target: Target::Session(session),
+                            revision: snapshot.revision,
+                            prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
+                        },
+                    );
+                completions.emit(AppEvent::Backend(event));
+            });
     }
 }
 
@@ -867,6 +921,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             browser: PlatformBrowserOpener {
                 reaper: self.helper_reaper.clone(),
             },
+            clipboard: PlatformClipboard,
         }));
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
@@ -2645,23 +2700,33 @@ fn spawn_pr_pump(sessions: Arc<Mutex<Vec<SessionId>>>) -> RefreshPump<PrObservat
     let mut lane = LaneConnection::observing();
     RefreshPump::spawn(pr_cadence(), move || {
         let sessions = lock_pr_sessions(&sessions).clone();
-        let mut observations = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            let reply = lane.request(DaemonRequest::Pr {
-                action: PrAction::Snapshot,
-                payload: PrRequest {
-                    session_id: session,
-                    revision: None,
-                },
-            })?;
-            let snapshot = match reply {
-                DaemonReply::Ok(value) => usagi_core::usecase::client::decode_pr_snapshot(value)
-                    .map_err(|_| "invalid PR snapshot".to_owned()),
-                DaemonReply::Accepted { .. } => Err("PR snapshot is unavailable".to_owned()),
-            };
-            observations.push((session, snapshot));
+        if sessions.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(observations)
+        let reply = lane.request(DaemonRequest::PrBatch {
+            payload: PrBatchRequest {
+                session_ids: sessions.clone(),
+            },
+        })?;
+        let snapshots = match reply {
+            DaemonReply::Ok(value) => serde_json::from_value::<Vec<PrSnapshot>>(value)
+                .map_err(|_| "invalid PR batch snapshot".to_owned())?,
+            DaemonReply::Accepted { .. } => return Err("PR snapshot is unavailable".to_owned()),
+        };
+        let by_session = snapshots
+            .into_iter()
+            .map(|snapshot| (snapshot.session_id, snapshot))
+            .collect::<BTreeMap<_, _>>();
+        Ok(sessions
+            .into_iter()
+            .map(|session| {
+                let snapshot = by_session
+                    .get(&session)
+                    .cloned()
+                    .ok_or_else(|| "PR snapshot is unavailable".to_owned());
+                (session, snapshot)
+            })
+            .collect())
     })
 }
 
@@ -7527,6 +7592,7 @@ mod tests {
         };
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
+            pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             ..Settings::default()
         };
         first.save(SettingsScope::Global, &settings).unwrap();
@@ -7806,6 +7872,7 @@ mod tests {
         let initial = Settings {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Prompt,
+            pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,

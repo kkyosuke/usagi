@@ -390,6 +390,7 @@ impl HomeProjection {
                     lifecycle: session.lifecycle,
                     selected: state.selected() == Selection::Target(Target::Session(session.id)),
                     failure_summary: session.failure_summary.clone(),
+                    pr_merged: state.celebrates_pr_merge(session.id),
                     agents: state
                         .runtimes()
                         .iter()
@@ -1848,7 +1849,8 @@ fn render_pr_overlay(
         height,
         width,
         base,
-        &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected()),
+        &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected())
+            .with_filter(overlay.filter().label()),
     )
 }
 

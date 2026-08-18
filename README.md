@@ -211,7 +211,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 
 | 設定 | 内容 |
 |---|---|
-| Theme / Modal mode | TUI の配色と Overview / Closeup の操作方式 |
+| Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
