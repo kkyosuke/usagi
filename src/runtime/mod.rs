@@ -12,6 +12,7 @@ pub(crate) mod inventory_pump;
 pub(crate) mod launchd;
 pub(crate) mod platform_child_reaper;
 pub(crate) mod refresh_pump;
+pub(crate) mod systemd;
 pub(crate) mod terminal_pump;
 pub(crate) mod tui;
 pub(crate) mod user_env;

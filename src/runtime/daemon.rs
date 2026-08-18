@@ -2601,7 +2601,13 @@ fn start_connection_cleanup_worker_with(
 }
 
 use super::bootstrap;
+// Only the platform's own supervisor backend is linked in here. The other
+// module keeps its pure half compiled so its tests run on every host, but it
+// exposes no real IO to link against.
+#[cfg(target_os = "macos")]
 use super::launchd;
+#[cfg(target_os = "linux")]
+use super::systemd;
 
 /// Owns every daemon-wide worker from its first successful spawn.
 ///
@@ -9839,6 +9845,65 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
         Backtrace::force_capture()
     )
 }
+/// The service supervisor this build provisions, named in the command's output.
+#[cfg(target_os = "macos")]
+const SERVICE_SUPERVISOR: &str = "launchd";
+/// The service supervisor this build provisions, named in the command's output.
+#[cfg(target_os = "linux")]
+const SERVICE_SUPERVISOR: &str = "systemd";
+/// The service supervisor this build provisions, named in the command's output.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const SERVICE_SUPERVISOR: &str = "no";
+
+/// Provision the platform's supervisor for the foreground `daemon serve`.
+///
+/// macOS uses a `LaunchAgent`, Linux a systemd **user** unit. Both receive the
+/// [`paths::DataHome`] pair so the supervised daemon lands on the directory this
+/// process selected. Other platforms have no supported supervisor; the detached
+/// `start` path and client bootstrap keep working there.
+fn install_service(
+    executable: &std::path::Path,
+    data_home: &paths::DataHome,
+) -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        launchd::install(executable, data_home)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        systemd::install(executable, data_home)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (executable, data_home);
+        Err(unsupported_service())
+    }
+}
+
+/// Remove the platform's supervisor definition installed by [`install_service`].
+fn uninstall_service() -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        launchd::uninstall()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        systemd::uninstall()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err(unsupported_service())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn unsupported_service() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "service supervision is only supported on macOS (launchd) and Linux (systemd)",
+    )
+}
+
 #[allow(clippy::too_many_lines)] // Composition wires the closed lifecycle verbs and their IO ports.
 fn run_inner(
     out: &mut dyn Write,
@@ -9853,24 +9918,27 @@ fn run_inner(
     let daemon_dir = data_dir.join("daemon");
     let command = match command {
         CliDaemonCommand::InstallService => {
-            // The LaunchAgent must resolve the same data home this process
-            // selected. launchd starts it from its own environment, so the pair
-            // travels in the plist rather than being re-derived there.
+            // The supervised service must resolve the same data home this
+            // process selected. Both launchd and systemd start it from their own
+            // environment, so the pair travels in the service definition rather
+            // than being re-derived there.
             let data_home = paths::DataHome::from_selected(&data_dir, paths::runtime_mode());
-            let path = launchd::install(&std::env::current_exe()?, &data_home)?;
+            let path = install_service(&std::env::current_exe()?, &data_home)?;
             return writeln!(
                 out,
-                "{}: launchd service installed ({})",
+                "{}: {} service installed ({})",
                 info.describe(),
+                SERVICE_SUPERVISOR,
                 path.display()
             );
         }
         CliDaemonCommand::UninstallService => {
-            let path = launchd::uninstall()?;
+            let path = uninstall_service()?;
             return writeln!(
                 out,
-                "{}: launchd service uninstalled ({})",
+                "{}: {} service uninstalled ({})",
                 info.describe(),
+                SERVICE_SUPERVISOR,
                 path.display()
             );
         }

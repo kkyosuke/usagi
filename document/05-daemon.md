@@ -11,7 +11,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [session tree と ignore rules](#session-tree-と-ignore-rules)
 - [daemon process lifecycle](#daemon-process-lifecycle)
 - [planned replacement](#planned-replacement)
-- [launchd supervision](#launchd-supervision)
+- [service supervision](#service-supervision)
 - [daemon data directory](#daemon-data-directory)
 - [PR 検出の投影](#pr-検出の投影)
 - [PR refresh scheduler](#pr-refresh-scheduler)
@@ -169,8 +169,8 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon` / `usagi daemon serve` | 前景で daemon を active role で serve する。`serve` は内部用の subcommand であり、[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
-| `usagi daemon install-service` | macOS の LaunchAgent を明示的に install し、前景 `serve` を login と異常終了後に supervise する |
-| `usagi daemon uninstall-service` | install 済み LaunchAgent を unload して remove する |
+| `usagi daemon install-service` | platform の supervisor（macOS は LaunchAgent、Linux は systemd user unit）を明示的に install し、前景 `serve` を login と異常終了後に supervise する（[service supervision](#service-supervision)） |
+| `usagi daemon uninstall-service` | install 済みの supervisor 定義を停止・無効化して remove する |
 
 ### sandbox bootstrap broker
 
@@ -492,25 +492,48 @@ generation なので、seamless の successor 候補にはならない。
 seamless に保てなかった理由を示す。`daemon stop` は rollover とは別契約であり、渡す先の successor が
 そもそも存在しないため seamless refusal を報告しない。live runtime を明示的に手放したかどうかだけを問う。
 
-## launchd supervision
+## service supervision
 
-macOS では `usagi daemon install-service` が `~/Library/LaunchAgents/com.usagi.daemon.plist`
-を install する。LaunchAgent は絶対 path の `usagi daemon serve` だけを起動し、`RunAtLoad` と
-`KeepAlive` により login・再起動・異常終了後に daemon process を起動する。
+`usagi daemon install-service` は、その platform の supervisor へ前景 `serve` を登録する。
+どちらも絶対 path の `usagi daemon serve` だけを起動する。
 
-plist が持つ環境変数は **data home の組（`USAGI_HOME` の base と `USAGI_RUNTIME_MODE` の mode）だけ**で、
-token・credential・session state は保存しない。launchd は install した shell の環境ではなく launchd 自身の
-環境で agent を起動するため、この組を書かない plist は supervise される daemon に data home を空の環境から
-再解決させてしまい、install した process とは別の directory を掴ませる（一方で plist の stderr log path は
-install した process の selected directory を指すため、log と daemon の mode が食い違う）。この組を渡す契約は、
-daemon が起動する Agent MCP child に渡すもの（[Agent child の data home](#agent-child-の-data-home)）と同じである。
-base が UTF-8 で綴れない場合は lossy 変換せず install を拒否する。
+| platform | supervisor | 定義の置き場所 | login 起動 | 異常終了後 |
+|---|---|---|---|---|
+| macOS | launchd（LaunchAgent） | `~/Library/LaunchAgents/com.usagi.daemon.plist` | `RunAtLoad` | `KeepAlive` |
+| Linux | systemd（**user** unit） | `<config dir>/systemd/user/usagi-daemon.service` | `WantedBy=default.target` | `Restart=on-failure` |
+| その他 | なし | — | — | — |
 
-launchd は process supervisor であり、managed session や Agent の権威を持たない。手動の `start` と
-LaunchAgent が競合しても、active role の `serve` が保持する `daemon.lock` がその data directory の active を
+Linux が system unit ではなく **user unit** なのは、daemon が 1 人の利用者の PTY と Agent child を所有し、
+その利用者の home 配下に data home を解決するからである。system unit は root で動き、まったく別の data home を
+解決してしまう。unit の置き場所は `$XDG_CONFIG_HOME`（未設定なら `~/.config`）に従う。
+
+**異常終了後の扱いが 2 つで異なる。** LaunchAgent の `KeepAlive` は無条件なので、意図した
+`usagi daemon stop` の後でも launchd が daemon を起動し直す。systemd unit は `Restart=on-failure` を使い、
+graceful な停止はそのまま停止として残し、crash だけを回復する。`usagi daemon stop` が停止の正規手段である以上、
+supervision がそれを打ち消すべきではないという判断である。
+
+Linux の user unit は既定でログアウト時に停止する。ログアウトをまたいで常駐させる場合は
+`loginctl enable-linger <user>` を利用者が別途実行する（特権を要するため usagi は実行しない）。
+
+install-service は supervisor の定義に **data home の組（`USAGI_HOME` の base と `USAGI_RUNTIME_MODE` の
+mode）だけ**を書き、token・credential・session state は書かない。
+
+launchd も systemd も、install した shell の環境ではなく **supervisor 自身の環境**で service を起動する。
+この組を書かない定義は supervise される daemon に data home を空の環境から再解決させてしまい、install した
+process とは別の directory を掴ませる（一方で定義の stderr log path は install した process の selected
+directory を指すため、log と daemon の mode が食い違う）。この組を渡す契約は、daemon が起動する Agent MCP
+child に渡すもの（[Agent child の data home](#agent-child-の-data-home)）と同じである。base が UTF-8 で
+綴れない場合は lossy 変換せず install を拒否する。
+
+systemd unit では、`ExecStart` と `Environment=` の値のように systemd が shell 風に分割する field を quote し、
+`%` を `%%` へ escape する。quote しない path に空白が含まれると service は誤った argv で起動し、escape しない
+`%` は unit specifier として展開される。
+
+supervisor は process supervisor であり、managed session や Agent の権威を持たない。手動の `start` と
+supervisor が競合しても、active role の `serve` が保持する `daemon.lock` がその data directory の active を
 決める。lock を取得できない process は IPC endpoint を公開しない。`uninstall-service` は supervision を止めるが、実行中 daemon の
-停止は `usagi daemon stop` が担う。非 macOS では service 操作は unsupported として失敗し、既存の detached
-`start` 経路は変わらない。
+停止は `usagi daemon stop` が担う。macOS / Linux 以外では service 操作は unsupported として失敗し、既存の detached
+`start` 経路と client bootstrap による自動起動は変わらない。
 
 ## daemon data directory
 
