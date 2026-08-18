@@ -718,6 +718,28 @@ mod tests {
     }
 
     #[test]
+    fn a_stateless_fetch_panic_uses_the_noop_recovery_path() {
+        let terminal = terminal();
+        let pump = TerminalPollPump::spawn(|_| -> Result<Vec<TerminalChunk>, TerminalError> {
+            panic!("stateless fetch panic")
+        });
+        pump.register(&terminal, 0, 1);
+
+        let error = (0..100)
+            .find_map(|_| {
+                if let Err(error) = pump.take(&terminal, 0) {
+                    Some(error)
+                } else {
+                    std::thread::sleep(Duration::from_millis(2));
+                    None
+                }
+            })
+            .expect("the panic is delivered through the stateless adapter");
+        assert_eq!(error, TerminalError::Unavailable);
+        assert_eq!(pump.metrics().panics, 1);
+    }
+
+    #[test]
     fn unregister_drops_the_terminal_and_a_late_fetch_result_is_ignored() {
         let mut state = PumpState::default();
         let terminal = terminal();
