@@ -1313,6 +1313,10 @@ impl AppState {
     /// from [`AppState::size`], so a pointer event before the first resize is
     /// inert.
     fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
+        self.sidebar_hit_at(column, row).map(|hit| hit.selection)
+    }
+
+    fn sidebar_hit_at(&self, column: u16, row: u16) -> Option<SidebarHit> {
         let (raw_width, raw_height) = self.size?;
         let width = if raw_width == 0 {
             80
@@ -1334,7 +1338,11 @@ impl AppState {
         let rows = self.rows();
         let body_height = height - SIDEBAR_CHROME_ROWS;
         if body_height == 1 {
-            return (usize::from(row) == SIDEBAR_CHROME_ROWS).then(|| rows[0]);
+            return (usize::from(row) == SIDEBAR_CHROME_ROWS).then(|| SidebarHit {
+                selection: rows[0],
+                line: 0,
+                left,
+            });
         }
         let body_capacity = body_height - 1;
         let content_capacity =
@@ -1355,11 +1363,40 @@ impl AppState {
                 break;
             }
             if (offset..offset + lines).contains(&clicked) {
-                return Some(*entry);
+                return Some(SidebarHit {
+                    selection: *entry,
+                    line: clicked - offset,
+                    left,
+                });
             }
             offset += lines;
         }
         None
+    }
+
+    /// Resolve only the visible `<PR icon> <count>` cells at the right edge of
+    /// a session metadata row. The count and width mirror the view's badge.
+    fn sidebar_pr_at(&self, column: u16, row: u16) -> Option<SessionId> {
+        let hit = self.sidebar_hit_at(column, row)?;
+        let Selection::Target(Target::Session(session)) = hit.selection else {
+            return None;
+        };
+        if hit.line != 1 {
+            return None;
+        }
+        let visible = self
+            .session_prs(session)?
+            .iter()
+            .filter(|pr| pr.is_visible())
+            .count();
+        if visible == 0 {
+            return None;
+        }
+        let badge_width = 2 + visible.to_string().len();
+        let start = hit.left.saturating_sub(badge_width);
+        (start..hit.left)
+            .contains(&usize::from(column))
+            .then_some(session)
     }
 
     fn reconcile_sessions(&mut self, previous_sessions: &[SessionId]) {
@@ -1397,6 +1434,15 @@ impl AppState {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidebarHit {
+    selection: Selection,
+    /// Zero-based line inside the logical sidebar row.
+    line: usize,
+    /// Width of the rendered left pane.
+    left: usize,
 }
 
 /// Choose a deterministic surviving row at the removed session's former
@@ -1514,7 +1560,7 @@ pub enum AppKey {
     CtrlO,
     /// Ctrl-O Ctrl-N selects the next Closeup tab when a live pane owns input.
     CtrlN,
-    /// Ctrl-O p / Ctrl-P selects the previous Closeup tab when a live pane owns input.
+    /// Ctrl-O p selects the previous Closeup tab when a live pane owns input.
     CtrlP,
     /// Home navigation. Inside a create form it is deliberately inert: this
     /// string-only reducer has no byte cursor, and must never reopen the form.
@@ -1542,7 +1588,7 @@ pub enum AppKey {
     OpenNotes,
     /// Open the active target's environment editor.
     OpenEnvironment,
-    /// Open the active target's Pull Request list overlay.
+    /// Open the active target's Pull Request list overlay (`Ctrl-O Ctrl-P` in Closeup).
     OpenPrs,
     /// Open the active target's Markdown preview overlay.
     OpenPreview,
@@ -3993,6 +4039,10 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
     let Some(target) = state.active_target() else {
         return Vec::new();
     };
+    open_prs_for_target(state, target)
+}
+
+fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
     state.overlay = Some(Overlay::Prs);
     let mut overlay = PrOverlay::loading(target);
     if let Target::Session(session) = target
@@ -4394,6 +4444,10 @@ fn update_pointer(
         state.pending_session_click = None;
         return Vec::new();
     }
+    if let Some(session) = state.sidebar_pr_at(column, row) {
+        state.pending_session_click = None;
+        return open_prs_for_target(state, Target::Session(session));
+    }
     let Some(selection) = state.sidebar_selection_at(column, row) else {
         state.pending_session_click = None;
         return Vec::new();
@@ -4681,6 +4735,82 @@ mod tests {
         assert_eq!(state.selected(), before);
         let _ = click_at(&mut state, 5, 9, 5_000);
         assert_eq!(state.selected(), before);
+    }
+
+    #[test]
+    fn closeup_sidebar_pr_badge_click_opens_that_sessions_modal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let pr = pr_link(41);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr.clone()],
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(state.overlay(), None);
+
+        // The first session's metadata is row 3. Its three-cell badge is flush
+        // right in the 36-cell sidebar, so the last cell must open PRs rather
+        // than changing selection or contributing to a double-click.
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Pointer {
+                    column: 35,
+                    row: 3,
+                    at: std::time::Duration::ZERO,
+                },
+            ),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.pr_overlay().unwrap().target(), target);
+        assert_eq!(state.pr_overlay().unwrap().prs(), std::slice::from_ref(&pr));
+    }
+
+    #[test]
+    fn sidebar_reserved_pr_cells_without_a_visible_pr_do_not_open_a_modal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let mut dismissed = pr_link(41);
+        dismissed.state = PrState::Dismissed;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![dismissed],
+            }),
+        );
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Pointer {
+                    column: 35,
+                    row: 3,
+                    at: std::time::Duration::ZERO,
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
     }
 
     #[test]

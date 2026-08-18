@@ -171,6 +171,8 @@ pub enum LiveTerminalAction {
     NextTab,
     /// Select the previous tab.
     PreviousTab,
+    /// Open the active Closeup target's Pull Request modal.
+    OpenPullRequests,
     /// Move the selected tab one slot toward the next tab.
     MoveTabNext,
     /// Move the selected tab one slot toward the previous tab.
@@ -397,7 +399,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return Some(LiveTerminalAction::NextTab);
     }
     if is_ctrl_p(key) {
-        return Some(LiveTerminalAction::PreviousTab);
+        return Some(LiveTerminalAction::OpenPullRequests);
     }
     if is_ctrl_x(key) {
         return Some(LiveTerminalAction::CloseTab);
@@ -414,6 +416,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     }
     match key.code {
         KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
+        KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
         KeyCode::Char(']') => Some(LiveTerminalAction::MoveTabNext),
@@ -712,6 +715,10 @@ mod tests {
             },
             Case {
                 follow_up: ctrl('p'),
+                action: LiveTerminalAction::OpenPullRequests,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('p')),
                 action: LiveTerminalAction::PreviousTab,
             },
             Case {

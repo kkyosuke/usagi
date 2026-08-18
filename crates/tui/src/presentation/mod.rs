@@ -3341,6 +3341,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
+        LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
@@ -4458,7 +4459,7 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         Key::Live(LiveTerminalAction::NextTab) => {
             crate::usecase::application::controller::TabDirection::Next
         }
-        Key::Live(LiveTerminalAction::PreviousTab) => {
+        Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::OpenPullRequests) => {
             crate::usecase::application::controller::TabDirection::Previous
         }
         _ => return false,
@@ -7134,6 +7135,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::PreviousTab)),
             Some(AppEvent::Key(AppKey::CtrlP))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests)),
+            Some(AppEvent::Key(AppKey::OpenPrs))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Agent)),
