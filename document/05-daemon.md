@@ -172,6 +172,23 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon install-service` | macOS の LaunchAgent を明示的に install し、前景 `serve` を login と異常終了後に supervise する |
 | `usagi daemon uninstall-service` | install 済み LaunchAgent を unload して remove する |
 
+### sandbox bootstrap broker
+
+active daemon は workspace fence を取得して IPC endpoint を bind した後、同じ executable path、runtime mode、canonical workspace を
+固定した hidden `bootstrap-broker` process を sandbox 外へ起動する。broker は workspace と executable path の digest で分離した
+`<data-dir>/daemon/bootstrap-broker-<digest>.sock`（`0600`、private daemon directory 内）で 1 byte の ping または start だけを受理する。
+client から workspace、実行ファイル、argv を受け取らず、start 時は固定済み workspace を cwd として `daemon serve` だけを spawn する。
+
+broker は対応する `bootstrap-broker-<digest>.lock` を process lifetime にわたって保持するため、同じ workspace と executable の
+候補 broker は 1 process だけが残る。別 workspace や別 executable は独立した endpoint を使い、誤った workspace・build の daemon を
+起動しない。daemon 停止・crash 後も broker は残り、root Agent の read-only sandbox から cold start を仲介する。workspace が消えた後の
+要求では broker も終了し、socket を回収する。接続ごとの read / write には deadline を設け、request byte を送らない client が accept loop を
+占有し続けることを許さない。
+
+通常 client は従来どおり `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によってその lock を開けない client だけが
+broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の build identity・workspace handshake を通して接続する。
+この fallback は data home、workspace、Git common dir を Agent の writable root へ追加しない。
+
 active role の `serve` は process lifetime にわたって単一インスタンス lock を保持する。lock が意味するのは
 「この process がこの data directory の **active role** である」ことであり、「この data directory の process が
 1 つだけである」ことではない（[単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）。record は daemon の発見と
@@ -505,6 +522,8 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `daemon.json` | JSON | 稼働中 daemon の pid と登録時刻を持つ lifecycle record。daemon は起動時に書き、endpoint cleanup 後に exact record だけを消去する |
 | `daemon.lock` | lock file | active role の `serve` が保持する単一インスタンス lock（standby は取らない）。process 終了時に OS が解放する |
 | `bootstrap.lock` | lock file | client の connect/start/restart/recover bootstrap を cross-process で直列化する |
+| `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
+| `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
 | `current.lock` | lock file | current locator の publish と generation-fenced retire を cross-process で直列化する |
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |
@@ -553,8 +572,9 @@ daemon が起動する Agent child には、mode を適用する**前**の base�
 
 この 2 つは常に 1 つの組として扱い、片方から path 操作でもう片方を導かない。production は base と selected directory が同じ directory なので、「selected directory から 1 階層上が base」と仮定すると data home の**親**（既定では利用者のホームディレクトリ）を選んでしまい、それが child の data home・sandbox の writable root として渡ることになる。
 
-- child の `$USAGI_HOME` には **base** を渡す。root coordinator の Claude sandbox にも base を writable root として
-  渡すが、session sandbox は data home を read-only とし、mutation は credential-scoped MCP/daemon IPC を使う。
+- child の `$USAGI_HOME` には **base** を渡すが、Claude / Codex sandbox の writable root には含めない。root coordinator
+  からの cold start は、稼働中 daemon があらかじめ sandbox 外へ起動した固定 workspace の bootstrap broker に委譲する。
+  broker は ping と daemon start だけを受理し、session sandbox と同様に data home の mutation は daemon IPC に閉じる。
   child は mode の子 directory を自分で作る必要があるため、root coordinator に selected directory だけを渡すことは
   できない。
 - daemon 所有の global settings（local LLM の有効/無効とモデル名など）は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。

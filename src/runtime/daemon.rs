@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::prompt::session_system_prompt_with_role;
@@ -827,9 +828,8 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
 /// A session launch receives exactly its own worktree. A root coordinator receives
-/// no repository-local writable root; daemon-owned MCP operations perform durable
-/// writes out of process, so the Agent child never needs write access to the checkout,
-/// `.git`, or `.usagi`.
+/// no repository-local writable root. Daemon bootstrap is delegated to the
+/// out-of-sandbox bootstrap broker.
 fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
         vec![working_directory.to_path_buf()]
@@ -7714,7 +7714,12 @@ impl DaemonReady for IpcReady<'_> {
                 true,
                 Arc::clone(&self.shutdown),
             )
-        })
+        })?;
+        spawn_bootstrap_broker(
+            &std::env::current_exe()?,
+            self.data_dir,
+            self.workspace_root,
+        )
     }
 
     fn quiesce(&self) -> std::io::Result<()> {
@@ -9230,6 +9235,247 @@ impl DaemonLauncher for ServeLauncher {
     }
 }
 
+const BROKER_PING: u8 = b'P';
+const BROKER_START: u8 = b'S';
+const BROKER_OK: u8 = b'O';
+const BROKER_READINESS_ATTEMPTS: u32 = 100;
+const BROKER_IO_TIMEOUT: Duration = Duration::from_secs(1);
+const BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Debug, PartialEq, Eq)]
+struct BootstrapBrokerAddress {
+    socket: PathBuf,
+    lock: PathBuf,
+}
+
+fn bootstrap_broker_address(
+    data_dir: &Path,
+    workspace: &Path,
+    exe: &Path,
+) -> BootstrapBrokerAddress {
+    let mut digest = Sha256::new();
+    for component in [
+        b"usagi-bootstrap-broker-v1".as_slice(),
+        workspace.as_os_str().as_encoded_bytes(),
+        exe.as_os_str().as_encoded_bytes(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    let digest = digest.finalize();
+    let mut key = String::with_capacity(32);
+    for byte in &digest[..16] {
+        write!(&mut key, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    let daemon_dir = data_dir.join("daemon");
+    BootstrapBrokerAddress {
+        socket: daemon_dir.join(format!("bootstrap-broker-{key}.sock")),
+        lock: daemon_dir.join(format!("bootstrap-broker-{key}.lock")),
+    }
+}
+
+fn broker_workspace(workspace: &ClientWorkspace) -> std::io::Result<PathBuf> {
+    let root = match workspace {
+        ClientWorkspace::Bound { root } | ClientWorkspace::Selected { root }
+            if !root.is_empty() =>
+        {
+            root
+        }
+        ClientWorkspace::Bound { .. }
+        | ClientWorkspace::Selected { .. }
+        | ClientWorkspace::Unbound => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "daemon bootstrap broker requires a canonical workspace",
+            ));
+        }
+    };
+    paths::canonical_workspace_root(root)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))
+}
+
+fn request_bootstrap_broker(address: &BootstrapBrokerAddress, request: u8) -> std::io::Result<()> {
+    let mut stream = std::os::unix::net::UnixStream::connect(&address.socket)?;
+    let timeout = if request == BROKER_START {
+        Duration::from_secs(6)
+    } else {
+        BROKER_REQUEST_TIMEOUT
+    };
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(&[request])?;
+    let mut reply = [0_u8; 1];
+    stream.read_exact(&mut reply)?;
+    (reply[0] == BROKER_OK)
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other("daemon bootstrap broker refused the request"))
+}
+
+fn request_broker_start(
+    data_dir: &Path,
+    workspace: &ClientWorkspace,
+    exe: &Path,
+) -> std::io::Result<()> {
+    let workspace = broker_workspace(workspace)?;
+    let exe = exe.canonicalize()?;
+    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
+    request_bootstrap_broker(&address, BROKER_START)?;
+    for _ in 0..BROKER_READINESS_ATTEMPTS {
+        if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+            return Ok(());
+        }
+        RealSleeper.sleep();
+    }
+    Err(std::io::Error::other(
+        "daemon bootstrap broker started no reachable daemon",
+    ))
+}
+
+fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std::io::Result<()> {
+    let workspace = paths::canonical_workspace_root(workspace)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let exe = exe.canonicalize()?;
+    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
+    // A daemon launched by this broker reaches here while the broker is still
+    // waiting for that daemon's readiness. Requiring a ping reply would make
+    // both processes wait on each other. The identity-scoped socket path and a
+    // successful connect are sufficient to prove that this broker is present.
+    if std::os::unix::net::UnixStream::connect(&address.socket).is_ok() {
+        return Ok(());
+    }
+    let mut command = std::process::Command::new(&exe);
+    command
+        .args(["daemon", "bootstrap-broker"])
+        .current_dir(&workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let child = command.spawn()?;
+    reap_child(child);
+    for _ in 0..BROKER_READINESS_ATTEMPTS {
+        if request_bootstrap_broker(&address, BROKER_PING).is_ok() {
+            return Ok(());
+        }
+        RealSleeper.sleep();
+    }
+    Err(std::io::Error::other(
+        "daemon bootstrap broker did not become ready",
+    ))
+}
+
+fn reap_child(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+fn bootstrap_serve_command(exe: &Path, workspace: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["daemon", "serve"])
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command
+}
+
+fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::io::Result<()> {
+    if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+        return Ok(());
+    }
+    let child = bootstrap_serve_command(exe, workspace).spawn()?;
+    for _ in 0..BROKER_READINESS_ATTEMPTS {
+        if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
+            reap_child(child);
+            return Ok(());
+        }
+        RealSleeper.sleep();
+    }
+    reap_child(child);
+    Err(std::io::Error::other(
+        "brokered daemon did not become ready",
+    ))
+}
+
+fn handle_bootstrap_broker_request(
+    request: u8,
+    launch: impl FnOnce() -> std::io::Result<()>,
+) -> bool {
+    match request {
+        BROKER_PING => true,
+        BROKER_START => launch().is_ok(),
+        _ => false,
+    }
+}
+
+fn serve_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let workspace = paths::canonical_workspace_root(workspace)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let exe = exe.canonicalize()?;
+    ensure_private_dir_all(data_dir)?;
+    let daemon_dir = data_dir.join("daemon");
+    ensure_private_dir(&daemon_dir)?;
+    let lock = FileInstanceLock {
+        path: bootstrap_broker_address(data_dir, &workspace, &exe).lock,
+        held: RefCell::new(None),
+    };
+    if !lock.acquire()? {
+        return Ok(());
+    }
+    let socket = bootstrap_broker_address(data_dir, &workspace, &exe).socket;
+    match std::fs::symlink_metadata(&socket) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&socket)?,
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "daemon bootstrap broker endpoint is not a socket",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    }
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else {
+            continue;
+        };
+        if workspace.canonicalize().ok().as_deref() != Some(workspace.as_path()) {
+            break;
+        }
+        // A readiness probe may disconnect immediately after `connect`. Some
+        // platforms reject timeout setup on that already-disconnected socket;
+        // one vanished client must not terminate the broker process.
+        if stream.set_read_timeout(Some(BROKER_IO_TIMEOUT)).is_err()
+            || stream.set_write_timeout(Some(BROKER_IO_TIMEOUT)).is_err()
+        {
+            continue;
+        }
+        let mut request = [0_u8; 1];
+        if stream.read_exact(&mut request).is_err() {
+            continue;
+        }
+        let accepted = handle_bootstrap_broker_request(request[0], || {
+            launch_broker_daemon(&exe, &workspace, data_dir)
+        });
+        let _ = stream.write_all(&[if accepted { BROKER_OK } else { b'E' }]);
+    }
+    drop(listener);
+    let _ = std::fs::remove_file(socket);
+    Ok(())
+}
+
 struct IpcRolloverRequester<'a> {
     data_dir: &'a Path,
     launcher: &'a ServeLauncher,
@@ -9483,6 +9729,21 @@ pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
     Ok(data_dir)
 }
 
+fn run_broker_lifecycle_command(command: CliDaemonCommand) -> Option<std::io::Result<()>> {
+    if command == CliDaemonCommand::BootstrapBroker {
+        return Some((|| {
+            let data_dir =
+                paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+            serve_bootstrap_broker(
+                &data_dir,
+                &std::env::current_dir()?,
+                &std::env::current_exe()?,
+            )
+        })());
+    }
+    None
+}
+
 /// Install one process-wide panic hook for the daemon. A daemon owns several
 /// worker threads, so a boundary around its main thread alone cannot observe a
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
@@ -9511,12 +9772,16 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
         Backtrace::force_capture()
     )
 }
+#[allow(clippy::too_many_lines)] // Composition wires the closed lifecycle verbs and their IO ports.
 fn run_inner(
     out: &mut dyn Write,
     command: CliDaemonCommand,
     info: &AppInfo,
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
 ) -> std::io::Result<()> {
+    if let Some(result) = run_broker_lifecycle_command(command) {
+        return result;
+    }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
     let command = match command {
@@ -9551,6 +9816,7 @@ fn run_inner(
             ServeRole::Active
         }),
         CliDaemonCommand::Start => PresentationDaemonCommand::Start,
+        CliDaemonCommand::BootstrapBroker => unreachable!("handled before daemon state setup"),
         CliDaemonCommand::Status => PresentationDaemonCommand::Status,
         CliDaemonCommand::Stop { force } => PresentationDaemonCommand::Stop(transition_mode(force)),
         // A manual restart is a forced replacement of the artifact that is
@@ -9759,7 +10025,7 @@ fn client_for(
     connect_budget_ms: u64,
 ) -> Result<LaneClient, ClientError> {
     let clock = SystemClock::new();
-    bootstrap_client(|data_dir, build| {
+    bootstrap_client(workspace, |data_dir, build| {
         connect_client(
             data_dir,
             policy,
@@ -9806,14 +10072,54 @@ pub(crate) fn lane_socket(client: &LaneClient) -> &std::os::unix::net::UnixStrea
 // UnixStream instantiation already exercises through the integration suite.
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=cli_tui_pty
 fn bootstrap_client<S: Read + Write>(
+    workspace: &ClientWorkspace,
     connect: impl Fn(&Path, &BuildIdentity) -> std::io::Result<IpcClient<S>>,
 ) -> Result<IpcClient<S>, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let exe =
         std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
     let expected_build = current_build();
+    let _bootstrap_lock =
+        match acquire_bootstrap_lock_io_within(&data_dir, PrivateLockWait::BOOTSTRAP) {
+            Ok(lock) => lock,
+            Err(lock_error) if lock_error.kind() == std::io::ErrorKind::PermissionDenied => {
+                if request_broker_start(&data_dir, workspace, &exe).is_err() {
+                    return Err(map_bootstrap_lock_error(&lock_error));
+                }
+                for _ in 0..40 {
+                    if let Ok(client) = connect(&data_dir, &expected_build) {
+                        return match build_artifact_decision(
+                            client.server_build(),
+                            &expected_build,
+                            false,
+                        ) {
+                            BuildArtifactDecision::Reuse => Ok(client),
+                            BuildArtifactDecision::ForceReplace
+                            | BuildArtifactDecision::RolloverTrigger => {
+                                Err(ClientError::RolloverRequired(
+                                    build_rollover_trigger(
+                                        client.server_build(),
+                                        &expected_build,
+                                        runtime_channel(),
+                                        false,
+                                    )
+                                    .ok_or(ClientError::BuildIdentityUnavailable)?,
+                                ))
+                            }
+                            BuildArtifactDecision::Unknown => {
+                                Err(ClientError::BuildIdentityUnavailable)
+                            }
+                        };
+                    }
+                    RealSleeper.sleep();
+                }
+                return Err(ClientError::Unavailable(
+                    "daemon bootstrap broker started no reachable daemon".into(),
+                ));
+            }
+            Err(lock_error) => return Err(map_bootstrap_lock_error(&lock_error)),
+        };
     let channel = runtime_channel();
     let connection = bootstrap::connect_or_start(
         || connect(&data_dir, &expected_build),
@@ -10006,7 +10312,7 @@ fn connect_deadline_client(
 pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
     let clock = SystemClock::new();
     let workspace = client_workspace();
-    let initial = bootstrap_client(|data_dir, build| {
+    let initial = bootstrap_client(&workspace, |data_dir, build| {
         connect_deadline_client(
             data_dir,
             policy,
@@ -10502,7 +10808,15 @@ fn acquire_bootstrap_lock_within(
     data_dir: &Path,
     wait: PrivateLockWait,
 ) -> Result<std::fs::File, ClientError> {
-    let result = (|| {
+    acquire_bootstrap_lock_io_within(data_dir, wait)
+        .map_err(|error| map_bootstrap_lock_error(&error))
+}
+
+fn acquire_bootstrap_lock_io_within(
+    data_dir: &Path,
+    wait: PrivateLockWait,
+) -> std::io::Result<std::fs::File> {
+    (|| {
         ensure_private_dir_all(data_dir)?;
         // `open_private_lock` runs `ensure_private_dir` on the lock's parent, so
         // creating (and directory-locking) `daemon/` here as well would double
@@ -10514,14 +10828,15 @@ fn acquire_bootstrap_lock_within(
             PrivateLockModePolicy::OwnerLegacy0644,
             wait,
         )
-    })();
-    result.map_err(|error: std::io::Error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            ClientError::BootstrapContended
-        } else {
-            ClientError::Unavailable(error.to_string())
-        }
-    })
+    })()
+}
+
+fn map_bootstrap_lock_error(error: &std::io::Error) -> ClientError {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        ClientError::BootstrapContended
+    } else {
+        ClientError::Unavailable(error.to_string())
+    }
 }
 
 /// Ensures that an active daemon endpoint exists before an interactive TUI is
@@ -14638,11 +14953,160 @@ instructions = "{instructions}"
                 Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
             );
 
-            // 3. Root sandbox scope: daemon state is not writable by the Agent child.
+            // 3. Root sandbox scope: daemon bootstrap is brokered out of process,
+            // so neither the selected directory nor its mode-neutral base is writable.
             let roots =
                 claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
             assert!(roots.is_empty(), "{roots:?}");
         }
+    }
+
+    #[test]
+    fn root_agent_writable_roots_include_only_provider_state() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let home = fixture.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let roots = root_agent_writable_roots(Some(&home), "codex").unwrap();
+        assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
+        assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
+
+        let roots = root_agent_writable_roots(None, "/bin/sh").unwrap();
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_broker_accepts_only_ping_and_start() {
+        let launches = std::cell::Cell::new(0_u8);
+        assert!(handle_bootstrap_broker_request(BROKER_PING, || {
+            launches.set(launches.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(launches.get(), 0);
+        assert!(handle_bootstrap_broker_request(BROKER_START, || {
+            launches.set(launches.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(launches.get(), 1);
+        assert!(!handle_bootstrap_broker_request(b'X', || {
+            launches.set(launches.get() + 1);
+            Ok(())
+        }));
+        assert_eq!(launches.get(), 1);
+        assert!(!handle_bootstrap_broker_request(BROKER_START, || {
+            Err(std::io::Error::other("launch refused"))
+        }));
+    }
+
+    #[test]
+    fn bootstrap_broker_launches_only_serve_in_its_fixed_workspace() {
+        let command = bootstrap_serve_command(Path::new("/opt/usagi"), Path::new("/repo"));
+        assert_eq!(command.get_program(), "/opt/usagi");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["daemon", "serve"]);
+        assert_eq!(command.get_current_dir(), Some(Path::new("/repo")));
+    }
+
+    #[test]
+    fn bootstrap_broker_address_is_fenced_by_workspace_and_executable() {
+        let data = Path::new("/data");
+        let first = bootstrap_broker_address(data, Path::new("/repo-a"), Path::new("/bin/usagi"));
+        assert_eq!(
+            first,
+            bootstrap_broker_address(data, Path::new("/repo-a"), Path::new("/bin/usagi"))
+        );
+        assert_ne!(
+            first,
+            bootstrap_broker_address(data, Path::new("/repo-b"), Path::new("/bin/usagi"))
+        );
+        assert_ne!(
+            first,
+            bootstrap_broker_address(data, Path::new("/repo-a"), Path::new("/opt/usagi"))
+        );
+        assert_eq!(first.socket.parent(), Some(Path::new("/data/daemon")));
+        assert_eq!(first.lock.parent(), Some(Path::new("/data/daemon")));
+        assert!(first.socket.to_string_lossy().ends_with(".sock"));
+        assert!(first.lock.to_string_lossy().ends_with(".lock"));
+    }
+
+    #[test]
+    fn bootstrap_broker_requires_a_named_workspace() {
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let canonical = directory.path().canonicalize().unwrap();
+        for workspace in [
+            ClientWorkspace::Bound {
+                root: paths::wire_workspace_root(&canonical),
+            },
+            ClientWorkspace::Selected {
+                root: paths::wire_workspace_root(&canonical),
+            },
+        ] {
+            assert_eq!(broker_workspace(&workspace).unwrap(), canonical);
+        }
+        assert_eq!(
+            broker_workspace(&ClientWorkspace::Unbound)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            broker_workspace(&ClientWorkspace::Bound {
+                root: String::new(),
+            })
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn ordinary_daemon_start_does_not_use_a_workspace_fixed_broker() {
+        assert!(run_broker_lifecycle_command(CliDaemonCommand::Start).is_none());
+    }
+
+    #[test]
+    fn an_idle_broker_client_cannot_block_the_next_request_forever() {
+        let workspace_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let workspace = workspace_dir.path().canonicalize().unwrap();
+        let data_parent = tempfile::tempdir_in("/tmp").unwrap();
+        let data = data_parent.path().join("data");
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let address = bootstrap_broker_address(&data, &workspace, &exe);
+        let server_data = data.clone();
+        let server_workspace = workspace.clone();
+        let server_exe = exe.clone();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let result = serve_bootstrap_broker(&server_data, &server_workspace, &server_exe);
+            let _ = finished_tx.send(result.as_ref().err().map(ToString::to_string));
+            result
+        });
+        let mut idle = None;
+        for _ in 0..100 {
+            if let Ok(stream) = std::os::unix::net::UnixStream::connect(&address.socket) {
+                idle = Some(stream);
+                break;
+            }
+            if let Ok(error) = finished_rx.try_recv() {
+                panic!("broker failed before binding its socket: {error:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let idle = idle.expect("broker socket became ready");
+        drop(std::os::unix::net::UnixStream::connect(&address.socket).unwrap());
+
+        let started = Instant::now();
+        request_bootstrap_broker(&address, BROKER_PING).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an idle peer blocked the broker beyond its IO deadline"
+        );
+        drop(idle);
+
+        workspace_dir.close().unwrap();
+        let _ = request_bootstrap_broker(&address, BROKER_PING);
+        server.join().unwrap().unwrap();
+        assert!(!address.socket.exists());
     }
 
     #[test]
@@ -15106,7 +15570,7 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&provision_context(None));
         assert_eq!(mode, SandboxMode::Root);
 
-        // A root launch's cwd is the project root, but it is not a writable root.
+        // A root launch's cwd and daemon data stay read-only; bootstrap uses the broker.
         let roots = claude_writable_roots(mode, Path::new("/repo"));
         assert!(roots.is_empty());
         let launcher = claude_sandbox_launcher(

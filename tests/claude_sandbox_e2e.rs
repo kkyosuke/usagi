@@ -7,8 +7,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 const ORIGINAL: &[u8] = b"authority-sentinel\n";
 
@@ -75,6 +77,27 @@ fn run_in_root(root: &Path, script: &str) -> Output {
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_PAGER", "")
         .env("GIT_EXTERNAL_DIFF", "")
+        .output()
+        .expect("shipping launcher starts")
+}
+
+fn run_usagi_in_root(root: &Path, data: &Path, arguments: &[&str]) -> Output {
+    let protected = root.canonicalize().expect("canonical protected root");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_usagi"));
+    let mut command = Command::new(&binary);
+    command
+        .args(["claude-sandbox", "--mode", "root", "--protected-root"])
+        .arg(&protected);
+    #[cfg(target_os = "macos")]
+    command.arg("--backend").arg("/usr/bin/sandbox-exec");
+    command
+        .arg("--")
+        .arg(&binary)
+        .args(arguments)
+        .current_dir(&protected)
+        .env("USAGI_HOME", data)
+        .env("USAGI_RUNTIME_MODE", "production")
+        .env("USAGI_WORKSPACE_ROOT", &protected)
         .output()
         .expect("shipping launcher starts")
 }
@@ -149,6 +172,44 @@ fn sandbox_backend_unavailable(output: &Output) -> bool {
     diagnostic.contains("sandbox_apply: Operation not permitted")
         || diagnostic.contains("sandbox backend")
         || diagnostic.contains("OS sandbox backend")
+}
+
+fn bootstrap_broker_sockets(data: &Path) -> Vec<PathBuf> {
+    let daemon = data.join("daemon");
+    let mut sockets = fs::read_dir(daemon)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("bootstrap-broker-") && name.ends_with(".sock")
+            })
+        })
+        .collect::<Vec<_>>();
+    sockets.sort();
+    sockets
+}
+
+fn retire_bootstrap_brokers(repo: &Path, data: &Path, fixture: &Path) {
+    let _ = fs::remove_dir_all(repo);
+    let sockets = bootstrap_broker_sockets(data);
+    for socket in &sockets {
+        if let Ok(mut broker) = std::os::unix::net::UnixStream::connect(socket) {
+            let _ = broker.write_all(b"P");
+        }
+    }
+    for _ in 0..40 {
+        if sockets.iter().all(|socket| !socket.exists()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        sockets.iter().all(|socket| !socket.exists()),
+        "bootstrap broker did not retire"
+    );
+    fs::remove_dir_all(fixture).unwrap();
 }
 
 #[test]
@@ -353,4 +414,102 @@ fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
     }
 
     let _ = fs::remove_dir_all(&fixture);
+}
+
+#[test]
+fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
+    let fixture = PathBuf::from(std::env::var_os("HOME").expect("test HOME"))
+        .join(".codex")
+        .join(format!("ub{}", std::process::id()));
+    let _ = fs::remove_dir_all(&fixture);
+    let repo = fixture.join("repo");
+    let data = fixture.join("data");
+    fs::create_dir_all(&repo).unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_usagi"));
+    let run = |arguments: &[&str]| {
+        Command::new(&binary)
+            .args(arguments)
+            .current_dir(&repo)
+            .env("USAGI_HOME", &data)
+            .env("USAGI_RUNTIME_MODE", "production")
+            .env("USAGI_WORKSPACE_ROOT", &repo)
+            .output()
+            .unwrap()
+    };
+    let git = |arguments: &[&str]| {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    fs::write(repo.join("tracked"), "base\n").unwrap();
+    git(&["add", "tracked"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+
+    let started = run(&["daemon", "start"]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let stopped = run(&["daemon", "stop"]);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+
+    let sockets = bootstrap_broker_sockets(&data);
+    assert_eq!(sockets.len(), 1, "one broker for this workspace and binary");
+    // One client that connects without sending a request must time out instead
+    // of monopolising the broker's single accept loop forever.
+    let idle = std::os::unix::net::UnixStream::connect(&sockets[0]).unwrap();
+    let mut broker = std::os::unix::net::UnixStream::connect(&sockets[0]).unwrap();
+    broker.write_all(b"S").unwrap();
+    let mut reply = [0_u8; 1];
+    broker.read_exact(&mut reply).unwrap();
+    assert_eq!(reply, [b'O']);
+    drop(idle);
+    let stopped = run(&["daemon", "stop"]);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+
+    let created = run_usagi_in_root(&repo, &data, &["session", "create", "brokered"]);
+    if !created.status.success() && sandbox_backend_unavailable(&created) {
+        let _ = run(&["daemon", "stop", "--force"]);
+        retire_bootstrap_brokers(&repo, &data, &fixture);
+        return;
+    }
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(repo.join(".usagi/sessions/brokered/.git").is_file());
+
+    let removed = run(&["session", "remove", "brokered"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let stopped = run(&["daemon", "stop"]);
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    retire_bootstrap_brokers(&repo, &data, &fixture);
 }

@@ -74,7 +74,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
 `clap` / `clap_complete` は `usagi-cli` が使う。
-`sha2` は合成ルートの `build.rs` が source / build configuration identity、IPC contract が rollover operation ID を
+`sha2` は合成ルートの `build.rs` が source / build configuration identity、runtime が workspace・executable 別の bootstrap broker endpoint、IPC contract が rollover operation ID を
 作るほか、`usagi-cli` が配布 binary に同梱した self-update installer の identity 検証にも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire と、ルート結合テストの[重い E2E の直列化](#重い-e2e-の直列化)も直列化する。

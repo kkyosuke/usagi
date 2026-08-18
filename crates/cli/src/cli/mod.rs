@@ -293,6 +293,9 @@ pub enum DaemonCommand {
         #[arg(long)]
         standby: bool,
     },
+    /// sandbox 外で daemon の cold start だけを仲介する（内部用）
+    #[command(hide = true)]
+    BootstrapBroker,
     /// detached daemon を起動する
     Start,
     /// daemon の状態を表示する
@@ -640,6 +643,10 @@ mod tests {
             (
                 &["usagi", "daemon", "serve", "--standby"][..],
                 DaemonCommand::Serve { standby: true },
+            ),
+            (
+                &["usagi", "daemon", "bootstrap-broker"][..],
+                DaemonCommand::BootstrapBroker,
             ),
             (&["usagi", "daemon", "start"][..], DaemonCommand::Start),
             (&["usagi", "daemon", "status"][..], DaemonCommand::Status),
