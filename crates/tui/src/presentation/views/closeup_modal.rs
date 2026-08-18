@@ -466,7 +466,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
     }
     let mut lines = vec![
         Style::new().dim().paint("Run a command:  (type to filter)"),
-        modal::prompt_line(
+        modal::filter_line(
             state.input.value(),
             state.input.cursor(),
             state.input.selection(),
@@ -1017,11 +1017,13 @@ mod tests {
     fn render_marks_the_selected_action() {
         let mut modal = CloseupModal::new("s");
         modal.select_next(); // Focus agent
-        let cursor_rows = render(24, 80, &modal)
+        let frame = render(24, 80, &modal);
+        let selection_rows = frame
             .iter()
-            .filter(|l| strip_ansi(l).contains('›'))
+            .filter(|line| strip_ansi(line).contains('›'))
             .count();
-        assert_eq!(cursor_rows, 1);
+        assert_eq!(selection_rows, 1);
+        assert!(!frame.iter().any(|line| strip_ansi(line).contains('❯')));
     }
 
     #[test]

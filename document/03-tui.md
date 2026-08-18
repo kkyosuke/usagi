@@ -989,13 +989,13 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 | list | Prs / Closeup / Decisions（一覧・option） / remove | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
 | text-viewer | Preview（`text_overlay`。PR error の Unavailable も） | `viewport_window` + `scroll_window` | offset 起点の読み取り専用 scroll・scroll indicator |
 | editor | Notes / Environment / Decisions（editor） | `content_line` + `caption` / `heading` + `footer` | draft 行・section 切替・error 行・footer |
-| palette | Overview / Closeup（prompt） | `prompt_line` + `subcommand_row` + list helper | `❯` 入力行・前方一致候補・inline subcommand picker・result / footer |
+| palette | Overview / Closeup | `prompt_line` / `filter_line` + `subcommand_row` + list helper | command 入力の `❯`、マーカーなしの filter 入力、前方一致候補、inline subcommand picker、result / footer |
 
 - **scroll viewport は 1 経路**。選択追従（list）は `list_window(len, selected, capacity)`、offset 起点
   （text-viewer）は `viewport_window(len, offset, capacity)` が半開区間 `[start, end)` を返し、`scroll_window(rows, start, end)`
   が `↑ N more` / `↓ N more` を挟んで窓を描く。pr_modal の旧 `visible_bounds` と text_overlay の inline scroll 計算は
   この 3 helper に統合した。
-- **palette の入力行は `prompt_line(value, cursor)`**（danger `❯` + accent block caret）に集約し、Overview と
+- **palette の command 入力行は `prompt_line(value, cursor)`**（danger `❯` + accent block caret）、選択肢を絞る filter 入力行は `filter_line(value, cursor)`（選択マーカーなし + accent block caret）に集約し、Overview と
   Closeup（prompt）が同じ prompt を描く。inline subcommand picker は `subcommand_row(label, selected)` に寄せる。
   subcommand の quiet な `›` は list の danger カーソルとは別に保つ。
 - **決定 modal の選択行は共通カーソルへ移行**した。旧 plain `>` を `selection_marker` の danger `›` に揃え、他の
