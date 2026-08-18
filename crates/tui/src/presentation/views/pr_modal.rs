@@ -8,23 +8,24 @@
 //! 純粋な値で、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。キー入力の
 //! 解釈は入力層が整うときに載せ、ここではカーソル移動の純粋操作だけを公開する。
 
-use usagi_core::domain::pr_inventory::PrEntry;
+use usagi_core::domain::pr_inventory::{PrChecksState, PrEntry, PrRefreshState, PrReviewDecision};
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::modal;
 
 /// モーダルの枠の内側（内容）幅。
-const INNER_WIDTH: usize = 58;
+const INNER_WIDTH: usize = 72;
 /// 一度に表示する Pull Request の最大数。
 const MAX_VISIBLE: usize = 6;
-const BODY_HEIGHT: usize = 10;
+const BODY_HEIGHT: usize = 11;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
 pub struct PrModal {
     prs: Vec<PrLink>,
     selected: usize,
+    filter: &'static str,
 }
 
 /// ダミーの [`PrLink`] を 1 件組む。
@@ -64,7 +65,11 @@ impl PrModal {
     /// 与えた PR 一覧で開く。先頭を選択する。
     #[must_use]
     pub fn new(prs: Vec<PrLink>) -> Self {
-        Self { prs, selected: 0 }
+        Self {
+            prs,
+            selected: 0,
+            filter: "all",
+        }
     }
 
     /// Open with a caller-owned cursor, clamped to the list. The controller
@@ -75,7 +80,17 @@ impl PrModal {
     #[must_use]
     pub fn with_selection(prs: Vec<PrLink>, selected: usize) -> Self {
         let selected = selected.min(prs.len().saturating_sub(1));
-        Self { prs, selected }
+        Self {
+            prs,
+            selected,
+            filter: "all",
+        }
+    }
+
+    #[must_use]
+    pub const fn with_filter(mut self, filter: &'static str) -> Self {
+        self.filter = filter;
+        self
     }
 
     /// Builds the modal from the daemon-owned PR snapshot projection.
@@ -96,22 +111,15 @@ impl PrModal {
                     pr.title.clone_from(&entry.title);
                     pr.state = match entry.state {
                         usagi_core::domain::pr_inventory::PrState::Open => PrState::Open,
-                        usagi_core::domain::pr_inventory::PrState::Closed => {
-                            // `PrLink` predates daemon inventory's Closed state. Keep
-                            // its persisted vocabulary stable and retain the display
-                            // label as modal-only metadata.
-                            pr.lookup_error = Some("closed".to_owned());
-                            PrState::Open
-                        }
+                        usagi_core::domain::pr_inventory::PrState::Closed => PrState::Closed,
                         usagi_core::domain::pr_inventory::PrState::Merged => PrState::Merged,
                         usagi_core::domain::pr_inventory::PrState::Dismissed => PrState::Dismissed,
                     };
-                    pr.refreshing =
-                        entry.refresh == usagi_core::domain::pr_inventory::PrRefreshState::Pending;
-                    if entry.refresh == usagi_core::domain::pr_inventory::PrRefreshState::BackingOff
-                    {
-                        pr.attempts = 1;
-                    }
+                    pr.refresh = entry.refresh;
+                    pr.draft = entry.draft;
+                    pr.checks = entry.checks;
+                    pr.review = entry.review;
+                    pr.auto_open = entry.auto_open;
                     pr
                 })
                 .collect(),
@@ -153,14 +161,39 @@ impl PrModal {
 
 /// PR の状態のラベルと色（open=success / merged=feature / dismissed=dim）。
 fn state_label(pr: &PrLink) -> (&'static str, Style) {
-    if pr.lookup_error.as_deref() == Some("closed") {
-        return ("closed", Style::new().dim());
-    }
     match pr.state {
         PrState::Open => ("open", Role::Success.style()),
         PrState::Merged => ("merged", Role::Feature.style()),
+        PrState::Closed => ("closed", Style::new().dim()),
         PrState::Dismissed => ("dismissed", Style::new().dim()),
     }
+}
+
+fn repository(url: &str) -> &str {
+    url.strip_prefix("https://github.com/")
+        .and_then(|path| path.split_once("/pull/"))
+        .map_or("unknown/unknown", |(repository, _)| repository)
+}
+
+fn remote_summary(pr: &PrLink) -> String {
+    let mut parts = Vec::new();
+    if pr.draft {
+        parts.push("draft");
+    }
+    parts.push(match pr.checks {
+        Some(PrChecksState::Passing) => "ci✓",
+        Some(PrChecksState::Failing) => "ci✗",
+        Some(PrChecksState::Pending) => "ci…",
+        None => "ci–",
+    });
+    if let Some(review) = pr.review {
+        parts.push(match review {
+            PrReviewDecision::Approved => "review✓",
+            PrReviewDecision::ChangesRequested => "changes",
+            PrReviewDecision::ReviewRequired => "review…",
+        });
+    }
+    parts.join(" ")
 }
 
 /// 1 PR 行: 選択中は `›` マーカー、`#番号`（warning）、状態バッジ、タイトル。幅に切り詰める。
@@ -173,9 +206,9 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
     let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
     let title = pr.title.as_deref().unwrap_or("(no title)");
-    let hint = if pr.refreshing {
+    let hint = if pr.refresh == PrRefreshState::Pending {
         Some("refresh pending")
-    } else if pr.attempts != 0 {
+    } else if pr.refresh == PrRefreshState::BackingOff {
         Some("refresh retrying")
     } else {
         None
@@ -183,7 +216,12 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
     let hint = hint.map_or_else(String::new, |hint| {
         format!("  {}", Style::new().dim().paint(hint))
     });
-    modal::content_line(&format!("{marker} {number} {badge} {title}{hint}"), inner)
+    let repo = Style::new().dim().paint(repository(&pr.url));
+    let remote = Style::new().dim().paint(&remote_summary(pr));
+    modal::content_line(
+        &format!("{marker} {number} {badge} {repo} · {title}  {remote}{hint}"),
+        inner,
+    )
 }
 
 /// PR ポップアップのボディ（枠の内側の行）: 一覧とフッタ。
@@ -205,7 +243,13 @@ fn body(state: &PrModal) -> Vec<String> {
         lines.push(modal::empty_notice("no pull requests"));
     }
     lines.push(String::new());
-    lines.push(modal::footer("↑↓ select   Enter: open   Esc: close"));
+    lines.push(modal::footer(&format!(
+        "filter:{}  ↑↓ select  f: filter",
+        state.filter
+    )));
+    lines.push(modal::footer(
+        "c: copy  d: dismiss  Enter: open  Esc: close",
+    ));
     lines
 }
 
@@ -248,7 +292,9 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{PrModal, render, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
-    use usagi_core::domain::pr_inventory::{PrEntry, PrRefreshState, PrState, canonicalize};
+    use usagi_core::domain::pr_inventory::{
+        PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
+    };
     use usagi_core::domain::pullrequest::PrLink;
 
     #[test]
@@ -304,13 +350,70 @@ mod tests {
                 } else {
                     PrRefreshState::Idle
                 },
+                draft: false,
+                checks: None,
+                review: None,
+                auto_open: true,
             })
             .collect::<Vec<_>>();
         let modal = PrModal::from_entries(&entries);
         assert_eq!(modal.prs().len(), 4);
-        assert!(modal.prs()[0].refreshing);
+        assert_eq!(modal.prs()[0].refresh, PrRefreshState::Pending);
         let rendered = joined(&modal);
         assert!(rendered.contains("open"));
+    }
+
+    #[test]
+    fn remote_metadata_renders_every_draft_check_and_review_label() {
+        let variants = [
+            (
+                true,
+                Some(PrChecksState::Passing),
+                Some(PrReviewDecision::Approved),
+            ),
+            (
+                false,
+                Some(PrChecksState::Failing),
+                Some(PrReviewDecision::ChangesRequested),
+            ),
+            (
+                false,
+                Some(PrChecksState::Pending),
+                Some(PrReviewDecision::ReviewRequired),
+            ),
+        ];
+        let entries = variants
+            .into_iter()
+            .enumerate()
+            .map(|(index, (draft, checks, review))| PrEntry {
+                identity: canonicalize(&format!(
+                    "https://github.com/acme/widget/pull/{}",
+                    index + 1
+                ))
+                .unwrap(),
+                title: Some(format!("metadata {index}")),
+                state: PrState::Open,
+                pinned: false,
+                refresh: PrRefreshState::Idle,
+                draft,
+                checks,
+                review,
+                auto_open: true,
+            })
+            .collect::<Vec<_>>();
+
+        let rendered = joined(&PrModal::from_entries(&entries));
+        for label in [
+            "draft",
+            "ci✓",
+            "review✓",
+            "ci✗",
+            "changes",
+            "ci…",
+            "review…",
+        ] {
+            assert!(rendered.contains(label), "missing {label}: {rendered}");
+        }
     }
 
     #[test]
@@ -458,7 +561,7 @@ mod tests {
         assert!(text.contains("Pull Request"));
         assert!(text.contains("#812"));
         let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();
-        assert!(modal_row.starts_with("workspace"));
+        assert!(!modal_row.starts_with('┌'));
         assert!(modal_row.trim_end().ends_with('.'));
     }
 

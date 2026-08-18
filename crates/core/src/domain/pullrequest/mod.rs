@@ -10,21 +10,13 @@
 
 use serde::{Deserialize, Serialize};
 
-// serde's `skip_serializing_if` hands each predicate `&field`, so the references
-// below are required by that contract despite the types being trivially copyable.
+use crate::domain::pr_inventory::{PrChecksState, PrRefreshState, PrReviewDecision};
 
 /// `true` when a boolean is its `false` default, so an unpinned PR omits the
 /// `pinned` key from persisted files.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(value: &bool) -> bool {
     !*value
-}
-
-/// `true` when a counter is its zero default, so a never-failed PR omits the
-/// `attempts` key.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero(value: &u32) -> bool {
-    *value == 0
 }
 
 /// A pull request discovered for a session.
@@ -50,24 +42,17 @@ pub struct PrLink {
     /// Defaults to `false`, omitted from persisted files when `false`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
-    /// When the background `gh pr view` enrichment last checked this PR. Used to
-    /// re-poll auto-managed open PRs even when the terminal prints no new output.
+    /// Daemon-owned remote refresh lifecycle.
+    #[serde(default)]
+    pub refresh: PrRefreshState,
+    #[serde(default)]
+    pub draft: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_checked: Option<chrono::DateTime<chrono::Utc>>,
-    /// The earliest time a failed/open lookup should be retried. Backoff state is
-    /// persisted so restarting the TUI does not hammer `gh`.
+    pub checks: Option<PrChecksState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_retry: Option<chrono::DateTime<chrono::Utc>>,
-    /// Consecutive failed lookup attempts. Reset to zero on a successful lookup.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub attempts: u32,
-    /// Transient UI flag set while a worker is refreshing this PR. Never written
-    /// to disk, so a TUI restart cannot leave a PR stuck "refreshing".
-    #[serde(skip)]
-    pub refreshing: bool,
-    /// Last lookup error, if any. Shown only as a quiet hint and cleared on success.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lookup_error: Option<String>,
+    pub review: Option<PrReviewDecision>,
+    #[serde(default)]
+    pub auto_open: bool,
 }
 
 impl PrLink {
@@ -81,11 +66,11 @@ impl PrLink {
             title: None,
             state: PrState::Open,
             pinned: false,
-            last_checked: None,
-            next_retry: None,
-            attempts: 0,
-            refreshing: false,
-            lookup_error: None,
+            refresh: PrRefreshState::Idle,
+            draft: false,
+            checks: None,
+            review: None,
+            auto_open: false,
         }
     }
 
@@ -163,6 +148,8 @@ impl PrLink {
 pub enum PrState {
     /// Merged — set automatically when `gh` reports the PR merged, or manually.
     Merged,
+    /// Closed without merge.
+    Closed,
     /// Dismissed (hidden) — kept as a tombstone so a re-detected URL is not
     /// re-surfaced, but excluded from the badge count and the popup's default view.
     Dismissed,

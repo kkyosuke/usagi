@@ -8,8 +8,8 @@ use usagi_core::{
     domain::{
         id::{SessionId, TerminalId},
         pr_inventory::{
-            CANDIDATE_PREFIX_MAX, PrIdentity, PrInventory, PrState, extract,
-            is_candidate_terminator,
+            CANDIDATE_PREFIX_MAX, PrChecksState, PrIdentity, PrInventory, PrReviewDecision,
+            PrState, canonicalize, extract, is_candidate_terminator,
         },
     },
     usecase::pr_inventory::PrInventoryPort,
@@ -62,14 +62,17 @@ pub trait RefreshClock {
     fn now_ms(&self) -> u64;
 }
 
-/// Safe, parsed result of `gh pr view --json title,state`.
+/// Safe, parsed result of `gh pr view`'s allowlisted presentation fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhPrView {
     pub title: Option<String>,
     pub state: PrState,
+    pub draft: bool,
+    pub checks: Option<PrChecksState>,
+    pub review: Option<PrReviewDecision>,
 }
 
-/// Parses exactly the two fields the daemon is allowed to persist or publish.
+/// Parses exactly the fields the daemon is allowed to persist or publish.
 #[must_use]
 pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
     let value: serde_json::Value = serde_json::from_str(output).ok()?;
@@ -80,10 +83,57 @@ pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
         "MERGED" => PrState::Merged,
         _ => return None,
     };
+    let draft = value
+        .get("isDraft")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let review = match value
+        .get("reviewDecision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+    {
+        "" => None,
+        "APPROVED" => Some(PrReviewDecision::Approved),
+        "CHANGES_REQUESTED" => Some(PrReviewDecision::ChangesRequested),
+        "REVIEW_REQUIRED" => Some(PrReviewDecision::ReviewRequired),
+        _ => return None,
+    };
+    let checks = match value.get("statusCheckRollup") {
+        Some(value) => parse_checks(value).ok()?,
+        None => None,
+    };
     Some(GhPrView {
         title: (!title.is_empty()).then_some(title),
         state,
+        draft,
+        checks,
+        review,
     })
+}
+
+fn parse_checks(value: &serde_json::Value) -> Result<Option<PrChecksState>, ()> {
+    let checks = value.as_array().ok_or(())?;
+    if checks.is_empty() {
+        return Ok(None);
+    }
+    let mut pending = false;
+    for check in checks {
+        let token = check
+            .get("conclusion")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| check.get("state").and_then(serde_json::Value::as_str));
+        match token.unwrap_or("PENDING") {
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" | "STALE" => return Ok(Some(PrChecksState::Failing)),
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
+            _ => pending = true,
+        }
+    }
+    Ok(Some(if pending {
+        PrChecksState::Pending
+    } else {
+        PrChecksState::Passing
+    }))
 }
 
 /// Fixed argv for one canonical URL. It intentionally has no shell syntax.
@@ -94,7 +144,7 @@ pub fn gh_pr_view_argv(identity: &PrIdentity) -> Vec<String> {
         "view".into(),
         identity.as_url().into(),
         "--json".into(),
-        "title,state".into(),
+        "title,state,isDraft,reviewDecision,statusCheckRollup".into(),
     ]
 }
 
@@ -127,6 +177,15 @@ impl RefreshScheduler {
             .entry(identity)
             .or_insert(now_ms.saturating_add(jitter_ms));
     }
+    /// Drops work that is no longer present in the durable eligible set.
+    pub fn retain(&mut self, eligible: &BTreeSet<PrIdentity>) {
+        self.due_at_ms
+            .retain(|identity, _| eligible.contains(identity));
+        self.attempts
+            .retain(|identity, _| eligible.contains(identity));
+        self.in_flight
+            .retain(|identity| eligible.contains(identity));
+    }
     #[must_use]
     pub fn due(&self, now_ms: u64) -> Vec<PrIdentity> {
         let available = self.cap.saturating_sub(self.in_flight.len());
@@ -148,6 +207,11 @@ impl RefreshScheduler {
     pub fn succeeded(&mut self, identity: &PrIdentity, now_ms: u64, freshness_ms: u64) {
         self.due_at_ms
             .insert(identity.clone(), now_ms.saturating_add(freshness_ms));
+        self.attempts.remove(identity);
+        self.in_flight.remove(identity);
+    }
+    pub fn retire(&mut self, identity: &PrIdentity) {
+        self.due_at_ms.remove(identity);
         self.attempts.remove(identity);
         self.in_flight.remove(identity);
     }
@@ -205,7 +269,12 @@ impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
         projector: &mut OutputPrProjector<P>,
     ) -> Result<(), P::Error> {
         let now_ms = self.clock.now_ms();
-        for identity in projector.refresh_candidates()? {
+        let candidates = projector
+            .refresh_candidates()?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        self.scheduler.retain(&candidates);
+        for identity in candidates {
             self.scheduler.schedule(identity, now_ms, 0);
         }
         Ok(())
@@ -221,7 +290,12 @@ impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
         projector: &mut OutputPrProjector<P>,
     ) -> Result<Vec<PrIdentity>, P::Error> {
         let now_ms = self.clock.now_ms();
-        for identity in projector.refresh_candidates()? {
+        let candidates = projector
+            .refresh_candidates()?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        self.scheduler.retain(&candidates);
+        for identity in candidates {
             self.scheduler.schedule(identity, now_ms, 0);
         }
         Ok(self.scheduler.claim_due(now_ms))
@@ -234,6 +308,38 @@ impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
             .ok()
             .and_then(|output| parse_gh_pr_view(&output))
             .map_or(RefreshResult::Failed, RefreshResult::Success)
+    }
+
+    /// Executes one claimed tick concurrently. The scheduler cap remains the
+    /// single bound, so a slow provider costs one timeout window rather than one
+    /// timeout per identity.
+    pub fn fetch_many(&self, identities: Vec<PrIdentity>) -> Vec<(PrIdentity, RefreshResult)>
+    where
+        R: Clone + Send,
+    {
+        std::thread::scope(|scope| {
+            identities
+                .into_iter()
+                .map(|identity| {
+                    let mut runner = self.runner.clone();
+                    let worker_identity = identity.clone();
+                    let handle = scope.spawn(move || {
+                        let result = runner
+                            .run("gh", &gh_pr_view_argv(&worker_identity), 5_000)
+                            .ok()
+                            .and_then(|output| parse_gh_pr_view(&output))
+                            .map_or(RefreshResult::Failed, RefreshResult::Success);
+                        (worker_identity, result)
+                    });
+                    (identity, handle)
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(identity, handle)| {
+                    handle.join().unwrap_or((identity, RefreshResult::Failed))
+                })
+                .collect()
+        })
     }
 
     /// Publishes safe metadata and advances freshness/backoff from the same
@@ -252,8 +358,16 @@ impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
         match result {
             RefreshResult::Success(view) => match projector.publish_success(identity, &view) {
                 Ok(changed) => {
-                    self.scheduler
-                        .succeeded(identity, now_ms, self.freshness_ms);
+                    if view.state == PrState::Merged {
+                        self.scheduler.retire(identity);
+                    } else {
+                        let freshness = if view.state == PrState::Closed {
+                            self.freshness_ms.saturating_mul(15)
+                        } else {
+                            self.freshness_ms
+                        };
+                        self.scheduler.succeeded(identity, now_ms, freshness);
+                    }
                     Ok(changed)
                 }
                 Err(error) => {
@@ -308,7 +422,7 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
     fn discover(
         &mut self,
         session: SessionId,
-        identities: Vec<PrIdentity>,
+        identities: Vec<(PrIdentity, bool)>,
     ) -> Result<bool, P::Error> {
         if identities.is_empty() {
             return Ok(false);
@@ -318,7 +432,7 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
             .sessions
             .entry(session)
             .or_default()
-            .discover(identities);
+            .discover_with_auto_open(identities);
         if changed {
             self.save()?;
         }
@@ -327,7 +441,7 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
 
     /// Extracts from the terminated region of `carry + bytes` and carries the
     /// unterminated remainder into the next chunk.
-    fn scan(&mut self, terminal: TerminalId, bytes: &[u8]) -> Vec<PrIdentity> {
+    fn scan(&mut self, terminal: TerminalId, bytes: &[u8]) -> Vec<(PrIdentity, bool)> {
         let carry = self.carries.remove(&terminal).unwrap_or_default();
         let scanned: Cow<'_, [u8]> = if carry.is_empty() {
             Cow::Borrowed(bytes)
@@ -340,7 +454,22 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
             .iter()
             .rposition(|byte| is_candidate_terminator(*byte))
             .map_or(0, |index| index + 1);
-        let identities = extract(&scanned[..boundary]);
+        let complete = &scanned[..boundary];
+        let identities = extract(complete)
+            .into_iter()
+            .map(|identity| {
+                let standalone = complete
+                    .split(|byte| matches!(byte, b'\n' | b'\r'))
+                    .any(|line| {
+                        std::str::from_utf8(line)
+                            .ok()
+                            .map(str::trim)
+                            .and_then(canonicalize)
+                            .is_some_and(|candidate| candidate == identity)
+                    });
+                (identity, standalone)
+            })
+            .collect();
         self.remember_carry(terminal, &scanned[boundary..]);
         identities
     }
@@ -400,7 +529,15 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         let Some(session) = session else {
             return Ok(false);
         };
-        self.discover(session, extract(&carry))
+        self.discover(
+            session,
+            extract(&carry)
+                .into_iter()
+                // The scan boundary may already have discarded prose preceding
+                // this unterminated suffix, so it cannot prove standalone intent.
+                .map(|identity| (identity, false))
+                .collect(),
+        )
     }
 
     /// How many terminals currently hold a carry buffer. Tests assert the bound.
@@ -426,7 +563,9 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
             .sessions
             .values()
             .flat_map(|inventory| inventory.entries.values())
-            .filter(|entry| !entry.pinned && entry.state != PrState::Dismissed)
+            .filter(|entry| {
+                !entry.pinned && !matches!(entry.state, PrState::Dismissed | PrState::Merged)
+            })
             .map(|entry| entry.identity.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -446,7 +585,14 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         self.hydrate()?;
         let mut changed = false;
         for inventory in self.sessions.values_mut() {
-            changed = inventory.apply_refresh(identity, view.title.clone(), view.state) || changed;
+            changed = inventory.apply_refresh(
+                identity,
+                view.title.clone(),
+                view.state,
+                view.draft,
+                view.checks,
+                view.review,
+            ) || changed;
         }
         if changed {
             self.save()?;
@@ -484,6 +630,63 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         self.hydrate()?;
         let inventory = self.sessions.get(&session).cloned().unwrap_or_default();
         Ok((session, inventory).into())
+    }
+
+    /// Reads several session snapshots after one hydrate operation.
+    ///
+    /// # Errors
+    /// Returns the durable inventory port's read error.
+    pub fn snapshots(
+        &mut self,
+        sessions: &[SessionId],
+    ) -> Result<Vec<usagi_core::usecase::client::PrSnapshot>, P::Error> {
+        self.hydrate()?;
+        Ok(sessions
+            .iter()
+            .map(|session| {
+                (
+                    *session,
+                    self.sessions.get(session).cloned().unwrap_or_default(),
+                )
+                    .into()
+            })
+            .collect())
+    }
+
+    /// Hides one exact canonical identity for a session and pins the tombstone.
+    ///
+    /// # Errors
+    /// Returns the durable inventory port's read or write error.
+    pub fn dismiss(&mut self, session: SessionId, url: &str) -> Result<bool, P::Error> {
+        let Some(identity) = canonicalize(url) else {
+            return Ok(false);
+        };
+        self.hydrate()?;
+        let changed = self
+            .sessions
+            .get_mut(&session)
+            .is_some_and(|inventory| inventory.set_user_state(&identity, PrState::Dismissed, true));
+        if changed {
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
+    /// Prunes inventories whose stable session identity no longer exists.
+    ///
+    /// # Errors
+    /// Returns the durable inventory port's read or write error.
+    pub fn retain_sessions(&mut self, retained: &BTreeSet<SessionId>) -> Result<bool, P::Error> {
+        self.hydrate()?;
+        let before = self.sessions.len();
+        self.sessions
+            .retain(|session, _| retained.contains(session));
+        let changed = self.sessions.len() != before;
+        if !changed {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
     }
 }
 
@@ -742,6 +945,14 @@ mod tests {
         assert!(!projector.release_terminal(terminal, Some(session)).unwrap());
         let store = projector.into_store();
         assert_eq!(store.values.borrow()[&session].entries.len(), 1);
+        assert!(
+            !store.values.borrow()[&session]
+                .entries
+                .values()
+                .next()
+                .unwrap()
+                .auto_open
+        );
     }
     #[test]
     fn the_carry_table_is_bounded_by_terminal_count() {
@@ -823,6 +1034,45 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct PanickingRunner;
+
+    impl GhProcessPort for PanickingRunner {
+        type Error = ();
+
+        fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
+            panic!("injected PR provider panic");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct SuccessfulRunner;
+
+    impl GhProcessPort for SuccessfulRunner {
+        type Error = ();
+
+        fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
+            Ok(r#"{"title":"ready","state":"OPEN"}"#.to_owned())
+        }
+    }
+
+    #[test]
+    fn concurrent_refresh_contains_a_panicking_provider_worker() {
+        let id = canonicalize("https://github.com/o/r/pull/17").unwrap();
+        let worker = RefreshWorker::new(PanickingRunner, FakeClock::default(), 1, 10);
+        let results = worker.fetch_many(vec![id.clone()]);
+        assert_eq!(results, vec![(id, RefreshResult::Failed)]);
+
+        let id = canonicalize("https://github.com/o/r/pull/18").unwrap();
+        let worker = RefreshWorker::new(SuccessfulRunner, FakeClock::default(), 1, 10);
+        let results = worker.fetch_many(vec![id.clone()]);
+        assert!(matches!(
+            results.as_slice(),
+            [(actual, RefreshResult::Success(GhPrView { title: Some(title), .. }))]
+                if actual == &id && title == "ready"
+        ));
+    }
+
     /// Feeds one URL as committed output. The newline terminates the candidate,
     /// which is what makes it eligible for detection in this chunk rather than
     /// being carried into the next one.
@@ -866,7 +1116,7 @@ mod tests {
                     "view",
                     "https://github.com/o/r/pull/3",
                     "--json",
-                    "title,state"
+                    "title,state,isDraft,reviewDecision,statusCheckRollup"
                 ]
                 .into_iter()
                 .map(String::from)
@@ -907,21 +1157,53 @@ mod tests {
             parse_gh_pr_view("{\"title\":\"\",\"state\":\"OPEN\"}"),
             Some(GhPrView {
                 title: None,
-                state: PrState::Open
+                state: PrState::Open,
+                draft: false,
+                checks: None,
+                review: None,
             })
         );
         assert_eq!(
             parse_gh_pr_view("{\"title\":\"x\",\"state\":\"CLOSED\"}"),
             Some(GhPrView {
                 title: Some("x".into()),
-                state: PrState::Closed
+                state: PrState::Closed,
+                draft: false,
+                checks: None,
+                review: None,
             })
+        );
+        assert_eq!(
+            parse_gh_pr_view(
+                r#"{"title":"x","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[]}"#,
+            )
+            .unwrap()
+            .review,
+            Some(PrReviewDecision::ChangesRequested)
+        );
+        let required = parse_gh_pr_view(
+            r#"{"title":"x","state":"OPEN","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"state":"EXPECTED"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(required.review, Some(PrReviewDecision::ReviewRequired));
+        assert_eq!(required.checks, Some(PrChecksState::Pending));
+        assert_eq!(
+            parse_gh_pr_view(
+                r#"{"title":"x","state":"OPEN","statusCheckRollup":[{"conclusion":"FAILURE"}]}"#,
+            )
+            .unwrap()
+            .checks,
+            Some(PrChecksState::Failing)
         );
         for invalid in [
             "not json",
             "{}",
             "{\"title\":1,\"state\":\"OPEN\"}",
+            "{\"title\":\"x\"}",
+            "{\"title\":\"x\",\"state\":1}",
             "{\"title\":\"x\",\"state\":\"DRAFT\"}",
+            r#"{"title":"x","state":"OPEN","reviewDecision":"UNKNOWN"}"#,
+            r#"{"title":"x","state":"OPEN","statusCheckRollup":{}}"#,
         ] {
             assert_eq!(parse_gh_pr_view(invalid), None);
         }
@@ -976,12 +1258,46 @@ mod tests {
                     &GhPrView {
                         title: Some("fresh".into()),
                         state: PrState::Open,
+                        draft: false,
+                        checks: None,
+                        review: None,
                     },
                 )
                 .unwrap()
         );
         assert!(worker.claim_due(&mut projector).unwrap().is_empty());
         clock.set(12_000);
+        assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id]);
+    }
+
+    #[test]
+    fn closed_pull_requests_use_the_extended_refresh_interval() {
+        let session = SessionId::new();
+        let id = canonicalize("https://github.com/o/r/pull/15").unwrap();
+        let mut projector = OutputPrProjector::new(Store::default());
+        discover(&mut projector, session, id.as_url());
+        let clock = FakeClock::default();
+        let mut worker = RefreshWorker::new(FakeRunner::default(), clock.clone(), 1, 10_000);
+        worker.rebuild(&mut projector).unwrap();
+        assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id.clone()]);
+        assert!(
+            worker
+                .complete(
+                    &mut projector,
+                    &id,
+                    RefreshResult::Success(GhPrView {
+                        title: Some("closed".into()),
+                        state: PrState::Closed,
+                        draft: false,
+                        checks: None,
+                        review: None,
+                    }),
+                )
+                .unwrap()
+        );
+        clock.set(149_999);
+        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
+        clock.set(150_000);
         assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id]);
     }
 
@@ -1039,5 +1355,125 @@ mod tests {
         discover(&mut failure_projector, session, id.as_url());
         failure_projector.store.fail_save.set(true);
         assert!(failure_projector.publish_failure(&id).is_err());
+    }
+
+    #[test]
+    fn every_inventory_read_and_new_mutation_propagates_storage_errors() {
+        let session = SessionId::new();
+        let id = canonicalize("https://github.com/o/r/pull/16").unwrap();
+        let failing_projector = || {
+            let store = Store::default();
+            store.fail_load.set(true);
+            OutputPrProjector::new(store)
+        };
+
+        let mut projector = failing_projector();
+        let mut worker = RefreshWorker::new(FakeRunner::default(), FakeClock::default(), 1, 10);
+        assert!(worker.rebuild(&mut projector).is_err());
+        let mut projector = failing_projector();
+        assert!(worker.claim_due(&mut projector).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.refresh_candidates().is_err());
+        let mut projector = failing_projector();
+        assert!(
+            projector
+                .publish_success(
+                    &id,
+                    &GhPrView {
+                        title: None,
+                        state: PrState::Open,
+                        draft: false,
+                        checks: None,
+                        review: None,
+                    },
+                )
+                .is_err()
+        );
+        let mut projector = failing_projector();
+        assert!(projector.publish_failure(&id).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.snapshot(session).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.snapshots(&[session]).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.dismiss(session, id.as_url()).is_err());
+        let mut projector = failing_projector();
+        assert!(projector.retain_sessions(&BTreeSet::new()).is_err());
+
+        let mut dismiss = OutputPrProjector::new(Store::default());
+        discover(&mut dismiss, session, id.as_url());
+        dismiss.store.fail_save.set(true);
+        assert!(dismiss.dismiss(session, id.as_url()).is_err());
+
+        let mut retain = OutputPrProjector::new(Store::default());
+        discover(&mut retain, session, id.as_url());
+        retain.store.fail_save.set(true);
+        assert!(retain.retain_sessions(&BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn references_do_not_auto_open_but_standalone_urls_do_and_user_can_dismiss() {
+        let session = SessionId::new();
+        let terminal = TerminalId::new();
+        let mut projector = OutputPrProjector::new(Store::default());
+        projector
+            .observe_committed(
+                terminal,
+                Some(session),
+                b"review https://github.com/o/r/pull/7 please\nhttps://github.com/o/r/pull/8\n",
+            )
+            .unwrap();
+        let snapshot = projector.snapshot(session).unwrap();
+        assert_eq!(snapshot.entries.len(), 2);
+        assert!(!snapshot.entries[0].auto_open);
+        assert!(snapshot.entries[1].auto_open);
+        let revision = snapshot.revision;
+        assert!(
+            projector
+                .dismiss(session, "https://github.com/o/r/pull/8")
+                .unwrap()
+        );
+        let dismissed = projector.snapshot(session).unwrap();
+        assert!(dismissed.revision > revision);
+        assert_eq!(dismissed.entries[1].state, PrState::Dismissed);
+    }
+
+    #[test]
+    fn batch_snapshot_and_session_reconciliation_share_one_cached_document() {
+        let kept = SessionId::new();
+        let removed = SessionId::new();
+        let mut projector = OutputPrProjector::new(Store::default());
+        discover(&mut projector, kept, "https://github.com/o/r/pull/1");
+        discover(&mut projector, removed, "https://github.com/o/r/pull/2");
+        assert!(!projector.dismiss(kept, "not-a-pr").unwrap());
+        assert!(
+            !projector
+                .dismiss(SessionId::new(), "https://github.com/o/r/pull/9")
+                .unwrap()
+        );
+        assert_eq!(projector.snapshots(&[kept, removed]).unwrap().len(), 2);
+        assert!(projector.retain_sessions(&BTreeSet::from([kept])).unwrap());
+        assert!(!projector.retain_sessions(&BTreeSet::from([kept])).unwrap());
+        assert_eq!(projector.snapshot(removed).unwrap().entries, Vec::new());
+        assert_eq!(projector.snapshots(&[kept]).unwrap()[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn parser_projects_checks_review_and_scheduler_drops_ineligible_work() {
+        let view = parse_gh_pr_view(
+            r#"{"title":"ready","state":"OPEN","isDraft":true,"reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}]}"#,
+        )
+        .unwrap();
+        assert!(view.draft);
+        assert_eq!(view.checks, Some(PrChecksState::Passing));
+        assert_eq!(view.review, Some(PrReviewDecision::Approved));
+
+        let keep = canonicalize("https://github.com/o/r/pull/1").unwrap();
+        let drop = canonicalize("https://github.com/o/r/pull/2").unwrap();
+        let mut scheduler = RefreshScheduler::new(2);
+        scheduler.schedule(keep.clone(), 0, 0);
+        scheduler.schedule(drop, 0, 0);
+        scheduler.retain(&BTreeSet::from([keep.clone()]));
+        assert_eq!(scheduler.claim_due(0), vec![keep]);
     }
 }

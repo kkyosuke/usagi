@@ -270,6 +270,10 @@ impl WorkspaceRuntime {
         self.modal_selection_mode = mode;
     }
 
+    pub fn set_pr_auto_open(&mut self, mode: usagi_core::domain::settings::PrAutoOpen) {
+        self.state.set_pr_auto_open(mode);
+    }
+
     /// Apply the observed Agent CLI availability and the configured default
     /// provider. An open Closeup modal is re-projected so its `agent -m` picker
     /// and completion follow a newly saved setting immediately.

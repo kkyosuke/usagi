@@ -14,6 +14,25 @@ impl PrIdentity {
     pub fn as_url(&self) -> &str {
         &self.0
     }
+
+    /// Returns the stable `owner/repository` label embedded in the canonical URL.
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        self.0
+            .strip_prefix("https://github.com/")
+            .and_then(|path| path.split_once("/pull/"))
+            .map_or("unknown/unknown", |(repository, _)| repository)
+    }
+
+    /// Returns the pull-request number embedded in the canonical URL.
+    #[must_use]
+    pub fn number(&self) -> u64 {
+        self.0
+            .rsplit('/')
+            .next()
+            .and_then(|number| number.parse().ok())
+            .unwrap_or(0)
+    }
 }
 
 /// Parses one complete HTTP(S) URL into a GitHub PR identity.
@@ -170,6 +189,24 @@ pub enum PrRefreshState {
     BackingOff,
 }
 
+/// Aggregate status of the checks reported by GitHub for a PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrChecksState {
+    Passing,
+    Failing,
+    Pending,
+}
+
+/// Review decision reported by GitHub for a PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+}
+
 /// One durable inventory entry. `pinned` and `Dismissed` are user-owned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrEntry {
@@ -181,6 +218,19 @@ pub struct PrEntry {
     pub pinned: bool,
     #[serde(default)]
     pub refresh: PrRefreshState,
+    /// Whether GitHub reports this PR as a draft.
+    #[serde(default)]
+    pub draft: bool,
+    /// Aggregate CI/check state. `None` means GitHub returned no checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<PrChecksState>,
+    /// Aggregate review decision. `None` means GitHub has no decision yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<PrReviewDecision>,
+    /// Whether the detector saw the URL as a standalone announcement rather
+    /// than as a reference embedded in prose.
+    #[serde(default)]
+    pub auto_open: bool,
 }
 
 /// Revisioned inventory for one stable session identity.
@@ -193,9 +243,23 @@ pub struct PrInventory {
 impl PrInventory {
     /// Adds discoveries without changing user-owned metadata. Returns whether it changed.
     pub fn discover(&mut self, identities: impl IntoIterator<Item = PrIdentity>) -> bool {
+        self.discover_with_auto_open(identities.into_iter().map(|identity| (identity, true)))
+    }
+
+    /// Adds classified discoveries. A later standalone announcement may promote
+    /// an existing reference, but automatic refresh never changes this bit.
+    pub fn discover_with_auto_open(
+        &mut self,
+        identities: impl IntoIterator<Item = (PrIdentity, bool)>,
+    ) -> bool {
         let mut changed = false;
-        for identity in identities {
-            if !self.entries.contains_key(&identity) {
+        for (identity, auto_open) in identities {
+            if let Some(entry) = self.entries.get_mut(&identity) {
+                if auto_open && !entry.auto_open {
+                    entry.auto_open = true;
+                    changed = true;
+                }
+            } else {
                 self.entries.insert(
                     identity.clone(),
                     PrEntry {
@@ -204,6 +268,10 @@ impl PrInventory {
                         state: PrState::Open,
                         pinned: false,
                         refresh: PrRefreshState::Pending,
+                        draft: false,
+                        checks: None,
+                        review: None,
+                        auto_open,
                     },
                 );
                 changed = true;
@@ -222,6 +290,9 @@ impl PrInventory {
         identity: &PrIdentity,
         title: Option<String>,
         state: PrState,
+        draft: bool,
+        checks: Option<PrChecksState>,
+        review: Option<PrReviewDecision>,
     ) -> bool {
         let Some(entry) = self.entries.get_mut(identity) else {
             return false;
@@ -229,18 +300,28 @@ impl PrInventory {
         if entry.pinned || entry.state == PrState::Dismissed {
             return false;
         }
-        if entry.title == title && entry.state == state && entry.refresh == PrRefreshState::Idle {
+        if entry.title == title
+            && entry.state == state
+            && entry.refresh == PrRefreshState::Idle
+            && entry.draft == draft
+            && entry.checks == checks
+            && entry.review == review
+        {
             return false;
         }
         entry.title = title;
         entry.state = state;
         entry.refresh = PrRefreshState::Idle;
+        entry.draft = draft;
+        entry.checks = checks;
+        entry.review = review;
         self.revision += 1;
         true
     }
 
     /// Records a retryable refresh failure without discarding the last known
-    /// title or state. This is observational metadata, not an inventory revision.
+    /// title or state. Refresh metadata is part of the public snapshot, so it
+    /// advances the same revision fence as every other visible field.
     pub fn mark_refresh_backoff(&mut self, identity: &PrIdentity) -> bool {
         if let Some(entry) = self.entries.get_mut(identity)
             && !entry.pinned
@@ -248,6 +329,7 @@ impl PrInventory {
             && entry.refresh != PrRefreshState::BackingOff
         {
             entry.refresh = PrRefreshState::BackingOff;
+            self.revision += 1;
             return true;
         }
         false
@@ -399,11 +481,32 @@ mod tests {
         let id = canonicalize("https://github.com/o/r/pull/9").unwrap();
         let mut inventory = PrInventory::default();
         inventory.discover([id.clone()]);
-        assert!(inventory.apply_refresh(&id, Some("closed work".into()), PrState::Closed));
+        assert!(inventory.apply_refresh(
+            &id,
+            Some("closed work".into()),
+            PrState::Closed,
+            false,
+            None,
+            None
+        ));
         assert_eq!(inventory.revision, 2);
-        assert!(!inventory.apply_refresh(&id, Some("closed work".into()), PrState::Closed));
+        assert!(!inventory.apply_refresh(
+            &id,
+            Some("closed work".into()),
+            PrState::Closed,
+            false,
+            None,
+            None
+        ));
         assert!(inventory.set_user_state(&id, PrState::Dismissed, true));
-        assert!(!inventory.apply_refresh(&id, Some("merged work".into()), PrState::Merged));
+        assert!(!inventory.apply_refresh(
+            &id,
+            Some("merged work".into()),
+            PrState::Merged,
+            false,
+            None,
+            None
+        ));
         assert_eq!(inventory.entries[&id].title.as_deref(), Some("closed work"));
     }
     #[test]
@@ -411,10 +514,17 @@ mod tests {
         let known = canonicalize("https://github.com/o/r/pull/10").unwrap();
         let missing = canonicalize("https://github.com/o/r/pull/11").unwrap();
         let mut inventory = PrInventory::default();
-        assert!(!inventory.apply_refresh(&missing, None, PrState::Open));
+        assert!(!inventory.apply_refresh(&missing, None, PrState::Open, false, None, None));
         inventory.discover([known.clone()]);
         assert!(inventory.set_user_state(&known, PrState::Open, true));
-        assert!(!inventory.apply_refresh(&known, Some("ignored".into()), PrState::Closed));
+        assert!(!inventory.apply_refresh(
+            &known,
+            Some("ignored".into()),
+            PrState::Closed,
+            false,
+            None,
+            None
+        ));
         inventory.mark_refresh_backoff(&known);
         assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
         assert!(inventory.set_user_state(&known, PrState::Dismissed, false));
@@ -422,13 +532,45 @@ mod tests {
         assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
     }
     #[test]
-    fn refresh_failure_marks_non_user_entry_without_revising_inventory() {
+    fn refresh_failure_marks_non_user_entry_and_revises_the_public_snapshot() {
         let id = canonicalize("https://github.com/o/r/pull/12").unwrap();
         let mut inventory = PrInventory::default();
         inventory.discover([id.clone()]);
         let revision = inventory.revision;
         inventory.mark_refresh_backoff(&id);
         assert_eq!(inventory.entries[&id].refresh, PrRefreshState::BackingOff);
-        assert_eq!(inventory.revision, revision);
+        assert_eq!(inventory.revision, revision + 1);
+    }
+
+    #[test]
+    fn identity_exposes_repository_number_and_reference_can_be_promoted() {
+        let id = canonicalize("https://github.com/acme/widgets/pull/42").unwrap();
+        assert_eq!(id.repository(), "acme/widgets");
+        assert_eq!(id.number(), 42);
+        let mut inventory = PrInventory::default();
+        assert!(inventory.discover_with_auto_open([(id.clone(), false)]));
+        assert!(!inventory.entries[&id].auto_open);
+        assert!(inventory.discover_with_auto_open([(id.clone(), true)]));
+        assert!(inventory.entries[&id].auto_open);
+        assert_eq!(inventory.revision, 2);
+    }
+
+    #[test]
+    fn refresh_publishes_draft_checks_and_review_metadata() {
+        let id = canonicalize("https://github.com/o/r/pull/13").unwrap();
+        let mut inventory = PrInventory::default();
+        inventory.discover([id.clone()]);
+        assert!(inventory.apply_refresh(
+            &id,
+            Some("ready".into()),
+            PrState::Open,
+            true,
+            Some(PrChecksState::Passing),
+            Some(PrReviewDecision::Approved),
+        ));
+        let entry = &inventory.entries[&id];
+        assert!(entry.draft);
+        assert_eq!(entry.checks, Some(PrChecksState::Passing));
+        assert_eq!(entry.review, Some(PrReviewDecision::Approved));
     }
 }

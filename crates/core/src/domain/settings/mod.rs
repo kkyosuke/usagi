@@ -86,6 +86,22 @@ pub enum ModalSelectionMode {
     Action,
 }
 
+/// How a newly detected PR may interrupt Home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrAutoOpen {
+    /// Open from Switch and Closeup when no other surface owns input.
+    Always,
+    /// Open only from Switch. This keeps live terminal input stable by default.
+    #[default]
+    SwitchOnly,
+    /// Keep the modal closed and show a quiet notice.
+    NotifyOnly,
+    /// Update only the sidebar badge.
+    #[serde(other)]
+    Never,
+}
+
 /// The public, non-secret status invocation that decides whether an agent CLI is
 /// ready to launch.
 ///
@@ -338,6 +354,8 @@ pub struct Settings {
     pub theme: Theme,
     /// The command-selection interaction used by Overview and Closeup modals.
     pub modal_selection_mode: ModalSelectionMode,
+    /// Whether a newly detected PR opens its modal automatically.
+    pub pr_auto_open: PrAutoOpen,
     /// The provider used for Agent panes when no profile is selected explicitly.
     pub default_model: DefaultModel,
     /// Whether issue-backed MCP tools are available to agents.
@@ -358,6 +376,7 @@ impl Default for Settings {
         Self {
             theme: Theme::default(),
             modal_selection_mode: ModalSelectionMode::default(),
+            pr_auto_open: PrAutoOpen::default(),
             default_model: DefaultModel::default(),
             issue_enabled: true,
             memory_enabled: true,
@@ -390,6 +409,7 @@ impl Settings {
     pub fn with_config(mut self, settings: &Self) -> Self {
         self.theme = settings.theme;
         self.modal_selection_mode = settings.modal_selection_mode;
+        self.pr_auto_open = settings.pr_auto_open;
         self.default_model = settings.default_model;
         self.issue_enabled = settings.issue_enabled;
         self.memory_enabled = settings.memory_enabled;

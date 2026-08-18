@@ -17,7 +17,7 @@ use usagi_core::domain::pullrequest::{PrLink, PrState};
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use usagi_core::domain::settings::{
-    AvailableModels, DefaultModel, EnvBindings, format_env_bindings,
+    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, format_env_bindings,
 };
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
@@ -508,6 +508,52 @@ pub struct PrOverlay {
     prs: Vec<PrLink>,
     selected: usize,
     error: Option<SafeError>,
+    filter: PrFilter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrFilter {
+    #[default]
+    All,
+    Open,
+    Closed,
+    Merged,
+}
+
+impl PrFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Open,
+            Self::Open => Self::Closed,
+            Self::Closed => Self::Merged,
+            Self::Merged => Self::All,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Merged => "merged",
+        }
+    }
+}
+
+fn filtered_prs(prs: &[PrLink], filter: PrFilter) -> Vec<PrLink> {
+    prs.iter()
+        .filter(|pr| {
+            pr.state != PrState::Dismissed
+                && match filter {
+                    PrFilter::All => true,
+                    PrFilter::Open => pr.state == PrState::Open,
+                    PrFilter::Closed => pr.state == PrState::Closed,
+                    PrFilter::Merged => pr.state == PrState::Merged,
+                }
+        })
+        .cloned()
+        .collect()
 }
 
 impl PrOverlay {
@@ -517,6 +563,7 @@ impl PrOverlay {
             prs: Vec::new(),
             selected: 0,
             error: None,
+            filter: PrFilter::All,
         }
     }
 
@@ -544,6 +591,10 @@ impl PrOverlay {
     #[must_use]
     pub fn error(&self) -> Option<&SafeError> {
         self.error.as_ref()
+    }
+    #[must_use]
+    pub const fn filter(&self) -> PrFilter {
+        self.filter
     }
 }
 
@@ -877,6 +928,8 @@ pub struct AppState {
     /// modal deliberately read this same projection.
     session_prs: BTreeMap<SessionId, (u64, Vec<PrLink>)>,
     session_pr_revision: u64,
+    pr_auto_open: PrAutoOpen,
+    pr_merge_celebrations: BTreeMap<SessionId, u64>,
     /// Read-only effective session-scope catalog used by the create picker.
     role_catalog: SessionRoleCatalog,
     selected: Selection,
@@ -1017,6 +1070,8 @@ impl AppState {
             session_roles: BTreeMap::new(),
             session_prs: BTreeMap::new(),
             session_pr_revision: 0,
+            pr_auto_open: PrAutoOpen::default(),
+            pr_merge_celebrations: BTreeMap::new(),
             role_catalog: SessionRoleCatalog::default(),
             selected,
             active,
@@ -1164,6 +1219,15 @@ impl AppState {
     #[must_use]
     pub const fn session_pr_revision(&self) -> u64 {
         self.session_pr_revision
+    }
+    pub fn set_pr_auto_open(&mut self, mode: PrAutoOpen) {
+        self.pr_auto_open = mode;
+    }
+    #[must_use]
+    pub fn celebrates_pr_merge(&self, session: SessionId) -> bool {
+        self.pr_merge_celebrations
+            .get(&session)
+            .is_some_and(|until| self.mascot_tick <= *until)
     }
     #[must_use]
     pub fn role_catalog(&self) -> &SessionRoleCatalog {
@@ -2059,6 +2123,15 @@ pub enum Effect {
     OpenPullRequest {
         url: String,
     },
+    /// Copy one selected canonical URL to the OS clipboard.
+    CopyPullRequest {
+        url: String,
+    },
+    /// Persist a user-owned dismissed tombstone for one session PR.
+    DismissPullRequest {
+        session: SessionId,
+        url: String,
+    },
 }
 
 /// One selectable workspace in the entry surfaces.
@@ -2869,6 +2942,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::Tick => {
             state.mascot_tick = state.mascot_tick.saturating_add(1);
+            state
+                .pr_merge_celebrations
+                .retain(|_, until| state.mascot_tick <= *until);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
@@ -3133,9 +3209,23 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                         newly_detected = current.and_then(|(_, current)| {
                             prs.iter().position(|pr| {
                                 pr.state != PrState::Dismissed
+                                    && pr.auto_open
                                     && current.iter().all(|known| known.url != pr.url)
                             })
                         });
+                        let newly_merged = current.is_some_and(|(_, current)| {
+                            prs.iter().any(|pr| {
+                                pr.state == PrState::Merged
+                                    && current.iter().any(|known| {
+                                        known.url == pr.url && known.state != PrState::Merged
+                                    })
+                            })
+                        });
+                        if newly_merged {
+                            state
+                                .pr_merge_celebrations
+                                .insert(*session, state.mascot_tick.saturating_add(24));
+                        }
                         state.session_prs.insert(*session, (*revision, prs.clone()));
                         state.session_pr_revision = state.session_pr_revision.saturating_add(1);
                     }
@@ -3147,29 +3237,54 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 .as_mut()
                 .filter(|overlay| accepted && overlay.target == *target)
             {
-                overlay.prs.clone_from(prs);
-                overlay.selected = newly_detected
+                overlay.prs = filtered_prs(prs, overlay.filter);
+                let detected_selection = newly_detected.and_then(|index| {
+                    prs.get(index).and_then(|detected| {
+                        overlay.prs.iter().position(|pr| pr.url == detected.url)
+                    })
+                });
+                overlay.selected = detected_selection
                     .unwrap_or(overlay.selected)
-                    .min(prs.len().saturating_sub(1));
+                    .min(overlay.prs.len().saturating_sub(1));
                 overlay.error = None;
             }
             // A freshly discovered PR is the completion of work the user is
             // waiting for, so surface it immediately. Metadata-only refreshes,
             // duplicate snapshots, and deliberate dismissals stay quiet. An
             // existing modal or Director interaction remains the input owner.
+            let may_auto_open = match state.pr_auto_open {
+                PrAutoOpen::Always => true,
+                PrAutoOpen::SwitchOnly => {
+                    matches!(state.route, Route::Home(HomeMode::Switch))
+                }
+                PrAutoOpen::NotifyOnly | PrAutoOpen::Never => false,
+            };
             if accepted
                 && let Some(selected) = newly_detected
+                && may_auto_open
                 && state.overlay.is_none()
                 && !state.director_drawer_open
             {
+                let detected_url = prs.get(selected).map(|pr| pr.url.as_str());
+                let visible = filtered_prs(prs, PrFilter::All);
+                let visible_selected = detected_url
+                    .and_then(|url| visible.iter().position(|pr| pr.url == url))
+                    .unwrap_or(0);
                 state.overlay = Some(Overlay::Prs);
                 state.pr_overlay = Some(PrOverlay {
                     target: *target,
-                    prs: prs.clone(),
-                    selected,
+                    prs: visible,
+                    selected: visible_selected,
                     error: None,
+                    filter: PrFilter::All,
                 });
                 state.preview_overlay = None;
+            } else if accepted
+                && let Some(selected) = newly_detected
+                && state.pr_auto_open == PrAutoOpen::NotifyOnly
+                && let Some(pr) = prs.get(selected)
+            {
+                state.notice = Some(Notice::new(format!("PR detected: {}", pr.url)));
             }
         }
         BackendEvent::PullRequestsError { target, error } => {
@@ -4048,7 +4163,7 @@ fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
     if let Target::Session(session) = target
         && let Some(prs) = state.session_prs(session)
     {
-        overlay.prs = prs.to_vec();
+        overlay.prs = filtered_prs(prs, PrFilter::All);
     }
     state.pr_overlay = Some(overlay);
     state.preview_overlay = None;
@@ -4068,6 +4183,26 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
 /// Pull Request overlay の入力を還元する。↑↓ で選択を回し、Enter で選択 PR を
 /// browser で開く effect を出す。Esc は overlay を閉じる。素材の再取得はしない。
 fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    if matches!(key, AppKey::Char('f')) {
+        let Some((target, filter)) = state
+            .pr_overlay
+            .as_ref()
+            .map(|overlay| (overlay.target, overlay.filter.next()))
+        else {
+            return Vec::new();
+        };
+        let all = target
+            .session_id()
+            .and_then(|session| state.session_prs(session))
+            .unwrap_or_default()
+            .to_vec();
+        if let Some(overlay) = state.pr_overlay.as_mut() {
+            overlay.filter = filter;
+            overlay.prs = filtered_prs(&all, filter);
+            overlay.selected = 0;
+        }
+        return Vec::new();
+    }
     let Some(overlay) = state.pr_overlay.as_mut() else {
         state.overlay = None;
         return Vec::new();
@@ -4094,6 +4229,26 @@ fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             .selected_pr()
             .map(|pr| Effect::OpenPullRequest {
                 url: pr.url.clone(),
+            })
+            .into_iter()
+            .collect(),
+        AppKey::Char('c') => overlay
+            .selected_pr()
+            .map(|pr| Effect::CopyPullRequest {
+                url: pr.url.clone(),
+            })
+            .into_iter()
+            .collect(),
+        AppKey::Char('d') => overlay
+            .selected_pr()
+            .and_then(|pr| {
+                overlay
+                    .target
+                    .session_id()
+                    .map(|session| Effect::DismissPullRequest {
+                        session,
+                        url: pr.url.clone(),
+                    })
             })
             .into_iter()
             .collect(),
@@ -8707,7 +8862,9 @@ mod tests {
     }
 
     fn pr_link(number: u32) -> PrLink {
-        PrLink::new(number, format!("https://github.com/o/r/pull/{number}"))
+        let mut pr = PrLink::new(number, format!("https://github.com/o/r/pull/{number}"));
+        pr.auto_open = true;
+        pr
     }
 
     fn safe_error(message: &str) -> SafeError {
@@ -8967,6 +9124,161 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(overlay.selected(), 7);
         assert_eq!(overlay.selected_pr(), Some(&detected));
+    }
+
+    #[test]
+    fn pr_reference_filter_copy_dismiss_and_safe_auto_open_modes() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 0,
+                prs: Vec::new(),
+            }),
+        );
+        let mut reference = pr_link(1);
+        reference.auto_open = false;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![reference.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+
+        state.route = Route::Home(HomeMode::Closeup);
+        let open = pr_link(2);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: vec![reference.clone(), open.clone()],
+            }),
+        );
+        assert_eq!(
+            state.overlay(),
+            None,
+            "switch-only must not steal live input"
+        );
+        let mut merged = open;
+        merged.state = PrState::Merged;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 3,
+                prs: vec![reference, merged],
+            }),
+        );
+        assert!(state.celebrates_pr_merge(session));
+        for _ in 0..25 {
+            let _ = update(&mut state, AppEvent::Tick);
+        }
+        assert!(!state.celebrates_pr_merge(session));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('c'))),
+            vec![Effect::CopyPullRequest {
+                url: "https://github.com/o/r/pull/1".into()
+            }]
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('d'))),
+            vec![Effect::DismissPullRequest {
+                session,
+                url: "https://github.com/o/r/pull/1".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn open_pr_overlay_tracks_new_detection_and_cycles_every_filter() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let mut merged = pr_link(2);
+        merged.state = PrState::Merged;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr_link(1), merged.clone()],
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let newly_detected = pr_link(3);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: vec![pr_link(1), merged, newly_detected.clone()],
+            }),
+        );
+        assert_eq!(
+            state.pr_overlay().unwrap().selected_pr(),
+            Some(&newly_detected)
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
+        assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
+        for (filter, expected) in [
+            (PrFilter::Closed, 0),
+            (PrFilter::Merged, 1),
+            (PrFilter::All, 3),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+            assert_eq!(state.pr_overlay().unwrap().filter(), filter);
+            assert_eq!(state.pr_overlay().unwrap().prs().len(), expected);
+        }
+        assert_eq!(PrFilter::All.label(), "all");
+        assert_eq!(PrFilter::Open.label(), "open");
+        assert_eq!(PrFilter::Closed.label(), "closed");
+        assert_eq!(PrFilter::Merged.label(), "merged");
+
+        state.pr_overlay = None;
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('f'))).is_empty());
+    }
+
+    #[test]
+    fn explicit_pr_auto_open_modes_cover_always_notify_and_never() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        for (mode, opens, notifies) in [
+            (PrAutoOpen::Always, true, false),
+            (PrAutoOpen::NotifyOnly, false, true),
+            (PrAutoOpen::Never, false, false),
+        ] {
+            let mut state = AppState::home(workspace, vec![session]);
+            state.route = Route::Home(HomeMode::Closeup);
+            state.set_pr_auto_open(mode);
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision: 0,
+                    prs: Vec::new(),
+                }),
+            );
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision: 1,
+                    prs: vec![pr_link(7)],
+                }),
+            );
+            assert_eq!(state.overlay() == Some(Overlay::Prs), opens);
+            assert_eq!(state.notice().is_some(), notifies);
+        }
     }
 
     #[test]

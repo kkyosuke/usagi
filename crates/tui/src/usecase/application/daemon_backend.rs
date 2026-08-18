@@ -271,6 +271,19 @@ pub trait OverlayPort {
     fn load_preview(&mut self, target: Target, completions: Completions);
     /// Open one already-selected Pull Request URL in the browser.
     fn open_pull_request(&mut self, url: String, completions: Completions);
+    /// Copy one selected canonical URL.
+    fn copy_pull_request(&mut self, _url: String, completions: Completions) {
+        unavailable(&completions, "clipboard is unavailable");
+    }
+    /// Persist one dismissed session PR.
+    fn dismiss_pull_request(
+        &mut self,
+        _session: SessionId,
+        _url: String,
+        completions: Completions,
+    ) {
+        unavailable(&completions, "Pull Request dismissal is unavailable");
+    }
 }
 
 struct NoOverlay;
@@ -283,6 +296,12 @@ impl OverlayPort for NoOverlay {
     }
     fn open_pull_request(&mut self, _: String, completions: Completions) {
         unavailable(&completions, "browser opening is unavailable");
+    }
+    fn copy_pull_request(&mut self, _: String, completions: Completions) {
+        unavailable(&completions, "clipboard is unavailable");
+    }
+    fn dismiss_pull_request(&mut self, _: SessionId, _: String, completions: Completions) {
+        unavailable(&completions, "Pull Request dismissal is unavailable");
     }
 }
 
@@ -480,6 +499,13 @@ impl DaemonBackend {
             }
             Effect::OpenPullRequest { url } => {
                 self.overlay.open_pull_request(url, self.completions());
+            }
+            Effect::CopyPullRequest { url } => {
+                self.overlay.copy_pull_request(url, self.completions());
+            }
+            Effect::DismissPullRequest { session, url } => {
+                self.overlay
+                    .dismiss_pull_request(session, url, self.completions());
             }
             Effect::Detach => return Flow::Exit,
             Effect::LeaveWorkspace => return Flow::Leave,
@@ -1070,6 +1096,7 @@ mod tests {
     #[test]
     fn overlay_effects_complete_with_explicit_errors_without_an_overlay_port() {
         let mut backend = backend();
+        let session = SessionId::new();
         for effect in [
             Effect::LoadPullRequests {
                 target: Target::Root(WorkspaceId::new()),
@@ -1080,10 +1107,17 @@ mod tests {
             Effect::OpenPullRequest {
                 url: "https://github.com/o/r/pull/7".to_owned(),
             },
+            Effect::CopyPullRequest {
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            },
+            Effect::DismissPullRequest {
+                session,
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            },
         ] {
             assert_eq!(backend.dispatch(effect), Flow::Continue);
         }
-        assert_eq!(backend.drain_events().len(), 3);
+        assert_eq!(backend.drain_events().len(), 5);
     }
 
     #[test]

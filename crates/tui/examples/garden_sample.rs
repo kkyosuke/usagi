@@ -86,6 +86,7 @@ fn sample(
         selected: false,
         failure_summary: (lifecycle == SessionLifecycle::Failed)
             .then(|| "safe sample failure".to_owned()),
+        pr_merged: false,
         agents: vec![GardenAgent {
             runtime_id: AgentRuntimeId::parse(id).expect("sample IDs are canonical UUIDs"),
             phase: agent_phase,
@@ -105,6 +106,7 @@ fn sample_agents(
         lifecycle,
         selected: true,
         failure_summary: None,
+        pr_merged: false,
         agents: agents
             .iter()
             .map(|(runtime_id, phase)| GardenAgent {

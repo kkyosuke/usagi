@@ -75,6 +75,8 @@ pub struct GardenSession {
     pub selected: bool,
     pub failure_summary: Option<String>,
     pub agents: Vec<GardenAgent>,
+    /// A short, non-blocking celebration after one of the session's PRs merges.
+    pub pr_merged: bool,
 }
 
 /// Garden に描く 1 agent。runtime identity は並び順と animation sequence に使う。
@@ -269,6 +271,9 @@ pub fn canonical_tick(
 }
 
 fn session_may_animate(session: &GardenSession) -> bool {
+    if session.pr_merged {
+        return true;
+    }
     match session.lifecycle {
         SessionLifecycle::Creating
         | SessionLifecycle::Initializing
@@ -427,6 +432,24 @@ fn available_plot(
     tick: u64,
     reduced_motion: bool,
 ) -> [String; PLOT_CONTENT_ROWS - 1] {
+    if session.pr_merged {
+        let rabbit = if reduced_motion || tick.is_multiple_of(2) {
+            ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"]
+        } else {
+            [" ✨  ✨", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+        };
+        let [ears, head, body, feet] = sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
+        return [
+            centered(
+                PLOT_WIDTH,
+                &Role::Success.style().bold().paint("PR merged! ✨"),
+            ),
+            ears,
+            head,
+            body,
+            feet,
+        ];
+    }
     let agents = ordered_agents(&session.agents);
     if agents.is_empty() {
         return [
@@ -738,6 +761,7 @@ mod tests {
             lifecycle,
             selected: false,
             failure_summary: None,
+            pr_merged: false,
             agents: vec![GardenAgent {
                 runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
                 phase,
@@ -874,6 +898,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            pr_merged: false,
             agents,
         };
         let first = render(24, 100, "x", &[make_session(shuffled)], 2, false).expect("fits");
@@ -901,6 +926,7 @@ mod tests {
                 lifecycle: SessionLifecycle::Available,
                 selected: false,
                 failure_summary: None,
+                pr_merged: false,
                 agents: Vec::new(),
             }],
             0,
@@ -1169,6 +1195,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            pr_merged: false,
             agents: vec![
                 agent("10000000-0000-4000-8000-000000000001", AgentPhase::Ended),
                 agent("20000000-0000-4000-8000-000000000001", AgentPhase::Exited),
@@ -1265,6 +1292,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            pr_merged: false,
             agents,
         };
 
@@ -1353,5 +1381,23 @@ mod tests {
             .expect("the garden draws ground");
         // 3 plot 分の地面が途切れずつながる（plot 間に空白が入らない）。
         assert!(!ground.trim().contains("  "), "ground broke: {ground:?}");
+    }
+
+    #[test]
+    fn a_merged_pr_gives_its_session_a_short_reduced_motion_safe_celebration() {
+        let mut merged = session(
+            STEADY_ID,
+            "merged",
+            SessionLifecycle::Available,
+            AgentPhase::Ready,
+        );
+        merged.pr_merged = true;
+        assert!(super::session_may_animate(&merged));
+        let animated =
+            plain(&render(24, 100, "x", &[merged.clone()], 1, false).unwrap()).join("\n");
+        let reduced = plain(&render(24, 100, "x", &[merged], 1, true).unwrap()).join("\n");
+        assert!(animated.contains("PR merged!"));
+        assert!(animated.contains("^o^"));
+        assert!(reduced.contains("^.^"));
     }
 }

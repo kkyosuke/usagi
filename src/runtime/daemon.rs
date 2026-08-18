@@ -2425,6 +2425,7 @@ impl RefreshClock for ProductionRefreshClock {
     }
 }
 
+#[derive(Clone, Copy)]
 struct GhProcess;
 
 impl GhProcessPort for GhProcess {
@@ -2813,6 +2814,7 @@ fn spawn_ipc_server(
     )?);
     background_workers.push(start_pr_refresh_worker(
         Arc::clone(&pr_inventory),
+        Arc::clone(&runtime),
         Arc::clone(&shutdown),
     )?);
     let (teardown, teardown_worker) = start_session_teardown_worker(
@@ -3025,10 +3027,12 @@ fn bind_ipc_listener(
 /// progress while `gh` is slow.
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
+    sessions: SharedSessionRuntime,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_pr_refresh_worker(
         pr_inventory,
+        Some(sessions),
         shutdown,
         GhProcess,
         ProductionRefreshClock {
@@ -3040,13 +3044,14 @@ fn start_pr_refresh_worker(
 
 fn spawn_pr_refresh_worker<R, C>(
     pr_inventory: SharedPrInventory,
+    sessions: Option<SharedSessionRuntime>,
     shutdown: Arc<ShutdownRequest>,
     runner: R,
     clock: C,
     tick: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>>
 where
-    R: GhProcessPort + Send + 'static,
+    R: GhProcessPort + Clone + Send + 'static,
     C: RefreshClock + Send + 'static,
 {
     std::thread::Builder::new()
@@ -3061,16 +3066,20 @@ where
                 ErrorLog::record("PR refresh schedule rebuild failed");
             }
             while !shutdown.is_requested() {
+                if let Some(sessions) = &sessions
+                    && let Ok(sessions) = sessions.lock()
+                    && let Ok(retained) = sessions.session_ids()
+                    && let Ok(mut projector) = pr_inventory.lock()
+                    && projector.retain_sessions(&retained).is_err()
+                {
+                    ErrorLog::record("PR inventory session reconciliation failed");
+                }
                 let due = pr_inventory
                     .lock()
                     .ok()
                     .and_then(|mut projector| worker.claim_due(&mut projector).ok())
                     .unwrap_or_default();
-                for identity in due {
-                    if shutdown.is_requested() {
-                        break;
-                    }
-                    let result = worker.fetch(&identity);
+                for (identity, result) in worker.fetch_many(due) {
                     if shutdown.is_requested() {
                         break;
                     }
@@ -4143,7 +4152,7 @@ fn start_ipc_accept_loop(
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
-                                        Some("pr") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
+                                        Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
@@ -5084,6 +5093,19 @@ fn dispatch_pr_snapshot(
                 .lock()
                 .ok()
                 .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
+                .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+            DaemonRequest::PrBatch { payload } => inventory
+                .lock()
+                .ok()
+                .and_then(|mut projector| projector.snapshots(&payload.session_ids).ok())
+                .and_then(|snapshots| serde_json::to_value(snapshots).ok()),
+            DaemonRequest::PrDismiss { payload } => inventory
+                .lock()
+                .ok()
+                .and_then(|mut projector| {
+                    projector.dismiss(payload.session_id, &payload.url).ok()?;
+                    projector.snapshot(payload.session_id).ok()
+                })
                 .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
             _ => None,
         });
@@ -13307,6 +13329,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct CompositionGh {
         calls: Arc<AtomicUsize>,
         inventory: SharedPrInventory,
@@ -13350,6 +13373,7 @@ mod tests {
         let unlocked = Arc::new(AtomicBool::new(false));
         let handle = spawn_pr_refresh_worker(
             Arc::clone(&inventory),
+            None,
             Arc::clone(&shutdown),
             CompositionGh {
                 calls: Arc::clone(&calls),
@@ -13374,6 +13398,7 @@ mod tests {
         let cancelled_calls = Arc::new(AtomicUsize::new(0));
         let handle = spawn_pr_refresh_worker(
             Arc::clone(&inventory),
+            None,
             Arc::clone(&cancelled),
             CompositionGh {
                 calls: Arc::clone(&cancelled_calls),

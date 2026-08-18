@@ -52,6 +52,11 @@ pub enum DaemonRequest {
         action: PrAction,
         payload: PrRequest,
     },
+    /// Batch form used by resident projections so observing N sessions costs one
+    /// IPC exchange rather than N sequential requests.
+    PrBatch { payload: PrBatchRequest },
+    /// Hide one exact PR identity for one stable session.
+    PrDismiss { payload: PrDismissRequest },
     /// Manage a daemon-owned periodic metrics subscription.  Metrics are
     /// observational only: they never authorize a client-side fallback.
     Metrics { action: MetricsAction },
@@ -150,8 +155,6 @@ pub struct McpCallerContext {
 #[serde(rename_all = "snake_case")]
 pub enum PrAction {
     Snapshot,
-    Subscribe,
-    Unsubscribe,
 }
 
 /// A PR request names only a stable session and optional last known revision.
@@ -159,6 +162,19 @@ pub enum PrAction {
 pub struct PrRequest {
     pub session_id: SessionId,
     pub revision: Option<u64>,
+}
+
+/// One bounded read of several session inventories.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrBatchRequest {
+    pub session_ids: Vec<SessionId>,
+}
+
+/// User-owned tombstone mutation for one canonical URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrDismissRequest {
+    pub session_id: SessionId,
+    pub url: String,
 }
 
 /// Source-of-truth PR snapshot. `entries` contains only safe presentation data.
@@ -1561,6 +1577,7 @@ impl RetryEligibility {
     pub fn classify(request: &DaemonRequest) -> Self {
         match request {
             DaemonRequest::Pr { .. }
+            | DaemonRequest::PrBatch { .. }
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
             // Resolving a durable input operation only reads the daemon's
@@ -1608,7 +1625,8 @@ impl RetryEligibility {
             | DaemonRequest::Agent { .. }
             | DaemonRequest::ResumeAgent { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
-            DaemonRequest::Terminal { .. }
+            DaemonRequest::PrDismiss { .. }
+            | DaemonRequest::Terminal { .. }
             | DaemonRequest::CodexSessionCapture { .. }
             | DaemonRequest::AgentPhaseReport { .. }
             | DaemonRequest::McpChildClaim => Self::NoCrossConnectionEvidence,
