@@ -3,10 +3,22 @@
 //! launchd only supervises the foreground `daemon serve` process.  The daemon
 //! lock remains the single-instance authority, and this module never reads or
 //! interprets managed-session state.
+//!
+//! The plist carries exactly one thing beyond the program to run: the
+//! [`DataHome`] pair. launchd starts the agent from its own environment, not
+//! from the shell that installed the service, so a plist without that pair
+//! makes the supervised daemon re-resolve its data home from an empty
+//! environment — landing it on a different directory than the installing
+//! process, while the plist's own stderr log path still points at the
+//! installing process's selected directory. Forwarding `base` plus the mode
+//! spelling is the same contract the daemon already uses for the Agent MCP
+//! children it launches. No token or session state is written here.
 
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
+
+use usagi_core::infrastructure::paths::{DATA_DIR_ENV, DataHome, RUNTIME_MODE_ENV};
 
 const LABEL: &str = "com.usagi.daemon";
 
@@ -19,14 +31,17 @@ mod real_io {
     use super::Command;
     use super::{Path, PathBuf, install_with, uninstall_with};
 
-    pub(crate) fn install(executable: &Path, data_dir: &Path) -> std::io::Result<PathBuf> {
+    pub(crate) fn install(
+        executable: &Path,
+        data_home: &super::DataHome,
+    ) -> std::io::Result<PathBuf> {
         let path = plist_path()?;
         let mut create_dir_all = create_dir_all;
         let mut write = write_file;
         let mut launch = launchctl;
         install_with(
             executable,
-            data_dir,
+            data_home,
             path,
             &mut create_dir_all,
             &mut write,
@@ -92,14 +107,20 @@ fn plist_path_from_home(home: Option<PathBuf>) -> std::io::Result<PathBuf> {
 
 fn install_with(
     executable: &Path,
-    data_dir: &Path,
+    data_home: &DataHome,
     path: PathBuf,
     create_dir_all: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     write: &mut dyn FnMut(&Path, String) -> std::io::Result<()>,
     launch: &mut dyn FnMut(&str, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<PathBuf> {
-    let log = data_dir.join("logs").join("launchd-daemon.stderr.log");
-    let plist = render(executable, &log)?;
+    // The log lives in the selected directory, and the plist announces the pair
+    // that resolves back to it. Deriving both from one `DataHome` is what keeps
+    // the supervised daemon and its log in the same mode.
+    let log = data_home
+        .selected()
+        .join("logs")
+        .join("launchd-daemon.stderr.log");
+    let plist = render(executable, &log, data_home)?;
     create_dir_all(path.parent().expect("LaunchAgents has a parent"))?;
     create_dir_all(log.parent().expect("log path has a parent"))?;
     write(&path, plist)?;
@@ -122,7 +143,7 @@ fn uninstall_with(
     Ok(path)
 }
 
-fn render(executable: &Path, stderr_log: &Path) -> std::io::Result<String> {
+fn render(executable: &Path, stderr_log: &Path, data_home: &DataHome) -> std::io::Result<String> {
     let executable = executable.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -132,10 +153,21 @@ fn render(executable: &Path, stderr_log: &Path) -> std::io::Result<String> {
     let stderr_log = stderr_log.to_str().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 log path")
     })?;
+    // A base that cannot be spelled as UTF-8 is refused rather than lossily
+    // converted: a plist holding a corrupted base would send the supervised
+    // daemon to a directory nobody chose.
+    let base = data_home.base().to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "non-UTF-8 data home base path",
+        )
+    })?;
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>serve</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>{}</string>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>serve</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>{DATA_DIR_ENV}</key><string>{}</string><key>{RUNTIME_MODE_ENV}</key><string>{}</string></dict>\n</dict></plist>\n",
         xml_escape(executable),
-        xml_escape(stderr_log)
+        xml_escape(stderr_log),
+        xml_escape(base),
+        data_home.mode().as_env_value()
     ))
 }
 
@@ -148,21 +180,56 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_with, plist_path_from_home, render, uninstall_with};
+    use super::{DataHome, install_with, plist_path_from_home, render, uninstall_with};
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use usagi_core::infrastructure::paths::RuntimeMode;
 
     #[test]
-    fn rendered_agent_supervises_foreground_serve_without_environment() {
+    fn rendered_agent_supervises_foreground_serve_and_announces_the_data_home() {
         let plist = render(
             Path::new("/Applications/usagi&bin"),
             Path::new("/tmp/daemon.log"),
+            &DataHome::new("/home/usagi/.usagi", RuntimeMode::Local),
         )
         .unwrap();
         assert!(plist.contains("<string>/Applications/usagi&amp;bin</string><string>daemon</string><string>serve</string>"));
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
-        assert!(!plist.contains("EnvironmentVariables"));
+        // The base and the mode spelling travel together. launchd would
+        // otherwise start the daemon from an empty environment, resolving a
+        // different data home than the log path in this same plist.
+        assert!(plist.contains(
+            "<key>EnvironmentVariables</key><dict><key>USAGI_HOME</key><string>/home/usagi/.usagi</string><key>USAGI_RUNTIME_MODE</key><string>local</string></dict>"
+        ));
+    }
+
+    #[test]
+    fn rendered_agent_announces_the_base_itself_for_production() {
+        // Production selects the base, so the announced base must stay the base
+        // rather than climbing above it.
+        let plist = render(
+            Path::new("/opt/usagi"),
+            Path::new("/home/usagi/.usagi/logs/launchd-daemon.stderr.log"),
+            &DataHome::new("/home/usagi/.usagi", RuntimeMode::Production),
+        )
+        .unwrap();
+        assert!(plist.contains(
+            "<key>USAGI_HOME</key><string>/home/usagi/.usagi</string><key>USAGI_RUNTIME_MODE</key><string>production</string>"
+        ));
+    }
+
+    #[test]
+    fn rendered_agent_escapes_the_announced_base() {
+        let plist = render(
+            Path::new("/opt/usagi"),
+            Path::new("/tmp/log"),
+            &DataHome::new("/home/usagi&co/<data>", RuntimeMode::Development),
+        )
+        .unwrap();
+        assert!(plist.contains(
+            "<key>USAGI_HOME</key><string>/home/usagi&amp;co/&lt;data&gt;</string><key>USAGI_RUNTIME_MODE</key><string>development</string>"
+        ));
     }
 
     #[cfg(unix)]
@@ -171,12 +238,28 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let invalid = Path::new(std::ffi::OsStr::from_bytes(&[0xff]));
+        let home = DataHome::new("/home/usagi/.usagi", RuntimeMode::Local);
         assert_eq!(
-            render(invalid, Path::new("/tmp/log")).unwrap_err().kind(),
+            render(invalid, Path::new("/tmp/log"), &home)
+                .unwrap_err()
+                .kind(),
             std::io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            render(Path::new("/opt/usagi"), invalid).unwrap_err().kind(),
+            render(Path::new("/opt/usagi"), invalid, &home)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        // A base that cannot be spelled is refused rather than written lossily.
+        assert_eq!(
+            render(
+                Path::new("/opt/usagi"),
+                Path::new("/tmp/log"),
+                &DataHome::new(invalid, RuntimeMode::Local)
+            )
+            .unwrap_err()
+            .kind(),
             std::io::ErrorKind::InvalidInput
         );
     }
@@ -215,7 +298,7 @@ mod tests {
         };
         let result = install_with(
             Path::new("/opt/usagi&friends/usagi"),
-            Path::new("/data"),
+            &DataHome::new("/data", RuntimeMode::Local),
             path.clone(),
             &mut create,
             &mut write,
@@ -223,16 +306,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, path);
+        // The log directory is the *selected* directory, so local mode puts it
+        // below `local/` while the plist announces the base plus that mode.
         assert_eq!(
             created.into_inner(),
             [
                 PathBuf::from("/home/usagi/Library/LaunchAgents"),
-                PathBuf::from("/data/logs")
+                PathBuf::from("/data/local/logs")
             ]
         );
         let (destination, contents) = written.into_inner().unwrap();
         assert_eq!(destination, path);
         assert!(contents.contains("/opt/usagi&amp;friends/usagi"));
+        assert!(contents.contains("<string>/data/local/logs/launchd-daemon.stderr.log</string>"));
+        assert!(contents.contains(
+            "<key>USAGI_HOME</key><string>/data</string><key>USAGI_RUNTIME_MODE</key><string>local</string>"
+        ));
         assert_eq!(launched.into_inner(), [("bootstrap".into(), path.clone())]);
 
         let mut create = |_: &Path| Ok(());
@@ -240,7 +329,7 @@ mod tests {
         let mut launch = |_: &str, _: &Path| Err(std::io::Error::other("launchctl failed"));
         let error = install_with(
             Path::new("/opt/usagi"),
-            Path::new("/data"),
+            &DataHome::new("/data", RuntimeMode::Local),
             path,
             &mut create,
             &mut write,

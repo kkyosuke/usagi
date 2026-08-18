@@ -1322,10 +1322,16 @@ while IFS= read -r line; do printf 'fixture-input:%s\n' "$line"; done
     assert_eq!(logged("credential:"), "unset");
 
     assert_eq!(child_mode, "production");
-    // The child re-applies the announced mode to the announced home.
+    // The child re-applies the announced mode to the announced home. This test
+    // binary's artifact default is local, so dropping the announced
+    // `production` spelling would resolve a different directory rather than
+    // pass by accident.
     let resolved = usagi_core::infrastructure::paths::DataHome::new(
         &child_home,
-        usagi_core::infrastructure::paths::RuntimeMode::from_env_value(Some(&child_mode)),
+        usagi_core::infrastructure::paths::RuntimeMode::from_env_value(
+            Some(&child_mode),
+            usagi_core::infrastructure::paths::DEFAULT_RUNTIME_MODE,
+        ),
     )
     .selected();
     assert_eq!(resolved, mcp.data_dir());

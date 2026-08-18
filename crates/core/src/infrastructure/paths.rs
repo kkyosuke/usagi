@@ -77,16 +77,21 @@ impl RuntimeMode {
         }
     }
 
-    /// The mode an [`RUNTIME_MODE_ENV`] value selects.
+    /// The mode an [`RUNTIME_MODE_ENV`] value selects, falling back to
+    /// `default` when the variable is absent or unrecognised.
     ///
-    /// An absent or unrecognised value selects local, the safe default for
-    /// every build profile; production requires an explicit selection.
+    /// The fallback is a parameter rather than a literal because it differs per
+    /// artifact ([`DEFAULT_RUNTIME_MODE`]): a source build must never reach
+    /// production state, while a shipped binary must not hide the user's data
+    /// below a development directory. Taking it as an argument keeps every
+    /// (value, default) combination testable in one build.
     #[must_use]
-    pub fn from_env_value(value: Option<&str>) -> Self {
+    pub fn from_env_value(value: Option<&str>, default: Self) -> Self {
         match value {
             Some("production") => Self::Production,
             Some("development") => Self::Development,
-            _ => Self::Local,
+            Some("local") => Self::Local,
+            _ => default,
         }
     }
 
@@ -104,14 +109,43 @@ impl RuntimeMode {
     }
 }
 
+/// The runtime mode this artifact selects when [`RUNTIME_MODE_ENV`] is absent
+/// or unrecognised.
+///
+/// The default is baked into the artifact instead of being read from the
+/// environment because nothing can force a user's shell to carry the variable:
+/// an environment-only default leaves a plain `usagi` invocation resolving a
+/// different data home than the one the installer or service intended.
+///
+/// The `production-runtime-mode` feature selects [`RuntimeMode::Production`],
+/// and is meant for the shipped stable artifact so that a user's data lives in
+/// `$USAGI_HOME` / `~/.usagi` itself. Without it — every source build, every
+/// `cargo test`, and any pre-release artifact that wants isolation — the
+/// default is [`RuntimeMode::Local`]. That asymmetry is deliberate: the
+/// dangerous direction (writing real state) requires an explicit act, so a
+/// stray `cargo run` inside a checkout cannot reach production state.
+///
+/// [`RUNTIME_MODE_ENV`] still overrides this in either direction, so
+/// development and investigation paths stay open.
+#[cfg(feature = "production-runtime-mode")]
+pub const DEFAULT_RUNTIME_MODE: RuntimeMode = RuntimeMode::Production;
+/// The runtime mode this artifact selects when [`RUNTIME_MODE_ENV`] is absent
+/// or unrecognised. See the `production-runtime-mode` variant for why this is
+/// an artifact constant rather than an environment lookup.
+#[cfg(not(feature = "production-runtime-mode"))]
+pub const DEFAULT_RUNTIME_MODE: RuntimeMode = RuntimeMode::Local;
+
 /// Returns the selected runtime mode.
 ///
 /// [`RUNTIME_MODE_ENV`] accepts `production`, `development`, and `local`.
-/// When it is absent (or invalid), local is the safe default for every
-/// build profile; production requires an explicit selection.
+/// When it is absent (or invalid), this artifact's [`DEFAULT_RUNTIME_MODE`]
+/// applies.
 #[must_use]
 pub fn runtime_mode() -> RuntimeMode {
-    RuntimeMode::from_env_value(std::env::var(RUNTIME_MODE_ENV).ok().as_deref())
+    RuntimeMode::from_env_value(
+        std::env::var(RUNTIME_MODE_ENV).ok().as_deref(),
+        DEFAULT_RUNTIME_MODE,
+    )
 }
 
 /// The two directories one runtime mode relates: the mode-neutral `base` that a
@@ -439,19 +473,47 @@ mod tests {
     }
 
     #[test]
-    fn runtime_mode_env_values_round_trip() {
-        for mode in [
+    fn runtime_mode_env_values_round_trip_and_ignore_the_artifact_default() {
+        const MODES: [RuntimeMode; 3] = [
+            RuntimeMode::Production,
+            RuntimeMode::Local,
+            RuntimeMode::Development,
+        ];
+        // Every spelling — `local` included — is honoured whatever the artifact
+        // would have defaulted to. Without the explicit `local` arm, a
+        // production-default artifact would silently upgrade a user's
+        // deliberate `USAGI_RUNTIME_MODE=local` to production.
+        for mode in MODES {
+            for default in MODES {
+                assert_eq!(
+                    RuntimeMode::from_env_value(Some(mode.as_env_value()), default),
+                    mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_absent_or_unrecognised_value_falls_back_to_the_supplied_default() {
+        for default in [
             RuntimeMode::Production,
             RuntimeMode::Local,
             RuntimeMode::Development,
         ] {
-            assert_eq!(RuntimeMode::from_env_value(Some(mode.as_env_value())), mode);
+            assert_eq!(RuntimeMode::from_env_value(None, default), default);
+            assert_eq!(RuntimeMode::from_env_value(Some("bogus"), default), default);
+            assert_eq!(RuntimeMode::from_env_value(Some(""), default), default);
         }
-        assert_eq!(RuntimeMode::from_env_value(None), RuntimeMode::Local);
-        assert_eq!(
-            RuntimeMode::from_env_value(Some("bogus")),
-            RuntimeMode::Local
-        );
+    }
+
+    #[test]
+    fn the_artifact_default_is_local_unless_the_production_feature_is_built() {
+        // The constant is what a plain `usagi` invocation resolves, so it is
+        // pinned per artifact rather than left to the environment.
+        #[cfg(feature = "production-runtime-mode")]
+        assert_eq!(DEFAULT_RUNTIME_MODE, RuntimeMode::Production);
+        #[cfg(not(feature = "production-runtime-mode"))]
+        assert_eq!(DEFAULT_RUNTIME_MODE, RuntimeMode::Local);
     }
 
     #[test]
@@ -477,9 +539,11 @@ mod tests {
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "development") };
         assert_eq!(runtime_mode(), RuntimeMode::Development);
 
+        // An unrecognised value and an absent one both land on the artifact
+        // default rather than on a hard-coded mode.
         unsafe { std::env::set_var(RUNTIME_MODE_ENV, "invalid") };
-        assert_eq!(runtime_mode(), RuntimeMode::Local);
+        assert_eq!(runtime_mode(), DEFAULT_RUNTIME_MODE);
         unsafe { std::env::remove_var(RUNTIME_MODE_ENV) };
-        assert_eq!(runtime_mode(), RuntimeMode::Local);
+        assert_eq!(runtime_mode(), DEFAULT_RUNTIME_MODE);
     }
 }
