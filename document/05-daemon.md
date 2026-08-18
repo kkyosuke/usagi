@@ -1980,4 +1980,6 @@ process・実 PTY を通した最終回帰は
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership
 を証明しない。daemon crash をまたぐ PTY master FD の継続はこの契約に含めず、
-[PTY broker／FD handoff の調査](proposals/07-pty-crash-continuation.md) に分離する。
+[PTY broker／FD handoff の調査](proposals/07-pty-crash-continuation.md) に分離する。PTY を継続しないまま
+crash / cold restart 後の作業面を取り戻す設計も、同じくこの契約の外側として
+[restart / crash 後の作業状態の復帰](proposals/16-restart-state-restoration.md) に分離する。
