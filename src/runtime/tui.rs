@@ -2687,10 +2687,14 @@ fn spawn_metrics_pump() -> RefreshPump<Option<DaemonMetrics>> {
 /// connection so every `Resume` fetch runs off the render thread.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 fn spawn_poll_pump() -> TerminalPollPump {
-    let mut lanes: BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient> = BTreeMap::new();
-    TerminalPollPump::spawn(move |fence| {
-        fetch_terminal_output(&mut lanes, &fence.terminal, fence.after_offset)
-    })
+    let lanes: BTreeMap<usagi_core::domain::id::DaemonGeneration, LaneClient> = BTreeMap::new();
+    TerminalPollPump::spawn_stateful(
+        lanes,
+        |lanes, fence| fetch_terminal_output(lanes, &fence.terminal, fence.after_offset),
+        |lanes, fence| {
+            lanes.remove(&fence.terminal.daemon_generation);
+        },
+    )
 }
 
 /// Spawns the background scope-inventory pump on its own deadline-bounded daemon

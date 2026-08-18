@@ -392,9 +392,15 @@ impl PumpState {
 /// state. Returns whether any terminal was fetched, so the caller can pick the
 /// interactive cadence while work is flowing. The state lock is never held
 /// across a `fetch` call, so the render thread's drain never waits on IO.
-fn run_round<F>(state: &Mutex<PumpState>, fetch: &mut F) -> bool
+fn run_round<S, F, R>(
+    state: &Mutex<PumpState>,
+    fetch_state: &mut S,
+    fetch: &mut F,
+    recover: &mut R,
+) -> bool
 where
-    F: FnMut(&FetchFence) -> Result<Vec<TerminalChunk>, TerminalError>,
+    F: FnMut(&mut S, &FetchFence) -> Result<Vec<TerminalChunk>, TerminalError>,
+    R: FnMut(&mut S, &FetchFence),
 {
     let fences = lock(state).begin_round();
     let worked = !fences.is_empty();
@@ -403,9 +409,13 @@ where
         // not kill its sole worker and leave a live Agent behind a permanently
         // frozen screen. Surface it as the transient failure that already
         // drives TerminalSession's bounded reattach from an atomic checkpoint.
-        if let Ok(result) = catch_unwind(AssertUnwindSafe(|| fetch(&fence))) {
+        if let Ok(result) = catch_unwind(AssertUnwindSafe(|| fetch(fetch_state, &fence))) {
             lock(state).apply_fetch(&fence, result);
         } else {
+            // A stateful fetch can leave its connection unusable when unwinding
+            // across a partially completed request. Reset that state before the
+            // render thread observes the failure and starts reattaching.
+            recover(fetch_state, &fence);
             let mut state = lock(state);
             state.metrics.panics = state.metrics.panics.saturating_add(1);
             state.apply_fetch(&fence, Err(TerminalError::Unavailable));
@@ -457,12 +467,24 @@ pub struct TerminalPollPump {
 }
 
 impl TerminalPollPump {
-    /// Spawns the fetch thread. `fetch` performs one `Resume` fetch for the
-    /// terminal and cursor named by the fence; the composition root injects the
-    /// real daemon IPC, while tests inject an in-process fake.
+    /// Test convenience for a stateless in-process fetch.
+    #[cfg(test)]
     pub fn spawn<F>(mut fetch: F) -> Self
     where
         F: FnMut(&FetchFence) -> Result<Vec<TerminalChunk>, TerminalError> + Send + 'static,
+    {
+        Self::spawn_stateful((), move |(), fence| fetch(fence), |(), _fence| {})
+    }
+
+    /// Spawns the fetch thread with worker-owned connection state and a panic
+    /// recovery hook. `recover` runs before the panic is surfaced as
+    /// [`TerminalError::Unavailable`], allowing a partially consumed connection
+    /// to be discarded before the render thread starts reattaching.
+    pub fn spawn_stateful<S, F, R>(mut fetch_state: S, mut fetch: F, mut recover: R) -> Self
+    where
+        S: Send + 'static,
+        F: FnMut(&mut S, &FetchFence) -> Result<Vec<TerminalChunk>, TerminalError> + Send + 'static,
+        R: FnMut(&mut S, &FetchFence) + Send + 'static,
     {
         let shared = Arc::new(Shared::default());
         let stop = Arc::new(AtomicBool::new(false));
@@ -470,7 +492,12 @@ impl TerminalPollPump {
         let thread_stop = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
-                let worked = run_round(&thread_shared.state, &mut fetch);
+                let worked = run_round(
+                    &thread_shared.state,
+                    &mut fetch_state,
+                    &mut fetch,
+                    &mut recover,
+                );
                 let interval = lock(&thread_shared.state).next_interval(worked);
                 // Only the loop condition ends this thread. `Drop` sets `stop`,
                 // marks the state woken, and notifies, so the wait below always
@@ -643,13 +670,21 @@ mod tests {
         let terminal = terminal();
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let fetch_attempts = Arc::clone(&attempts);
-        let pump = TerminalPollPump::spawn(move |fence| {
-            assert!(
-                fetch_attempts.fetch_add(1, Ordering::SeqCst) != 0,
-                "injected terminal fetch panic"
-            );
-            Ok(vec![chunk(fence.after_offset, b"recovered")])
-        });
+        let pump = TerminalPollPump::spawn_stateful(
+            false,
+            move |connection_poisoned, fence| {
+                if fetch_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    *connection_poisoned = true;
+                    panic!("injected terminal fetch panic");
+                }
+                assert!(
+                    !*connection_poisoned,
+                    "the connection poisoned by the panic was reused"
+                );
+                Ok(vec![chunk(fence.after_offset, b"recovered")])
+            },
+            |connection_poisoned, _fence| *connection_poisoned = false,
+        );
         pump.register(&terminal, 0, 1);
 
         let error = (0..100)

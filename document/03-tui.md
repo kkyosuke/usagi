@@ -1244,7 +1244,8 @@ interactive cadence へ wake する。attach / input / detach は
 atomic checkpoint から screen を組み直し、daemon 自身の `next_input_seq` を採用するため、失った cursor・
 古くなった `TerminalRef`・input ordering のずれのいずれに対しても回復手段はこの 1 つである。したがって pane は
 失敗の種類で運命を分けず、100ms から 2s 上限の指数 backoff で再 attach を続ける。
-foreground poll worker の fetch が panic した場合も worker を終了させず、一過性の接続失敗として同じ再 attach に流す。
+foreground poll worker の fetch が panic した場合も worker を終了させず、途中まで使用した owner 接続を破棄してから
+一過性の接続失敗として同じ再 attach に流す。次の fetch は新しい owner 接続を確立する。
 これにより daemon・Agent・PTY が動作中なのに観測 thread だけが消え、最後の screen が永久に静止する状態を作らない。
 
 | 状態 | いつ入るか | 次に何が起きるか |
