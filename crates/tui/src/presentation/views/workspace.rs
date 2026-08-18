@@ -19,7 +19,7 @@ use usagi_core::domain::agent::{
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::session_lifecycle::{
-    AgentPhase, SessionLifecycle, SessionLifecycleProjection,
+    AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
@@ -121,6 +121,8 @@ pub struct ProjectedSession {
     /// attachable but is removable) and, for `Failed`, shows
     /// [`failure_summary`](Self::failure_summary).
     pub lifecycle: SessionLifecycle,
+    /// Typed failure stage used for compact delete-failure recovery UI.
+    pub failure_stage: Option<FailureStage>,
     /// Safe failure summary shown on a `Failed` row; `None` for other lifecycles.
     pub failure_summary: Option<String>,
     /// Safe display-only role ID from the daemon projection.
@@ -164,6 +166,7 @@ impl ProjectedSession {
             // (e.g. the non-interactive Home fallback) defaults to `Available`,
             // the only state those legacy paths ever projected.
             lifecycle: SessionLifecycle::Available,
+            failure_stage: None,
             failure_summary: None,
             role_id: None,
         }
@@ -2142,6 +2145,17 @@ fn home_failed_row_lines(
         Role::Danger.style().dim().paint(&clipped)
     };
     let marker = home_row_marker(row, selected, current);
+    if session.failure_stage == Some(FailureStage::Delete) {
+        let first = widgets::pad_to_width(&format!("{marker} {label}"), width);
+        let detail = format!(
+            "{} remove failed",
+            home_session_continuation_marker(selected, current)
+        );
+        return vec![
+            first,
+            widgets::pad_to_width(&Style::new().dim().paint(&detail), width),
+        ];
+    }
     let tag = Role::Danger.style().dim().paint("failed");
     let first = widgets::pad_to_width(&format!("{marker} {label}  {tag}"), width);
     let reason = session
@@ -2214,10 +2228,14 @@ fn home_row_lines_at(
         ];
     }
     let current = target.and_then(Target::session_id) == home.active;
+    // The green rail identifies the Closeup command target. Switch already has
+    // an explicit cursor, so retaining the previous target's rail there creates
+    // two competing selections.
+    let current_marker = current && home.mode == HomeMode::Closeup;
     if let Some(session) = session.filter(|session| session.lifecycle == SessionLifecycle::Failed) {
-        return home_failed_row_lines(session, row, width, selected, current);
+        return home_failed_row_lines(session, row, width, selected, current_marker);
     }
-    let marker = home_row_marker(row, selected, current);
+    let marker = home_row_marker(row, selected, current_marker);
     let label = if session.is_some() {
         widgets::clip_to_width(label, width.saturating_sub(6))
     } else {
@@ -2253,23 +2271,24 @@ fn home_row_lines_at(
         facts.push(modified);
         let metadata = format!(
             "{} {}",
-            home_session_continuation_marker(selected, current),
+            home_session_continuation_marker(selected, current_marker),
             facts.join(" · ")
         );
         // Draw the same Git summary columns as the legacy sidebar. A non-cursor
-        // Switch row is inactive even when its current-target marker or Git
-        // cells contain ANSI spans: compose its dim treatment after the spans so
+        // Switch row is inactive even when its Git cells contain ANSI spans:
+        // compose its dim treatment after the spans so
         // their resets cannot make the relative time bright. The cursor row
         // keeps its established marker emphasis. Column widths still reuse the
         // shared `sidebar_metadata` so both render paths align identically.
         let inactive = home.mode == HomeMode::Switch && !selected;
-        // Keep the descriptive prefix subdued, but end that span before the
-        // selected session's Git cells so they do not inherit dim intensity.
-        // Inactive Switch rows are dimmed as a whole below.
-        let metadata = if inactive {
-            metadata
-        } else {
+        // A selected Switch row keeps its descriptive prefix subdued while its
+        // Git cells remain at normal intensity. Closeup owns input, so its
+        // entire metadata row stays at normal intensity. Inactive Switch rows
+        // are dimmed as a whole below.
+        let metadata = if home.mode == HomeMode::Switch && !inactive {
             Style::new().dim().paint(&metadata)
+        } else {
+            metadata
         };
         let metadata = sidebar_metadata(
             &metadata,
@@ -2379,8 +2398,9 @@ fn create_session_input_lines(
 /// v1-compatible sidebar marker with explicit precedence.
 ///
 /// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
-/// in Closeup its active two-line stack is green. The action row remains
-/// chevron-free even while it owns the Switch cursor.
+/// in Closeup its active two-line stack is green. Switch does not retain a rail
+/// for the previous target because its cursor is the sole selection indicator.
+/// The action row remains chevron-free even while it owns the Switch cursor.
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
@@ -2615,7 +2635,7 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::role::RoleId;
-    use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+    use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
@@ -2774,6 +2794,7 @@ mod tests {
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_stage: None,
             failure_summary: None,
             role_id: None,
         }
@@ -4216,7 +4237,7 @@ mod tests {
     }
 
     #[test]
-    fn home_projection_draws_selected_and_active_markers_on_different_rows() {
+    fn switch_draws_only_the_selected_cursor_and_not_the_previous_target_rail() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
         let second = SessionId::new();
@@ -4237,7 +4258,7 @@ mod tests {
             .iter()
             .map(|line| strip(line))
             .collect::<Vec<_>>();
-        assert!(lines.iter().any(|line| line.contains("| first")));
+        assert!(lines.iter().all(|line| !line.contains("| first")));
         assert!(lines.iter().any(|line| line.contains("\u{f0907} second")));
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
@@ -4299,7 +4320,7 @@ mod tests {
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
         let switch = HomeProjection::from_state(&state, "work", Path::new("/work"), &snapshot);
         let switch_text = joined_home(&switch);
-        assert!(switch_text.contains("| 同じ名前"));
+        assert!(!switch_text.contains("| 同じ名前"));
         assert!(switch_text.contains("\u{f0907} 同じ名前"));
         assert!(switch_text.contains("[switch] ↑↓ select"));
 
@@ -4341,8 +4362,8 @@ mod tests {
         let selected = SessionId::new();
         let mut state = AppState::home(workspace, vec![active, selected]);
         // Make `active` the current target, move the cursor to `selected`, then
-        // return to Switch. This is the transition that previously left `now`
-        // bright after the green current marker reset.
+        // return to Switch. The previous target no longer keeps a green rail,
+        // and its whole metadata row remains inactive.
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -4375,7 +4396,8 @@ mod tests {
             .find(|line| line.contains("now"))
             .expect("active session metadata row");
 
-        assert!(metadata.contains("\u{1b}[2m now"));
+        assert!(metadata.contains("\u{1b}[2m  now"));
+        assert!(!metadata.contains("\u{1b}[1;32m|"));
         assert!(metadata.contains("\u{1b}[2;36m↑1"));
         assert!(metadata.contains("\u{1b}[2;35m↓2"));
         assert!(metadata.contains(&format!("{PR_ICON} 2")));
@@ -4419,6 +4441,58 @@ mod tests {
         assert!(!metadata.contains("\u{1b}[2;35m↓2"));
         assert!(!metadata.contains("\u{1b}[2;32m+ 3"));
         assert!(!metadata.contains("\u{1b}[2;31m- 4"));
+    }
+
+    #[test]
+    fn closeup_keeps_elapsed_time_at_normal_intensity() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[projected_session(session, "session", "/work/session")],
+        )
+        .with_git_diffs(&BTreeMap::from([(
+            session,
+            GitDiff {
+                base: "origin/main".to_owned(),
+                ahead: 1,
+                behind: 0,
+                added: 2,
+                removed: 0,
+            },
+        )]));
+
+        let metadata = render_home_at(30, 100, &home, now())
+            .into_iter()
+            .find(|line| line.contains("now"))
+            .expect("closeup session metadata row");
+
+        assert!(metadata.contains("\u{1b}[0m now"));
+        assert!(!metadata.contains("\u{1b}[2m now"));
+        assert!(!metadata.contains("\u{1b}[2;37mnow"));
+    }
+
+    #[test]
+    fn delete_failure_row_is_compact_and_does_not_expose_the_backend_summary() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let mut failed = projected_session(session, "feature", "/work/feature");
+        failed.lifecycle = SessionLifecycle::Failed;
+        failed.failure_stage = Some(FailureStage::Delete);
+        failed.failure_summary = Some("git worktree remove failed: private detail".to_owned());
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[failed]);
+
+        let frame = render_home_at(30, 100, &home, now()).join("\n");
+
+        assert!(frame.contains("\u{1b}[1;31mfeature\u{1b}[0m"));
+        assert!(strip(&frame).contains("remove failed"));
+        assert!(!frame.contains("private detail"));
+        assert!(!strip(&frame).contains("feature  failed"));
     }
 
     #[test]

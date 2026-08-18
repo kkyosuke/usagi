@@ -642,6 +642,7 @@ mod tests {
         };
         let lifecycle = usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Failed,
+            failure_stage: Some(usagi_core::domain::session_lifecycle::FailureStage::Create),
             failure_summary: Some("create failed".into()),
         };
         let snapshot = WorkspaceSnapshot::with_runtime_projection(

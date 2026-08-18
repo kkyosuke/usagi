@@ -3489,6 +3489,9 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
             if let Some(projection) = ui.workspace.session_lifecycles().get(id) {
                 projected.lifecycle = projection.lifecycle;
                 projected
+                    .failure_stage
+                    .clone_from(&projection.failure_stage);
+                projected
                     .failure_summary
                     .clone_from(&projection.failure_summary);
                 // The daemon accepts a removal before its worktree teardown
@@ -3538,6 +3541,9 @@ pub fn render_home_snapshot(
             if let Some(projection) = snapshot.session_lifecycles.get(id) {
                 projected.lifecycle = projection.lifecycle;
                 projected
+                    .failure_stage
+                    .clone_from(&projection.failure_stage);
+                projected
                     .failure_summary
                     .clone_from(&projection.failure_summary);
             }
@@ -3585,15 +3591,9 @@ fn sync_runtime_sessions(
     if runtime.state().session_names() != names.as_slice() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
     }
-    // Keep the reducer's per-session lifecycle in step so it can gate attach by
-    // capability. Only the lifecycle enum is needed reducer-side; the failure
-    // summary is presentation-only and stays in the sidebar projection.
-    let lifecycles: BTreeMap<SessionId, SessionLifecycle> = ui
-        .workspace
-        .session_lifecycles()
-        .iter()
-        .map(|(id, projection)| (*id, projection.lifecycle))
-        .collect();
+    // Keep the reducer's per-session lifecycle in step so it can gate attach
+    // and recognize a typed delete failure without parsing display text.
+    let lifecycles = ui.workspace.session_lifecycles().clone();
     if runtime.state().session_lifecycles() != &lifecycles {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
             lifecycles,
@@ -4733,6 +4733,8 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    /// Failed-delete session label and focused Yes/No answer.
+    force_remove_confirmation: Option<(String, bool)>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
     role_editor: Option<crate::usecase::application::controller::RoleEditor>,
     /// Whole-second wall clock behind the sidebar's relative session times.
@@ -4839,6 +4841,16 @@ fn home_frame_material_shared(
     create_pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> HomeFrameMaterial {
+    let force_remove_confirmation =
+        runtime
+            .state()
+            .force_remove_confirmation()
+            .and_then(|(target, confirm)| {
+                sessions
+                    .iter()
+                    .find(|session| session.id == target)
+                    .map(|session| (session.label.clone(), confirm))
+            });
     let projection = HomeProjection::from_ordered_state(runtime.state(), workspace_name, sessions)
         .with_pane(runtime.preview_pane())
         .with_metrics(metrics)
@@ -4865,6 +4877,7 @@ fn home_frame_material_shared(
             .state()
             .create_session_error()
             .map(|error| error.message.clone()),
+        force_remove_confirmation,
         environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
         // Garden canonicalization happens only after every composition-owned
@@ -4893,6 +4906,25 @@ fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> {
             material.width,
             &frame,
             message,
+        );
+    }
+    if let Some((label, confirm)) = &material.force_remove_confirmation {
+        let title = Style::new().fg(Color::White).bold().paint("Force remove");
+        let heading = Style::new()
+            .fg(Color::White)
+            .bold()
+            .paint(&format!("Force remove {label}?"));
+        return modal::render_confirmation_over(
+            material.height,
+            material.width,
+            &frame,
+            modal::ConfirmationModal::from_confirm_selected(*confirm),
+            ConfirmationView::confirmation(
+                &title,
+                52,
+                heading,
+                "Previous removal failed. Changes may be discarded.",
+            ),
         );
     }
     if let Some(editor) = &material.environment_editor {
@@ -6938,7 +6970,8 @@ mod tests {
         MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort, SessionWorktreeHint,
+        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
+        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
         SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
         TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
@@ -7516,6 +7549,63 @@ mod tests {
         assert_eq!(runtime.state().active(), before);
     }
 
+    #[test]
+    fn failed_delete_selection_renders_the_force_remove_confirmation() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "feature".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/feature"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let mut projected = ProjectedSession::from_record(session, &record);
+        projected.lifecycle = SessionLifecycle::Failed;
+        projected.failure_stage = Some(usagi_core::domain::session_lifecycle::FailureStage::Delete);
+        projected.failure_summary = Some("safe detail".to_owned());
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+            BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(
+                        usagi_core::domain::session_lifecycle::FailureStage::Delete,
+                    ),
+                    failure_summary: Some("safe detail".to_owned()),
+                },
+            )]),
+        )));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
+
+        let material = home_frame_material(
+            20,
+            80,
+            &runtime,
+            "demo",
+            Path::new("/tmp/demo"),
+            &[projected],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        );
+        let frame = render_home_material(&material).join("\n");
+
+        assert!(frame.contains("Force remove"));
+        assert!(frame.contains("Force remove feature?"));
+        assert!(frame.contains("[ yes ]"));
+        assert!(frame.contains("[ no  ]"));
+        assert!(frame.contains("Previous removal failed. Changes may be discarded."));
+    }
+
     fn ws(name: &str) -> Workspace {
         Workspace::new(name, format!("/tmp/{name}"))
     }
@@ -7849,6 +7939,7 @@ mod tests {
             session,
             SessionLifecycleProjection {
                 lifecycle: SessionLifecycle::Failed,
+                failure_stage: Some(usagi_core::domain::session_lifecycle::FailureStage::Create),
                 failure_summary: Some("create failed".into()),
             },
         )]));
@@ -7874,8 +7965,12 @@ mod tests {
         assert_eq!(runtime.state().sessions(), &[session]);
         assert_eq!(runtime.state().session_roles().get(&session), Some(&role));
         assert_eq!(
-            runtime.state().session_lifecycles().get(&session).copied(),
-            Some(SessionLifecycle::Failed)
+            runtime
+                .state()
+                .session_lifecycles()
+                .get(&session)
+                .map(|projection| projection.lifecycle),
+            Some(SessionLifecycle::Failed),
         );
     }
 
@@ -7888,6 +7983,7 @@ mod tests {
             session,
             SessionLifecycleProjection {
                 lifecycle: SessionLifecycle::Deleting,
+                failure_stage: None,
                 failure_summary: None,
             },
         )]));
@@ -8034,6 +8130,7 @@ mod tests {
                 session,
                 usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
                     lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+                    failure_stage: None,
                     failure_summary: None,
                 },
             )])),
@@ -9585,6 +9682,7 @@ mod tests {
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_stage: None,
             failure_summary: None,
             role_id: None,
         };
@@ -9715,6 +9813,7 @@ mod tests {
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_stage: None,
             failure_summary: None,
             role_id: None,
         }];
@@ -21612,6 +21711,7 @@ mod tests {
             id,
             usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
                 lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Failed,
+                failure_stage: Some(usagi_core::domain::session_lifecycle::FailureStage::Create),
                 failure_summary: Some("branch exists".into()),
             },
         );

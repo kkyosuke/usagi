@@ -173,6 +173,10 @@ impl SessionLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLifecycleProjection {
     pub lifecycle: SessionLifecycle,
+    /// Safe typed stage for a failed row. Clients use this to distinguish a
+    /// retryable removal failure from a partially-created reservation without
+    /// parsing the display summary.
+    pub failure_stage: Option<FailureStage>,
     pub failure_summary: Option<String>,
 }
 
@@ -1025,6 +1029,7 @@ mod tests {
         assert!(SessionLifecycle::Failed.capabilities().can_recover);
         let failed = SessionLifecycleProjection {
             lifecycle: SessionLifecycle::Failed,
+            failure_stage: Some(FailureStage::Create),
             failure_summary: Some("create failed".into()),
         };
         assert!(!failed.capabilities().can_use);

@@ -2982,6 +2982,10 @@ impl LifecycleSnapshot {
                     session.session_id,
                     SessionLifecycleProjection {
                         lifecycle: session.lifecycle,
+                        failure_stage: session
+                            .failure
+                            .as_ref()
+                            .map(|failure| failure.stage.clone()),
                         failure_summary: session
                             .failure
                             .as_ref()
@@ -6554,6 +6558,7 @@ mod tests {
             failed_projection.failure_summary.as_deref(),
             Some("create failed")
         );
+        assert_eq!(failed_projection.failure_stage, Some(FailureStage::Create));
         // A Deleting row is neither attachable nor removable again, so listing
         // it cannot produce a second teardown of the same session.
         let deleting_projection = lifecycles.get(&deleting_id).unwrap();
@@ -8158,6 +8163,7 @@ mod tests {
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_stage: None,
             failure_summary: None,
             role_id: None,
         };

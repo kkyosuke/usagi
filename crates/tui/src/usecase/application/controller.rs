@@ -15,7 +15,9 @@ use usagi_core::domain::id::{
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
 use usagi_core::domain::role::RoleId;
-use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
+use usagi_core::domain::session_lifecycle::{
+    AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
+};
 use usagi_core::domain::settings::{
     AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, format_env_bindings,
 };
@@ -55,6 +57,8 @@ pub enum Overlay {
     /// Detach confirmation. This is TUI-local: confirming it never stops a
     /// daemon-owned terminal or operation.
     QuitConfirmation,
+    /// Explicit Yes/No gate before retrying a failed deletion with force.
+    ForceRemoveConfirmation,
     /// active target の note / todo / decision scratchpad。
     Notes,
     /// workspace または session の environment editor。
@@ -921,7 +925,7 @@ pub struct AppState {
     /// Per-session lifecycle by stable identity, used to gate actions by
     /// capability (attach only when `can_use`). A session absent here is treated
     /// as `Available`, so pre-lifecycle callers keep their behaviour.
-    session_lifecycles: BTreeMap<SessionId, SessionLifecycle>,
+    session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     /// Non-persistent daemon role assignment projection by stable identity.
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
     /// Daemon-authoritative PR rows by stable session identity. The sidebar and
@@ -966,6 +970,8 @@ pub struct AppState {
     /// the process. The presentation layer projects this into the shared choice
     /// widget, keeping that widget out of this usecase-layer state.
     exit_choice: ExitChoice,
+    /// Stable failed-delete target and focused answer (`true` = Yes).
+    force_remove_confirmation: Option<(SessionId, bool)>,
 }
 
 /// The three answers the workspace exit prompt accepts.
@@ -1091,6 +1097,7 @@ impl AppState {
             default_model: DefaultModel::default(),
             ctrl_c_grace: false,
             exit_choice: ExitChoice::Quit,
+            force_remove_confirmation: None,
         }
     }
 
@@ -1201,7 +1208,7 @@ impl AppState {
     }
     /// Per-session lifecycle by stable identity, for the runtime sync guard.
     #[must_use]
-    pub fn session_lifecycles(&self) -> &BTreeMap<SessionId, SessionLifecycle> {
+    pub fn session_lifecycles(&self) -> &BTreeMap<SessionId, SessionLifecycleProjection> {
         &self.session_lifecycles
     }
     #[must_use]
@@ -1304,6 +1311,11 @@ impl AppState {
     #[must_use]
     pub const fn exit_choice(&self) -> ExitChoice {
         self.exit_choice
+    }
+    /// Failed-delete target and whether Yes is focused while its prompt is open.
+    #[must_use]
+    pub const fn force_remove_confirmation(&self) -> Option<(SessionId, bool)> {
+        self.force_remove_confirmation
     }
     /// The Agent CLIs a Closeup `agent` command may select.
     #[must_use]
@@ -1873,7 +1885,7 @@ pub enum BackendEvent {
     /// actions by capability (a `Failed` row is not attachable but is removable).
     /// A session absent here is treated as `Available`, so it refluxes
     /// independently of [`Sessions`](Self::Sessions).
-    SessionLifecycles(BTreeMap<SessionId, SessionLifecycle>),
+    SessionLifecycles(BTreeMap<SessionId, SessionLifecycleProjection>),
     /// Safe daemon role metadata, independent of persisted `SessionRecord` rows.
     SessionRoles(BTreeMap<SessionId, SessionRoleProjection>),
     /// Effective session-scope picker catalog. Role instructions are omitted.
@@ -2978,6 +2990,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 }
             }
             state.reconcile_sessions(&previous_sessions);
+            reconcile_force_remove_confirmation(state);
             vec![Effect::SyncPullRequestTargets {
                 sessions: state.sessions.clone(),
             }]
@@ -2993,6 +3006,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.session_lifecycles = lifecycles;
             let sessions = state.sessions.clone();
             state.reconcile_sessions(&sessions);
+            reconcile_force_remove_confirmation(state);
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::SessionRoles(roles)) => {
@@ -3503,6 +3517,59 @@ fn commit_exit_choice(state: &mut AppState, choice: ExitChoice) -> Vec<Effect> {
     choice.effects()
 }
 
+/// Close the failed-delete prompt and, only for an affirmative answer, retry
+/// the exact stable session with force. A refreshed/missing target fails closed.
+fn commit_force_remove(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
+    let target = state
+        .force_remove_confirmation
+        .take()
+        .map(|(session, _)| session);
+    state.overlay = None;
+    let Some(session) = target.filter(|session| {
+        state.sessions.contains(session)
+            && state
+                .session_lifecycles
+                .get(session)
+                .is_some_and(|projection| {
+                    projection.lifecycle == SessionLifecycle::Failed
+                        && projection.failure_stage == Some(FailureStage::Delete)
+                })
+    }) else {
+        return Vec::new();
+    };
+    if !confirmed {
+        return Vec::new();
+    }
+    state.move_selection(-1);
+    vec![Effect::RemoveSession {
+        workspace: state.workspace,
+        session,
+        force: true,
+    }]
+}
+
+/// Drop a confirmation as soon as its daemon-authoritative delete failure is no
+/// longer present. This prevents a stale modal from retargeting a refreshed row.
+fn reconcile_force_remove_confirmation(state: &mut AppState) {
+    let Some((session, _)) = state.force_remove_confirmation else {
+        return;
+    };
+    let still_failed_delete = state.sessions.contains(&session)
+        && state
+            .session_lifecycles
+            .get(&session)
+            .is_some_and(|projection| {
+                projection.lifecycle == SessionLifecycle::Failed
+                    && projection.failure_stage == Some(FailureStage::Delete)
+            });
+    if !still_failed_delete {
+        state.force_remove_confirmation = None;
+        if state.overlay == Some(Overlay::ForceRemoveConfirmation) {
+            state.overlay = None;
+        }
+    }
+}
+
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
@@ -3538,6 +3605,23 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             AppKey::Left => {
                 state.exit_choice = state.exit_choice.shifted(false);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        },
+        Overlay::ForceRemoveConfirmation => match key {
+            AppKey::Char('y' | 'Y') => commit_force_remove(state, true),
+            AppKey::Char('n' | 'N') | AppKey::Escape => commit_force_remove(state, false),
+            AppKey::Enter => commit_force_remove(
+                state,
+                state
+                    .force_remove_confirmation
+                    .is_some_and(|(_, confirm)| confirm),
+            ),
+            AppKey::Left | AppKey::Right | AppKey::Tab => {
+                if let Some((_, confirm)) = state.force_remove_confirmation.as_mut() {
+                    *confirm = !*confirm;
+                }
                 Vec::new()
             }
             _ => Vec::new(),
@@ -4699,6 +4783,19 @@ fn closeup_launcher_on_entry(state: &AppState) -> Option<Overlay> {
 
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     match state.selected {
+        Selection::Target(Target::Session(session))
+            if state
+                .session_lifecycles
+                .get(&session)
+                .is_some_and(|projection| {
+                    projection.lifecycle == SessionLifecycle::Failed
+                        && projection.failure_stage == Some(FailureStage::Delete)
+                }) =>
+        {
+            state.force_remove_confirmation = Some((session, true));
+            state.overlay = Some(Overlay::ForceRemoveConfirmation);
+            Vec::new()
+        }
         // A Failed row is not a usable checkout (`can_use=false`): it stays
         // selected so it can be removed, but activation does not attach it or open
         // its Closeup terminal surface. Usable targets and the workspace root are
@@ -4831,6 +4928,14 @@ mod tests {
 
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
+    }
+
+    fn lifecycle(value: SessionLifecycle) -> SessionLifecycleProjection {
+        SessionLifecycleProjection {
+            lifecycle: value,
+            failure_stage: None,
+            failure_summary: None,
+        }
     }
 
     fn sized_home(
@@ -5291,7 +5396,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
                 first,
-                SessionLifecycle::Failed,
+                lifecycle(SessionLifecycle::Failed),
             )]))),
         );
         let _ = update(
@@ -6314,6 +6419,7 @@ mod tests {
                 | Overlay::Daemon
                 | Overlay::Closeup
                 | Overlay::QuitConfirmation
+                | Overlay::ForceRemoveConfirmation
                 | Overlay::CreateSessionError
                 | Overlay::Garden => {}
             }
@@ -7183,7 +7289,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
                 session,
-                SessionLifecycle::Failed,
+                lifecycle(SessionLifecycle::Failed),
             )]))),
         );
         assert_eq!(
@@ -7223,6 +7329,64 @@ mod tests {
     }
 
     #[test]
+    fn selecting_a_delete_failure_confirms_before_forced_removal() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let failed_delete = SessionLifecycleProjection {
+            lifecycle: SessionLifecycle::Failed,
+            failure_stage: Some(FailureStage::Delete),
+            failure_summary: Some("safe detail".to_owned()),
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                failed_delete,
+            )]))),
+        );
+
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::ForceRemoveConfirmation));
+        assert_eq!(state.force_remove_confirmation(), Some((session, true)));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::new())),
+        );
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.force_remove_confirmation(), None);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: Some("safe detail".to_owned()),
+                },
+            )]))),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        assert_eq!(state.force_remove_confirmation(), Some((session, false)));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('y'))),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+            }]
+        );
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.force_remove_confirmation(), None);
+    }
+
+    #[test]
     fn an_available_session_stays_attachable_after_a_lifecycle_refresh() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -7230,7 +7394,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
                 session,
-                SessionLifecycle::Available,
+                lifecycle(SessionLifecycle::Available),
             )]))),
         );
         // An Available row attaches as before: the route enters Closeup and the
@@ -8365,7 +8529,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
                 session,
-                SessionLifecycle::Failed,
+                lifecycle(SessionLifecycle::Failed),
             )]))),
         );
         state.overlay = Some(Overlay::Garden);
