@@ -65,6 +65,29 @@ pub enum ActiveBuffer {
     Alternate,
 }
 
+/// Encoding requested by a program that enabled DEC mouse reporting.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseProtocolEncoding {
+    /// Legacy X10 single-byte coordinates.
+    #[default]
+    Default,
+    /// UTF-8 encoded X10 coordinates (`DECSET 1005`).
+    Utf8,
+    /// SGR decimal coordinates (`DECSET 1006`).
+    Sgr,
+}
+
+/// The concrete DEC mouse tracking mode currently requested by the program.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseProtocolMode {
+    #[default]
+    None,
+    Press,
+    PressRelease,
+    ButtonMotion,
+    AnyMotion,
+}
+
 /// Decoder parser position, mirroring the private `Phase` used by the parser.
 /// Carried so a checkpoint taken mid-sequence resumes on the correct state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +199,15 @@ pub struct ScreenCheckpoint {
     pub styles: Vec<String>,
     /// The decoder's in-flight state.
     pub decoder: DecoderCheckpoint,
+    /// Whether the program requested application cursor-key sequences (DECCKM).
+    #[serde(default)]
+    pub application_cursor: bool,
+    /// Concrete mouse tracking mode requested by the program.
+    #[serde(default)]
+    pub mouse_protocol_mode: MouseProtocolMode,
+    /// Coordinate encoding for reported mouse events.
+    #[serde(default)]
+    pub mouse_encoding: MouseProtocolEncoding,
 }
 
 /// A checkpoint that failed validation. Every variant fails closed: the caller

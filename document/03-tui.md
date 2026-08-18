@@ -1243,7 +1243,7 @@ live の input cursor は現在セルを反転して表示する。output offset
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
 checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback とその oldest-row origin・cursor・saved cursor・
-scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態）を含むため、retention の先頭が
+scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・application cursor / mouse protocol）を含むため、retention の先頭が
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
 
@@ -1417,7 +1417,7 @@ tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは v1 と同じく live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
 snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
