@@ -30,9 +30,11 @@ daemon が所有する端末に attach するクライアントになる」設�
 | `/`（ルート） | v2 の実装。ビルド・CI（fmt / clippy / test / coverage 100%）の対象 |
 | `v1/` | 退避した旧実装。仕様ドキュメント（`v1/document/`）ごと独立した Cargo プロジェクトで、ルートの workspace から exclude されている |
 
-- 配布 version はルート `Cargo.toml` が v1 の version を引き継ぎ、v2 として最初に
-  リリースするときに bump する（[6. 開発規約#リリース](06-conventions.md#リリース)）。
-- v1 は `v1/` 配下で従来どおり単体ビルドできる。
+- **出荷するのはルートの v2 パッケージ**である。リリースはルート `Cargo.toml` の version 変更を起点に
+  自動化されており、v1 はリリース経路に乗らない（[6. 開発規約#リリース](06-conventions.md#リリース)）。
+- v2 として最初に出す version は既存の v1 release（`2.9.1`）より大きくする必要がある。小さいと
+  `/releases/latest` が v1 のままになり、installer が新しい v2 を選ばない。
+- v1 は `v1/` 配下で従来どおり単体ビルドでき、tree に残る間は `v1-test.yml` / `v1-coverage.yml` が検証する。
 
 ## 現在の実装状態
 
@@ -109,7 +111,9 @@ Switch で session 行を選択しているとき、`x` は `session remove`、`
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
 Workspace entry は各 session の daemon PR snapshot を読み、sidebar に `PR #<number>`（複数件は
 `+<count>`）を表示する。`p` は同じ snapshot projection から選択中 session の Pull Request モーダルを
-開き、root では空一覧を表示する。`v` は対象の
+開き、root では空一覧を表示する。新しい PR URL の検知時は、別の modal や Director drawer が前面になければ
+対象 session の Pull Request モーダルを検知した PR を選択して自動で開く。初回 snapshot の既存 PR は
+自動表示しない。`v` は対象の
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
 長文を scroll し、データを提供できない diff や空の Notes は安全な fallback を表示する。いずれも
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した

@@ -496,8 +496,15 @@ seamless に保てなかった理由を示す。`daemon stop` は rollover と�
 
 macOS では `usagi daemon install-service` が `~/Library/LaunchAgents/com.usagi.daemon.plist`
 を install する。LaunchAgent は絶対 path の `usagi daemon serve` だけを起動し、`RunAtLoad` と
-`KeepAlive` により login・再起動・異常終了後に daemon process を起動する。plist に環境変数、token、
-session state は保存しない。
+`KeepAlive` により login・再起動・異常終了後に daemon process を起動する。
+
+plist が持つ環境変数は **data home の組（`USAGI_HOME` の base と `USAGI_RUNTIME_MODE` の mode）だけ**で、
+token・credential・session state は保存しない。launchd は install した shell の環境ではなく launchd 自身の
+環境で agent を起動するため、この組を書かない plist は supervise される daemon に data home を空の環境から
+再解決させてしまい、install した process とは別の directory を掴ませる（一方で plist の stderr log path は
+install した process の selected directory を指すため、log と daemon の mode が食い違う）。この組を渡す契約は、
+daemon が起動する Agent MCP child に渡すもの（[Agent child の data home](#agent-child-の-data-home)）と同じである。
+base が UTF-8 で綴れない場合は lossy 変換せず install を拒否する。
 
 launchd は process supervisor であり、managed session や Agent の権威を持たない。手動の `start` と
 LaunchAgent が競合しても、active role の `serve` が保持する `daemon.lock` がその data directory の active を
@@ -534,8 +541,24 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `dispatch.json` | durable atomic JSON | dispatchable agent、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
 
-runtime mode は `USAGI_RUNTIME_MODE=production`（本番モード）、`USAGI_RUNTIME_MODE=development`（開発モード）、または `USAGI_RUNTIME_MODE=local`（ローカルモード）で明示する。production は `$USAGI_HOME` または `~/.usagi` 自体を使い、development はその `dev/` 子 directory、local はその `local/` 子 directory を使う。環境変数を未指定または不正な値にした場合は、debug / release build とも local を既定にする。本番モードは `USAGI_RUNTIME_MODE=production` による明示指定が必要である。プロジェクト内の runtime state も同じ定義を使い、production は `<project_root>/.usagi/`、development は `<project_root>/.usagi/dev/`、local は `<project_root>/.usagi/local/` に保存する。旧 `device/` / `develop/` / `development/` との互換処理は行わない。
+runtime mode は `USAGI_RUNTIME_MODE=production`（本番モード）、`USAGI_RUNTIME_MODE=development`（開発モード）、または `USAGI_RUNTIME_MODE=local`（ローカルモード）で明示する。production は `$USAGI_HOME` または `~/.usagi` 自体を使い、development はその `dev/` 子 directory、local はその `local/` 子 directory を使う。3 つの綴りはいずれも明示指定として尊重され、artifact の既定に上書きされない。環境変数を未指定または不正な値にした場合は、**その artifact に焼き込まれた既定 mode**（[artifact の既定 mode](#artifact-の既定-mode)）を使う。プロジェクト内の runtime state も同じ定義を使い、production は `<project_root>/.usagi/`、development は `<project_root>/.usagi/dev/`、local は `<project_root>/.usagi/local/` に保存する。旧 `device/` / `develop/` / `development/` との互換処理は行わない。
 したがって development 中・local mode 中に本番用の record / locator / lock / daemon-owned state へ触れず、必要なら `USAGI_RUNTIME_MODE=development cargo run` で local mode のまま開発用状態を選べる。`USAGI_HOME` を明示しても同じ分離を適用する。daemon が起動する Agent の MCP server には選択した mode も転送するため、Agent の完了報告も同じ daemon に届く。
+
+### artifact の既定 mode
+
+`USAGI_RUNTIME_MODE` が未指定または不正な値のときに使う既定 mode は、**その artifact に焼き込まれている**。
+利用者の shell が常にこの環境変数を持つことは強制できないため、env だけを既定の決め手にすると、
+installer や service が意図した data home と、plain shell で起動した `usagi` が解決する data home が
+食い違う。
+
+| artifact | 既定 mode | 根拠 |
+|---|---|---|
+| source build（`cargo run` / `cargo test`） | local | 開発中の実行が本番 state へ到達しない |
+| `production` feature を有効にした build | production | 配布 binary が利用者のデータを `$USAGI_HOME` / `~/.usagi` 自体へ置く |
+
+焼き込みはルートパッケージの `production` feature（`usagi-core` の `production-runtime-mode` を有効にする）で
+選ぶ。feature 無しの既定は local であり、**危険な向き（本番 state を書く）に明示的な build 時の指定を要求する**
+非対称を保つ。`USAGI_RUNTIME_MODE` は artifact の既定を両方向へ上書きできるため、開発・調査の経路は塞がない。
 
 ### Agent child の data home
 
@@ -783,6 +806,10 @@ flag を直接書くだけ（async-signal-safe だが condvar を notify でき�
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
+同期 `user_decision_request` の waiter はこの maintenance tick で store を再読込しない。resolve / cancel / expire は
+decision 単位の通知で waiter を即時に起こし、状態変化がない間は connection の切断と ActiveControl barrier の close を
+最大 250 ms 間隔で非破壊観測する。planned rollover は barrier を閉じた時点で waiter を終了させて lease を解放してから
+drain を完了し、shutdown / retirement は connection 自体も閉じる。いずれも durable な `Pending` record を変更しない。
 
 ## session teardown worker
 

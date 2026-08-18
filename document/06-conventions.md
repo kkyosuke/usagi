@@ -380,11 +380,11 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | ファイル | トリガー | 役割 |
 |---|---|---|
 | `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy と full test（`--workspace`）を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
-| `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
-| `.github/workflows/v1-coverage.yml` | PR | v1 Rust source / manifest 差分では出荷元 `v1/Cargo.toml` の line/function coverage 100% を強制し、全差分で `v1-coverage` aggregate を報告。gate 自体は `test.yml` の実 crate fixture で検証 |
+| `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1 を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証（v1 は出荷しないが、tree に残る間は検証する） |
+| `.github/workflows/v1-coverage.yml` | PR | v1 Rust source / manifest 差分では `v1/Cargo.toml` の line/function coverage 100% を強制し、全差分で `v1-coverage` aggregate を報告。gate 自体は `test.yml` の実 crate fixture で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
-| `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 出荷物 v1 の実 PTY TUI E2E。PR / merge queue では `v1/Cargo.toml` の `[package].version` が base と異なる場合だけ実行し、通常 PR の重い test を回避する |
-| `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
+| `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 退避された v1 の実 PTY TUI E2E。PR / merge queue では `v1/Cargo.toml` の `[package].version` が base と異なる場合だけ実行する。v1 はリリース起点ではなくなったため、実質は手動実行の経路である。v2 の実 PTY E2E は `test.yml` の full test に含まれる |
+| `.github/workflows/release-build-check.yml` | ルート `Cargo.toml` / `Cargo.lock`、またはリリース経路の workflow / `rust-toolchain.toml` を変更する PR | リリースと同じ 3 プラットフォーム・同じ `--features production` で `cargo build --release` し、リリースビルドが成功することをマージ前に検証する。host target では installer の version 出力契約も検証する。workflow 自身も trigger に含めるのは、リリース経路を変更する PR では version が動かず、version だけを trigger にすると経路の変更が無検証でマージされるためである |
 | `.github/workflows/coverage.yml` | PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR コメント + Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
 | `.github/workflows/markdown-link-check.yml` | `main` への push / PR | Markdown 対象差分ではリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証し、全差分で `markdown-link-check` aggregate を報告 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
@@ -411,27 +411,40 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 ## リリース
 
-リリースは **`v1/Cargo.toml` の `version` 変更を起点に自動化**されている。手動でタグを切る必要はない。
-出荷するバイナリはまだ v1（`v1/` に退避された実装）であり、ルートの v2 workspace の version はリリースに
-影響しない（退避時点の v1 の version を引き継いでおり、v2 として最初にリリースするときにリリース起点を
-ルートへ切り替える）。
+リリースは **ルート `Cargo.toml` の `version` 変更を起点に自動化**されている。手動でタグを切る必要はない。
+出荷するバイナリは**ルートの v2 パッケージ**であり、`v1/` に退避された実装は出荷しない（`v1/` は
+[CI](#cigithub-actions) の `v1-test.yml` / `v1-coverage.yml` が引き続き検証するが、リリース経路には乗らない）。
+
+### 出荷 artifact の要件
+
+| 要件 | 内容 |
+|---|---|
+| feature | `--features production` を付ける。この feature が無い artifact は `USAGI_RUNTIME_MODE` 未指定時に local を既定にするため、利用者のデータが `~/.usagi/local/` に入る（正本は [5. daemon#artifact の既定 mode](05-daemon.md#artifact-の既定-mode)） |
+| toolchain | `rust-toolchain.toml` が pin した nightly。cross target は `rustup target add` で pin した toolchain へ入れる（`dtolnay/rust-toolchain` の `targets:` は日付なし nightly に入るため使わない） |
+| 対象 platform | Linux amd64 / macOS amd64 / macOS arm64 の 3 つ。installer（`scripts/install.sh`）の `platform_asset` は darwin / linux だけを受け付け、それ以外は fail する。加えて v2 は Unix domain socket の IPC と Unix 専用の process / permission API に依存するため Windows ではコンパイルできない |
+| archive | `usagi-<os>-<arch>.tar.gz`。中身は唯一の top-level entry `usagi`（installer の `verify_archive` が要求する） |
+| verification artifact | 各 archive と同名の `.sha256` と `.version`。installer は両方を必須とし、存在しない旧 release へ無検証 fallback しない |
+| version 出力 | `usagi <version>`（installer の `read_version` が要求する。`release-build-check.yml` が host target でこの契約を検証する） |
 
 ### 手順
 
 1. リリースしたい変更を `main` にマージする。
-2. `v1/Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（`create-release-pr.yml` の手動実行でも作成できる）。
+2. ルート `Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（`create-release-pr.yml` の手動実行でも作成できる）。
 3. 以降は自動で進む:
-   - `auto-release.yml` が `main` への `v1/Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
-   - reusable な `release.yml` が呼ばれ、4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 のバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。各 archive には同名の `.sha256` と `.version` verification artifact を添付する。installer は両 artifact を必須とし、存在しない旧 release へ無検証 fallback しない。
+   - `auto-release.yml` が `main` へのルート `Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
+   - reusable な `release.yml` が呼ばれ、上表の要件で 3 プラットフォームのバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。
 
 > version が変わらない push、または同名タグが既に存在する場合はスキップされる。
+
+v2 として最初に出す version は、既存の v1 release（`2.9.1`）より大きくなければならない。小さい version の
+タグを切ると `/releases/latest` が v1 のままになり、installer の既定経路が新しい v2 を選ばない。
 
 ### ワークフロー構成
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | 指定 version へ `v1/Cargo.toml` を更新するリリース PR を作成する |
-| `.github/workflows/auto-release.yml` | `main` への `v1/Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
-| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v1 のビルド・SHA-256 / version artifact 生成・GitHub Release 作成 |
+| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | 指定 version へルート `Cargo.toml` を更新するリリース PR を作成する |
+| `.github/workflows/auto-release.yml` | `main` へのルート `Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
+| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。

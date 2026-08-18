@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'New release version (e.g., 2.5.0)'
+        description: 'New release version (e.g., 3.0.0)'
         required: true
         type: string
 
@@ -19,17 +19,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # ビルドは rust-toolchain.toml が pin した nightly で走るため、component も
+      # そちらへ届く前提で入れる（正本は document/06-conventions.md）。
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
-      - name: Update version in v1/Cargo.toml
+      - name: Update version in Cargo.toml
         run: |
-          # リリース対象はまだ v1（v1/ に退避された旧実装）のため、
-          # v1/Cargo.toml の最初の version = "..." を入力されたバージョンで上書き
-          sed -i -e "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${{ inputs.version }}\"/}" v1/Cargo.toml
+          # リリース対象はルートの v2 パッケージなので、ルート Cargo.toml の
+          # 最初の version = "..." を入力されたバージョンで上書きする。
+          sed -i -e "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${{ inputs.version }}\"/}" Cargo.toml
 
-          # v1/Cargo.lock も更新
-          cargo check --manifest-path v1/Cargo.toml
+          # Cargo.lock も更新
+          cargo check --workspace
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7

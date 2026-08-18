@@ -801,9 +801,9 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 ## session garden
 
 session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、daemon 権威の lifecycle と controller が runtime ごとに保持する Agent phase
-だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、閉じると表示前と同じ Home
-へ戻る。設計判断は
+Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新の coherent Agent inventory・controller が runtime
+ごとに保持する Agent phase だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、
+閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
@@ -814,6 +814,12 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle と contr
 1 区画は 1 session、1 うさぎは 1 Agent runtime である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+
+うさぎの membership と stable identity は、controller が既に phase を観測した runtime に加え、workspace open 時の
+最新 coherent Agent inventory から補う。同じ `AgentRuntimeId` が両方にある場合は、`Waiting` まで区別できる
+controller の runtime-local phase を優先する。inventory にだけある runtime は `reserved → ready`、`live → running`、
+`interrupted` / `unavailable → interrupted`、`exited` / `reclaimed → done` に写す。workspace root の runtime と、
+Home に存在しない session の runtime は区画へ加えない。
 
 複数 runtime は `Waiting` を先頭にし、残りと同 phase の tie-break を stable `AgentRuntimeId` 順にする。4 羽目
 以降は末尾から畳み、状態内訳の末尾へ `+N hidden` を表示する。このため入力待ちの runtime は低い注目度の runtime
@@ -871,7 +877,10 @@ attach されない。Garden から daemon command は発行しない。
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない先頭 PR と残件数を
 sidebar の `PR #<number> +<count>` に投影する。`p` の PR modal は focused `SessionId` について同じ
 projection を即時表示し、resident PR lane を wake する。sidebar projection は新しい revision だけで進み、
-開き直した modal は同じ cache を即時利用する。重複・古い revision または別 session の値は捨てる。
+開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
+保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
+その session の PR modal を検知した行を選択して自動で開く。title / state だけの更新、重複・古い revision、
+dismissed PR は自動表示せず、前面の操作を奪わない。別 session の値は対象 session の cache にだけ反映する。
 
 resident PR lane は render thread の外で daemon との persistent connection を所有し、1 秒以下の bounded cadence で
 現在の session 集合を観測する。session の追加・削除は集合を全置換して即時 wake し、結果は frame loop の non-blocking
@@ -1244,6 +1253,9 @@ interactive cadence へ wake する。attach / input / detach は
 atomic checkpoint から screen を組み直し、daemon 自身の `next_input_seq` を採用するため、失った cursor・
 古くなった `TerminalRef`・input ordering のずれのいずれに対しても回復手段はこの 1 つである。したがって pane は
 失敗の種類で運命を分けず、100ms から 2s 上限の指数 backoff で再 attach を続ける。
+foreground poll worker の fetch が panic した場合も worker を終了させず、途中まで使用した owner 接続を破棄してから
+一過性の接続失敗として同じ再 attach に流す。次の fetch は新しい owner 接続を確立する。
+これにより daemon・Agent・PTY が動作中なのに観測 thread だけが消え、最後の screen が永久に静止する状態を作らない。
 
 | 状態 | いつ入るか | 次に何が起きるか |
 |---|---|---|

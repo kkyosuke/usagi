@@ -18,6 +18,15 @@ repository.workspace = true
 license.workspace = true
 description = "usagi v2 — セッション・worktree オーケストレータのフルリライト"
 
+# 配布 artifact の既定 runtime mode を選ぶ feature。`--features production` で
+# build した artifact は USAGI_RUNTIME_MODE 未指定時に production を選び、
+# 利用者のデータを $USAGI_HOME / ~/.usagi 自体へ置く。既定（feature なし）は
+# local で、source build や cargo test が本番 state へ到達しない。
+# 正本は document/05-daemon.md#daemon-data-directory。
+[features]
+default = []
+production = ["usagi-core/production-runtime-mode"]
+
 [dependencies]
 usagi-cli.workspace = true
 usagi-core.workspace = true
