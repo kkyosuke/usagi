@@ -198,8 +198,14 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
                     row: mouse.row,
                 }))
             }
-            MouseEventKind::ScrollUp => Some(RuntimeEvent::Input(LiveInput::WheelUp)),
-            MouseEventKind::ScrollDown => Some(RuntimeEvent::Input(LiveInput::WheelDown)),
+            MouseEventKind::ScrollUp => Some(RuntimeEvent::Input(LiveInput::WheelUp {
+                column: mouse.column,
+                row: mouse.row,
+            })),
+            MouseEventKind::ScrollDown => Some(RuntimeEvent::Input(LiveInput::WheelDown {
+                column: mouse.column,
+                row: mouse.row,
+            })),
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
                     kind: PointerKind::Drag,
@@ -435,11 +441,17 @@ mod tests {
         };
         assert_eq!(
             adapt_event::<()>(Event::Mouse(mouse(MouseEventKind::ScrollUp))),
-            Some(RuntimeEvent::Input(LiveInput::WheelUp))
+            Some(RuntimeEvent::Input(LiveInput::WheelUp {
+                column: 41,
+                row: 12
+            }))
         );
         assert_eq!(
             adapt_event::<()>(Event::Mouse(mouse(MouseEventKind::ScrollDown))),
-            Some(RuntimeEvent::Input(LiveInput::WheelDown))
+            Some(RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 41,
+                row: 12
+            }))
         );
     }
 

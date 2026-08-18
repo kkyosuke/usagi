@@ -7,8 +7,12 @@
 
 use std::time::Duration;
 
+use usagi_core::usecase::vt_screen::MouseProtocolEncoding;
+
 /// The longest interval in which a `Ctrl-O` leader accepts its follow-up.
 pub const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
+/// Arrow presses emitted for one alternate-screen wheel notch.
+pub const WHEEL_LINES: usize = 3;
 
 /// A terminal key code, independent of any terminal-event library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,9 +127,9 @@ pub enum LiveInput {
     /// sidebar hit testing.
     Mouse { column: u16, row: u16 },
     /// Pointer wheel moved toward older terminal output.
-    WheelUp,
+    WheelUp { column: u16, row: u16 },
     /// Pointer wheel moved toward newer terminal output.
-    WheelDown,
+    WheelDown { column: u16, row: u16 },
     /// Pointer lifecycle for terminal-output click/selection. It never reaches
     /// the PTY.
     Pointer(PointerEvent),
@@ -202,6 +206,8 @@ pub enum LiveTerminalAction {
     /// possible and what would otherwise leave the reader thousands of rows of
     /// `ScrollDown` away from the newest output.
     ScrollBottom,
+    /// A physical wheel notch, routed after consulting the program's DEC modes.
+    Wheel { up: bool, column: u16, row: u16 },
 }
 
 /// A control chord reserved globally when no live-terminal leader is pending.
@@ -250,13 +256,21 @@ impl LiveInputClassifier {
 
         match input {
             LiveInput::Key(key) => self.classify_key(now, leader_alive, &key),
-            LiveInput::WheelUp => {
+            LiveInput::WheelUp { column, row } => {
                 self.leader_at = None;
-                LiveInputOutput::Action(LiveTerminalAction::ScrollUp)
+                LiveInputOutput::Action(LiveTerminalAction::Wheel {
+                    up: true,
+                    column,
+                    row,
+                })
             }
-            LiveInput::WheelDown => {
+            LiveInput::WheelDown { column, row } => {
                 self.leader_at = None;
-                LiveInputOutput::Action(LiveTerminalAction::ScrollDown)
+                LiveInputOutput::Action(LiveTerminalAction::Wheel {
+                    up: false,
+                    column,
+                    row,
+                })
             }
             LiveInput::Text(text) => self.classify_bytes(leader_alive, text.into_bytes()),
             LiveInput::Raw(bytes) => self.classify_bytes(leader_alive, bytes),
@@ -482,6 +496,51 @@ fn function_key_bytes(number: u8) -> Vec<u8> {
         12 => b"\x1b[24~".to_vec(),
         _ => Vec::new(),
     }
+}
+
+/// Encodes one wheel notch for a program that enabled DEC mouse reporting.
+/// `column` and `row` are zero-based terminal-viewport cells.
+#[must_use]
+pub fn encode_mouse_wheel(
+    up: bool,
+    column: usize,
+    row: usize,
+    encoding: MouseProtocolEncoding,
+) -> Vec<u8> {
+    let button = if up { 64_u32 } else { 65_u32 };
+    let column = u32::try_from(column).unwrap_or(u32::MAX).saturating_add(1);
+    let row = u32::try_from(row).unwrap_or(u32::MAX).saturating_add(1);
+    match encoding {
+        MouseProtocolEncoding::Sgr => format!("\x1b[<{button};{column};{row}M").into_bytes(),
+        MouseProtocolEncoding::Default | MouseProtocolEncoding::Utf8 => {
+            let mut bytes = b"\x1b[M".to_vec();
+            for field in [button, column, row] {
+                let value = field.saturating_add(32);
+                if let (MouseProtocolEncoding::Utf8, Some(character)) =
+                    (encoding, char::from_u32(value))
+                {
+                    let mut encoded = [0_u8; 4];
+                    bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+                    continue;
+                }
+                bytes.push(u8::try_from(value).unwrap_or(u8::MAX));
+            }
+            bytes
+        }
+    }
+}
+
+/// Emulates a terminal's alternate-scroll mode for a full-screen program that
+/// did not enable mouse reporting.
+#[must_use]
+pub fn encode_wheel_arrows(up: bool, application_cursor: bool) -> Vec<u8> {
+    let arrow = match (up, application_cursor) {
+        (true, true) => b"\x1bOA".as_slice(),
+        (true, false) => b"\x1b[A".as_slice(),
+        (false, true) => b"\x1bOB".as_slice(),
+        (false, false) => b"\x1b[B".as_slice(),
+    };
+    arrow.repeat(WHEEL_LINES)
 }
 
 /// Bracketed-paste start marker (DECSET 2004). A program that requested the mode
@@ -981,15 +1040,23 @@ mod tests {
     }
 
     #[test]
-    fn wheel_events_are_reserved_for_pane_scrolling_without_terminal_bytes() {
+    fn wheel_events_keep_the_pointer_cell_for_mode_aware_routing() {
         let mut classifier = LiveInputClassifier::default();
         assert_eq!(
-            classifier.classify(T0, LiveInput::WheelUp),
-            LiveInputOutput::Action(LiveTerminalAction::ScrollUp)
+            classifier.classify(T0, LiveInput::WheelUp { column: 4, row: 9 }),
+            LiveInputOutput::Action(LiveTerminalAction::Wheel {
+                up: true,
+                column: 4,
+                row: 9,
+            })
         );
         assert_eq!(
-            classifier.classify(T0, LiveInput::WheelDown),
-            LiveInputOutput::Action(LiveTerminalAction::ScrollDown)
+            classifier.classify(T0, LiveInput::WheelDown { column: 2, row: 7 }),
+            LiveInputOutput::Action(LiveTerminalAction::Wheel {
+                up: false,
+                column: 2,
+                row: 7,
+            })
         );
     }
 
@@ -1146,5 +1213,23 @@ mod tests {
             classifier.classify(Duration::from_millis(2), alt_follow_up),
             LiveInputOutput::Swallowed
         );
+    }
+
+    #[test]
+    fn mouse_wheel_encoding_matches_sgr_and_legacy_terminal_protocols() {
+        assert_eq!(
+            encode_mouse_wheel(true, 4, 9, MouseProtocolEncoding::Sgr),
+            b"\x1b[<64;5;10M"
+        );
+        assert_eq!(
+            encode_mouse_wheel(false, 0, 0, MouseProtocolEncoding::Default),
+            vec![0x1b, b'[', b'M', 97, 33, 33]
+        );
+    }
+
+    #[test]
+    fn alternate_wheel_uses_the_program_cursor_key_mode() {
+        assert_eq!(encode_wheel_arrows(true, false), b"\x1b[A".repeat(3));
+        assert_eq!(encode_wheel_arrows(false, true), b"\x1bOB".repeat(3));
     }
 }

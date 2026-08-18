@@ -28,9 +28,9 @@ mod checkpoint;
 
 pub use checkpoint::{
     ActiveBuffer, BufferCheckpoint, CELLS_PER_TERMINAL_MAX, CHECKPOINT_BYTES_MAX, COLS_MAX,
-    CellRun, CheckpointError, DecoderCheckpoint, DecoderPhase, Geometry, PARAMS_MAX, ROWS_MAX,
-    RowCheckpoint, SCHEMA_VERSION, SCROLLBACK_MAX, STYLE_BYTES_MAX, STYLES_MAX, ScreenCheckpoint,
-    UTF8_NEEDED_MAX, UTF8_PENDING_MAX,
+    CellRun, CheckpointError, DecoderCheckpoint, DecoderPhase, Geometry, MouseProtocolEncoding,
+    PARAMS_MAX, ROWS_MAX, RowCheckpoint, SCHEMA_VERSION, SCROLLBACK_MAX, STYLE_BYTES_MAX,
+    STYLES_MAX, ScreenCheckpoint, UTF8_NEEDED_MAX, UTF8_PENDING_MAX,
 };
 
 /// Escape-sequence parser position. Only these six states are reachable; any
@@ -142,6 +142,12 @@ pub struct VtScreen {
     /// this region and scrolls only the transcript above it.
     scroll_top: usize,
     scroll_bottom: usize,
+    /// DECCKM: cursor keys use SS3 instead of CSI while enabled.
+    application_cursor: bool,
+    /// Any of DECSET 9/1000/1002/1003 requests mouse reports.
+    mouse_protocol: bool,
+    /// Coordinate encoding selected by DECSET 1005/1006.
+    mouse_encoding: checkpoint::MouseProtocolEncoding,
     /// The primary screen while a full-screen program (for example Codex)
     /// renders into the active alternate buffer.
     primary_screen: Option<Box<ScreenBuffer>>,
@@ -318,6 +324,9 @@ impl VtScreen {
             saved_cursor: None,
             scroll_top: 0,
             scroll_bottom: rows - 1,
+            application_cursor: false,
+            mouse_protocol: false,
+            mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
             primary_screen: None,
         }
     }
@@ -409,6 +418,24 @@ impl VtScreen {
         } else {
             ActiveBuffer::Primary
         }
+    }
+
+    /// Whether a full-screen program requested application cursor-key input.
+    #[must_use]
+    pub const fn application_cursor(&self) -> bool {
+        self.application_cursor
+    }
+
+    /// Whether a program requested DEC mouse reports.
+    #[must_use]
+    pub const fn mouse_protocol(&self) -> bool {
+        self.mouse_protocol
+    }
+
+    /// Mouse coordinate encoding requested by the active program.
+    #[must_use]
+    pub const fn mouse_encoding(&self) -> checkpoint::MouseProtocolEncoding {
+        self.mouse_encoding
     }
 
     /// Returns a retained scrollback row by its oldest-first logical index.
@@ -784,16 +811,27 @@ impl VtScreen {
     /// ratatui renderer uses 1049; accepting the older 47/1047 variants keeps
     /// the pane compatible with other full-screen agents as well.
     fn set_private_modes(&mut self) {
-        let modes = self.private_modes();
-        if modes.iter().any(|mode| matches!(mode, 47 | 1047 | 1049)) {
-            self.enter_alternate_screen();
+        for mode in self.private_modes() {
+            match mode {
+                1 => self.application_cursor = true,
+                9 | 1000 | 1002 | 1003 => self.mouse_protocol = true,
+                1005 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Utf8,
+                1006 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Sgr,
+                47 | 1047 | 1049 => self.enter_alternate_screen(),
+                _ => {}
+            }
         }
     }
 
     fn reset_private_modes(&mut self) {
-        let modes = self.private_modes();
-        if modes.iter().any(|mode| matches!(mode, 47 | 1047 | 1049)) {
-            self.leave_alternate_screen();
+        for mode in self.private_modes() {
+            match mode {
+                1 => self.application_cursor = false,
+                9 | 1000 | 1002 | 1003 => self.mouse_protocol = false,
+                1005 | 1006 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Default,
+                47 | 1047 | 1049 => self.leave_alternate_screen(),
+                _ => {}
+            }
         }
     }
 
@@ -1010,6 +1048,9 @@ impl VtScreen {
                 utf8_pending: self.utf8_pending.clone(),
                 utf8_needed: self.utf8_needed as u8,
             },
+            application_cursor: self.application_cursor,
+            mouse_protocol: self.mouse_protocol,
+            mouse_encoding: self.mouse_encoding,
             styles: styles.table,
         }
     }
@@ -1068,6 +1109,9 @@ impl VtScreen {
         screen.params.clone_from(&cp.decoder.params);
         screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
         screen.utf8_needed = cp.decoder.utf8_needed as usize;
+        screen.application_cursor = cp.application_cursor;
+        screen.mouse_protocol = cp.mouse_protocol;
+        screen.mouse_encoding = cp.mouse_encoding;
 
         match alternate {
             // The alternate buffer is live; the primary is the saved background.
@@ -1734,6 +1778,25 @@ mod tests {
     }
 
     #[test]
+    fn dec_input_modes_follow_program_requests_and_checkpoint() {
+        let mut screen = VtScreen::new(2, 8);
+        screen.advance(b"\x1b[?1h\x1b[?1000h\x1b[?1006h");
+        assert!(screen.application_cursor());
+        assert!(screen.mouse_protocol());
+        assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Sgr);
+
+        let restored = VtScreen::from_checkpoint(&screen.checkpoint()).expect("input modes");
+        assert!(restored.application_cursor());
+        assert!(restored.mouse_protocol());
+        assert_eq!(restored.mouse_encoding(), MouseProtocolEncoding::Sgr);
+
+        screen.advance(b"\x1b[?1l\x1b[?1000l\x1b[?1006l");
+        assert!(!screen.application_cursor());
+        assert!(!screen.mouse_protocol());
+        assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Default);
+    }
+
+    #[test]
     fn alternate_screen_keeps_full_screen_agent_output_visible_and_restores_the_shell() {
         let mut screen = VtScreen::new(2, 12);
         screen.advance(b"$ shell");
@@ -1974,9 +2037,16 @@ mod tests {
             .as_object_mut()
             .expect("primary object")
             .remove("scrollback_origin");
+        let legacy_object = legacy.as_object_mut().expect("checkpoint object");
+        legacy_object.remove("application_cursor");
+        legacy_object.remove("mouse_protocol");
+        legacy_object.remove("mouse_encoding");
         let legacy: ScreenCheckpoint =
             serde_json::from_value(legacy).expect("legacy checkpoint decodes");
         assert_eq!(legacy.primary.scrollback_origin, 0);
+        assert!(!legacy.application_cursor);
+        assert!(!legacy.mouse_protocol);
+        assert_eq!(legacy.mouse_encoding, MouseProtocolEncoding::Default);
     }
 
     /// One block exercising UTF-8, CJK width, combining marks, CSI moves/erase,
@@ -2087,6 +2157,9 @@ mod tests {
                 utf8_pending: Vec::new(),
                 utf8_needed: 0,
             },
+            application_cursor: false,
+            mouse_protocol: false,
+            mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
         }
     }
 

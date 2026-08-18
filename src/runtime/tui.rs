@@ -3601,8 +3601,8 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
             return Key::Passthrough(bytes);
         }
         LiveInput::Mouse { .. }
-        | LiveInput::WheelUp
-        | LiveInput::WheelDown
+        | LiveInput::WheelUp { .. }
+        | LiveInput::WheelDown { .. }
         | LiveInput::Pointer(_) => return Key::Other,
     };
     // Some terminal backends report an auto-repeat as the first observable
@@ -6935,8 +6935,14 @@ mod tests {
     fn terminal_adapter_projects_resolved_live_and_pointer_inputs() {
         let cases = [
             (
-                LiveInput::WheelUp,
-                Key::Live(usagi_tui::usecase::terminal_input::LiveTerminalAction::ScrollUp),
+                LiveInput::WheelUp { column: 0, row: 0 },
+                Key::Live(
+                    usagi_tui::usecase::terminal_input::LiveTerminalAction::Wheel {
+                        up: true,
+                        column: 0,
+                        row: 0,
+                    },
+                ),
             ),
             (
                 LiveInput::Pointer(PointerEvent {

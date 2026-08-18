@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use usagi_core::usecase::vt_screen::{
-    ActiveBuffer, Cell, CheckpointError, ScreenCheckpoint, VtScreen,
+    ActiveBuffer, Cell, CheckpointError, MouseProtocolEncoding, ScreenCheckpoint, VtScreen,
 };
 
 use super::terminal_link::scan_links;
@@ -35,6 +35,15 @@ pub enum TerminalBuffer {
     Alternate,
 }
 
+/// Input modes requested by the program currently drawing the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalInputModes {
+    pub alternate_screen: bool,
+    pub application_cursor: bool,
+    pub mouse_protocol: bool,
+    pub mouse_encoding: MouseProtocolEncoding,
+}
+
 /// Renders the shared core VT screen into the rows the pane draws.
 ///
 /// The grid, scrollback, cursor, SGR and alternate/saved buffer state are owned
@@ -50,6 +59,18 @@ impl TerminalScreen {
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
             screen: VtScreen::new(rows, cols),
+        }
+    }
+
+    /// Returns the DEC input modes needed to route a physical mouse wheel like
+    /// a standalone terminal would.
+    #[must_use]
+    pub fn input_modes(&self) -> TerminalInputModes {
+        TerminalInputModes {
+            alternate_screen: self.screen.active_buffer() == ActiveBuffer::Alternate,
+            application_cursor: self.screen.application_cursor(),
+            mouse_protocol: self.screen.mouse_protocol(),
+            mouse_encoding: self.screen.mouse_encoding(),
         }
     }
 

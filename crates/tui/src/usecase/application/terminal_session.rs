@@ -34,7 +34,7 @@ use usagi_core::domain::id::{OperationId, TerminalRef};
 use usagi_core::usecase::vt_screen::{CheckpointError, ScreenCheckpoint};
 
 use super::pane_runtime::Geometry;
-use super::terminal_screen::{TerminalBuffer, TerminalScreen};
+use super::terminal_screen::{TerminalBuffer, TerminalInputModes, TerminalScreen};
 use super::terminal_selection::{TerminalPoint, TerminalSelection};
 
 /// How an attach snapshot carries the terminal screen.
@@ -644,6 +644,12 @@ impl TerminalSession {
     #[must_use]
     pub fn display_buffer(&self) -> TerminalBuffer {
         self.screen.retained_buffer()
+    }
+
+    /// DEC input modes advertised by the program drawing this terminal.
+    #[must_use]
+    pub fn input_modes(&self) -> TerminalInputModes {
+        self.screen.input_modes()
     }
 
     /// Number of retained rows needed to display live content and the complete

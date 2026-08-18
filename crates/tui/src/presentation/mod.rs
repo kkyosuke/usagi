@@ -83,6 +83,7 @@ use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSel
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::TerminalBuffer;
+use crate::usecase::application::terminal_screen::TerminalInputModes;
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
@@ -90,7 +91,10 @@ use crate::usecase::application::terminal_session::{
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal, open_refusal_notice};
 use crate::usecase::overview::SessionCommand;
-use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
+use crate::usecase::terminal_input::{
+    LiveTerminalAction, PointerEvent, PointerKind, WHEEL_LINES, encode_mouse_wheel,
+    encode_wheel_arrows,
+};
 use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{
@@ -2400,6 +2404,13 @@ impl WorkspaceUi {
             .map(TerminalSession::projection_key)
     }
 
+    fn terminal_input_modes(&self, terminal: &TerminalRef) -> Option<TerminalInputModes> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(TerminalSession::input_modes)
+    }
+
     /// Snapshot the retained rows of a detached background terminal without
     /// attaching or polling it. Director owns the one live subscription; this
     /// projection keeps the managed right pane visible behind the drawer.
@@ -3351,7 +3362,8 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         | LiveTerminalAction::MoveTabPrevious
         | LiveTerminalAction::ScrollUp
         | LiveTerminalAction::ScrollDown
-        | LiveTerminalAction::ScrollBottom => None,
+        | LiveTerminalAction::ScrollBottom
+        | LiveTerminalAction::Wheel { .. } => None,
     }
 }
 
@@ -4560,6 +4572,7 @@ fn intercept_live_terminal_control(
         *action == LiveTerminalAction::ScrollUp
             || *action == LiveTerminalAction::ScrollDown
             || *action == LiveTerminalAction::ScrollBottom
+            || matches!(action, LiveTerminalAction::Wheel { .. })
             || *action == LiveTerminalAction::CloseTab
             || *action == LiveTerminalAction::ResumeTab
             || *action == LiveTerminalAction::MoveTabNext
@@ -4575,6 +4588,47 @@ fn intercept_live_terminal_control(
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
             Key::Live(LiveTerminalAction::ScrollBottom) => controls.scroll_to_bottom(),
+            Key::Live(LiveTerminalAction::Wheel { up, column, row }) => {
+                let point = if runtime.state().director_drawer_open() {
+                    director_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
+                } else {
+                    terminal_point_at(height, width, 0, 0, *column, *row)
+                };
+                let Some(point) = point else {
+                    return true;
+                };
+                let Some(terminal) = runtime.focused_terminal() else {
+                    return true;
+                };
+                let Some(modes) = ui.terminal_input_modes(&terminal) else {
+                    return true;
+                };
+                let bytes = if modes.mouse_protocol {
+                    Some(encode_mouse_wheel(
+                        *up,
+                        point.column,
+                        point.row,
+                        modes.mouse_encoding,
+                    ))
+                } else if modes.alternate_screen {
+                    Some(encode_wheel_arrows(*up, modes.application_cursor))
+                } else {
+                    None
+                };
+                if let Some(bytes) = bytes {
+                    if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
+                        controls.set_feedback(message);
+                    }
+                } else {
+                    for _ in 0..WHEEL_LINES {
+                        if *up {
+                            controls.scroll_up();
+                        } else {
+                            controls.scroll_down();
+                        }
+                    }
+                }
+            }
             Key::Live(LiveTerminalAction::CloseTab) => {
                 close_focused_terminal_pane(ui, runtime, pending_targets);
             }
@@ -12212,6 +12266,62 @@ mod tests {
         }
     }
 
+    struct WheelRecordingPort {
+        terminal: TerminalRef,
+        replay: Vec<u8>,
+        inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl AgentCommandPort for WheelRecordingPort {
+        fn launch(
+            &mut self,
+            _operation: OperationId,
+            _workspace: WorkspaceId,
+            _session: Option<SessionId>,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<AgentPaneAdmission, String> {
+            Ok(AgentPaneAdmission {
+                terminal: self.terminal.clone(),
+                continuation: None,
+            })
+        }
+
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: TerminalSubscription { id: 1, epoch: 1 },
+                revision: 1,
+                output_offset: self.replay.len() as u64,
+                next_input_seq: None,
+                screen: attach_checkpoint(&self.replay, geometry),
+                exited: false,
+            })
+        }
+
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            Ok(Vec::new())
+        }
+
+        fn input_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _subscription: TerminalSubscription,
+            _input_seq: u64,
+            _operation: OperationId,
+            bytes: &[u8],
+        ) -> Result<TerminalInputOutcome, TerminalError> {
+            self.inputs.lock().unwrap().push(bytes.to_vec());
+            Ok(TerminalInputOutcome::Written)
+        }
+    }
+
     fn live_terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -13049,6 +13159,112 @@ mod tests {
                 .map(|notice| notice.message.as_str()),
             Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
         );
+    }
+
+    #[test]
+    fn physical_wheel_follows_full_screen_program_input_modes() {
+        let cases = [
+            (
+                b"\x1b[?1000h\x1b[?1006hclaude".as_slice(),
+                b"\x1b[<64;5;1M".to_vec(),
+            ),
+            (
+                b"\x1b[?1049h\x1b[?1hcodex".as_slice(),
+                b"\x1bOA".repeat(super::WHEEL_LINES),
+            ),
+        ];
+
+        for (replay, expected) in cases {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let terminal = live_terminal_ref(workspace, session);
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            let (mut ui, mut runtime) = focused_live_pane(
+                workspace,
+                session,
+                terminal.clone(),
+                Box::new(WheelRecordingPort {
+                    terminal,
+                    replay: replay.to_vec(),
+                    inputs: Arc::clone(&inputs),
+                }),
+            );
+            let mut controls = LiveTerminalControls::default();
+            let geometry = terminal_geometry(20, 80);
+            let (_, rows_len, scroll) =
+                poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+            let mut term = FakeTerminal::default();
+            let mut browser = RecordingBrowser::default();
+            let mut pending = std::collections::HashMap::new();
+
+            assert!(intercept_live_terminal_control(
+                &Key::Live(LiveTerminalAction::Wheel {
+                    up: true,
+                    column: 41,
+                    row: 5,
+                }),
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                &mut term,
+                &mut browser,
+                &mut pending,
+                20,
+                80,
+                rows_len,
+                scroll,
+            ));
+            assert_eq!(inputs.lock().unwrap().as_slice(), &[expected]);
+        }
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let mut replay = String::new();
+        for row in 0..30 {
+            use std::fmt::Write as _;
+            let _ = writeln!(replay, "row {row}\r");
+        }
+        let replay = replay.into_bytes();
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(WheelRecordingPort {
+                terminal,
+                replay,
+                inputs: Arc::clone(&inputs),
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let geometry = terminal_geometry(20, 80);
+        let (_, rows_len, scroll) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut pending = std::collections::HashMap::new();
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: true,
+                column: 41,
+                row: 5,
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            rows_len,
+            scroll,
+        ));
+        let (view, _, _) =
+            poll_and_project_terminals(&mut ui, &mut runtime, &mut controls, geometry);
+        assert_eq!(view.expect("primary history").scroll, super::WHEEL_LINES);
+        assert!(inputs.lock().unwrap().is_empty());
     }
 
     /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
