@@ -9521,7 +9521,11 @@ fn run_inner(
     let daemon_dir = data_dir.join("daemon");
     let command = match command {
         CliDaemonCommand::InstallService => {
-            let path = launchd::install(&std::env::current_exe()?, &data_dir)?;
+            // The LaunchAgent must resolve the same data home this process
+            // selected. launchd starts it from its own environment, so the pair
+            // travels in the plist rather than being re-derived there.
+            let data_home = paths::DataHome::from_selected(&data_dir, paths::runtime_mode());
+            let path = launchd::install(&std::env::current_exe()?, &data_home)?;
             return writeln!(
                 out,
                 "{}: launchd service installed ({})",
@@ -14603,11 +14607,16 @@ instructions = "{instructions}"
             let child_mode = value(usagi_core::infrastructure::paths::RUNTIME_MODE_ENV);
             assert_eq!(child_mode, mode.as_env_value());
             // Re-applying the announced mode lands the child on the daemon's
-            // own directory — the round trip the E2E pins end to end.
+            // own directory — the round trip the E2E pins end to end. The
+            // artifact default is passed as the fallback so a dropped wire
+            // spelling would resolve somewhere else instead of passing.
             assert_eq!(
                 paths::DataHome::new(
                     &child_home,
-                    paths::RuntimeMode::from_env_value(Some(&child_mode))
+                    paths::RuntimeMode::from_env_value(
+                        Some(&child_mode),
+                        paths::DEFAULT_RUNTIME_MODE
+                    )
                 )
                 .selected(),
                 selected

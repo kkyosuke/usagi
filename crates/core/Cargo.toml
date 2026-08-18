@@ -34,6 +34,15 @@ shell-words.workspace = true
 # usecase 層のみで使い、domain（chrono/serde/uuid）へは持ち込まない。
 unicode-width.workspace = true
 
+# 配布 artifact に既定 runtime mode を焼き込む feature。有効にすると
+# USAGI_RUNTIME_MODE 未指定時の既定が production になり、利用者のデータが
+# $USAGI_HOME / ~/.usagi 自体へ入る。無効（既定）では local を選ぶため、
+# source build や cargo test が本番 state へ到達しない。正本は
+# document/05-daemon.md#daemon-data-directory。
+[features]
+default = []
+production-runtime-mode = []
+
 # tempfile はストアのユニットテストで一時ディレクトリを作るためだけに使う。
 [dev-dependencies]
 tempfile.workspace = true
