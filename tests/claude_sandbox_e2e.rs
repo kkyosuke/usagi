@@ -174,6 +174,44 @@ fn sandbox_backend_unavailable(output: &Output) -> bool {
         || diagnostic.contains("OS sandbox backend")
 }
 
+fn bootstrap_broker_sockets(data: &Path) -> Vec<PathBuf> {
+    let daemon = data.join("daemon");
+    let mut sockets = fs::read_dir(daemon)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.starts_with("bootstrap-broker-") && name.ends_with(".sock")
+            })
+        })
+        .collect::<Vec<_>>();
+    sockets.sort();
+    sockets
+}
+
+fn retire_bootstrap_brokers(repo: &Path, data: &Path, fixture: &Path) {
+    let _ = fs::remove_dir_all(repo);
+    let sockets = bootstrap_broker_sockets(data);
+    for socket in &sockets {
+        if let Ok(mut broker) = std::os::unix::net::UnixStream::connect(socket) {
+            let _ = broker.write_all(b"P");
+        }
+    }
+    for _ in 0..40 {
+        if sockets.iter().all(|socket| !socket.exists()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        sockets.iter().all(|socket| !socket.exists()),
+        "bootstrap broker did not retire"
+    );
+    fs::remove_dir_all(fixture).unwrap();
+}
+
 #[test]
 fn session_scope_preserves_sibling_issue_and_daemon_authority_for_path_alias_matrix() {
     let fixture = fixture_root();
@@ -398,21 +436,6 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
             .output()
             .unwrap()
     };
-    let retire_broker = || {
-        let _ = fs::remove_dir_all(&repo);
-        let socket = data.join("daemon/bootstrap-broker.sock");
-        if let Ok(mut broker) = std::os::unix::net::UnixStream::connect(&socket) {
-            let _ = broker.write_all(b"P");
-        }
-        for _ in 0..40 {
-            if !socket.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(!socket.exists(), "bootstrap broker did not retire");
-        fs::remove_dir_all(&fixture).unwrap();
-    };
     let git = |arguments: &[&str]| {
         let output = Command::new("git")
             .args(arguments)
@@ -445,12 +468,17 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
         String::from_utf8_lossy(&stopped.stderr)
     );
 
-    let mut broker =
-        std::os::unix::net::UnixStream::connect(data.join("daemon/bootstrap-broker.sock")).unwrap();
+    let sockets = bootstrap_broker_sockets(&data);
+    assert_eq!(sockets.len(), 1, "one broker for this workspace and binary");
+    // One client that connects without sending a request must time out instead
+    // of monopolising the broker's single accept loop forever.
+    let idle = std::os::unix::net::UnixStream::connect(&sockets[0]).unwrap();
+    let mut broker = std::os::unix::net::UnixStream::connect(&sockets[0]).unwrap();
     broker.write_all(b"S").unwrap();
     let mut reply = [0_u8; 1];
     broker.read_exact(&mut reply).unwrap();
     assert_eq!(reply, [b'O']);
+    drop(idle);
     let stopped = run(&["daemon", "stop"]);
     assert!(
         stopped.status.success(),
@@ -461,7 +489,7 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
     let created = run_usagi_in_root(&repo, &data, &["session", "create", "brokered"]);
     if !created.status.success() && sandbox_backend_unavailable(&created) {
         let _ = run(&["daemon", "stop", "--force"]);
-        retire_broker();
+        retire_bootstrap_brokers(&repo, &data, &fixture);
         return;
     }
     assert!(
@@ -483,5 +511,5 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
-    retire_broker();
+    retire_bootstrap_brokers(&repo, &data, &fixture);
 }

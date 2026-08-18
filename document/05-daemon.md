@@ -174,14 +174,16 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 
 ### sandbox bootstrap broker
 
-active daemon は workspace fence を取得して IPC endpoint を bind した後、同じ binary、runtime mode、canonical workspace を
-固定した hidden `bootstrap-broker` process を sandbox 外へ起動する。broker は `<data-dir>/daemon/bootstrap-broker.sock`
-（`0600`、private daemon directory 内）で 1 byte の ping または start だけを受理する。client から workspace、実行ファイル、
-argv を受け取らず、start 時は固定済み workspace を cwd として `daemon serve` だけを spawn する。
+active daemon は workspace fence を取得して IPC endpoint を bind した後、同じ executable path、runtime mode、canonical workspace を
+固定した hidden `bootstrap-broker` process を sandbox 外へ起動する。broker は workspace と executable path の digest で分離した
+`<data-dir>/daemon/bootstrap-broker-<digest>.sock`（`0600`、private daemon directory 内）で 1 byte の ping または start だけを受理する。
+client から workspace、実行ファイル、argv を受け取らず、start 時は固定済み workspace を cwd として `daemon serve` だけを spawn する。
 
-broker は `bootstrap-broker.lock` を process lifetime にわたって保持するため、daemon replacement が候補 broker を起動しても
-同じ data directory には 1 process だけが残る。daemon 停止・crash 後も broker は残り、root Agent の read-only sandbox から
-cold start を仲介する。workspace が消えた後の要求では broker も終了し、socket を回収する。
+broker は対応する `bootstrap-broker-<digest>.lock` を process lifetime にわたって保持するため、同じ workspace と executable の
+候補 broker は 1 process だけが残る。別 workspace や別 executable は独立した endpoint を使い、誤った workspace・build の daemon を
+起動しない。daemon 停止・crash 後も broker は残り、root Agent の read-only sandbox から cold start を仲介する。workspace が消えた後の
+要求では broker も終了し、socket を回収する。接続ごとの read / write には deadline を設け、request byte を送らない client が accept loop を
+占有し続けることを許さない。
 
 通常 client は従来どおり `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によってその lock を開けない client だけが
 broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の build identity・workspace handshake を通して接続する。
@@ -513,8 +515,8 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `daemon.json` | JSON | 稼働中 daemon の pid と登録時刻を持つ lifecycle record。daemon は起動時に書き、endpoint cleanup 後に exact record だけを消去する |
 | `daemon.lock` | lock file | active role の `serve` が保持する単一インスタンス lock（standby は取らない）。process 終了時に OS が解放する |
 | `bootstrap.lock` | lock file | client の connect/start/restart/recover bootstrap を cross-process で直列化する |
-| `bootstrap-broker.lock` | lock file | sandbox 外の bootstrap broker を data directory ごとに 1 process へ制限する |
-| `bootstrap-broker.sock` | private Unix socket | read-only sandbox の client から固定 workspace の cold start だけを受理する |
+| `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
+| `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
 | `current.lock` | lock file | current locator の publish と generation-fenced retire を cross-process で直列化する |
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |

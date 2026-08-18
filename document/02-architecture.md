@@ -906,7 +906,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 
   root coordinator から daemon の cold start が必要な場合も、この writable root 集合は広げない。active daemon は
   workspace fence と endpoint を確立した後、同じ実行ファイル・runtime mode・canonical workspace に固定した
-  `bootstrap-broker` を sandbox 外へ起動する。broker の private Unix socket が受理する要求は ping と cold start だけで、
+  `bootstrap-broker` を sandbox 外へ起動する。broker は canonical workspace と executable path ごとの private Unix socket へ分離し、受理する要求は ping と cold start だけで、
   executable、workspace、argv を client から受け取らない。root Agent が `bootstrap.lock` を書けない場合、client は
   broker へ start を要求してから通常の build / workspace fence 付き IPC へ接続する。
 
