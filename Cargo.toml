@@ -5,14 +5,14 @@
 # 4 クレートに置く（共通: usagi-core / daemon 面: usagi-daemon / TUI 面: usagi-tui /
 # 入口面: usagi-cli）。構成の正本は document/02-architecture.md を参照。
 #
-# リリース起点は v1/Cargo.toml の version（auto-release が監視。リリースはまだ
-# v1 のバイナリを出荷する）。このルートの version はリリースに影響しないが、
-# 退避時点の v1 の version を引き継いだリテラルを置いておき（workspace 継承に
-# しない。auto-release は `version = "..."` 行を grep するため）、v2 として最初に
-# リリースするときにリリース起点をこちらへ切り替える。
+# リリース起点はこのルート version である（auto-release.yml が main への変更を監視し、
+# 前コミットから変わっていれば v<version> タグを切る）。workspace 継承にせず
+# リテラルで置くのは、auto-release が `version = "..."` 行を grep するためである。
+# v1（v1/ に退避した旧実装）は出荷しない。手順の正本は
+# document/06-conventions.md#リリース。
 [package]
 name = "usagi"
-version = "2.6.0"
+version = "3.0.0"
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -22,7 +22,7 @@ description = "usagi v2 — セッション・worktree オーケストレータ�
 # build した artifact は USAGI_RUNTIME_MODE 未指定時に production を選び、
 # 利用者のデータを $USAGI_HOME / ~/.usagi 自体へ置く。既定（feature なし）は
 # local で、source build や cargo test が本番 state へ到達しない。
-# 正本は document/05-daemon.md#daemon-data-directory。
+# 正本は document/05-daemon.md#artifact-の既定-mode。
 [features]
 default = []
 production = ["usagi-core/production-runtime-mode"]
