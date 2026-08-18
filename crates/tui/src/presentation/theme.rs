@@ -17,6 +17,9 @@ const INFO_256: u8 = 75;
 /// `feature` 役割（マスコット）の ANSI-256 インデックス。うさぎを表すはっきりしたピンク
 /// （`#ff87af` 相当）。16 色の magenta より柔らかく、ピンクとして読める。
 const FEATURE_PINK_256: u8 = 211;
+/// Garden のうさぎに使う、暗い背景でも区別しやすい pastel palette。
+const GARDEN_RABBIT_256: [u8; 5] = [211, 117, 150, 222, 183];
+const GARDEN_RABBIT_VARIANTS: u64 = 5;
 /// Editable textarea surfaces use a quiet dark background distinct from the modal body.
 const EDITOR_SURFACE_256: u8 = 236;
 
@@ -177,6 +180,13 @@ pub fn editor_surface_style() -> Style {
         .bg(Color::Ansi256(EDITOR_SURFACE_256))
 }
 
+/// Garden のうさぎ本体に使う装飾色。状態色とは分離し、variant は palette 内で循環する。
+#[must_use]
+pub fn garden_rabbit_style(variant: u64) -> Style {
+    let index = usize::from(u8::try_from(variant % GARDEN_RABBIT_VARIANTS).unwrap_or_default());
+    Style::new().fg(Color::Ansi256(GARDEN_RABBIT_256[index]))
+}
+
 /// ANSI パレット上に写した意味的な色役割。UI は役割で色を要求し、[`Role::color`] /
 /// [`Role::style`] が具体色を返す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,7 +238,28 @@ pub const LINK_RGB: (u8, u8, u8) = (102, 178, 255);
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, FEATURE_PINK_256, INFO_256, LINK_RGB, Role, Style, TITLE_FADE};
+    use super::{
+        Color, FEATURE_PINK_256, GARDEN_RABBIT_256, GARDEN_RABBIT_VARIANTS, INFO_256, LINK_RGB,
+        Role, Style, TITLE_FADE, garden_rabbit_style,
+    };
+
+    #[test]
+    fn garden_rabbit_palette_has_five_distinct_colours_and_wraps() {
+        assert_eq!(
+            usize::try_from(GARDEN_RABBIT_VARIANTS).expect("variant count fits usize"),
+            GARDEN_RABBIT_256.len()
+        );
+        let styles = (0..GARDEN_RABBIT_256.len())
+            .map(|variant| garden_rabbit_style(u64::try_from(variant).expect("variant fits u64")))
+            .collect::<Vec<_>>();
+        for (index, style) in styles.iter().enumerate() {
+            assert!(!styles[..index].contains(style));
+        }
+        assert_eq!(
+            garden_rabbit_style(0),
+            garden_rabbit_style(u64::try_from(styles.len()).expect("palette length fits u64"))
+        );
+    }
 
     #[test]
     fn empty_style_returns_text_unchanged() {
