@@ -682,10 +682,11 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         self.sessions
             .retain(|session, _| retained.contains(session));
         let changed = self.sessions.len() != before;
-        if changed {
-            self.save()?;
+        if !changed {
+            return Ok(false);
         }
-        Ok(changed)
+        self.save()?;
+        Ok(true)
     }
 }
 
@@ -1031,6 +1032,45 @@ mod tests {
                 .push((program.into(), argv.to_vec(), timeout_ms));
             self.results.borrow_mut().pop_front().unwrap_or(Err(()))
         }
+    }
+
+    #[derive(Clone, Copy)]
+    struct PanickingRunner;
+
+    impl GhProcessPort for PanickingRunner {
+        type Error = ();
+
+        fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
+            panic!("injected PR provider panic");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct SuccessfulRunner;
+
+    impl GhProcessPort for SuccessfulRunner {
+        type Error = ();
+
+        fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
+            Ok(r#"{"title":"ready","state":"OPEN"}"#.to_owned())
+        }
+    }
+
+    #[test]
+    fn concurrent_refresh_contains_a_panicking_provider_worker() {
+        let id = canonicalize("https://github.com/o/r/pull/17").unwrap();
+        let worker = RefreshWorker::new(PanickingRunner, FakeClock::default(), 1, 10);
+        let results = worker.fetch_many(vec![id.clone()]);
+        assert_eq!(results, vec![(id, RefreshResult::Failed)]);
+
+        let id = canonicalize("https://github.com/o/r/pull/18").unwrap();
+        let worker = RefreshWorker::new(SuccessfulRunner, FakeClock::default(), 1, 10);
+        let results = worker.fetch_many(vec![id.clone()]);
+        assert!(matches!(
+            results.as_slice(),
+            [(actual, RefreshResult::Success(GhPrView { title: Some(title), .. }))]
+                if actual == &id && title == "ready"
+        ));
     }
 
     /// Feeds one URL as committed output. The newline terminates the candidate,
@@ -1413,6 +1453,7 @@ mod tests {
         );
         assert_eq!(projector.snapshots(&[kept, removed]).unwrap().len(), 2);
         assert!(projector.retain_sessions(&BTreeSet::from([kept])).unwrap());
+        assert!(!projector.retain_sessions(&BTreeSet::from([kept])).unwrap());
         assert_eq!(projector.snapshot(removed).unwrap().entries, Vec::new());
         assert_eq!(projector.snapshots(&[kept]).unwrap()[0].entries.len(), 1);
     }
