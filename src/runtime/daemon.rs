@@ -9051,7 +9051,11 @@ fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std:
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
     let exe = exe.canonicalize()?;
     let address = bootstrap_broker_address(data_dir, &workspace, &exe);
-    if request_bootstrap_broker(&address, BROKER_PING).is_ok() {
+    // A daemon launched by this broker reaches here while the broker is still
+    // waiting for that daemon's readiness. Requiring a ping reply would make
+    // both processes wait on each other. The identity-scoped socket path and a
+    // successful connect are sufficient to prove that this broker is present.
+    if std::os::unix::net::UnixStream::connect(&address.socket).is_ok() {
         return Ok(());
     }
     let mut command = std::process::Command::new(&exe);
@@ -9162,10 +9166,16 @@ fn serve_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) -> std:
         let Ok(mut stream) = stream else {
             continue;
         };
-        stream.set_read_timeout(Some(BROKER_IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(BROKER_IO_TIMEOUT))?;
         if workspace.canonicalize().ok().as_deref() != Some(workspace.as_path()) {
             break;
+        }
+        // A readiness probe may disconnect immediately after `connect`. Some
+        // platforms reject timeout setup on that already-disconnected socket;
+        // one vanished client must not terminate the broker process.
+        if stream.set_read_timeout(Some(BROKER_IO_TIMEOUT)).is_err()
+            || stream.set_write_timeout(Some(BROKER_IO_TIMEOUT)).is_err()
+        {
+            continue;
         }
         let mut request = [0_u8; 1];
         if stream.read_exact(&mut request).is_err() {
@@ -14584,6 +14594,7 @@ instructions = "{instructions}"
             std::thread::sleep(Duration::from_millis(10));
         }
         let idle = idle.expect("broker socket became ready");
+        drop(std::os::unix::net::UnixStream::connect(&address.socket).unwrap());
 
         let started = Instant::now();
         request_bootstrap_broker(&address, BROKER_PING).unwrap();
