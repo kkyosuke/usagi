@@ -241,7 +241,8 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。
 `--force` は live PTY を破棄してよい場合だけ使う。詳細は [planned replacement](document/05-daemon.md#planned-replacement)を参照する。
-service 登録は macOS（LaunchAgent）と Linux（systemd user unit）で利用できる。login 時の起動と異常終了後の
+service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 240 以降）で利用できる。
+登録した service は、登録時に解決した workspace を起動 directory として固定する。login 時の起動と異常終了後の
 復帰を担うが、`usagi daemon stop` による意図した停止の扱いは異なる（LaunchAgent は起動し直し、systemd unit は
 停止のまま残す）。Linux でログアウトをまたいで常駐させるには `loginctl enable-linger` が別途必要である。
 詳細は [service supervision](document/05-daemon.md#service-supervision) を参照する。

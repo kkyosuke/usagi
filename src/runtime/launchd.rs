@@ -17,6 +17,12 @@
 // The planning and rendering below are pure and tested on every host, but the
 // real IO that consumes them exists only on macOS. On other hosts they are
 // reached from tests alone, so `dead_code` would fire on a non-test build.
+//
+// The allowance is file-scoped rather than per-item because rustc's liveness
+// propagates: marking only the entry points still leaves everything they call
+// unreachable from a live root. The cost is that genuinely dead code added to
+// this module is not reported on hosts where the allowance is active — for this
+// file that means a Linux build, so a macOS build is what catches it.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -41,6 +47,7 @@ mod real_io {
     pub(crate) fn install(
         executable: &Path,
         data_home: &super::DataHome,
+        workspace: &Path,
     ) -> std::io::Result<PathBuf> {
         let path = plist_path()?;
         let mut create_dir_all = create_dir_all;
@@ -49,6 +56,7 @@ mod real_io {
         install_with(
             executable,
             data_home,
+            workspace,
             path,
             &mut create_dir_all,
             &mut write,
@@ -104,6 +112,7 @@ fn plist_path_from_home(home: Option<PathBuf>) -> std::io::Result<PathBuf> {
 fn install_with(
     executable: &Path,
     data_home: &DataHome,
+    workspace: &Path,
     path: PathBuf,
     create_dir_all: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     write: &mut dyn FnMut(&Path, String) -> std::io::Result<()>,
@@ -116,7 +125,7 @@ fn install_with(
         .selected()
         .join("logs")
         .join("launchd-daemon.stderr.log");
-    let plist = render(executable, &log, data_home)?;
+    let plist = render(executable, &log, data_home, workspace)?;
     create_dir_all(path.parent().expect("LaunchAgents has a parent"))?;
     create_dir_all(log.parent().expect("log path has a parent"))?;
     write(&path, plist)?;
@@ -139,7 +148,12 @@ fn uninstall_with(
     Ok(path)
 }
 
-fn render(executable: &Path, stderr_log: &Path, data_home: &DataHome) -> std::io::Result<String> {
+fn render(
+    executable: &Path,
+    stderr_log: &Path,
+    data_home: &DataHome,
+    workspace: &Path,
+) -> std::io::Result<String> {
     let executable = executable.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -158,10 +172,17 @@ fn render(executable: &Path, stderr_log: &Path, data_home: &DataHome) -> std::io
             "non-UTF-8 data home base path",
         )
     })?;
+    // launchd starts the agent from `/`, which is not a workspace anyone chose.
+    // The daemon binds the workspace its startup directory names, so the
+    // directory is pinned here rather than left to the supervisor.
+    let workspace = workspace.to_str().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 workspace root")
+    })?;
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>serve</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>{DATA_DIR_ENV}</key><string>{}</string><key>{RUNTIME_MODE_ENV}</key><string>{}</string></dict>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>serve</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>{}</string>\n<key>WorkingDirectory</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>{DATA_DIR_ENV}</key><string>{}</string><key>{RUNTIME_MODE_ENV}</key><string>{}</string></dict>\n</dict></plist>\n",
         xml_escape(executable),
         xml_escape(stderr_log),
+        xml_escape(workspace),
         xml_escape(base),
         data_home.mode().as_env_value()
     ))
@@ -181,12 +202,19 @@ mod tests {
     use std::path::{Path, PathBuf};
     use usagi_core::infrastructure::paths::RuntimeMode;
 
+    const WORKSPACE: &str = "/home/usagi/project";
+
+    fn home() -> DataHome {
+        DataHome::new("/home/usagi/.usagi", RuntimeMode::Local)
+    }
+
     #[test]
     fn rendered_agent_supervises_foreground_serve_and_announces_the_data_home() {
         let plist = render(
             Path::new("/Applications/usagi&bin"),
             Path::new("/tmp/daemon.log"),
             &DataHome::new("/home/usagi/.usagi", RuntimeMode::Local),
+            Path::new(WORKSPACE),
         )
         .unwrap();
         assert!(plist.contains("<string>/Applications/usagi&amp;bin</string><string>daemon</string><string>serve</string>"));
@@ -201,6 +229,38 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_pins_the_workspace_the_installer_resolved() {
+        // launchd starts the agent from `/`. The daemon binds the workspace its
+        // startup directory names, so the directory is pinned here; otherwise the
+        // supervised daemon owns a workspace nobody chose.
+        let plist = render(
+            Path::new("/opt/usagi"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new(WORKSPACE),
+        )
+        .unwrap();
+        assert!(plist.contains(&format!(
+            "<key>WorkingDirectory</key><string>{WORKSPACE}</string>"
+        )));
+
+        // The pinned path is escaped like every other value, and a path that
+        // cannot be spelled is refused rather than written lossily.
+        let escaped = render(
+            Path::new("/opt/usagi"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new("/home/usagi/a&b/<c>"),
+        )
+        .unwrap();
+        assert!(
+            escaped.contains(
+                "<key>WorkingDirectory</key><string>/home/usagi/a&amp;b/&lt;c&gt;</string>"
+            )
+        );
+    }
+
+    #[test]
     fn rendered_agent_announces_the_base_itself_for_production() {
         // Production selects the base, so the announced base must stay the base
         // rather than climbing above it.
@@ -208,6 +268,7 @@ mod tests {
             Path::new("/opt/usagi"),
             Path::new("/home/usagi/.usagi/logs/launchd-daemon.stderr.log"),
             &DataHome::new("/home/usagi/.usagi", RuntimeMode::Production),
+            Path::new(WORKSPACE),
         )
         .unwrap();
         assert!(plist.contains(
@@ -221,6 +282,7 @@ mod tests {
             Path::new("/opt/usagi"),
             Path::new("/tmp/log"),
             &DataHome::new("/home/usagi&co/<data>", RuntimeMode::Development),
+            Path::new(WORKSPACE),
         )
         .unwrap();
         assert!(plist.contains(
@@ -236,15 +298,20 @@ mod tests {
         let invalid = Path::new(std::ffi::OsStr::from_bytes(&[0xff]));
         let home = DataHome::new("/home/usagi/.usagi", RuntimeMode::Local);
         assert_eq!(
-            render(invalid, Path::new("/tmp/log"), &home)
+            render(invalid, Path::new("/tmp/log"), &home, Path::new(WORKSPACE))
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            render(Path::new("/opt/usagi"), invalid, &home)
-                .unwrap_err()
-                .kind(),
+            render(
+                Path::new("/opt/usagi"),
+                invalid,
+                &home,
+                Path::new(WORKSPACE)
+            )
+            .unwrap_err()
+            .kind(),
             std::io::ErrorKind::InvalidInput
         );
         // A base that cannot be spelled is refused rather than written lossily.
@@ -252,7 +319,21 @@ mod tests {
             render(
                 Path::new("/opt/usagi"),
                 Path::new("/tmp/log"),
-                &DataHome::new(invalid, RuntimeMode::Local)
+                &DataHome::new(invalid, RuntimeMode::Local),
+                Path::new(WORKSPACE),
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        // Likewise the pinned workspace: an unspellable directory would send the
+        // supervised daemon somewhere nobody chose.
+        assert_eq!(
+            render(
+                Path::new("/opt/usagi"),
+                Path::new("/tmp/log"),
+                &home,
+                invalid
             )
             .unwrap_err()
             .kind(),
@@ -295,6 +376,7 @@ mod tests {
         let result = install_with(
             Path::new("/opt/usagi&friends/usagi"),
             &DataHome::new("/data", RuntimeMode::Local),
+            Path::new(WORKSPACE),
             path.clone(),
             &mut create,
             &mut write,
@@ -326,6 +408,7 @@ mod tests {
         let error = install_with(
             Path::new("/opt/usagi"),
             &DataHome::new("/data", RuntimeMode::Local),
+            Path::new(WORKSPACE),
             path,
             &mut create,
             &mut write,

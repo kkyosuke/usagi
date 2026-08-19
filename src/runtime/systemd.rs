@@ -27,6 +27,12 @@
 // The planning and rendering below are pure and tested on every host, but the
 // real IO that consumes them exists only on Linux. On other hosts they are
 // reached from tests alone, so `dead_code` would fire on a non-test build.
+//
+// The allowance is file-scoped rather than per-item because rustc's liveness
+// propagates: marking only the entry points still leaves everything they call
+// unreachable from a live root. The cost is that genuinely dead code added to
+// this module is not reported on hosts where the allowance is active — for this
+// file that means a macOS build, so a Linux build is what catches it.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -52,6 +58,7 @@ mod real_io {
     pub(crate) fn install(
         executable: &Path,
         data_home: &super::DataHome,
+        workspace: &Path,
     ) -> std::io::Result<PathBuf> {
         let path = unit_path()?;
         let mut create_dir_all = create_dir_all;
@@ -60,6 +67,7 @@ mod real_io {
         install_with(
             executable,
             data_home,
+            workspace,
             path,
             &mut create_dir_all,
             &mut write,
@@ -119,6 +127,7 @@ fn unit_path_from_config_dir(config_dir: Option<PathBuf>) -> std::io::Result<Pat
 fn install_with(
     executable: &Path,
     data_home: &DataHome,
+    workspace: &Path,
     path: PathBuf,
     create_dir_all: &mut dyn FnMut(&Path) -> std::io::Result<()>,
     write: &mut dyn FnMut(&Path, String) -> std::io::Result<()>,
@@ -131,7 +140,7 @@ fn install_with(
         .selected()
         .join("logs")
         .join("systemd-daemon.stderr.log");
-    let unit = render(executable, &log, data_home)?;
+    let unit = render(executable, &log, data_home, workspace)?;
     create_dir_all(path.parent().expect("the unit directory has a parent"))?;
     create_dir_all(log.parent().expect("log path has a parent"))?;
     write(&path, unit)?;
@@ -160,31 +169,43 @@ fn uninstall_with(
     Ok(path)
 }
 
-fn render(executable: &Path, stderr_log: &Path, data_home: &DataHome) -> std::io::Result<String> {
+fn render(
+    executable: &Path,
+    stderr_log: &Path,
+    data_home: &DataHome,
+    workspace: &Path,
+) -> std::io::Result<String> {
     let executable = utf8(executable, "non-UTF-8 executable path")?;
     let stderr_log = utf8(stderr_log, "non-UTF-8 log path")?;
     // A base that cannot be spelled as UTF-8 is refused rather than lossily
     // converted: a unit holding a corrupted base would send the supervised
     // daemon to a directory nobody chose.
     let base = utf8(data_home.base(), "non-UTF-8 data home base path")?;
+    // The daemon binds the workspace its startup directory names. systemd's
+    // default for a user unit is the user's home, which is not a workspace
+    // anyone chose — and under the default `~/.usagi` data home it collides the
+    // workspace fence with the single-instance lock.
+    let workspace = utf8(workspace, "non-UTF-8 workspace root")?;
     Ok(format!(
         "[Unit]\n\
          Description=usagi daemon\n\
          \n\
          [Service]\n\
          Type=simple\n\
+         WorkingDirectory={}\n\
          ExecStart={} daemon serve\n\
          Restart=on-failure\n\
          RestartSec=1\n\
-         Environment={DATA_DIR_ENV}={}\n\
-         Environment={RUNTIME_MODE_ENV}={}\n\
+         Environment={}\n\
+         Environment={}\n\
          StandardError=append:{}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
+        specifier_safe(workspace),
         quoted(executable),
-        quoted(base),
-        data_home.mode().as_env_value(),
+        assignment(DATA_DIR_ENV, base),
+        assignment(RUNTIME_MODE_ENV, data_home.mode().as_env_value()),
         specifier_safe(stderr_log)
     ))
 }
@@ -194,21 +215,41 @@ fn utf8<'a>(path: &'a Path, message: &str) -> std::io::Result<&'a str> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, message.to_owned()))
 }
 
-/// Escape a value systemd reads literally to end of line.
+/// Escape a value systemd reads literally to end of line
+/// (`WorkingDirectory=`, `StandardError=append:`).
 ///
 /// `%` starts a unit specifier, so a literal one has to be doubled or systemd
-/// expands it into something else (or fails to parse the unit).
+/// expands it into something else (or fails to parse the unit). No quoting is
+/// applied: these fields take the rest of the line as the value, so a space is
+/// already safe and a quote would become part of the path.
 fn specifier_safe(value: &str) -> String {
     value.replace('%', "%%")
 }
 
-/// Quote a value that systemd splits like a shell word (`ExecStart`, the value
-/// half of `Environment=`).
+/// Render one `Environment=` assignment, quoting the **whole** `NAME=value`.
+///
+/// `systemd.exec(5)` documents the quoting this way — `Environment="VAR=word1
+/// word2"` — rather than quoting the value alone. Following the documented form
+/// keeps the unit valid on every systemd instead of relying on the parser
+/// accepting a quote that starts mid-word.
+fn assignment(name: &str, value: &str) -> String {
+    quoted(&format!("{name}={value}"))
+}
+
+/// Quote a value that systemd splits like a shell word: `ExecStart` and an
+/// `Environment=` assignment.
 ///
 /// Without quoting, a path containing a space would be read as two arguments —
 /// which is how a service silently starts with the wrong `argv`. Inside double
 /// quotes systemd still processes `\` escapes, so both `\` and `"` are escaped
 /// before the specifier pass.
+///
+/// **Not every field takes quotes.** `WorkingDirectory=` and
+/// `StandardError=append:` are read literally to end of line, so a quote there
+/// becomes part of the path: systemd rejects `WorkingDirectory="/tmp/x"` with
+/// "path is not absolute". Those use [`specifier_safe`] instead. The distinction
+/// is only observable against a real systemd, which is why
+/// `systemd_accepts_the_rendered_unit` exists.
 fn quoted(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{}\"", specifier_safe(&escaped))
@@ -228,12 +269,15 @@ mod tests {
         DataHome::new("/home/usagi/.usagi", RuntimeMode::Production)
     }
 
+    const WORKSPACE: &str = "/home/usagi/project";
+
     #[test]
     fn rendered_unit_supervises_serve_and_announces_the_data_home() {
         let unit = render(
             Path::new("/home/usagi/.usagi/bin/usagi"),
             Path::new("/home/usagi/.usagi/logs/systemd-daemon.stderr.log"),
             &home(),
+            Path::new(WORKSPACE),
         )
         .unwrap();
         assert!(unit.contains("ExecStart=\"/home/usagi/.usagi/bin/usagi\" daemon serve"));
@@ -242,10 +286,102 @@ mod tests {
         // The base and the mode spelling travel together, exactly as the plist
         // carries them, so the supervised daemon resolves the installing
         // process's data home instead of one from an empty environment.
-        assert!(unit.contains("Environment=USAGI_HOME=\"/home/usagi/.usagi\""));
-        assert!(unit.contains("Environment=USAGI_RUNTIME_MODE=production"));
+        assert!(unit.contains("Environment=\"USAGI_HOME=/home/usagi/.usagi\""));
+        assert!(unit.contains("Environment=\"USAGI_RUNTIME_MODE=production\""));
         assert!(
             unit.contains("StandardError=append:/home/usagi/.usagi/logs/systemd-daemon.stderr.log")
+        );
+    }
+
+    #[test]
+    fn the_unit_pins_the_workspace_the_installer_resolved() {
+        // systemd starts a user unit in the user's home. The daemon binds the
+        // workspace its startup directory names, so without this pin the
+        // supervised daemon would own a workspace nobody chose — and under the
+        // default `~/.usagi` data home the workspace fence and the
+        // single-instance lock become the same file, which the daemon reports as
+        // "already running" and never recovers from.
+        let unit = render(
+            Path::new("/opt/usagi"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new(WORKSPACE),
+        )
+        .unwrap();
+        assert!(unit.contains(&format!("WorkingDirectory={WORKSPACE}\n")));
+    }
+
+    #[test]
+    fn the_pinned_workspace_is_quoted_and_escaped_and_must_be_spellable() {
+        let unit = render(
+            Path::new("/opt/usagi"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new("/home/usagi/my project/100%"),
+        )
+        .unwrap();
+        assert!(unit.contains("WorkingDirectory=/home/usagi/my project/100%%\n"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let invalid = Path::new(std::ffi::OsStr::from_bytes(&[0xff]));
+            assert_eq!(
+                render(
+                    Path::new("/opt/usagi"),
+                    Path::new("/tmp/log"),
+                    &home(),
+                    invalid
+                )
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    /// Ask the real systemd whether the rendered unit is valid.
+    ///
+    /// Every other test here compares the output against strings this module
+    /// itself produced, so a directive that systemd rejects — a quoting form it
+    /// does not accept, a key it does not know — would pass all of them. This is
+    /// the only check that can fail for that reason. Paths that exist are used
+    /// because `systemd-analyze verify` also resolves `ExecStart` and
+    /// `WorkingDirectory`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_accepts_the_rendered_unit() {
+        use std::process::Command;
+
+        // Deliberately not skipped when the tool is missing. A silent skip would
+        // read as a pass on exactly the hosts that cannot check the one thing
+        // this test exists for, and the run that matters — CI on Linux — always
+        // has systemd. A missing tool is reported as a failure with what to
+        // install.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let unit_path = dir.path().join(UNIT);
+        let unit = render(
+            Path::new("/bin/sh"),
+            &dir.path().join("daemon.log"),
+            &DataHome::new(dir.path(), RuntimeMode::Local),
+            dir.path(),
+        )
+        .unwrap();
+        std::fs::write(&unit_path, &unit).expect("write unit");
+
+        let output = Command::new("systemd-analyze")
+            .arg("verify")
+            .arg(&unit_path)
+            .output()
+            .expect("systemd-analyze is required on Linux to validate the unit");
+        // Both streams are decoded before the assertion so the failure message
+        // costs no branch of its own: an argument evaluated only on failure is a
+        // line no passing run executes.
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "systemd rejected the unit:\n{unit}\nstdout: {stdout}\nstderr: {stderr}"
         );
     }
 
@@ -253,7 +389,13 @@ mod tests {
     fn a_graceful_stop_is_not_undone_by_supervision() {
         // `Restart=always` would restart the daemon after `usagi daemon stop`,
         // which is the documented way to stop it. Only failures are recovered.
-        let unit = render(Path::new("/opt/usagi"), Path::new("/tmp/log"), &home()).unwrap();
+        let unit = render(
+            Path::new("/opt/usagi"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new(WORKSPACE),
+        )
+        .unwrap();
         assert!(unit.contains("Restart=on-failure"));
         assert!(!unit.contains("Restart=always"));
     }
@@ -269,16 +411,17 @@ mod tests {
                 Path::new("/opt/usagi"),
                 Path::new("/tmp/log"),
                 &DataHome::new("/data", mode),
+                Path::new(WORKSPACE),
             )
             .unwrap();
             assert!(
-                unit.contains(&format!("Environment=USAGI_RUNTIME_MODE={spelling}")),
+                unit.contains(&format!("Environment=\"USAGI_RUNTIME_MODE={spelling}\"")),
                 "{spelling}"
             );
             // The base stays the base for every mode, including production
             // where the selected directory *is* the base.
             assert!(
-                unit.contains("Environment=USAGI_HOME=\"/data\""),
+                unit.contains("Environment=\"USAGI_HOME=/data\""),
                 "{spelling}"
             );
         }
@@ -298,10 +441,11 @@ mod tests {
             Path::new("/opt/my usagi/usagi"),
             Path::new("/var/log/50%/daemon.log"),
             &DataHome::new("/data dir/100%", RuntimeMode::Local),
+            Path::new(WORKSPACE),
         )
         .unwrap();
         assert!(unit.contains("ExecStart=\"/opt/my usagi/usagi\" daemon serve"));
-        assert!(unit.contains("Environment=USAGI_HOME=\"/data dir/100%%\""));
+        assert!(unit.contains("Environment=\"USAGI_HOME=/data dir/100%%\""));
         assert!(unit.contains("StandardError=append:/var/log/50%%/daemon.log"));
     }
 
@@ -312,22 +456,33 @@ mod tests {
 
         let invalid = Path::new(std::ffi::OsStr::from_bytes(&[0xff]));
         assert_eq!(
-            render(invalid, Path::new("/tmp/log"), &home())
-                .unwrap_err()
-                .kind(),
+            render(
+                invalid,
+                Path::new("/tmp/log"),
+                &home(),
+                Path::new(WORKSPACE)
+            )
+            .unwrap_err()
+            .kind(),
             std::io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            render(Path::new("/opt/usagi"), invalid, &home())
-                .unwrap_err()
-                .kind(),
+            render(
+                Path::new("/opt/usagi"),
+                invalid,
+                &home(),
+                Path::new(WORKSPACE)
+            )
+            .unwrap_err()
+            .kind(),
             std::io::ErrorKind::InvalidInput
         );
         assert_eq!(
             render(
                 Path::new("/opt/usagi"),
                 Path::new("/tmp/log"),
-                &DataHome::new(invalid, RuntimeMode::Local)
+                &DataHome::new(invalid, RuntimeMode::Local),
+                Path::new(WORKSPACE)
             )
             .unwrap_err()
             .kind(),
@@ -368,6 +523,7 @@ mod tests {
         let result = install_with(
             Path::new("/opt/usagi/usagi"),
             &DataHome::new("/data", RuntimeMode::Local),
+            Path::new(WORKSPACE),
             path.clone(),
             &mut create,
             &mut write,
@@ -387,8 +543,8 @@ mod tests {
         let (destination, contents) = written.into_inner().unwrap();
         assert_eq!(destination, path);
         assert!(contents.contains("append:/data/local/logs/systemd-daemon.stderr.log"));
-        assert!(contents.contains("Environment=USAGI_HOME=\"/data\""));
-        assert!(contents.contains("Environment=USAGI_RUNTIME_MODE=local"));
+        assert!(contents.contains("Environment=\"USAGI_HOME=/data\""));
+        assert!(contents.contains("Environment=\"USAGI_RUNTIME_MODE=local\""));
         // Reload must precede enable, or systemd enables a unit it has not read.
         assert_eq!(
             ran.into_inner(),
@@ -420,6 +576,7 @@ mod tests {
                 install_with(
                     Path::new("/opt/usagi"),
                     &DataHome::new("/data", RuntimeMode::Local),
+                    Path::new(WORKSPACE),
                     path.clone(),
                     &mut create,
                     &mut write,
@@ -440,6 +597,7 @@ mod tests {
             install_with(
                 Path::new("/opt/usagi"),
                 &DataHome::new("/data", RuntimeMode::Local),
+                Path::new(WORKSPACE),
                 path.clone(),
                 &mut create,
                 &mut write,
