@@ -254,6 +254,17 @@ pub fn prompt_line(value: &str, cursor: usize, selection: Option<(usize, usize)>
     format!("{prompt} {body}")
 }
 
+/// A neutral filter input line with no selection marker.
+///
+/// The two-cell indent keeps its text aligned with [`prompt_line`] while making
+/// the danger `❯` unambiguous: only command prompts use that marker, whereas a
+/// filter merely narrows the selectable rows below it.
+#[must_use]
+pub fn filter_line(value: &str, cursor: usize, selection: Option<(usize, usize)>) -> String {
+    let body = super::block_caret_with_selection(value, cursor, selection, &Role::Accent.style());
+    format!("  {body}")
+}
+
 /// Emit at most `capacity` rows of a selection list, keeping row `selected`
 /// visible and spending whatever rows are left over on the `↑ N more` /
 /// `↓ N more` indicators.
@@ -777,10 +788,10 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         ConfirmationModal, ConfirmationView, bounded_list_rows, boxed, caption, columns,
-        compact_boxed, confirmation_buttons, content_line, empty_notice, fixed_body, footer,
-        heading, list_window, modal_inner_width, prompt_line, render_body, render_body_over,
-        render_confirmation_over, render_modal, render_over, scroll_above, scroll_below,
-        scroll_window, selection_marker, subcommand_row, viewport_window,
+        compact_boxed, confirmation_buttons, content_line, empty_notice, filter_line, fixed_body,
+        footer, heading, list_window, modal_inner_width, prompt_line, render_body,
+        render_body_over, render_confirmation_over, render_modal, render_over, scroll_above,
+        scroll_below, scroll_window, selection_marker, subcommand_row, viewport_window,
     };
     use crate::presentation::theme::{Role, Style};
     use crate::presentation::widgets::{clip_to_width, strip_ansi};
@@ -1042,6 +1053,15 @@ mod tests {
         let line = prompt_line("cmd", 2, Some((0, 2)));
         assert!(line.contains("\u{1b}[7;36mcm\u{1b}[0m"));
         assert_eq!(display_width(&line), display_width("❯ cmd"));
+    }
+
+    #[test]
+    fn filter_line_aligns_with_a_prompt_without_drawing_its_danger_marker() {
+        let line = filter_line("cmd", 3, None);
+        assert!(line.starts_with("  "));
+        assert!(!line.contains('❯'));
+        assert!(line.contains("cmd"));
+        assert!(line.contains("\u{1b}[7"));
     }
 
     #[test]
