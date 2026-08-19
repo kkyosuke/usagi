@@ -44,6 +44,9 @@ pub struct PendingTeardown {
     /// Whether branch deletion may discard unmerged commits. This is reserved
     /// for daemon-owned compensation; requested deletion remains safe.
     pub force_delete_branch: bool,
+    /// Exact merged PR head used to recognize a squash merge without weakening
+    /// protection for commits added after that PR.
+    pub merged_head_oid: Option<String>,
 }
 
 /// The durable side of a teardown: which teardowns are unfinished, and how one
@@ -179,6 +182,7 @@ mod tests {
             force: false,
             delete_branch: false,
             force_delete_branch: false,
+            merged_head_oid: None,
         }
     }
 

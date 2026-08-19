@@ -8,8 +8,8 @@ use usagi_core::{
     domain::{
         id::{SessionId, TerminalId},
         pr_inventory::{
-            CANDIDATE_PREFIX_MAX, PrChecksState, PrIdentity, PrInventory, PrReviewDecision,
-            PrState, canonicalize, extract, is_candidate_terminator,
+            CANDIDATE_PREFIX_MAX, PrChecksState, PrIdentity, PrInventory, PrRefreshMetadata,
+            PrReviewDecision, PrState, canonicalize, extract, is_candidate_terminator,
         },
     },
     usecase::pr_inventory::PrInventoryPort,
@@ -67,6 +67,7 @@ pub trait RefreshClock {
 pub struct GhPrView {
     pub title: Option<String>,
     pub state: PrState,
+    pub head_oid: String,
     pub draft: bool,
     pub checks: Option<PrChecksState>,
     pub review: Option<PrReviewDecision>,
@@ -83,6 +84,12 @@ pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
         "MERGED" => PrState::Merged,
         _ => return None,
     };
+    let head_oid = value.get("headRefOid")?.as_str()?.to_owned();
+    if !((head_oid.len() == 40 || head_oid.len() == 64)
+        && head_oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return None;
+    }
     let draft = value
         .get("isDraft")
         .and_then(serde_json::Value::as_bool)
@@ -105,6 +112,7 @@ pub fn parse_gh_pr_view(output: &str) -> Option<GhPrView> {
     Some(GhPrView {
         title: (!title.is_empty()).then_some(title),
         state,
+        head_oid,
         draft,
         checks,
         review,
@@ -144,7 +152,7 @@ pub fn gh_pr_view_argv(identity: &PrIdentity) -> Vec<String> {
         "view".into(),
         identity.as_url().into(),
         "--json".into(),
-        "title,state,isDraft,reviewDecision,statusCheckRollup".into(),
+        "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup".into(),
     ]
 }
 
@@ -564,7 +572,9 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
             .values()
             .flat_map(|inventory| inventory.entries.values())
             .filter(|entry| {
-                !entry.pinned && !matches!(entry.state, PrState::Dismissed | PrState::Merged)
+                !entry.pinned
+                    && entry.state != PrState::Dismissed
+                    && (entry.state != PrState::Merged || entry.head_oid.is_none())
             })
             .map(|entry| entry.identity.clone())
             .collect::<BTreeSet<_>>()
@@ -589,9 +599,12 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
                 identity,
                 view.title.clone(),
                 view.state,
-                view.draft,
-                view.checks,
-                view.review,
+                PrRefreshMetadata {
+                    head_oid: Some(view.head_oid.clone()),
+                    draft: view.draft,
+                    checks: view.checks,
+                    review: view.review,
+                },
             ) || changed;
         }
         if changed {
@@ -693,6 +706,7 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const HEAD_OID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     use std::{
         cell::{Cell, RefCell},
         collections::{BTreeMap, VecDeque},
@@ -1052,7 +1066,9 @@ mod tests {
         type Error = ();
 
         fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, ()> {
-            Ok(r#"{"title":"ready","state":"OPEN"}"#.to_owned())
+            Ok(format!(
+                r#"{{"title":"ready","state":"OPEN","headRefOid":"{HEAD_OID}"}}"#
+            ))
         }
     }
 
@@ -1096,10 +1112,9 @@ mod tests {
         discover(&mut projector, first, id.as_url());
         discover(&mut projector, second, id.as_url());
         let runner = FakeRunner::default();
-        runner
-            .results
-            .borrow_mut()
-            .push_back(Ok("{\"title\":\"Done\",\"state\":\"MERGED\"}".into()));
+        runner.results.borrow_mut().push_back(Ok(format!(
+            r#"{{"title":"Done","state":"MERGED","headRefOid":"{HEAD_OID}"}}"#
+        )));
         let calls = Rc::clone(&runner.calls);
         let mut worker = RefreshWorker::new(runner, FakeClock::default(), 2, 60_000);
         worker.rebuild(&mut projector).unwrap();
@@ -1116,7 +1131,7 @@ mod tests {
                     "view",
                     "https://github.com/o/r/pull/3",
                     "--json",
-                    "title,state,isDraft,reviewDecision,statusCheckRollup"
+                    "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup"
                 ]
                 .into_iter()
                 .map(String::from)
@@ -1132,6 +1147,39 @@ mod tests {
             projector.snapshot(second).unwrap().entries[0].state,
             PrState::Merged
         );
+    }
+
+    #[test]
+    fn a_legacy_merged_entry_is_refreshed_once_to_backfill_its_head_oid() {
+        let session = SessionId::new();
+        let id = canonicalize("https://github.com/o/r/pull/19").unwrap();
+        let mut projector = OutputPrProjector::new(Store::default());
+        discover(&mut projector, session, id.as_url());
+        assert!(
+            projector
+                .sessions
+                .get_mut(&session)
+                .unwrap()
+                .set_user_state(&id, PrState::Merged, false)
+        );
+        assert_eq!(projector.refresh_candidates().unwrap(), vec![id.clone()]);
+
+        assert!(
+            projector
+                .publish_success(
+                    &id,
+                    &GhPrView {
+                        title: Some("merged".into()),
+                        state: PrState::Merged,
+                        head_oid: HEAD_OID.into(),
+                        draft: false,
+                        checks: None,
+                        review: None,
+                    },
+                )
+                .unwrap()
+        );
+        assert!(projector.refresh_candidates().unwrap().is_empty());
     }
 
     #[test]
@@ -1154,20 +1202,26 @@ mod tests {
     #[test]
     fn parser_and_scheduler_cover_safe_edge_cases() {
         assert_eq!(
-            parse_gh_pr_view("{\"title\":\"\",\"state\":\"OPEN\"}"),
+            parse_gh_pr_view(&format!(
+                r#"{{"title":"","state":"OPEN","headRefOid":"{HEAD_OID}"}}"#
+            )),
             Some(GhPrView {
                 title: None,
                 state: PrState::Open,
+                head_oid: HEAD_OID.into(),
                 draft: false,
                 checks: None,
                 review: None,
             })
         );
         assert_eq!(
-            parse_gh_pr_view("{\"title\":\"x\",\"state\":\"CLOSED\"}"),
+            parse_gh_pr_view(&format!(
+                r#"{{"title":"x","state":"CLOSED","headRefOid":"{HEAD_OID}"}}"#
+            )),
             Some(GhPrView {
                 title: Some("x".into()),
                 state: PrState::Closed,
+                head_oid: HEAD_OID.into(),
                 draft: false,
                 checks: None,
                 review: None,
@@ -1175,25 +1229,35 @@ mod tests {
         );
         assert_eq!(
             parse_gh_pr_view(
-                r#"{"title":"x","state":"OPEN","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[]}"#,
+                &format!(r#"{{"title":"x","state":"OPEN","headRefOid":"{HEAD_OID}","reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[]}}"#),
             )
             .unwrap()
             .review,
             Some(PrReviewDecision::ChangesRequested)
         );
         let required = parse_gh_pr_view(
-            r#"{"title":"x","state":"OPEN","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{"state":"EXPECTED"}]}"#,
+            &format!(r#"{{"title":"x","state":"OPEN","headRefOid":"{HEAD_OID}","reviewDecision":"REVIEW_REQUIRED","statusCheckRollup":[{{"state":"EXPECTED"}}]}}"#),
         )
         .unwrap();
         assert_eq!(required.review, Some(PrReviewDecision::ReviewRequired));
         assert_eq!(required.checks, Some(PrChecksState::Pending));
         assert_eq!(
             parse_gh_pr_view(
-                r#"{"title":"x","state":"OPEN","statusCheckRollup":[{"conclusion":"FAILURE"}]}"#,
+                &format!(r#"{{"title":"x","state":"OPEN","headRefOid":"{HEAD_OID}","statusCheckRollup":[{{"conclusion":"FAILURE"}}]}}"#),
             )
             .unwrap()
             .checks,
             Some(PrChecksState::Failing)
+        );
+        assert_eq!(
+            parse_gh_pr_view(r#"{"title":"x","state":"OPEN","headRefOid":"not-an-oid"}"#),
+            None
+        );
+        assert_eq!(
+            parse_gh_pr_view(&format!(
+                r#"{{"title":"x","state":"OPEN","headRefOid":"{HEAD_OID}","reviewDecision":"UNKNOWN"}}"#
+            )),
+            None
         );
         for invalid in [
             "not json",
@@ -1202,7 +1266,6 @@ mod tests {
             "{\"title\":\"x\"}",
             "{\"title\":\"x\",\"state\":1}",
             "{\"title\":\"x\",\"state\":\"DRAFT\"}",
-            r#"{"title":"x","state":"OPEN","reviewDecision":"UNKNOWN"}"#,
             r#"{"title":"x","state":"OPEN","statusCheckRollup":{}}"#,
         ] {
             assert_eq!(parse_gh_pr_view(invalid), None);
@@ -1230,7 +1293,9 @@ mod tests {
         let runner = FakeRunner::default();
         runner.results.borrow_mut().extend([
             Err(()),
-            Ok("{\"title\":\"fresh\",\"state\":\"OPEN\"}".into()),
+            Ok(format!(
+                r#"{{"title":"fresh","state":"OPEN","headRefOid":"{HEAD_OID}"}}"#
+            )),
         ]);
         let clock = FakeClock::default();
         let mut worker = RefreshWorker::new(runner, clock.clone(), 1, 10_000);
@@ -1258,6 +1323,7 @@ mod tests {
                     &GhPrView {
                         title: Some("fresh".into()),
                         state: PrState::Open,
+                        head_oid: HEAD_OID.into(),
                         draft: false,
                         checks: None,
                         review: None,
@@ -1288,6 +1354,7 @@ mod tests {
                     RefreshResult::Success(GhPrView {
                         title: Some("closed".into()),
                         state: PrState::Closed,
+                        head_oid: HEAD_OID.into(),
                         draft: false,
                         checks: None,
                         review: None,
@@ -1335,10 +1402,9 @@ mod tests {
         let mut projector = OutputPrProjector::new(Store::default());
         discover(&mut projector, session, id.as_url());
         let runner = FakeRunner::default();
-        runner
-            .results
-            .borrow_mut()
-            .push_back(Ok("{\"title\":\"remote\",\"state\":\"OPEN\"}".into()));
+        runner.results.borrow_mut().push_back(Ok(format!(
+            r#"{{"title":"remote","state":"OPEN","headRefOid":"{HEAD_OID}"}}"#
+        )));
         let clock = FakeClock::default();
         let mut worker = RefreshWorker::new(runner, clock.clone(), 1, 10_000);
         worker.rebuild(&mut projector).unwrap();
@@ -1382,6 +1448,7 @@ mod tests {
                     &GhPrView {
                         title: None,
                         state: PrState::Open,
+                        head_oid: HEAD_OID.into(),
                         draft: false,
                         checks: None,
                         review: None,
@@ -1461,7 +1528,7 @@ mod tests {
     #[test]
     fn parser_projects_checks_review_and_scheduler_drops_ineligible_work() {
         let view = parse_gh_pr_view(
-            r#"{"title":"ready","state":"OPEN","isDraft":true,"reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS"}]}"#,
+            &format!(r#"{{"title":"ready","state":"OPEN","headRefOid":"{HEAD_OID}","isDraft":true,"reviewDecision":"APPROVED","statusCheckRollup":[{{"conclusion":"SUCCESS"}}]}}"#),
         )
         .unwrap();
         assert!(view.draft);

@@ -100,6 +100,7 @@ mod tests {
             identity: canonicalize(url).unwrap(),
             title: None,
             state,
+            head_oid: None,
             pinned: false,
             refresh: PrRefreshState::Idle,
             draft: false,
