@@ -755,6 +755,19 @@ impl WorkspaceRuntime {
             && self.state.overlay().is_none()
     }
 
+    /// Whether a pointer may select a tab from the managed right-pane strip.
+    ///
+    /// Director keeps pane controls enabled for its foreground root conversation,
+    /// but its drawer covers the managed-session strip rendered behind it. A hit
+    /// test against that covered strip must therefore stay inert until Closeup is
+    /// the unobscured foreground surface again.
+    #[must_use]
+    pub fn wants_right_pane_tab_click(&self) -> bool {
+        matches!(self.state.route(), Route::Home(HomeMode::Closeup))
+            && !self.state.director_drawer_open()
+            && self.state.overlay().is_none()
+    }
+
     /// The terminal the active pane's selected tab attaches to, if the selection
     /// is a live tab. The shell polls this terminal for the viewport and forwards
     /// passthrough bytes to it.
@@ -1331,6 +1344,25 @@ impl WorkspaceRuntime {
     #[must_use]
     pub fn selection_after_select(&self, direction: TabDirection) -> Option<TabSelection> {
         self.adjacent_tab(direction)
+    }
+
+    /// Stable selection for one visible tab index. The index comes only from a
+    /// frame hit test; callers receive the tab identity and never use its label
+    /// as an action key.
+    #[must_use]
+    pub fn tab_selection_at(&self, index: usize) -> Option<TabSelection> {
+        self.panes
+            .active_pane()
+            .tabs()
+            .get(index)
+            .map(tab_selection)
+    }
+
+    /// Select an exact stable tab identity, used after a pointer hit test.
+    pub fn select_tab_selection(&mut self, selection: TabSelection) -> Vec<PaneRegistryEffect> {
+        let effects = route_tab_command(&mut self.panes, PaneTabCommand::Select(selection));
+        self.sync_live_pane();
+        effects
     }
 
     /// Move the selected tab in the active target while retaining its stable
@@ -1996,11 +2028,13 @@ mod tests {
         // A focused live pane owns input until the action modal opens over it.
         assert!(runtime.wants_live_input());
         assert!(runtime.wants_pane_control_input());
+        assert!(runtime.wants_right_pane_tab_click());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
         assert!(runtime.closeup_modal().is_some());
         assert!(!runtime.wants_live_input());
         assert!(!runtime.wants_pane_control_input());
+        assert!(!runtime.wants_right_pane_tab_click());
         // #355: Escape dismisses the forced modal and leaves Closeup for Switch
         // (rather than handing input back to the live pane), so live passthrough
         // stays disarmed until the session is re-activated.
@@ -2013,6 +2047,7 @@ mod tests {
         assert!(runtime.closeup_modal().is_none());
         assert!(!runtime.wants_live_input());
         assert!(!runtime.wants_pane_control_input());
+        assert!(!runtime.wants_right_pane_tab_click());
     }
 
     #[test]
@@ -2356,6 +2391,34 @@ mod tests {
     }
 
     #[test]
+    fn pointer_index_selects_the_exact_stable_tab_identity() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let first_op = OperationId::new();
+        let first = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, first_op, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, first_op, first.clone());
+        let second_op = OperationId::new();
+        let second = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, second_op, PaneKind::Agent);
+        let _ = runtime.complete_pane(target, second_op, second.clone());
+
+        assert_eq!(
+            runtime.tab_selection_at(0),
+            Some(TabSelection::Live(first.clone()))
+        );
+        assert_eq!(runtime.tab_selection_at(2), None);
+        let _ = runtime.select_tab_selection(TabSelection::Live(first.clone()));
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &PaneSelection::Tab(TabSelection::Live(first.clone()))
+        );
+        assert_eq!(runtime.focused_terminal(), Some(first));
+    }
+
+    #[test]
     fn tab_previews_cover_empty_pending_and_previous_successors() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -2651,12 +2714,14 @@ mod tests {
             runtime.state().active(),
             runtime.active_pane().clone(),
         );
+        assert!(runtime.wants_right_pane_tab_click());
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(runtime.state().director_drawer_open());
         assert_eq!(runtime.state().overlay(), None);
         assert!(!runtime.wants_live_input());
         assert!(runtime.wants_pane_control_input());
+        assert!(!runtime.wants_right_pane_tab_click());
         for key in [
             Key::Live(LiveTerminalAction::NextTab),
             Key::Live(LiveTerminalAction::CloseTab),
