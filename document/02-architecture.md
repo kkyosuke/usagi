@@ -944,14 +944,16 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   path の表記や symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
-  [起動する agent CLI 自身の state](#agent-state-の-writable-root)・macOS の Keychain と
+  [起動する agent CLI 自身の state](#agent-state-の-writable-root)と
+  [global config](#agent-global-config-の-writable-prefix)・macOS の Keychain と
   [MDS cache](#macos-の-mds-cache)）を**両 mode に同じだけ**足す。session と root を分けるのは上の
   repository 書き込み境界（起動固有 writable root と保護対象 workspace）であって、agent 自身の
   scratch / state / 認証領域ではない。この領域を session から落とすと agent は worktree に閉じるのではなく
   **起動できない**: Claude Code は tool を実行するたびに `$TMPDIR` を無視した固定 path
   （`/tmp/claude-<uid>/<cwd の slug>`）へ scratchpad を作るため `/tmp` が無いと全 tool 呼び出しが
-  `EPERM: operation not permitted, mkdir` になり、`~/.claude` が無いと onboarding・theme・permission mode・
-  MCP 承認が毎起動リセットされ、Keychain / MDS が無いと認証が 401 で失敗する。
+  `EPERM: operation not permitted, mkdir` になり、`~/.claude` と `~/.claude.json*` が無いと theme・
+  permission mode・onboarding・folder trust・MCP 承認が毎起動リセットされ、Keychain / MDS が無いと
+  認証が 401 で失敗する。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
   （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
@@ -986,6 +988,30 @@ launcher は、**exec する program 自身の state directory** を `$HOME` 配
   Git common dir）と重なる構成を拒否する。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
+
+#### agent global config の writable prefix
+
+agent CLI の設定は state directory の中だけにあるとは限らない。Claude は **onboarding 完了・folder trust・
+MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き、保存を lock file と temp file 経由で行う。
+したがって launcher は、この **path prefix** も両 mode の writable 領域に足す。
+
+| program | writable にする config prefix | prefix が覆う path |
+|---|---|---|
+| `claude` | `~/.claude.json` | `~/.claude.json` 本体 / `~/.claude.json.lock` / `~/.claude.json.tmp.<pid>.<random>` / `~/.claude.json.backup.<ms>` |
+| `codex` / `codex-fugu`（sakana.ai） | なし（config は state directory の中） | — |
+
+- **1 ファイルの grant では足りない**。Claude は `~/.claude.json.lock` を取り、
+  `~/.claude.json.tmp.<pid>.<random>` を書いて rename で本体に被せる。file 単位で許可すると temp と lock が
+  `$HOME` 直下で拒否され、保存が丸ごと失敗する。設定は**読めるのに書けない**状態になるため、症状は
+  「起動のたびに folder trust と初回フローを聞かれる」という形で出る（`~/.claude` の grant だけでは直らない）。
+- **`$HOME` 全体は writable にしない**。macOS の profile は prefix を regex（`(allow file-write* (regex
+  #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・temp・backup が
+  すべて覆われる。Linux の `bwrap` は mount 単位でしか許可できず prefix を表現できないため、
+  `--bind-try <prefix>` で config 本体だけを read-write に再 bind する（`$HOME` directory 自体は
+  read-only のままなので、Linux では lock / temp を要する保存経路は通らない）。
+- 判定は state root と同じく launcher が exec する program の basename だけを根拠にし、値の正本は
+  `usagi-core` の `domain::settings::DefaultModel::global_config_prefix` である。daemon 側の policy gate も
+  同じ program から prefix を決め、保護対象 workspace・Git common dir と重なる構成を拒否する。
 
 #### macOS の MDS cache
 
