@@ -14,21 +14,28 @@
 //! spelling is the same contract the daemon already uses for the Agent MCP
 //! children it launches. No token or session state is written here.
 
+// The planning and rendering below are pure and tested on every host, but the
+// real IO that consumes them exists only on macOS. On other hosts they are
+// reached from tests alone, so `dead_code` would fire on a non-test build.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
-use std::process::Command;
 
 use usagi_core::infrastructure::paths::{DATA_DIR_ENV, DataHome, RUNTIME_MODE_ENV};
 
 const LABEL: &str = "com.usagi.daemon";
 
+// The real IO exists only where the supervisor does. The pure planning and
+// rendering below stay cross-platform so their tests run on every host.
+#[cfg(target_os = "macos")]
 pub(crate) use real_io::{install, uninstall};
 
+#[cfg(target_os = "macos")]
 mod real_io {
     #![coverage(off)]
 
-    #[cfg(target_os = "macos")]
-    use super::Command;
+    use std::process::Command;
+
     use super::{Path, PathBuf, install_with, uninstall_with};
 
     pub(crate) fn install(
@@ -73,27 +80,16 @@ mod real_io {
     }
 
     fn launchctl(verb: &str, plist: &Path) -> std::io::Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            let domain = format!("gui/{}", unsafe { libc::geteuid() });
-            let status = Command::new("/bin/launchctl")
-                .arg(verb)
-                .arg(domain)
-                .arg(plist)
-                .status()?;
-            if status.success() {
-                return Ok(());
-            }
-            Err(std::io::Error::other(format!("launchctl {verb} failed")))
+        let domain = format!("gui/{}", unsafe { libc::geteuid() });
+        let status = Command::new("/bin/launchctl")
+            .arg(verb)
+            .arg(domain)
+            .arg(plist)
+            .status()?;
+        if status.success() {
+            return Ok(());
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (verb, plist);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "launchd supervision is only supported on macOS",
-            ))
-        }
+        Err(std::io::Error::other(format!("launchctl {verb} failed")))
     }
 }
 

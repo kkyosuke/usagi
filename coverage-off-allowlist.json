@@ -47,6 +47,15 @@
       "tests": "install_plan_creates_paths_writes_plist_and_propagates_launch_failure"
     },
     {
+      "path": "src/runtime/systemd.rs",
+      "symbol": "<module>",
+      "occurrence": 1,
+      "reason": "real_io",
+      "owner": "root-cli",
+      "expires": "2027-01-31",
+      "tests": "install_plan_writes_the_unit_then_reloads_and_enables_it"
+    },
+    {
       "path": "crates/daemon/src/infrastructure/unix_transport.rs",
       "symbol": "fn:peer_pid",
       "occurrence": 3,
