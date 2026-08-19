@@ -3565,11 +3565,12 @@ fn reconcile_force_remove_confirmation(state: &mut AppState) {
                 projection.lifecycle == SessionLifecycle::Failed
                     && projection.failure_stage == Some(FailureStage::Delete)
             });
-    if !still_failed_delete {
-        state.force_remove_confirmation = None;
-        if state.overlay == Some(Overlay::ForceRemoveConfirmation) {
-            state.overlay = None;
-        }
+    if still_failed_delete {
+        return;
+    }
+    state.force_remove_confirmation = None;
+    if state.overlay == Some(Overlay::ForceRemoveConfirmation) {
+        state.overlay = None;
     }
 }
 
@@ -7393,6 +7394,83 @@ mod tests {
         );
         assert_eq!(state.overlay(), None);
         assert_eq!(state.force_remove_confirmation(), None);
+    }
+
+    #[test]
+    fn force_remove_confirmation_handles_no_and_unsupported_keys_and_a_missing_target() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: None,
+                },
+            )]))),
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Home)).is_empty());
+        assert_eq!(state.force_remove_confirmation(), Some((session, true)));
+        assert!(
+            update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty(),
+            "No closes the prompt without removing the session"
+        );
+        assert_eq!(state.overlay(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        state.force_remove_confirmation = None;
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), None);
+    }
+
+    #[test]
+    fn force_remove_confirmation_reconciles_a_changed_failure_without_clobbering_an_overlay() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: None,
+                },
+            )]))),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: Some("refreshed detail".to_owned()),
+                },
+            )]))),
+        );
+        assert_eq!(state.force_remove_confirmation(), Some((session, true)));
+        state.overlay = Some(Overlay::Daemon);
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Create),
+                    failure_summary: None,
+                },
+            )]))),
+        );
+
+        assert_eq!(state.force_remove_confirmation(), None);
+        assert_eq!(state.overlay(), Some(Overlay::Daemon));
     }
 
     #[test]
