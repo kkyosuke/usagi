@@ -839,10 +839,15 @@ impl TargetPhase {
 
 /// One runtime-local phase entry. The complete runtime reference is retained so
 /// an update for one pane can never overwrite another pane in the same session.
+///
+/// The daemon's concrete [`AgentPhase`] is kept here instead of the session-level
+/// [`TargetPhase`] fold. Callers which classify a whole target still fold through
+/// [`TargetPhase::from_agent_phase`], while per-Agent surfaces (the sidebar Agent
+/// row and Garden) keep `interrupted` distinct from `ended` / `exited`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePhase {
     pub runtime: AgentRuntimeRef,
-    pub phase: TargetPhase,
+    pub phase: AgentPhase,
 }
 
 /// A message which a backend adapter has explicitly classified as safe to show.
@@ -1277,7 +1282,7 @@ impl AppState {
         self.runtimes
             .iter()
             .filter(|entry| entry.runtime.session_id == scope)
-            .map(|entry| entry.phase)
+            .map(|entry| TargetPhase::from_agent_phase(entry.phase))
             .max_by_key(|phase| phase.rank())
             .unwrap_or(TargetPhase::Absent)
     }
@@ -3043,7 +3048,6 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             {
                 return Vec::new();
             }
-            let phase = TargetPhase::from_agent_phase(phase);
             if let Some(entry) = state
                 .runtimes
                 .iter_mut()

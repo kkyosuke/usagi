@@ -666,7 +666,7 @@ Danger 表現で `failed` タグとその失敗理由（daemon の安全な `fai
 「0 体」と「まだ観測していない」を同じ空行に潰さない。行の順序・記号・語彙は
 [Session Garden](#session-garden) の plot と共有し、両者は同じ投影を読む。この投影は controller が観測した
 runtime-local phase に、workspace open 時の最新 coherent Agent inventory を重ねたものである
-（重複する `AgentRuntimeId` は `Waiting` まで区別できる runtime-local phase を優先する）。色は phase そのものの
+（重複する `AgentRuntimeId` は、daemon が報告した phase をそのまま保つ runtime-local phase を優先する）。色は phase そのものの
 情報なので cursor 行では落とさず、cursor でない Switch 行だけを 2 行目の Git 列と同じ規則で行ごと沈める。
 
 行数は Agent の有無で変えない。pointer の hit-test は row 種別だけから行数を導き、view が重ねる daemon
@@ -837,8 +837,8 @@ phase は各うさぎの pose と状態内訳へ投影する。利用可能な s
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
 うさぎの membership と stable identity は、controller が既に phase を観測した runtime に加え、workspace open 時の
-最新 coherent Agent inventory から補う。同じ `AgentRuntimeId` が両方にある場合は、`Waiting` まで区別できる
-controller の runtime-local phase を優先する。inventory にだけある runtime は `reserved → ready`、`live → running`、
+最新 coherent Agent inventory から補う。同じ `AgentRuntimeId` が両方にある場合は、daemon が報告した phase を
+そのまま保つ controller の runtime-local phase を優先する。inventory にだけある runtime は `reserved → ready`、`live → running`、
 `interrupted` / `unavailable → interrupted`、`exited` / `reclaimed → done` に写す。workspace root の runtime と、
 Home に存在しない session の runtime は区画へ加えない。
 

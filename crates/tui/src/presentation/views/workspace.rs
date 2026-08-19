@@ -409,7 +409,7 @@ impl HomeProjection {
             session_agents.entry(session_id).or_default().push(
                 widgets::agent_status::AgentStatus {
                     runtime_id: entry.runtime.agent_runtime_id,
-                    phase: agent_phase(entry.phase),
+                    phase: entry.phase,
                 },
             );
         }
@@ -622,8 +622,9 @@ impl HomeProjection {
                     .iter()
                     .any(|agent| agent.runtime_id == item.runtime.agent_runtime_id)
                 {
-                    // Runtime-local phase pushes are more precise than the
-                    // coarse durable inventory state (notably Waiting).
+                    // A runtime-local push carries the daemon's concrete phase,
+                    // while the durable inventory state is a coarse summary of
+                    // the same runtime. Keep the push.
                     continue;
                 }
                 agents.push(widgets::agent_status::AgentStatus {
@@ -1702,19 +1703,6 @@ pub fn right_pane_tab_at(
         })
         .collect::<Vec<_>>();
     widgets::session_tab::tab_at(split.right, &header, &tabs, right_column)
-}
-
-/// controller が runtime ごとに保持する phase を、Agent の表示語彙へ写す。
-/// `Done` は controller が runtime event の `Ended` / `Exited` / `Interrupted` を共通化した
-/// 値なので、表示側は完了として扱う（Garden では静止した完了 pose）。
-const fn agent_phase(phase: TargetPhase) -> AgentPhase {
-    match phase {
-        TargetPhase::Absent => AgentPhase::Absent,
-        TargetPhase::Ready => AgentPhase::Ready,
-        TargetPhase::Running => AgentPhase::Running,
-        TargetPhase::Waiting => AgentPhase::Waiting,
-        TargetPhase::Done => AgentPhase::Ended,
-    }
 }
 
 /// Coarse fallback used when a runtime exists in the latest daemon inventory
@@ -3219,6 +3207,55 @@ mod tests {
             garden.session_agents[&session]
         );
         assert_eq!(garden.session_agents, sidebar.session_agents);
+    }
+
+    /// runtime-local push の `Interrupted` は、session 単位の fold を通さずに
+    /// Agent 行と Garden へ届く。中断した Agent（＝resume 待ち）が完了した Agent と
+    /// 同じ記号・同じ件数へ潰れると、sidebar からは「手が止まっている」ことが読めない。
+    #[test]
+    fn a_runtime_local_interrupt_is_not_folded_into_done() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let interrupted = runtime_ref(workspace, session);
+        let ended = runtime_ref(workspace, session);
+        for (runtime, phase) in [
+            (interrupted.clone(), AgentPhase::Interrupted),
+            (ended.clone(), AgentPhase::Ended),
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase { runtime, phase }),
+            );
+        }
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        );
+        let agents = home.session_agents[&session].clone();
+        // 注目順で中断が先。fold が残っていると両方 `Ended` になり、この順序も消える。
+        assert_eq!(
+            widgets::agent_status::ordered(&agents)
+                .into_iter()
+                .map(|agent| agent.phase)
+                .collect::<Vec<_>>(),
+            vec![AgentPhase::Interrupted, AgentPhase::Ended]
+        );
+        let line = strip(&sidebar_agent_line(
+            &agents, LEFT_WIDTH, false, false, false,
+        ));
+        assert!(line.contains("1 int · 1 done"), "{line:?}");
+        assert!(
+            line.contains(widgets::agent_status::glyph(AgentPhase::Interrupted)),
+            "{line:?}"
+        );
+        // session 単位の fold は変えない。中断も完了も、target としては `Done` である。
+        assert_eq!(
+            state.phase_for(Target::Session(session)),
+            crate::usecase::application::controller::TargetPhase::Done
+        );
     }
 
     /// cursor でない Switch 行は 2 行目の Git 列と同じ規則で行ごと沈め、cursor 行の
