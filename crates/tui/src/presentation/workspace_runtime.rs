@@ -2173,10 +2173,11 @@ mod tests {
             width: 100,
             height: 30,
         });
+        // chrome 2 行 + 1 件目の session 行 3 行の直後が 2 件目の先頭行になる。
         for at in [1_000, 1_100] {
             let _ = runtime.apply_event(AppEvent::Pointer {
                 column: 5,
-                row: 4,
+                row: 5,
                 at: std::time::Duration::from_millis(at),
             });
         }

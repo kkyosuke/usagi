@@ -647,7 +647,7 @@ material にかかわらず必ず描き直す。
 ## Session sidebar rows
 
 Home sidebar は `session* → + new session` の順序と stable session identity を保つ。作成 action は
-1 行、各 session は固定 2 行で描画する。`main` 行・root divider・`Sessions` 見出しは表示しない。session が
+1 行、各 session は固定 3 行（1 行目 まとめ / 2 行目 変更履歴 / 3 行目 Agent）で描画する。`main` 行・root divider・`Sessions` 見出しは表示しない。session が
 0 件なら `+ new session` が唯一の selectable row となる。作成中の skeleton は `+ new session` の直前に置く。session の 1 行目は cursor / active marker、表示名、常に幅を
 予約する note icon に加え、daemon projection に assignment がある場合だけ `[role-id]` badge を描く。badge は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
@@ -656,7 +656,22 @@ Home sidebar は `session* → + new session` の順序と stable session identi
 のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind + added - removed` を続ける。base branch 名は表示しない。追加数は緑、削除数は赤で描く。相対時刻・commit 差分・追加数・削除数は、表示中の全 session で共有する固定幅の列に配置する。検査は sidebar の描画とは別スレッドで行い、完了後は 1 秒以上あけて現在の session 集合を再検査する。未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
 session は selected / active を surviving session、または `+ new session` / active なしへ縮退させる。空一覧でも作成 action は残る。作成に失敗した `failed` session は
 Danger 表現で `failed` タグとその失敗理由（daemon の安全な `failure.summary`）を 2 行目に表示し、使用可能な行と区別する。
-削除に失敗した session は赤い session 名と `remove failed` の 2 行だけに縮め、backend の詳細を sidebar へ出さない。
+削除に失敗した session は赤い session 名と `remove failed` だけに縮め、backend の詳細を sidebar へ出さない。
+
+3 行目はその session に属する Agent の状態を示す。Agent 1 体につき記号 1 つを注目順
+（`waiting → running → ready → interrupted → idle → done`）に並べ、同 phase の tie-break を stable
+`AgentRuntimeId` 順にするため、phase が変わらない限り並びは frame をまたいで動かない。記号の右には
+`1 wait · 2 run` のように phase ごとの件数を置き、幅が足りない場合は件数だけを落として記号列を残す。
+記号も置けない幅では、描けなかった Agent 数を `+N` に畳む。Agent を 1 体も持たない session は `—` を出し、
+「0 体」と「まだ観測していない」を同じ空行に潰さない。行の順序・記号・語彙は
+[Session Garden](#session-garden) の plot と共有し、両者は同じ投影を読む。この投影は controller が観測した
+runtime-local phase に、workspace open 時の最新 coherent Agent inventory を重ねたものである
+（重複する `AgentRuntimeId` は `Waiting` まで区別できる runtime-local phase を優先する）。色は phase そのものの
+情報なので cursor 行では落とさず、cursor でない Switch 行だけを 2 行目の Git 列と同じ規則で行ごと沈める。
+
+行数は Agent の有無で変えない。pointer の hit-test は row 種別だけから行数を導き、view が重ねる daemon
+inventory を知らないため、Agent に依存した行数は click を 1 行ずらす。使用できない session（`failed`・削除中）も
+同じ 3 行を占める。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
 inline 入力欄へ置き換わる。置き換わった入力欄でも `+ new` affordance は静的な `+ new session` と同じ
@@ -664,7 +679,7 @@ Success（緑）で描き、入力中の名前と block caret は白で描く。
 skeleton には Accent（青）を使わないため、静的行から入力欄へ移っても affordance の緑が途切れない。
 入力欄はその行が入力を所有しているため、選択を表す `>` chevron は描かず、空のマーカー列で affordance を静的
 ラベルと揃える。名前を入力して Enter を押すと通常の `session create <name>` と同じ daemon
-request を非同期に開始し、完了まで行の直前に session と同じ 2 行の skeleton を表示する。skeleton の activity glyph と session 名は Success（緑）で同じ
+request を非同期に開始し、完了まで行の直前に 2 行の skeleton を表示する。skeleton の activity glyph と session 名は Success（緑）で同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
 同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前と read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。picker は effective session-scope catalog の default を初期選択し、↑↓ / Tab で候補を切り替え、daemon へは role ID だけを送る。catalog が不正なら picker を空に縮退させる。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
@@ -697,7 +712,8 @@ workspace を離れた場合は実行中の daemon operation 自体を取り消�
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 
 狭幅では cursor / active marker、表示名、note icon を優先し、補足行を ANSI-safe・Unicode display width 準拠で
-clip する。viewport と作成中 skeleton は session ごとの 2 行 footprint を使い、mascot の予約より選択中 row を優先する。
+clip する。viewport は session ごとの 3 行 footprint を使い、mascot の予約より選択中 row を優先する。作成中
+skeleton は session 行ではなく作成中の 2 行として、選択できる row の予算の外に確保する。
 
 ## Overview と modal
 
@@ -826,10 +842,11 @@ controller の runtime-local phase を優先する。inventory にだけある r
 `interrupted` / `unavailable → interrupted`、`exited` / `reclaimed → done` に写す。workspace root の runtime と、
 Home に存在しない session の runtime は区画へ加えない。
 
-複数 runtime は `Waiting` を先頭にし、残りと同 phase の tie-break を stable `AgentRuntimeId` 順にする。4 羽目
-以降は末尾から畳み、状態内訳の末尾へ `+N hidden` を表示する。このため入力待ちの runtime は低い注目度の runtime
-より先に見える。`Waiting` 自体が 3 羽を超える場合は、描けない羽数を `+N wait hidden`（他 phase も隠れる場合は
-`+N hidden (W wait)`）と明示する。状態内訳は `2 run · 1 wait` のように phase ごとの羽数を文字でも示す。
+複数 runtime は注目順（`waiting → running → ready → interrupted → idle → done`）に並べ、同 phase の
+tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
+[Session sidebar rows](#session-sidebar-rows) の agent 行と共有する（同じ session の Agent が
+2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。4 羽目以降は末尾から畳むが、
+畳まれた runtime も状態内訳の記号列には現れるため、描けなかった Agent が何をしているかは失われない。
 `Ended` / `Exited` は瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さない
 ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。session の選択状態は Garden に装飾せず、
 すべて同じ dim の nameplate で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを

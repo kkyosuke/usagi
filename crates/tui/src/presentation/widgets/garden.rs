@@ -4,11 +4,12 @@
 //! frame と同じ layout から [`GardenHitbox`] も返すため、後続実装は座標から session
 //! identity を再計算せず click target を解決できる。
 
-use usagi_core::domain::id::{AgentRuntimeId, SessionId};
+use usagi_core::domain::id::SessionId;
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
 use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
+use super::agent_status;
 use super::{clip_to_width, display_width, pad_to_width};
 
 /// Garden を表示できる最小端末幅。
@@ -80,11 +81,11 @@ pub struct GardenSession {
 }
 
 /// Garden に描く 1 agent。runtime identity は並び順と animation sequence に使う。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GardenAgent {
-    pub runtime_id: AgentRuntimeId,
-    pub phase: AgentPhase,
-}
+///
+/// sidebar の agent 行と同じ値を同じ順序で描くため、型と語彙そのものを共有する
+/// （[`agent_status`]）。庭とサイドバーが別々の projection を持つと、同じ session の
+/// Agent 数や優先順位が画面の 2 か所で食い違う。
+pub type GardenAgent = agent_status::AgentStatus;
 
 /// 0-based terminal cell rectangle。右端・下端は含まない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,7 +280,7 @@ fn session_may_animate(session: &GardenSession) -> bool {
         | SessionLifecycle::Initializing
         | SessionLifecycle::Deleting => true,
         SessionLifecycle::Failed => false,
-        SessionLifecycle::Available => ordered_agents(&session.agents)
+        SessionLifecycle::Available => agent_status::ordered(&session.agents)
             .into_iter()
             .take(MAX_VISIBLE_AGENTS)
             .any(|agent| {
@@ -450,7 +451,7 @@ fn available_plot(
             feet,
         ];
     }
-    let agents = ordered_agents(&session.agents);
+    let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
         return [
             centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
@@ -480,8 +481,10 @@ fn available_plot(
     }
 
     let visible = &agents[..agents.len().min(MAX_VISIBLE_AGENTS)];
-    let hidden = &agents[visible.len()..];
-    let status = agent_summary(&agents, hidden);
+    // うさぎは plot 幅の都合で先頭数体しか置けないので、status 行は sidebar と同じ
+    // 記号列で **全** agent の phase を示す。畳まれたうさぎが何をしているかを、
+    // `+N hidden` のような件数ではなく phase そのもので読めるようにするため。
+    let status = agent_status::status_line(&agents, PLOT_WIDTH);
     let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
     for agent in visible {
         let (_, _, style, rabbit) = agent_appearance(
@@ -496,19 +499,7 @@ fn available_plot(
         }
     }
     let [ears, head, body, feet] = rows.map(|row| centered(PLOT_WIDTH, &row));
-    [
-        centered(PLOT_WIDTH, &Style::new().dim().paint(&status)),
-        ears,
-        head,
-        body,
-        feet,
-    ]
-}
-
-fn ordered_agents(agents: &[GardenAgent]) -> Vec<GardenAgent> {
-    let mut ordered = agents.to_vec();
-    ordered.sort_by_key(|agent| (agent.phase != AgentPhase::Waiting, agent.runtime_id));
-    ordered
+    [centered(PLOT_WIDTH, &status), ears, head, body, feet]
 }
 
 fn agent_appearance(
@@ -638,45 +629,6 @@ fn running_pose(action: RunningAction, progress: u64) -> [&'static str; SPRITE_R
             4 | 5 => ["", " (\\(\\", "( o.o)", "c(\")(\")"],
             _ => ["", " /)/)", "( o.o)", "c(\")(\")"],
         },
-    }
-}
-
-fn agent_summary(agents: &[GardenAgent], hidden: &[GardenAgent]) -> String {
-    let count = |matches: fn(AgentPhase) -> bool| {
-        agents.iter().filter(|agent| matches(agent.phase)).count()
-    };
-    let parts = [
-        (count(|phase| phase == AgentPhase::Running), "run"),
-        (count(|phase| phase == AgentPhase::Waiting), "wait"),
-        (count(|phase| phase == AgentPhase::Ready), "ready"),
-        (
-            count(|phase| matches!(phase, AgentPhase::Ended | AgentPhase::Exited)),
-            "done",
-        ),
-        (count(|phase| phase == AgentPhase::Interrupted), "int"),
-        (count(|phase| phase == AgentPhase::Absent), "idle"),
-    ]
-    .into_iter()
-    .filter(|(count, _)| *count > 0)
-    .map(|(count, label)| format!("{count} {label}"))
-    .collect::<Vec<_>>();
-    let summary = parts.join(" · ");
-    if hidden.is_empty() {
-        summary
-    } else {
-        let hidden_waiting = hidden
-            .iter()
-            .filter(|agent| agent.phase == AgentPhase::Waiting)
-            .count();
-        let suffix = if hidden_waiting == 0 {
-            format!(" · +{} hidden", hidden.len())
-        } else if hidden_waiting == hidden.len() {
-            format!(" · +{hidden_waiting} wait hidden")
-        } else {
-            format!(" · +{} hidden ({hidden_waiting} wait)", hidden.len())
-        };
-        let prefix_width = PLOT_WIDTH.saturating_sub(display_width(&suffix));
-        format!("{}{suffix}", clip_to_width(&summary, prefix_width))
     }
 }
 
@@ -875,7 +827,7 @@ mod tests {
         let ready = agent("30000000-0000-4000-8000-000000000001", AgentPhase::Ready);
         let ended = agent("40000000-0000-4000-8000-000000000001", AgentPhase::Ended);
         let shuffled = vec![ended, late_running, ready, waiting, early_running];
-        let ordered = super::ordered_agents(&shuffled);
+        let ordered = super::agent_status::ordered(&shuffled);
         assert_eq!(
             ordered
                 .iter()
@@ -905,8 +857,9 @@ mod tests {
         let second = render(24, 100, "x", &[make_session(reversed)], 2, false).expect("fits");
         assert_eq!(first, second);
         let text = plain(&first).join("\n");
-        assert!(text.contains("2 run · 1 wait"));
-        assert!(text.contains("+2"));
+        // status 行は sidebar と同じ記号列で、うさぎに置けなかった 2 体を含む
+        // **全** agent の phase を注意順に並べる。
+        assert!(text.contains("◆ ● ● ○ ◦"), "{text}");
         assert!(
             text.contains("( o.o)?"),
             "the waiting agent must stay visible"
@@ -1189,14 +1142,21 @@ mod tests {
         assert!(!super::session_may_animate(&failed));
         assert!(!super::session_may_animate(&done));
 
-        let hidden_running = GardenSession {
+        // 注意順（`agent_status::ordered`）で並べるため、動いている agent は plot の
+        // 表示上限に押し出されない。押し出されるのは常に注意順で最も低い phase なので、
+        // 「描かれないうさぎのために redraw する」状況そのものが起きない。
+        let plot = |label: &str, agents| GardenSession {
             id: SessionId::parse(STEADY_ID).expect("fixture id"),
-            label: "hidden-running".to_owned(),
+            label: label.to_owned(),
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
             pr_merged: false,
-            agents: vec![
+            agents,
+        };
+        let running_beyond_the_cap = plot(
+            "running-beyond-the-cap",
+            vec![
                 agent("10000000-0000-4000-8000-000000000001", AgentPhase::Ended),
                 agent("20000000-0000-4000-8000-000000000001", AgentPhase::Exited),
                 agent(
@@ -1205,10 +1165,25 @@ mod tests {
                 ),
                 agent("f0000000-0000-4000-8000-000000000001", AgentPhase::Running),
             ],
-        };
+        );
         assert!(
-            !super::session_may_animate(&hidden_running),
-            "an agent outside the plot's visible cap must not drive redraw work"
+            super::session_may_animate(&running_beyond_the_cap),
+            "attention order keeps the running agent inside the plot, so it animates"
+        );
+        let only_finished_work = plot(
+            "only-finished-work",
+            (0..4)
+                .map(|index| {
+                    agent(
+                        &format!("{index:08x}-0000-4000-8000-000000000001"),
+                        AgentPhase::Ended,
+                    )
+                })
+                .collect(),
+        );
+        assert!(
+            !super::session_may_animate(&only_finished_work),
+            "finished work is the phase pushed out of the plot and it never animates"
         );
     }
 
@@ -1277,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_reports_waiting_agents_that_cannot_fit() {
+    fn the_status_line_reports_agents_the_plot_cannot_draw() {
         let waiting = (0..4)
             .map(|index| {
                 agent(
@@ -1299,7 +1274,11 @@ mod tests {
         let all_waiting =
             render(24, 100, "x", &[make_session(waiting.clone())], 0, false).expect("fits");
         let all_waiting_text = plain(&all_waiting).join("\n");
-        assert!(all_waiting_text.contains("+1 wait hidden"));
+        // うさぎは 3 体までだが、記号列は 4 体すべてを数え上げる。
+        assert!(
+            all_waiting_text.contains("◆ ◆ ◆ ◆  4 wait"),
+            "{all_waiting_text}"
+        );
         assert_eq!(
             all_waiting_text.matches("( o.o)?").count(),
             super::MAX_VISIBLE_AGENTS
@@ -1311,7 +1290,11 @@ mod tests {
             AgentPhase::Running,
         ));
         let mixed = render(24, 100, "x", &[make_session(mixed)], 0, false).expect("fits");
-        assert!(plain(&mixed).join("\n").contains("+2 hidden (1 wait)"));
+        let mixed_text = plain(&mixed).join("\n");
+        assert!(
+            mixed_text.contains("◆ ◆ ◆ ◆ ●  4 wait · 1 run"),
+            "{mixed_text}"
+        );
     }
 
     #[test]

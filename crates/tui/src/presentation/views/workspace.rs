@@ -60,6 +60,14 @@ const CHROME_ROWS: usize = 2;
 // lock-step with the render so a click never lands on the wrong row.
 const _: () = assert!(LEFT_WIDTH == crate::usecase::application::controller::SIDEBAR_LEFT_WIDTH);
 const _: () = assert!(CHROME_ROWS == crate::usecase::application::controller::SIDEBAR_CHROME_ROWS);
+/// session 1 行が占める行数（まとめ / 変更履歴 / Agent）。session の行数は Agent の
+/// 有無で変えない。controller の hit-test は runtime-local phase しか持たず、daemon
+/// inventory を重ねた view の Agent 集合とは一致しないため、行数を Agent に依存させると
+/// click が 1 行ずれる。
+const SESSION_ROW_LINES: usize = 3;
+const _: () = assert!(
+    SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
+);
 /// v1 と同じ Nerd Font glyph: processor and resident-memory server.
 const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
@@ -262,6 +270,11 @@ pub struct HomeProjection {
     overview_modal: Option<OverviewModal>,
     /// Overview の `daemon` command が開く読み取り専用 status surface。
     daemon_overlay: bool,
+    /// session ごとの Agent 群。sidebar の agent 行と Garden の plot が読む唯一の
+    /// 素材で、controller の runtime-local phase に daemon inventory を重ねたもの。
+    /// 2 つの surface で別々に畳むと、同じ session の Agent 数が画面の 2 か所で
+    /// 食い違うため、ここで 1 度だけ束ねる。
+    session_agents: BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>>,
     /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
     /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
@@ -380,6 +393,26 @@ impl HomeProjection {
         // Derived before the sessions move into the projection: the counts are a
         // fold of the same daemon-authoritative rows, not a second source.
         let session_states = session_state_counts(state, &sessions);
+        // Agent 群は sidebar の agent 行と Garden の plot が同じものを読む。runtime-local
+        // phase を session ごとに 1 度だけ束ね、両 surface に同じ集合を配る。
+        let mut session_agents: BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>> =
+            BTreeMap::new();
+        for entry in state.runtimes() {
+            let Some(session_id) = entry.runtime.session_id else {
+                // workspace-root の runtime は session 行に属さない。
+                continue;
+            };
+            if !sessions.iter().any(|session| session.id == session_id) {
+                // 古い、あるいは他 workspace の runtime は行を作らない。
+                continue;
+            }
+            session_agents.entry(session_id).or_default().push(
+                widgets::agent_status::AgentStatus {
+                    runtime_id: entry.runtime.agent_runtime_id,
+                    phase: agent_phase(entry.phase),
+                },
+            );
+        }
         // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
         // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
         let garden_sessions = (state.overlay()
@@ -394,15 +427,7 @@ impl HomeProjection {
                     selected: state.selected() == Selection::Target(Target::Session(session.id)),
                     failure_summary: session.failure_summary.clone(),
                     pr_merged: state.celebrates_pr_merge(session.id),
-                    agents: state
-                        .runtimes()
-                        .iter()
-                        .filter(|entry| entry.runtime.session_id == Some(session.id))
-                        .map(|entry| widgets::garden::GardenAgent {
-                            runtime_id: entry.runtime.agent_runtime_id,
-                            phase: garden_phase(entry.phase),
-                        })
-                        .collect(),
+                    agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
                 })
                 .collect::<Vec<_>>()
         });
@@ -450,6 +475,7 @@ impl HomeProjection {
             overview_modal: None,
             daemon_overlay: state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
+            session_agents,
             garden_sessions,
             garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
@@ -581,22 +607,18 @@ impl HomeProjection {
     /// joins by stable `SessionId` / `AgentRuntimeId`, never visible labels.
     #[must_use]
     pub fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
-        if let (Some(garden_sessions), Some(inventory)) = (self.garden_sessions.as_mut(), inventory)
-        {
+        if let Some(inventory) = inventory {
             for item in &inventory.runtimes {
                 let Some(session_id) = item.runtime.session_id else {
-                    // Workspace-root runtimes have no session plot.
+                    // Workspace-root runtimes belong to no session row.
                     continue;
                 };
-                let Some(session) = garden_sessions
-                    .iter_mut()
-                    .find(|session| session.id == session_id)
-                else {
-                    // A stale or foreign session cannot create a new plot.
+                if !self.sessions.iter().any(|session| session.id == session_id) {
+                    // A stale or foreign session cannot create a row or a plot.
                     continue;
-                };
-                if session
-                    .agents
+                }
+                let agents = self.session_agents.entry(session_id).or_default();
+                if agents
                     .iter()
                     .any(|agent| agent.runtime_id == item.runtime.agent_runtime_id)
                 {
@@ -604,10 +626,21 @@ impl HomeProjection {
                     // coarse durable inventory state (notably Waiting).
                     continue;
                 }
-                session.agents.push(widgets::garden::GardenAgent {
+                agents.push(widgets::agent_status::AgentStatus {
                     runtime_id: item.runtime.agent_runtime_id,
-                    phase: garden_inventory_phase(item.state),
+                    phase: inventory_agent_phase(item.state),
                 });
+            }
+            // Garden は sidebar と同じ束を描く。inventory を重ねたあとに配り直すことで、
+            // 庭とサイドバーが別々の Agent 数を出す余地を残さない。
+            if let Some(garden_sessions) = self.garden_sessions.as_mut() {
+                for session in garden_sessions.iter_mut() {
+                    session.agents = self
+                        .session_agents
+                        .get(&session.id)
+                        .cloned()
+                        .unwrap_or_default();
+                }
             }
         }
         self.daemon_runtimes = inventory.map(|inventory| {
@@ -1671,10 +1704,10 @@ pub fn right_pane_tab_at(
     widgets::session_tab::tab_at(split.right, &header, &tabs, right_column)
 }
 
-/// controller が runtime ごとに保持する phase を、Garden の表示語彙へ写す。
+/// controller が runtime ごとに保持する phase を、Agent の表示語彙へ写す。
 /// `Done` は controller が runtime event の `Ended` / `Exited` / `Interrupted` を共通化した
-/// 値なので、Garden では静止した完了 pose に写す。
-const fn garden_phase(phase: TargetPhase) -> AgentPhase {
+/// 値なので、表示側は完了として扱う（Garden では静止した完了 pose）。
+const fn agent_phase(phase: TargetPhase) -> AgentPhase {
     match phase {
         TargetPhase::Absent => AgentPhase::Absent,
         TargetPhase::Ready => AgentPhase::Ready,
@@ -1686,7 +1719,7 @@ const fn garden_phase(phase: TargetPhase) -> AgentPhase {
 
 /// Coarse fallback used when a runtime exists in the latest daemon inventory
 /// but this TUI has not observed a runtime-local phase push for it yet.
-const fn garden_inventory_phase(state: AgentRuntimeInventoryState) -> AgentPhase {
+const fn inventory_agent_phase(state: AgentRuntimeInventoryState) -> AgentPhase {
     match state {
         AgentRuntimeInventoryState::Reserved => AgentPhase::Ready,
         AgentRuntimeInventoryState::Live => AgentPhase::Running,
@@ -2112,7 +2145,11 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
 }
 
 fn home_row_height(row: Selection) -> usize {
-    usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
+    if matches!(row, Selection::Target(Target::Session(_))) {
+        SESSION_ROW_LINES
+    } else {
+        1
+    }
 }
 
 /// Row height accounting for the inline create form. When the `+ new session` row
@@ -2193,6 +2230,7 @@ fn home_failed_row_lines(
         return vec![
             first,
             widgets::pad_to_width(&Style::new().dim().paint(&detail), width),
+            widgets::pad_to_width("", width),
         ];
     }
     let tag = Role::Danger.style().dim().paint("failed");
@@ -2208,7 +2246,13 @@ fn home_failed_row_lines(
     let reason = Style::new()
         .dim()
         .paint(&widgets::clip_to_width(&reason, width));
-    vec![first, widgets::pad_to_width(&reason, width)]
+    // 使用できない session に Agent 行は無いが、行数は生きた session と揃える。
+    // hit-test は行数を Agent ではなく row 種別だけで決めるため（[`SESSION_ROW_LINES`]）。
+    vec![
+        first,
+        widgets::pad_to_width(&reason, width),
+        widgets::pad_to_width("", width),
+    ]
 }
 
 #[allow(clippy::too_many_lines)] // One total row renderer keeps lifecycle, badge, and viewport height composition aligned.
@@ -2263,6 +2307,7 @@ fn home_row_lines_at(
                 &format!("  {} {}", Role::Danger.style().bold().paint("✂"), label),
                 width,
             ),
+            String::new(),
             String::new(),
         ];
     }
@@ -2343,10 +2388,57 @@ fn home_row_lines_at(
         } else {
             metadata
         };
-        vec![first, widgets::pad_to_width(&metadata, width)]
+        let agents = home
+            .session_agents
+            .get(&session.id)
+            .map_or(&[][..], Vec::as_slice);
+        vec![
+            first,
+            widgets::pad_to_width(&metadata, width),
+            sidebar_agent_line(agents, width, selected, current_marker, inactive),
+        ]
     } else {
         vec![first]
     }
+}
+
+/// session 行の 3 行目: その session に属する Agent の状態。
+///
+/// 記号は Agent 1 体につき 1 つで、注意を要する順に並ぶ（[`widgets::agent_status`]）。
+/// Garden の plot と同じ語彙・同じ順序なので、庭で見た並びがそのまま sidebar でも読める。
+/// Agent を 1 体も持たない session は [`UNREPORTED`] を出し、「0 体」と「まだ観測して
+/// いない」を同じ空行に潰さない。
+///
+/// 色は phase そのものの情報なので、cursor 行では落とさない。cursor でない Switch 行
+/// （`inactive`）だけを、2 行目の Git 列と同じ規則で行ごと沈める。
+fn sidebar_agent_line(
+    agents: &[widgets::agent_status::AgentStatus],
+    width: usize,
+    selected: bool,
+    current: bool,
+    inactive: bool,
+) -> String {
+    let icon = Style::new().dim().paint(&AGENT_ICON.to_string());
+    let prefix = format!(
+        "{} {icon} ",
+        home_session_continuation_marker(selected, current)
+    );
+    let content_width = width.saturating_sub(widgets::display_width(&prefix));
+    let content = if agents.is_empty() {
+        widgets::clip_to_width(
+            &Style::new().dim().paint(&UNREPORTED.to_string()),
+            content_width,
+        )
+    } else {
+        widgets::agent_status::status_line(agents, content_width)
+    };
+    let line = format!("{prefix}{content}");
+    let line = if inactive {
+        widgets::dim_ansi(&line)
+    } else {
+        line
+    };
+    widgets::pad_to_width(&line, width)
 }
 
 fn resume_label(projection: ProviderResumeProjection) -> Option<&'static str> {
@@ -2633,14 +2725,15 @@ mod tests {
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
         DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession, SIDECAR_GUTTER,
-        SidebarDiffColumns, TerminalViewProjection, Workspace, abnormal_daemon_speech,
-        create_skeleton_lines, feedback_label, format_memory, garden_click_at, garden_fits,
-        garden_frame, garden_tick, health_badge, health_reason_label, home_header_action_at,
-        home_header_layout, home_left_pane, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, right_pane_tab_at, short_id, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap,
+        LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession, SESSION_ROW_LINES,
+        SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED, Workspace,
+        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
+        garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
+        home_header_action_at, home_header_layout, home_left_pane, home_row_height,
+        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
+        pane_tab_label, pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
+        right_pane_tab_at, short_id, sidebar_agent_line, sidebar_metadata, sidecar_labels,
+        terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -2902,6 +2995,297 @@ mod tests {
     }
 
     /// The summary counts each session exactly once under the documented
+    /// session 行は「まとめ / 変更履歴 / Agent」の 3 行で、3 行目がその session に
+    /// 属する Agent の状態を述べる。Agent の数で行数を変えないので、`+ new session`
+    /// の位置も pointer の hit-test も Agent の有無に左右されない。
+    #[test]
+    fn a_session_row_states_its_agents_on_a_third_line() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        for phase in [
+            AgentPhase::Waiting,
+            AgentPhase::Running,
+            AgentPhase::Running,
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime_ref(workspace, session),
+                    phase,
+                }),
+            );
+        }
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        );
+
+        let rows = home_row_lines_at(
+            LEFT_WIDTH,
+            &home,
+            Selection::Target(Target::Session(session)),
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        assert_eq!(rows.len(), SESSION_ROW_LINES);
+        assert!(strip(&rows[0]).contains("builder"), "{:?}", strip(&rows[0]));
+        assert!(strip(&rows[1]).contains("now"), "{:?}", strip(&rows[1]));
+        // Agent 1 体につき記号 1 つ。waiting が先頭に来る（注意順）。
+        let agents = strip(&rows[2]);
+        assert!(agents.contains(AGENT_ICON), "{agents:?}");
+        assert!(agents.contains("◆ ● ●"), "{agents:?}");
+        assert!(agents.contains("1 wait · 2 run"), "{agents:?}");
+        assert!(
+            rows.iter()
+                .all(|line| widgets::display_width(line) == LEFT_WIDTH)
+        );
+    }
+
+    /// session 行に属さない runtime は Agent 行に混ぜない。workspace root の Agent と、
+    /// 表示中でない session の Agent が他の session の行数に足されると、その行の記号列も
+    /// pointer の hit-test も嘘になる。
+    #[test]
+    fn runtimes_outside_the_visible_session_rows_join_no_agent_line() {
+        let workspace = WorkspaceId::new();
+        let shown = SessionId::new();
+        let hidden = SessionId::new();
+        let mut state = AppState::home(workspace, vec![shown, hidden]);
+        let root = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+            None,
+        )
+        .expect("a root runtime owns a root terminal");
+        for runtime in [root, runtime_ref(workspace, hidden)] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime,
+                    phase: AgentPhase::Running,
+                }),
+            );
+        }
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime_ref(workspace, shown),
+                phase: AgentPhase::Running,
+            }),
+        );
+        // 投影する row は 1 件だけ。root runtime と、行を持たない session の runtime は
+        // どの束にも入らない。
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(shown, "builder", "/work/builder")],
+        );
+        assert_eq!(home.session_agents.len(), 1);
+        assert_eq!(home.session_agents[&shown].len(), 1);
+    }
+
+    /// Agent を 1 体も持たない session でも行は残り、`—` で「いない」と言う。空行に
+    /// 潰すと、Agent がいないのか描き損ねたのかを読者が区別できない。
+    #[test]
+    fn a_session_without_agents_says_so_instead_of_leaving_a_blank_line() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "quiet", "/work/quiet")],
+        );
+        let rows = home_row_lines_at(
+            LEFT_WIDTH,
+            &home,
+            Selection::Target(Target::Session(session)),
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        assert_eq!(rows.len(), SESSION_ROW_LINES);
+        let agents = strip(&rows[2]);
+        assert!(
+            agents.contains(&format!("{AGENT_ICON} {UNREPORTED}")),
+            "{agents:?}"
+        );
+    }
+
+    /// 使用できない session（`failed` / 削除中）も同じ 3 行を占める。行数を row 種別
+    /// だけで決める controller の hit-test と食い違わせないため。
+    #[test]
+    fn unusable_session_rows_keep_the_three_line_footprint() {
+        let workspace = WorkspaceId::new();
+        let failed = SessionId::new();
+        let removing = SessionId::new();
+        let state = AppState::home(workspace, vec![failed, removing]);
+        let mut failed_row = projected_session(failed, "broken", "/work/broken");
+        failed_row.lifecycle = usagi_core::domain::session_lifecycle::SessionLifecycle::Failed;
+        failed_row.failure_summary = Some("worktree missing".to_owned());
+        let mut removing_row = projected_session(removing, "going", "/work/going");
+        removing_row.removing = true;
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[failed_row, removing_row],
+        );
+        for session in [failed, removing] {
+            let rows = home_row_lines_at(
+                LEFT_WIDTH,
+                &home,
+                Selection::Target(Target::Session(session)),
+                SidebarDiffColumns::default(),
+                PR_RESERVE_WIDTH,
+                now(),
+            );
+            assert_eq!(rows.len(), SESSION_ROW_LINES);
+            assert_eq!(
+                rows.len(),
+                home_row_height(Selection::Target(Target::Session(session)))
+            );
+        }
+    }
+
+    /// sidebar の agent 行と Garden の plot は同じ束を読む。片方だけが inventory を
+    /// 重ねると、同じ session の Agent 数が画面の 2 か所で食い違う。
+    #[test]
+    fn the_sidebar_and_the_garden_report_the_same_agents() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let waiting = runtime_ref(workspace, session);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: waiting.clone(),
+                phase: AgentPhase::Waiting,
+            }),
+        );
+        let live = runtime_ref(workspace, session);
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                AgentRuntimeInventoryItem {
+                    runtime: waiting.clone(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                },
+                AgentRuntimeInventoryItem {
+                    runtime: live.clone(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                },
+            ],
+            resumable: Vec::new(),
+        };
+        let rows = &[projected_session(session, "builder", "/work/builder")];
+        let sidebar = HomeProjection::from_state(&state, "atlas", Path::new("/work"), rows)
+            .with_agent_inventory(Some(&inventory));
+        // inventory は runtime-local な Waiting を Live へ潰さず、未知の 1 体だけ足す。
+        assert_eq!(sidebar.session_agents[&session].len(), 2);
+        let agents = strip(&sidebar_agent_line(
+            &sidebar.session_agents[&session],
+            LEFT_WIDTH,
+            false,
+            false,
+            false,
+        ));
+        assert!(agents.contains("1 wait · 1 run"), "{agents:?}");
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let garden = HomeProjection::from_state(&state, "atlas", Path::new("/work"), rows)
+            .with_agent_inventory(Some(&inventory));
+        assert_eq!(
+            garden.garden_sessions.as_ref().expect("garden")[0].agents,
+            garden.session_agents[&session]
+        );
+        assert_eq!(garden.session_agents, sidebar.session_agents);
+    }
+
+    /// cursor でない Switch 行は 2 行目の Git 列と同じ規則で行ごと沈め、cursor 行の
+    /// phase 色は落とさない（色そのものが「待っている」という情報である）。
+    #[test]
+    fn only_the_uncursored_switch_row_dims_its_agent_line() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime_ref(workspace, session),
+                phase: AgentPhase::Waiting,
+            }),
+        );
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        );
+        let agents = home.session_agents[&session].clone();
+        // cursor 行（selected）は phase 色をそのまま保つ。
+        let cursor = sidebar_agent_line(&agents, LEFT_WIDTH, true, false, false);
+        assert!(cursor.contains(&Role::Warning.style().bold().paint("◆")));
+        // 同じ内容でも、cursor でない Switch 行は行ごと沈める。
+        let bright = sidebar_agent_line(&agents, LEFT_WIDTH, false, false, false);
+        let inactive = sidebar_agent_line(&agents, LEFT_WIDTH, false, false, true);
+        assert_ne!(bright, inactive);
+        assert_eq!(strip(&bright), strip(&inactive));
+        assert!(!bright.starts_with("\u{1b}[2m"));
+        assert!(inactive.starts_with("\u{1b}[2m"));
+    }
+
+    /// 狭い sidebar でも桁を溢れさせず、記号列（何体がどの phase か）を要約より
+    /// 優先して残す。
+    #[test]
+    fn a_narrow_sidebar_keeps_the_agent_glyphs_and_drops_their_summary() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        for phase in [AgentPhase::Waiting, AgentPhase::Running] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime_ref(workspace, session),
+                    phase,
+                }),
+            );
+        }
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        );
+        let agents = home.session_agents[&session].clone();
+        for width in 0..=LEFT_WIDTH {
+            let line = sidebar_agent_line(&agents, width, false, false, false);
+            assert_eq!(widgets::display_width(&line), width, "width {width}");
+        }
+        let narrow = strip(&sidebar_agent_line(&agents, 10, false, false, false));
+        assert!(narrow.contains("◆ ●"), "{narrow:?}");
+        assert!(!narrow.contains("wait"), "{narrow:?}");
+    }
+
     /// precedence, and never reports a finished or interrupted runtime as a
     /// failure — only a `Failed` lifecycle is a failure.
     #[test]
@@ -2980,9 +3364,13 @@ mod tests {
             .iter()
             .position(|line| strip(line).contains("run 1"))
             .expect("session state row");
+        // session 行の Agent 行も同じ Agent glyph を使うため、mascot sidecar の
+        // concurrency 行は state 行より下だけを探す。
         let concurrency_row = with_metrics
             .iter()
+            .skip(state_row)
             .position(|line| strip(line).contains(AGENT_ICON))
+            .map(|offset| state_row + offset)
             .expect("agent concurrency row");
         let metrics_row = with_metrics
             .iter()
@@ -3862,7 +4250,8 @@ mod tests {
             phase: AgentPhase::Running,
         }));
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        assert!(text.contains("1 run · 1 wait"));
+        // 注意順（waiting が先）で数え上げ、Garden と sidebar が同じ言葉を使う。
+        assert!(text.contains("1 wait · 1 run"), "{text}");
         assert!(!text.contains("no agents"));
     }
 
@@ -3883,7 +4272,7 @@ mod tests {
             (AgentRuntimeInventoryState::Reclaimed, AgentPhase::Exited),
         ];
         for (state, expected) in cases {
-            assert_eq!(super::garden_inventory_phase(state), expected);
+            assert_eq!(super::inventory_agent_phase(state), expected);
         }
     }
 

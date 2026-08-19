@@ -11,6 +11,7 @@
 //! それらが共通して使うテキスト幅の測定・切り詰め・折り返しと、相対時刻の表記の
 //! プリミティブである。
 
+pub mod agent_status;
 pub mod garden;
 pub mod icon;
 pub mod live_terminal;
