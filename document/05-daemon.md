@@ -500,7 +500,7 @@ seamless に保てなかった理由を示す。`daemon stop` は rollover と�
 | platform | supervisor | 定義の置き場所 | login 起動 | 異常終了後 |
 |---|---|---|---|---|
 | macOS | launchd（LaunchAgent） | `~/Library/LaunchAgents/com.usagi.daemon.plist` | `RunAtLoad` | `KeepAlive` |
-| Linux | systemd（**user** unit） | `<config dir>/systemd/user/usagi-daemon.service` | `WantedBy=default.target` | `Restart=on-failure` |
+| Linux | systemd（**user** unit。systemd 240 以降） | `<config dir>/systemd/user/usagi-daemon.service` | `WantedBy=default.target` | `Restart=on-failure` |
 | その他 | なし | — | — | — |
 
 Linux が system unit ではなく **user unit** なのは、daemon が 1 人の利用者の PTY と Agent child を所有し、
@@ -516,7 +516,23 @@ Linux の user unit は既定でログアウト時に停止する。ログアウ
 `loginctl enable-linger <user>` を利用者が別途実行する（特権を要するため usagi は実行しない）。
 
 install-service は supervisor の定義に **data home の組（`USAGI_HOME` の base と `USAGI_RUNTIME_MODE` の
-mode）だけ**を書き、token・credential・session state は書かない。
+mode）と workspace root だけ**を書き、token・credential・session state は書かない。
+
+### 起動 directory を pin する
+
+supervisor は install した shell の working directory を引き継がない。既定は systemd user unit が利用者の
+home、launchd が `/` で、どちらも**利用者が選んだ workspace ではない**。daemon が束ねる workspace は
+起動時 directory から決まる（[単一 daemon の 2 段 fence](#単一-daemon-の-2-段-fence)）ため、install-service は
+install した process が解決した workspace root を定義へ書き込む（systemd は `WorkingDirectory=`、launchd は
+`WorkingDirectory` key）。
+
+pin しない場合の失敗は分かりにくい。workspace root が home directory になると、workspace fence
+（`<workspace>/.usagi/daemon/daemon.lock`）と単一インスタンス lock（`<data-dir>/daemon/daemon.lock`）が
+既定の `~/.usagi` data home のもとで**同一ファイル**を指す。daemon は前者を取った後に後者を取れず、
+自分の起動を「daemon already running」として拒否し続ける。client からの cold start は
+`lifecycle_command` が同じ pin を行っており、supervised start もこれに揃える。
+
+workspace root が UTF-8 で綴れない場合は、base と同じく lossy 変換せず install を拒否する。
 
 launchd も systemd も、install した shell の環境ではなく **supervisor 自身の環境**で service を起動する。
 この組を書かない定義は supervise される daemon に data home を空の環境から再解決させてしまい、install した
@@ -525,9 +541,13 @@ directory を指すため、log と daemon の mode が食い違う）。この�
 child に渡すもの（[Agent child の data home](#agent-child-の-data-home)）と同じである。base が UTF-8 で
 綴れない場合は lossy 変換せず install を拒否する。
 
-systemd unit では、`ExecStart` と `Environment=` の値のように systemd が shell 風に分割する field を quote し、
-`%` を `%%` へ escape する。quote しない path に空白が含まれると service は誤った argv で起動し、escape しない
-`%` は unit specifier として展開される。
+systemd unit では、`ExecStart` / `WorkingDirectory` / `Environment=` のように systemd が shell 風に分割する
+field を quote し、`%` を `%%` へ escape する。quote しない path に空白が含まれると service は誤った argv で
+起動し、escape しない `%` は unit specifier として展開される。`Environment=` は
+`systemd.exec(5)` の記載どおり **`NAME=value` 全体**を quote する（値だけを quote する形に依存しない）。
+
+unit が systemd に受理されることは、`systemd-analyze verify` に実際の unit を渡す test で確認する。他の test は
+自分が生成した文字列との比較なので、systemd が拒否する directive や quote 形式を通してしまう。
 
 supervisor は process supervisor であり、managed session や Agent の権威を持たない。手動の `start` と
 supervisor が競合しても、active role の `serve` が保持する `daemon.lock` がその data directory の active を

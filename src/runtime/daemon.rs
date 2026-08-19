@@ -9832,23 +9832,26 @@ const SERVICE_SUPERVISOR: &str = "no";
 ///
 /// macOS uses a `LaunchAgent`, Linux a systemd **user** unit. Both receive the
 /// [`paths::DataHome`] pair so the supervised daemon lands on the directory this
-/// process selected. Other platforms have no supported supervisor; the detached
-/// `start` path and client bootstrap keep working there.
+/// process selected, and `workspace` so it binds the workspace this process
+/// resolved instead of the supervisor's default directory. Other platforms have
+/// no supported supervisor; the detached `start` path and client bootstrap keep
+/// working there.
 fn install_service(
     executable: &std::path::Path,
     data_home: &paths::DataHome,
+    workspace: &std::path::Path,
 ) -> std::io::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        launchd::install(executable, data_home)
+        launchd::install(executable, data_home, workspace)
     }
     #[cfg(target_os = "linux")]
     {
-        systemd::install(executable, data_home)
+        systemd::install(executable, data_home, workspace)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (executable, data_home);
+        let _ = (executable, data_home, workspace);
         Err(unsupported_service())
     }
 }
@@ -9891,12 +9894,25 @@ fn run_inner(
     let daemon_dir = data_dir.join("daemon");
     let command = match command {
         CliDaemonCommand::InstallService => {
-            // The supervised service must resolve the same data home this
-            // process selected. Both launchd and systemd start it from their own
-            // environment, so the pair travels in the service definition rather
-            // than being re-derived there.
+            // The supervised service must resolve the same data home *and* the
+            // same workspace as this process. Both launchd and systemd start it
+            // from their own environment and working directory, so both travel in
+            // the service definition rather than being re-derived there.
+            //
+            // The workspace matters as much as the data home: a daemon binds the
+            // workspace its startup directory names, and a supervisor's default
+            // directory is the user's home (systemd user units) or `/` (launchd) —
+            // neither of which is the workspace anyone meant. Worse, when the
+            // workspace resolves to the home directory, the workspace fence
+            // (`<workspace>/.usagi/daemon/daemon.lock`) and the single-instance
+            // lock (`<data-dir>/daemon/daemon.lock`) name the same file under the
+            // default `~/.usagi` data home, and the daemon refuses its own start
+            // as "already running". `lifecycle_command` already pins the
+            // directory for a cold start from a client; a supervised start needs
+            // the same pin.
             let data_home = paths::DataHome::from_selected(&data_dir, paths::runtime_mode());
-            let path = install_service(&std::env::current_exe()?, &data_home)?;
+            let workspace = bound_workspace_root(&daemon_dir, std::env::current_dir()?)?;
+            let path = install_service(&std::env::current_exe()?, &data_home, &workspace)?;
             return writeln!(
                 out,
                 "{}: {} service installed ({})",
