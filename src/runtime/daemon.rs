@@ -699,21 +699,19 @@ struct RootClaudeProvisioner {
     sandbox_passthrough: bool,
 }
 impl RootClaudeProvisioner {
-    /// The policy paths this launch may carry. A session launch contributes no
-    /// universal area at all: its writable root is the own worktree, and
-    /// `TMPDIR` / `CLAUDE_CONFIG_DIR` are redirected inside it by daemon-issued
-    /// environment.
-    fn launcher_paths(&self, mode: SandboxMode) -> SandboxLauncherPaths<'_> {
-        let universal = mode != SandboxMode::Session;
+    /// The policy paths this launch may carry. Both scopes carry the same
+    /// universal areas: the agent CLI keeps its scratchpad, state and credential
+    /// caches outside the repository, and withholding them does not confine the
+    /// agent — it stops it from running at all
+    /// ([`claude_sandbox`](usagi_core::usecase::claude_sandbox)). What separates a
+    /// session launch from a root coordinator is the repository write boundary
+    /// (`launch_roots` plus `protected_root`), not these paths.
+    fn launcher_paths(&self) -> SandboxLauncherPaths<'_> {
         SandboxLauncherPaths {
             backend: self.sandbox_backend.as_deref(),
-            tmpdir: universal
-                .then_some(self.sandbox_tmpdir.as_deref())
-                .flatten(),
-            home: universal.then_some(self.sandbox_home.as_deref()).flatten(),
-            cache_dir: universal
-                .then_some(self.sandbox_cache_dir.as_deref())
-                .flatten(),
+            tmpdir: self.sandbox_tmpdir.as_deref(),
+            home: self.sandbox_home.as_deref(),
+            cache_dir: self.sandbox_cache_dir.as_deref(),
         }
     }
 }
@@ -728,7 +726,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
         let launch_roots = claude_writable_roots(mode, &working_directory);
-        let paths = self.launcher_paths(mode);
+        let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
             program: CLAUDE_PROGRAM,
@@ -791,15 +789,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             arguments,
         );
         spawn.set_sandbox_launcher(sandbox_launcher);
-        if mode == SandboxMode::Session {
-            // Public/configured values may point at shared host state. Session Claude receives
-            // daemon-owned overrides inside its own worktree, which is its sole writable root.
-            for (name, value) in session_claude_environment(&working_directory)
-                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
-            {
-                spawn.insert_daemon_environment(name, value);
-            }
-        } else {
+        if mode == SandboxMode::Root {
             insert_root_git_environment(&mut spawn);
         }
         if self.sandbox_passthrough {
@@ -837,23 +827,6 @@ fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<Pat
     } else {
         Vec::new()
     }
-}
-
-fn session_claude_environment(
-    working_directory: &Path,
-) -> Result<Vec<(EnvironmentVariableName, String)>, ()> {
-    [
-        ("TMPDIR", working_directory.to_path_buf()),
-        ("CLAUDE_CONFIG_DIR", working_directory.join(".usagi/claude")),
-    ]
-    .into_iter()
-    .map(|(name, value)| {
-        Ok((
-            EnvironmentVariableName::new(name).expect("literal environment variable name is valid"),
-            value.to_str().ok_or(())?.to_owned(),
-        ))
-    })
-    .collect()
 }
 
 /// Root providers may run the small read-only Git allowlist accepted by
@@ -15537,6 +15510,47 @@ instructions = "{instructions}"
             ]
         );
 
+        // A session launch carries the same universal policy paths a root
+        // coordinator does. Withholding them does not confine the agent to its
+        // worktree — it leaves Claude Code unable to create its fixed
+        // `/tmp/claude-<uid>` scratchpad on every tool call, and restarts it
+        // against an empty `~/.claude` (first-run flow, no settings, no
+        // permission mode) on every launch.
+        let universal = claude_sandbox_launcher(
+            usagi,
+            mode,
+            Path::new("/repo"),
+            &SandboxLauncherPaths {
+                backend: Some(Path::new("/usr/bin/sandbox-exec")),
+                tmpdir: Some(Path::new("/tmp/user")),
+                home: Some(Path::new("/home/dev")),
+                cache_dir: Some(Path::new("/cache")),
+            },
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(
+            universal.prefix,
+            [
+                "claude-sandbox",
+                "--mode",
+                "session",
+                "--protected-root",
+                "/repo",
+                "--backend",
+                "/usr/bin/sandbox-exec",
+                "--tmpdir",
+                "/tmp/user",
+                "--cache-dir",
+                "/cache",
+                "--home",
+                "/home/dev",
+                "--writable-root",
+                "/repo/.usagi/sessions/work",
+                "--",
+            ]
+        );
+
         let arguments = claude_settings_arguments(usagi).unwrap();
         assert_eq!(arguments[0], "--settings");
         let settings: serde_json::Value = serde_json::from_str(&arguments[1]).unwrap();
@@ -15550,17 +15564,6 @@ instructions = "{instructions}"
         assert_eq!(
             settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             serde_json::json!("'/opt/usagi/bin/usagi' agent-phase ready")
-        );
-
-        let environment = session_claude_environment(Path::new("/repo/.usagi/sessions/work"))
-            .unwrap()
-            .into_iter()
-            .map(|(name, value)| (name.as_str().to_owned(), value))
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(environment["TMPDIR"], "/repo/.usagi/sessions/work");
-        assert_eq!(
-            environment["CLAUDE_CONFIG_DIR"],
-            "/repo/.usagi/sessions/work/.usagi/claude"
         );
     }
 
@@ -15656,17 +15659,6 @@ instructions = "{instructions}"
         let cache = resolve_sandbox_cache_dir().unwrap();
         assert!(cache.is_absolute() && cache.is_dir());
         assert_eq!(validate_owned_directory(&cache), Ok(()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn session_claude_environment_rejects_non_utf8_worktrees() {
-        use std::os::unix::ffi::OsStringExt as _;
-
-        assert!(
-            session_claude_environment(Path::new(&std::ffi::OsString::from_vec(vec![0xff])))
-                .is_err()
-        );
     }
 
     #[test]

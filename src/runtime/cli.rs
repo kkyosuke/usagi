@@ -166,7 +166,14 @@ mod action_io {
                         return Ok(ExitCode::FAILURE);
                     }
                 };
-                match daemon::policy_client(ClientPolicy::cli()) {
+                // A lifecycle hook reports to the daemon that launched this agent, so
+                // that daemon is running by construction. Attach to it instead of
+                // taking the cold-start path: the agent runs inside a sandbox whose
+                // writable roots exclude the data home, so `bootstrap.lock` is
+                // `PermissionDenied` there and every hook would fall through to the
+                // broker and report `daemon transport is unavailable`. A per-tool-call
+                // hook must not start a daemon, and must not pay bootstrap latency.
+                match daemon::attached_client(ClientPolicy::cli()) {
                     Ok(mut client) => match client.request(request) {
                         Ok(_) => Ok(ExitCode::SUCCESS),
                         Err(error) => {
@@ -192,7 +199,14 @@ mod action_io {
                         return Ok(ExitCode::FAILURE);
                     }
                 };
-                match daemon::policy_client(ClientPolicy::cli()) {
+                // A lifecycle hook reports to the daemon that launched this agent, so
+                // that daemon is running by construction. Attach to it instead of
+                // taking the cold-start path: the agent runs inside a sandbox whose
+                // writable roots exclude the data home, so `bootstrap.lock` is
+                // `PermissionDenied` there and every hook would fall through to the
+                // broker and report `daemon transport is unavailable`. A per-tool-call
+                // hook must not start a daemon, and must not pay bootstrap latency.
+                match daemon::attached_client(ClientPolicy::cli()) {
                     Ok(mut client) => match client.request(request) {
                         Ok(_) => Ok(ExitCode::SUCCESS),
                         Err(error) => {

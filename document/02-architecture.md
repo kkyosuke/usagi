@@ -886,9 +886,15 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   session / path を名指しできない。未知 phase・malformed payload・配線外 event・credential 欠落は
   fail-closed で拒否し、request は送らない（非 0 終了）。`transcript_path` は deserialize せず file も開かない。
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
+  この報告は**すでに動いている daemon へ attach するだけ**で、bootstrap lock も daemon の cold start も
+  一切行わない。報告元は当の daemon が起動した agent であり daemon は定義上生きている一方、その agent が
+  入る sandbox の writable root は data home を含まないため、cold start 経路に入ると `bootstrap.lock` が
+  `PermissionDenied` になり、ツール呼び出しごとの hook がすべて
+  `agent phase report failed [unavailable]` で失敗する。tool 呼び出しごとに走る hook が bootstrap の
+  遅延を払わないという意味でも、attach だけが正しい。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。session の書き込みは own worktree だけに閉じ込め、root coordinator は普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  起動する。session の repository 書き込みは own worktree だけに閉じ込め、両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
@@ -934,21 +940,26 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
 - **起動固有 writable root**: session は own worktree だけであり、workspace の `.usagi`、Git common dir、
-  data home、普遍領域を追加しない。`TMPDIR` は worktree 自体、`CLAUDE_CONFIG_DIR` は
-  `<worktree>/.usagi/claude` へ daemon-issued environment で固定する。したがって sibling session、root の tracked
-  issue source、daemon durable state は path の表記や symlink alias にかかわらず read-only である。root coordinator
-  には起動固有 writable root を渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を
-  read-only に保つ。launcher は repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  data home を追加しない。したがって sibling session、root の tracked issue source、daemon durable state は
+  path の表記や symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
+  渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
+- **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)・macOS の Keychain と
-  [MDS cache](#macos-の-mds-cache)）だけを足す。
+  [MDS cache](#macos-の-mds-cache)）を**両 mode に同じだけ**足す。session と root を分けるのは上の
+  repository 書き込み境界（起動固有 writable root と保護対象 workspace）であって、agent 自身の
+  scratch / state / 認証領域ではない。この領域を session から落とすと agent は worktree に閉じるのではなく
+  **起動できない**: Claude Code は tool を実行するたびに `$TMPDIR` を無視した固定 path
+  （`/tmp/claude-<uid>/<cwd の slug>`）へ scratchpad を作るため `/tmp` が無いと全 tool 呼び出しが
+  `EPERM: operation not permitted, mkdir` になり、`~/.claude` が無いと onboarding・theme・permission mode・
+  MCP 承認が毎起動リセットされ、Keychain / MDS が無いと認証が 401 で失敗する。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
   （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
   も checkout と Git common dir の書き込みを拒否する。
-- **`TMPDIR` 伝播**: root coordinator は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
-  root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証する。session は
-  shared temporary directory を launcher policy へ渡さず、daemon-issued environment で own worktree へ上書きする。
+- **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
+  root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証し、両 mode へ
+  同じように渡す（agent child の環境変数は policy 解決に使わない）。
 - **テスト専用 seam**: `usagi_core::usecase::claude_sandbox::passthrough_requested` は、環境変数
   `USAGI_CLAUDE_SANDBOX_PASSTHROUGH=1` を見たときだけ launcher が拘束を省いて product をそのまま exec する
   ことを許す。`bwrap` を持たない Linux CI でも live 配線（launcher・`--settings`・PTY ライフサイクル）を
@@ -957,7 +968,7 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 
 #### agent state の writable root
 
-root mode の launcher は、**exec する program 自身の state directory** を `$HOME` 配下の writable root に
+launcher は、**exec する program 自身の state directory** を `$HOME` 配下の writable root に
 足す。agent CLI は自分の state / 認証キャッシュを `$HOME` 配下へ書くため（Codex は state DB
 `~/.codex/state_5.sqlite`）、これが無いと sandbox の中で起動そのものができない。grant は起動する CLI に
 追従し、他 provider の state へは広がらない。
@@ -973,12 +984,12 @@ root mode の launcher は、**exec する program 自身の state directory** �
   1 つの事実として持つ）。usagi が launch しない未知 program には state root を与えない（fail-closed）。
 - daemon 側の policy 検証も同じ program から state root を決め、保護対象 workspace（および linked worktree の
   Git common dir）と重なる構成を拒否する。
-- session mode はこの grant を使わない。writable root は own worktree だけで、state は daemon-issued
-  environment（`CLAUDE_CONFIG_DIR` / `TMPDIR`）で worktree 内へ向ける。
+- grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
+  onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
 
 #### macOS の MDS cache
 
-macOS の Keychain 検索は Module Directory Service (MDS) の cache を更新する。root mode の launcher は
+macOS の Keychain 検索は Module Directory Service (MDS) の cache を更新する。launcher は
 system 側（`/private/var/db/mds`）に加えて **per-user cache**（`<$DARWIN_USER_CACHE_DIR>/mds`）も writable
 にする。per-user 側が read-only だと `SecKeychainSearchCreateFromAttributes` が
 "A Module Directory Service error has occurred." で失敗し、agent CLI は Keychain の credential を読めない
@@ -990,11 +1001,8 @@ system 側（`/private/var/db/mds`）に加えて **per-user cache**（`<$DARWIN
 - writable にするのは `<cache>/mds` だけで、cache root 全体ではない。daemon 側の policy gate は
   他の writable root と同じ規則（absolute canonical directory・owner・保護対象 workspace と
   Git common dir の非重複）で cache root を検証する。
-- session mode はこの grant を使わない（writable root は own worktree だけ）。macOS 以外には MDS が
-  無いため cache root を渡さない。session の agent CLI は `CLAUDE_CONFIG_DIR` が worktree 内へ向いて
-  いるため、認証情報もその config directory（= writable root の中）に置き、OS の credential store を
-  writable にする必要がない。したがって session の launcher が Keychain / MDS へ書けないことは、
-  root の 401 とは別の話である（session の未認証は `Not logged in · Please run /login` になる）。
+- grant は両 mode に効く。session の agent CLI も OS の credential store から認証するため、ここが
+  read-only だと root と同じ 401 で起動できない。macOS 以外には MDS が無いため cache root を渡さない。
 
 #### `/dev` の device node
 
