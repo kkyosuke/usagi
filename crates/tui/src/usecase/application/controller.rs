@@ -1552,6 +1552,13 @@ pub(crate) const SIDEBAR_CHROME_ROWS: usize = 2;
 /// Desired Home sidebar left-pane width. The split clamps it to leave the right
 /// pane at least one column. Mirrors `views::workspace`'s `LEFT_WIDTH`.
 pub(crate) const SIDEBAR_LEFT_WIDTH: usize = 36;
+/// Lines one session row occupies: its summary, its change history, and its
+/// Agent states. The count never varies with how many Agents a session has —
+/// this hit-test only knows runtime-local phases, while the view also folds in
+/// the daemon Agent inventory, so an Agent-dependent height would drift by a
+/// row and land clicks on the wrong session. Mirrors `views::workspace`'s
+/// `SESSION_ROW_LINES`, which asserts the two agree at compile time.
+pub(crate) const SIDEBAR_SESSION_ROW_LINES: usize = 3;
 /// Rows the foot-of-sidebar mascot reserves in the controller Home: three rabbit
 /// lines and one trailing gap. The controller frame never renders a speech
 /// bubble, so the reservation is constant whenever the mascot is shown.
@@ -1573,10 +1580,11 @@ fn sidebar_mascot_rows(left: usize, body_capacity: usize) -> usize {
 }
 
 /// Scroll rows the sidebar viewport uses to weight one row: a session spans its
-/// identity and metadata lines, and the `+ new session` action is a single line.
+/// summary, change-history, and Agent lines, and the `+ new session` action is a
+/// single line.
 fn sidebar_row_height(row: Selection) -> usize {
     match row {
-        Selection::Target(Target::Session(_)) => 2,
+        Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
         // Root is not a Home row. Treat a stale/private synthetic value as one
         // line so geometry remains total without reintroducing a divider.
         Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
@@ -1584,10 +1592,10 @@ fn sidebar_row_height(row: Selection) -> usize {
 }
 
 /// Body lines a row actually draws: a session identity row carries a metadata
-/// row, while the action row is a single line.
+/// row and an Agent row, while the action row is a single line.
 fn sidebar_row_content_lines(row: Selection) -> usize {
     match row {
-        Selection::Target(Target::Session(_)) => 2,
+        Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
         Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
     }
 }
@@ -4973,9 +4981,10 @@ mod tests {
         let session = SessionId::new();
         let mut state = sized_home(workspace, vec![session], 100, 30);
 
-        // Content begins after the two chrome rows: the session's two lines
-        // (rows 2-3), then the action row (row 4). There is no `main` row or
-        // root divider. Each click moves the navigation cursor to that row.
+        // Content begins after the two chrome rows: the session's three lines
+        // (summary, change history, Agents — rows 2-4), then the action row
+        // (row 5). There is no `main` row or root divider. Each click moves the
+        // navigation cursor to that row.
         assert_eq!(
             click_at(&mut state, 5, 2, 0),
             Selection::Target(Target::Session(session))
@@ -4984,7 +4993,11 @@ mod tests {
             click_at(&mut state, 5, 3, 1_000),
             Selection::Target(Target::Session(session))
         );
-        assert_eq!(click_at(&mut state, 5, 4, 2_000), Selection::NewSession);
+        assert_eq!(
+            click_at(&mut state, 5, 4, 2_000),
+            Selection::Target(Target::Session(session))
+        );
+        assert_eq!(click_at(&mut state, 5, 5, 3_000), Selection::NewSession);
 
         // A click below every rendered row selects nothing new: the cursor stays
         // where it last landed.
@@ -5031,16 +5044,17 @@ mod tests {
         assert_eq!(state.overlay(), None);
         assert_eq!(state.selected(), Selection::Target(Target::Session(active)));
 
-        // The background session's metadata is row 5. Its three-cell badge is
-        // flush right in the 36-cell sidebar, so the last cell must open that
-        // session's PRs without changing the active sidebar selection or
-        // contributing to a double-click.
+        // The background session's metadata is row 6 (two chrome rows, the active
+        // session's three lines, then this session's summary line). Its
+        // three-cell badge is flush right in the 36-cell sidebar, so the last
+        // cell must open that session's PRs without changing the active sidebar
+        // selection or contributing to a double-click.
         assert_eq!(
             update(
                 &mut state,
                 AppEvent::Pointer {
                     column: 35,
-                    row: 5,
+                    row: 6,
                     at: std::time::Duration::ZERO,
                 },
             ),
@@ -5154,14 +5168,15 @@ mod tests {
             let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         }
         assert_eq!(state.selected(), Selection::NewSession);
-        // The short viewport scrolled to the tail: the last visible session and the
-        // action row. The mascot reserves the sidebar foot, so only the top three
-        // body rows are clickable and the action sits on the last of them (row 4).
+        // The short viewport scrolled to the tail. The mascot reserves the sidebar
+        // foot, leaving three clickable body rows — not enough for a session's
+        // three lines plus the action, so the frame shows the action alone on the
+        // first of them (row 2).
         let hit = state
-            .sidebar_selection_at(5, 4)
+            .sidebar_selection_at(5, 2)
             .expect("the tail row is addressable once scrolled");
         assert_eq!(hit, Selection::NewSession);
-        let _ = click_at(&mut state, 5, 4, 0);
+        let _ = click_at(&mut state, 5, 2, 0);
         assert_eq!(state.selected(), Selection::NewSession);
     }
 
@@ -5205,7 +5220,8 @@ mod tests {
     #[test]
     fn non_session_pointer_hits_invalidate_the_pending_session_press() {
         let (workspace, session, _) = ids();
-        for (column, row) in [(5, 4), (5, 8), (5, 1), (90, 4)] {
+        // `+ new session`（row 5）、行の外、chrome 行、sidebar の外。
+        for (column, row) in [(5, 5), (5, 8), (5, 1), (90, 4)] {
             let mut state = sized_home(workspace, vec![session], 100, 30);
             let _ = click_at(&mut state, 5, 2, 1_000);
             let _ = click_at(&mut state, column, row, 1_100);
@@ -5220,7 +5236,8 @@ mod tests {
         let sessions: Vec<SessionId> = (0..6).map(|_| SessionId::new()).collect();
         let mut other = sized_home(workspace, sessions[..2].to_vec(), 100, 30);
         let _ = click_at(&mut other, 5, 2, 1_000);
-        let _ = click_at(&mut other, 5, 4, 1_100);
+        // 2 件目の session の先頭行。3 行 footprint なので row 5 から始まる。
+        let _ = click_at(&mut other, 5, 5, 1_100);
         assert!(matches!(other.route(), Route::Home(HomeMode::Switch)));
 
         let mut scrolled = sized_home(workspace, sessions.clone(), 100, 14);
