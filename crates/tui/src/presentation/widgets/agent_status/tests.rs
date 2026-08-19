@@ -78,8 +78,10 @@ fn ordering_is_attention_then_runtime_identity() {
     assert_eq!(ordered(&reversed), ordered(&shuffled));
 }
 
+/// 閉じた phase 語彙のすべてに、1 桁の記号・短いラベル・色を用意する。1 つでも
+/// 抜けると、その phase の Agent だけ列がずれるか無色で出る。
 #[test]
-fn every_phase_has_a_single_column_glyph_and_a_short_label() {
+fn every_phase_has_a_single_column_glyph_a_short_label_and_a_colour() {
     for phase in AgentPhase::ALL {
         assert_eq!(
             display_width(glyph(phase)),
@@ -89,6 +91,9 @@ fn every_phase_has_a_single_column_glyph_and_a_short_label() {
         let label = short_label(phase);
         assert!(!label.is_empty());
         assert!(display_width(label) <= 5, "{phase:?} の label が長すぎる");
+        // 色を載せても表示桁は変わらない（ANSI は桁を持たない）。
+        let painted = style(phase).paint(glyph(phase));
+        assert_eq!(display_width(&painted), 1, "{phase:?}");
     }
 }
 
