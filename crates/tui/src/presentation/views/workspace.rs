@@ -221,6 +221,10 @@ pub struct HomeProjection {
     /// only a fallback for identities absent from this set, so a coarse `Live`
     /// row cannot overwrite a precise `Ready`/`Waiting` report.
     observed_agent_runtimes: BTreeSet<AgentRuntimeId>,
+    /// Concrete runtime phases grouped by session for the dedicated third
+    /// sidebar row. Unlike `session_phases`, this does not collapse concurrent
+    /// Agents into one state.
+    session_agents: BTreeMap<SessionId, BTreeMap<AgentRuntimeId, AgentPhase>>,
     feedback: Option<Feedback>,
     mascot_tick: u64,
     /// Presentation-only message. Runtime state currently supplies `None`; this
@@ -282,7 +286,7 @@ pub struct HomeProjection {
     create_draft: Option<CreateDraft>,
     create_role: Option<String>,
     /// Name of a create request the daemon is still fulfilling. Present exactly
-    /// while a create worker owns the port; the sidebar draws it as a two-line
+    /// while a create worker owns the port; the sidebar draws it as a three-line
     /// loading skeleton just above `+ new session` (`document/03-tui.md`) until
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
@@ -389,10 +393,11 @@ impl HomeProjection {
             .map(|session| (session.id, state.phase_for(Target::Session(session.id))))
             .collect::<BTreeMap<_, _>>();
         let session_states = session_state_counts(&sessions, &session_phases);
-        let observed_agent_runtimes = state
-            .runtimes()
-            .iter()
-            .map(|runtime| runtime.runtime.agent_runtime_id)
+        let session_agents = session_agent_phases(state, &sessions);
+        let observed_agent_runtimes = session_agents
+            .values()
+            .flat_map(BTreeMap::keys)
+            .copied()
             .collect();
         // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
         // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
@@ -435,6 +440,7 @@ impl HomeProjection {
             session_states,
             session_phases,
             observed_agent_runtimes,
+            session_agents,
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
@@ -643,6 +649,12 @@ impl HomeProjection {
                 let Some(session_id) = item.runtime.session_id else {
                     continue;
                 };
+                if let Some(agents) = self.session_agents.get_mut(&session_id) {
+                    agents.insert(
+                        item.runtime.agent_runtime_id,
+                        garden_inventory_phase(item.state),
+                    );
+                }
                 let Some(phase) = self.session_phases.get_mut(&session_id) else {
                     continue;
                 };
@@ -1436,6 +1448,26 @@ fn session_state_counts(
     SessionStateCounts::tally(&classified)
 }
 
+fn session_agent_phases(
+    state: &AppState,
+    sessions: &[ProjectedSession],
+) -> BTreeMap<SessionId, BTreeMap<AgentRuntimeId, AgentPhase>> {
+    let mut grouped = sessions
+        .iter()
+        .map(|session| (session.id, BTreeMap::new()))
+        .collect::<BTreeMap<_, _>>();
+    for runtime in state.runtimes() {
+        if let Some(agents) = runtime
+            .runtime
+            .session_id
+            .and_then(|session| grouped.get_mut(&session))
+        {
+            agents.insert(runtime.runtime.agent_runtime_id, runtime.phase);
+        }
+    }
+    grouped
+}
+
 /// The mascot sidecar line summarising session state, or `None` when there is
 /// nothing to summarise.
 ///
@@ -2083,7 +2115,7 @@ fn home_viewport_start(
 /// Rows the create loading skeleton occupies, matching a session row's height so
 /// the daemon's landed `session.created` row replaces it without shifting the
 /// sidebar.
-const CREATE_SKELETON_ROWS: usize = 2;
+const CREATE_SKELETON_ROWS: usize = 3;
 
 /// Two-line loading skeleton for a create the daemon is still fulfilling, drawn
 /// just above `+ new session` (`document/03-tui.md`). The activity glyph and the
@@ -2111,11 +2143,16 @@ fn create_skeleton_lines(width: usize, name: &str, tick: u64) -> Vec<String> {
             &format!("  {}", widgets::shimmer_text_with("creating…", frame, wave)),
             width,
         ),
+        widgets::pad_to_width("", width),
     ]
 }
 
 fn home_row_height(row: Selection) -> usize {
-    usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
+    if matches!(row, Selection::Target(Target::Session(_))) {
+        3
+    } else {
+        1
+    }
 }
 
 /// Row height accounting for the inline create form. When the `+ new session` row
@@ -2195,7 +2232,7 @@ fn home_failed_row_lines(
     let reason = Style::new()
         .dim()
         .paint(&widgets::clip_to_width(&reason, width));
-    vec![first, widgets::pad_to_width(&reason, width)]
+    vec![first, widgets::pad_to_width(&reason, width), String::new()]
 }
 
 #[allow(clippy::too_many_lines)] // One total row renderer keeps lifecycle, badge, and viewport height composition aligned.
@@ -2251,6 +2288,7 @@ fn home_row_lines_at(
                 width,
             ),
             String::new(),
+            String::new(),
         ];
     }
     let current = target.and_then(Target::session_id) == home.active;
@@ -2286,19 +2324,7 @@ fn home_row_lines_at(
     };
     if let Some(session) = session {
         let modified = widgets::relative_session_time(session.last_modified, now);
-        let mut facts = Vec::new();
-        if !session
-            .agent_resume
-            .is_some_and(|resume| resume.interrupted)
-            && let Some(phase) = home.session_phases.get(&session.id).copied()
-            && let Some(label) = sidebar_agent_phase_label(phase)
-        {
-            facts.push(label);
-        }
-        if let Some(resume) = session.agent_resume.and_then(resume_label) {
-            facts.push(resume.to_owned());
-        }
-        facts.push(modified);
+        let facts = [modified];
         let metadata = format!(
             "{} {}",
             home_session_continuation_marker(selected, current),
@@ -2333,42 +2359,96 @@ fn home_row_lines_at(
         } else {
             metadata
         };
-        vec![first, widgets::pad_to_width(&metadata, width)]
+        let agent = sidebar_agent_line(home, session, selected, current, width);
+        vec![first, widgets::pad_to_width(&metadata, width), agent]
     } else {
         vec![first]
     }
 }
 
-/// Compact, colour-coded Agent state for a session's sidebar continuation row.
-/// `Absent` stays silent, preserving rows that have never hosted an Agent.
-fn sidebar_agent_phase_label(phase: TargetPhase) -> Option<String> {
-    const WIDTH: usize = 9;
-    match phase {
-        TargetPhase::Absent => None,
-        TargetPhase::Ready => Some(
-            Style::new()
-                .dim()
-                .paint(&widgets::pad_to_width("☾ ready", WIDTH)),
+fn sidebar_agent_line(
+    home: &HomeProjection,
+    session: &ProjectedSession,
+    selected: bool,
+    current: bool,
+    width: usize,
+) -> String {
+    let agents = home.session_agents.get(&session.id);
+    let count = |matches: fn(AgentPhase) -> bool| {
+        agents
+            .into_iter()
+            .flat_map(|agents| agents.values())
+            .filter(|phase| matches(**phase))
+            .count()
+    };
+    let segments = [
+        (
+            count(|phase| phase == AgentPhase::Waiting),
+            "◆",
+            "waiting",
+            Role::Warning.style().bold(),
         ),
-        TargetPhase::Running => Some(
-            Role::Success
-                .style()
-                .bold()
-                .paint(&widgets::pad_to_width("▶ running", WIDTH)),
+        (
+            count(|phase| phase == AgentPhase::Running),
+            "▶",
+            "running",
+            Role::Success.style().bold(),
         ),
-        TargetPhase::Waiting => Some(
-            Role::Warning
-                .style()
-                .bold()
-                .paint(&widgets::pad_to_width("◆ waiting", WIDTH)),
+        (
+            count(|phase| phase == AgentPhase::Interrupted),
+            "↻",
+            "interrupted",
+            Role::Warning.style().bold(),
         ),
-        TargetPhase::Done => Some(
-            Role::Accent
-                .style()
-                .bold()
-                .paint(&widgets::pad_to_width("✓ done", WIDTH)),
+        (
+            count(|phase| phase == AgentPhase::Ready),
+            "☾",
+            "ready",
+            Style::new().dim(),
         ),
+        (
+            count(|phase| matches!(phase, AgentPhase::Ended | AgentPhase::Exited)),
+            "✓",
+            "done",
+            Role::Accent.style().bold(),
+        ),
+        (
+            count(|phase| phase == AgentPhase::Absent),
+            "·",
+            "idle",
+            Style::new().dim(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(count, _, _, _)| *count > 0)
+    .map(|(count, glyph, label, style)| style.paint(&format!("{glyph}{count} {label}")))
+    .collect::<Vec<_>>();
+    let resume = session.agent_resume.and_then(resume_label);
+    let mut summary = if segments.is_empty() {
+        resume.map_or_else(
+            || Style::new().dim().paint("· no agents"),
+            |resume| Style::new().dim().paint(resume),
+        )
+    } else {
+        segments.join(" · ")
+    };
+    if !segments.is_empty()
+        && let Some(resume) = resume
+    {
+        summary.push_str(" · ");
+        summary.push_str(&Style::new().dim().paint(resume));
     }
+    let marker = home_session_continuation_marker(selected, current);
+    let line = widgets::clip_to_width(&format!("{marker} {summary}"), width);
+    let inactive = home.mode == HomeMode::Switch && !selected;
+    widgets::pad_to_width(
+        &if inactive {
+            widgets::dim_ansi(&line)
+        } else {
+            line
+        },
+        width,
+    )
 }
 
 fn resume_label(projection: ProviderResumeProjection) -> Option<&'static str> {
@@ -2459,7 +2539,7 @@ fn create_session_input_lines(
 /// v1-compatible sidebar marker with explicit precedence.
 ///
 /// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
-/// in Closeup its active two-line stack is green. The action row remains
+/// in Closeup its active three-line stack is green. The action row remains
 /// chevron-free even while it owns the Switch cursor.
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
@@ -2474,7 +2554,7 @@ fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     " ".to_string()
 }
 
-/// The second row of a session carries the same coloured rail as its identity row.
+/// Both continuation rows of a session carry the same coloured rail as its identity row.
 fn home_session_continuation_marker(selected: bool, current: bool) -> String {
     if selected {
         Role::Danger.style().bold().paint("|")
@@ -2939,9 +3019,9 @@ mod tests {
 
         let frame = joined_home(&home);
         assert!(frame.contains("run 2 wait 1 fail 1"), "{frame}");
-        assert!(frame.contains("▶ running ·"), "{frame}");
-        assert!(frame.contains("◆ waiting ·"), "{frame}");
-        assert!(frame.contains("✓ done    ·"), "{frame}");
+        assert!(frame.contains("▶1 running"), "{frame}");
+        assert!(frame.contains("◆1 waiting"), "{frame}");
+        assert!(frame.contains("✓1 done"), "{frame}");
     }
 
     #[test]
@@ -2969,7 +3049,7 @@ mod tests {
         .with_agent_inventory(Some(&inventory));
 
         let frame = joined_home(&home);
-        assert!(frame.contains("▶ running ·"), "{frame}");
+        assert!(frame.contains("▶1 running"), "{frame}");
         assert!(frame.contains("run 1"), "{frame}");
 
         // Once a concrete phase push exists for this exact runtime, inventory
@@ -2990,9 +3070,49 @@ mod tests {
         )
         .with_agent_inventory(Some(&inventory));
         let frame = joined_home(&precise);
-        assert!(frame.contains("☾ ready"), "{frame}");
-        assert!(!frame.contains("▶ running"), "{frame}");
+        assert!(frame.contains("☾1 ready"), "{frame}");
+        assert!(!frame.contains("▶1 running"), "{frame}");
         assert!(!frame.contains("run 1"), "{frame}");
+    }
+
+    #[test]
+    fn sidebar_uses_a_dedicated_third_row_for_multiple_agent_states() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        for phase in [
+            AgentPhase::Waiting,
+            AgentPhase::Running,
+            AgentPhase::Running,
+            AgentPhase::Ended,
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime_ref(workspace, session),
+                    phase,
+                }),
+            );
+        }
+        let projected = projected_session(session, "workers", "/work/workers");
+        let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[projected]);
+        let lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &home,
+            Selection::Target(Target::Session(session)),
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+
+        assert_eq!(lines.len(), 3);
+        assert!(!strip(&lines[1]).contains("running"));
+        assert!(
+            strip(&lines[2]).contains("◆1 waiting · ▶2 running · ✓1 done"),
+            "{}",
+            strip(&lines[2])
+        );
+        assert_eq!(display_width(&lines[2]), LEFT_WIDTH);
     }
 
     /// A failed row and a still-live phase report can overlap for a frame while
@@ -3274,11 +3394,11 @@ mod tests {
     }
 
     #[test]
-    fn create_skeleton_draws_two_padded_lines_that_wave_with_the_tick() {
+    fn create_skeleton_draws_three_padded_lines_that_wave_with_the_tick() {
         let first = create_skeleton_lines(30, "atlas", 0);
         assert_eq!(first.len(), CREATE_SKELETON_ROWS);
-        // Both lines are padded to the sidebar width and carry the typed name /
-        // the loading caption, so the skeleton reads as a session-height row.
+        // All lines are padded to the sidebar width; the first two carry the
+        // typed name / loading caption and the third reserves the Agent row.
         assert!(first.iter().all(|line| display_width(line) == 30));
         assert!(strip(&first[0]).contains("atlas"));
         assert!(strip(&first[1]).contains("creating"));
@@ -6324,7 +6444,7 @@ mod tests {
         let sessions = [projected_session(session, "session", "/work/session")];
         let home = HomeProjection::from_state(&state, "repo", Path::new("/repo"), &sessions);
 
-        // One content line cannot fit the first two-line session row; the footer
+        // One content line cannot fit the first three-line session row; the footer
         // still occupies the final line without partial-row rendering.
         let pane = home_left_pane(2, LEFT_WIDTH, &home, now());
         assert_eq!(pane.len(), 2);
