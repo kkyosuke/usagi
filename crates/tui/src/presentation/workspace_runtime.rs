@@ -475,6 +475,14 @@ impl WorkspaceRuntime {
                 .session_lifecycles()
                 .get(&session)
                 .is_none_or(|lifecycle| lifecycle.capabilities().can_use)
+            && !self
+                .state
+                .session_lifecycles()
+                .get(&session)
+                .is_some_and(|projection| {
+                    projection.failure_stage
+                        == Some(usagi_core::domain::session_lifecycle::FailureStage::Delete)
+                })
             && self.panes.pane(target).is_some_and(PaneState::has_tabs)
         {
             return self.apply_event(AppEvent::RetainedPaneActivated(target));
@@ -3048,6 +3056,7 @@ mod tests {
             removing: false,
             agent_resume: None,
             lifecycle: usagi_core::domain::session_lifecycle::SessionLifecycle::Available,
+            failure_stage: None,
             failure_summary: None,
             role_id: None,
         };
@@ -3344,7 +3353,14 @@ mod tests {
         let _ = runtime.focus_terminal(target, terminal.clone());
 
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
-            BTreeMap::from([(session, SessionLifecycle::Failed)]),
+            BTreeMap::from([(
+                session,
+                usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: None,
+                    failure_summary: None,
+                },
+            )]),
         )));
         assert_eq!(runtime.state().active(), None);
         assert!(matches!(

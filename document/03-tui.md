@@ -346,8 +346,8 @@ reset する。入力を所有しない右ペインでは terminal 内 UI の fo
 物理カーソル位置を抑止する。SGR の faint は背景色へ効かない terminal があるため、focus 行だけが明るく残る状態を
 許さない。overlay は dim 済みの背景へ後から合成するため、modal 自身の style と可読性を優先する。
 
-左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor と current
-target を別々に stable identity から照合し、同じ行なら cursor を優先する。Switch の cursor ではない
+左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor を stable identity から照合し、
+それだけを選択表示として描く。Closeup から Switch へ戻った際の current target に緑の rail は残さない。Switch の cursor ではない
 session / `+ new session` 行は v1 と同じ dim の非アクティブ色で描き、selected session の Accent は
 保つ。Closeup では session を Accent で描き、current session だけを太字にする。`+ new session` は
 色付けされるときは常に Success（緑）で、accent（青）へは決して落ちない。cursor が乗る Switch の選択時は
@@ -362,9 +362,9 @@ skeleton は current target にならない。名前・補足・marker は ANSI 
 CJK、Nerd Font glyph 未対応、極小幅でも後続行の style や列幅を壊さない。
 
 Switch で cursor ではない session の補足行は、相対時刻・PR・Git summary の意味色を保ったまま dim にする。各
-ANSI span の reset 後にも dim を再適用するため、current marker や Git の色 span が続いても相対時刻だけが明るく
+ANSI span の reset 後にも dim を再適用するため、Git の色 span が続いても相対時刻だけが明るく
 戻らない。cursor が指す session の補足行は、相対時刻・PR を dim のまま描く一方、Git summary の意味色を通常輝度で
-描き、選択対象の Git 状態を非アクティブ行と区別する。
+描き、選択対象の Git 状態を非アクティブ行と区別する。Closeup の補足行は相対時刻を含めて通常輝度で描く。
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
 選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。`+ new session`
@@ -656,6 +656,7 @@ Home sidebar は `session* → + new session` の順序と stable session identi
 のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind + added - removed` を続ける。base branch 名は表示しない。追加数は緑、削除数は赤で描く。相対時刻・commit 差分・追加数・削除数は、表示中の全 session で共有する固定幅の列に配置する。検査は sidebar の描画とは別スレッドで行い、完了後は 1 秒以上あけて現在の session 集合を再検査する。未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
 session は selected / active を surviving session、または `+ new session` / active なしへ縮退させる。空一覧でも作成 action は残る。作成に失敗した `failed` session は
 Danger 表現で `failed` タグとその失敗理由（daemon の安全な `failure.summary`）を 2 行目に表示し、使用可能な行と区別する。
+削除に失敗した session は赤い session 名と `remove failed` の 2 行だけに縮め、backend の詳細を sidebar へ出さない。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
 inline 入力欄へ置き換わる。置き換わった入力欄でも `+ new` affordance は静的な `+ new session` と同じ
@@ -738,11 +739,14 @@ live Agent の枠は対象 tab で `Ctrl-D` により Agent を終了して解�
 port は resume を受理しない。provider-native ID は受け取らず表示もしない。live Agent、resume metadata の欠落、
 scope/revision 不一致は安全な error として収束し、provider の last session や旧 PTY を推測しない。
 sidebar は daemon snapshot の `available` session に加えて、名前を占有し続ける `failed` session も
-`failed` の状態と失敗理由付きで表示する。`failed` 行は使用不可（`can_use=false`）なので新しい pane の launch を提示せず、
+失敗 stage に応じた状態付きで表示する。`failed` 行は使用不可（`can_use=false`）なので新しい pane の launch を提示せず、
 削除可能（`can_remove=true`）なので `x` / `X` の remove をそのまま受け付ける。ただし、その session に daemon 所有の
 既存 pane tab が残っている場合だけ Enter で Closeup を開ける。これは Agent へ `Ctrl-D` を送り global slot を解放する
 回収経路であり、session の scope や checkout を再び使用可能にはしない。各行の可否は snapshot の lifecycle
-から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`deleting` session も表示し、削除中の行
+から client 側で導出する（`SessionLifecycle::capabilities` が正本）。ただし delete stage の `failed` 行を Enter で選択した場合は
+既存 pane より先に「強制削除しますか？」の Yes/No modal を開く。Yes だけが同じ stable session identity の
+worktree 強制削除と未マージ branch の破棄を許可した remove を送信し、No / Esc は何も削除せず閉じる。
+通常の `X` / `--force` は従来どおり worktree だけを強制し、未マージ branch は保護する。`deleting` session も表示し、削除中の行
 （Danger の `✂` と wave）として描く。daemon は remove を受理した時点で応答し、worktree の撤去は daemon 所有の
 worker が続けるため（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）、この行は
 撤去が終わるまで（巨大な `target/` では分オーダー）残り、完了で消える。`deleting` は使用不可かつ削除不可

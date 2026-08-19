@@ -66,6 +66,7 @@ pub enum SessionCommand {
     Remove {
         name: String,
         force: bool,
+        force_delete_branch: bool,
     },
 }
 
@@ -262,11 +263,13 @@ fn parse_remove(arguments: &str) -> Result<SessionCommand, &'static str> {
         [name] if !name.starts_with('-') => Ok(SessionCommand::Remove {
             name: (*name).to_owned(),
             force: false,
+            force_delete_branch: false,
         }),
         [name, "--force"] | ["--force", name] if !name.starts_with('-') => {
             Ok(SessionCommand::Remove {
                 name: (*name).to_owned(),
                 force: true,
+                force_delete_branch: false,
             })
         }
         _ => Err("invalid session remove arguments"),
@@ -504,6 +507,7 @@ mod tests {
             Ok(SessionCommand::Remove {
                 name: "feature-x".into(),
                 force: true,
+                force_delete_branch: false,
             })
         );
         assert_eq!(
@@ -511,6 +515,7 @@ mod tests {
             Ok(SessionCommand::Remove {
                 name: "feature-x".into(),
                 force: false,
+                force_delete_branch: false,
             })
         );
         assert_eq!(
