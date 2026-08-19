@@ -198,6 +198,25 @@ impl DefaultModel {
         }
     }
 
+    /// The `$HOME`-relative path prefix of the global config this provider's CLI
+    /// writes next to its state directory, when it keeps that config outside the
+    /// directory itself (Claude writes `~/.claude.json`). Codex and `codex-fugu`
+    /// keep their config inside [`state_directory`](Self::state_directory), so
+    /// they have no separate prefix.
+    ///
+    /// It is a **prefix**, not one file: Claude saves the config by writing
+    /// `~/.claude.json.tmp.<pid>.<random>` under the `~/.claude.json.lock` lock and
+    /// renaming it over `~/.claude.json`, and keeps `~/.claude.json.backup.<ms>`
+    /// snapshots beside it. A launcher that grants only the exact file leaves every
+    /// save failing, so onboarding, folder trust and MCP approvals never persist.
+    #[must_use]
+    pub const fn global_config_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::Claude => Some(".claude.json"),
+            Self::OpenAi | Self::SakanaAi => None,
+        }
+    }
+
     /// The user-facing token typed after `agent -m` and shown in the picker.
     #[must_use]
     pub const fn selector(self) -> &'static str {

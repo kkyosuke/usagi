@@ -144,6 +144,14 @@ fn every_model_provider_maps_a_selector_profile_and_executable() {
         DefaultModel::ALL.map(DefaultModel::state_directory),
         [".claude", ".codex", ".codex-fugu"]
     );
+    // Claude keeps its global config (onboarding, folder trust, MCP approvals)
+    // beside that directory in `~/.claude.json`, and saves it through sibling
+    // lock / temp files, so the launcher grants a prefix rather than one file.
+    // Codex and `codex-fugu` keep their config inside the state directory.
+    assert_eq!(
+        DefaultModel::ALL.map(DefaultModel::global_config_prefix),
+        [Some(".claude.json"), None, None]
+    );
 }
 
 #[test]
