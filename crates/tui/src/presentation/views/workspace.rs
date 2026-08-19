@@ -622,8 +622,9 @@ impl HomeProjection {
                     .iter()
                     .any(|agent| agent.runtime_id == item.runtime.agent_runtime_id)
                 {
-                    // Runtime-local phase pushes are more precise than the
-                    // coarse durable inventory state (notably Waiting).
+                    // A runtime-local push carries the daemon's concrete phase,
+                    // while the durable inventory state is a coarse summary of
+                    // the same runtime. Keep the push.
                     continue;
                 }
                 agents.push(widgets::agent_status::AgentStatus {
