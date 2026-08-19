@@ -875,8 +875,15 @@ fn validate_root_git_common_dir_policy(
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
-        writable
-            .extend(claude_sandbox::agent_state_directory(program).map(|state| home.join(state)));
+        writable.extend(
+            [
+                claude_sandbox::agent_state_directory(program),
+                claude_sandbox::agent_config_prefix(program),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|granted| home.join(granted)),
+        );
         if cfg!(target_os = "macos") {
             writable.push(home.join("Library/Keychains"));
         }
@@ -1016,11 +1023,19 @@ fn validate_claude_sandbox_policy(
     }
     if let Some(home) = home {
         validate_owned_directory(home)?;
-        if let Some(state) = claude_sandbox::agent_state_directory(program) {
-            let agent_state = home.join(state);
-            let agent_state = agent_state.canonicalize().unwrap_or(agent_state);
-            if protected_workspace.starts_with(&agent_state)
-                || (mode == SandboxMode::Root && agent_state.starts_with(&protected_workspace))
+        // gate は launcher の grant を写す: state directory（subtree）と、その隣に置かれる
+        // global config の path prefix（`~/.claude.json*`）の両方を見る。
+        for granted in [
+            claude_sandbox::agent_state_directory(program),
+            claude_sandbox::agent_config_prefix(program),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let granted = home.join(granted);
+            let granted = granted.canonicalize().unwrap_or(granted);
+            if protected_workspace.starts_with(&granted)
+                || (mode == SandboxMode::Root && granted.starts_with(&protected_workspace))
             {
                 return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
             }

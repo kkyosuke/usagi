@@ -10,8 +10,8 @@
 //!
 //! 起動固有の writable root は provisioner が渡す（session は own worktree、root coordinator は
 //! repository-local root を持たない）。**その起動固有 root に、両 mode とも同じ普遍領域**
-//! （`$TMPDIR`・`/tmp`・`/var/tmp`・起動する agent CLI 自身の state・macOS の Keychain と
-//! system / per-user の MDS cache）を加える。daemon の再起動は sandbox 外の bootstrap broker に
+//! （`$TMPDIR`・`/tmp`・`/var/tmp`・起動する agent CLI 自身の state と global config・macOS の
+//! Keychain と system / per-user の MDS cache）を加える。daemon の再起動は sandbox 外の bootstrap broker に
 //! 委譲し、data home は writable root に含めない。sandbox は書き込みだけをこの root 集合に
 //! 閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
@@ -19,9 +19,13 @@
 //! 普遍領域を session から落とすと、agent CLI は**その worktree の中でしか動けない**という以前に
 //! **起動できない**。Claude Code は tool を実行するたびに `$TMPDIR` を無視した固定 path
 //! （`/tmp/claude-<uid>/<cwd の slug>`）へ scratchpad を作るため、`/tmp` を落とすと全 tool 呼び出しが
-//! `EPERM: operation not permitted, mkdir` で失敗する。`~/.claude` を落とすと onboarding・theme・
-//! permission mode・MCP 承認といった利用者の設定が毎起動リセットされ、macOS の Keychain / MDS を
-//! 落とすと認証が 401 で失敗する。**session と root を分けるのは repository への書き込み境界**
+//! `EPERM: operation not permitted, mkdir` で失敗する。`~/.claude` を落とすと theme・permission
+//! mode といった settings が毎起動リセットされ、macOS の Keychain / MDS を落とすと認証が 401 で
+//! 失敗する。state directory だけでは足りない: Claude の onboarding 完了・folder trust・MCP 承認は
+//! **`~/.claude` の中ではなく隣の `~/.claude.json`** にあり、しかも保存は lock（`.lock`）と
+//! temp file（`.tmp.<pid>.<random>`）を `$HOME` 直下に作って rename で被せる形で行うため、
+//! grant は [`agent_config_prefix`] の **path prefix** でなければならない。この prefix が無いと
+//! 設定は読めるのに書けず、folder trust と初回フローが毎起動やり直しになる。**session と root を分けるのは repository への書き込み境界**
 //! （起動固有 root と `protected_root`）であって、agent 自身の scratch / state / 認証領域ではない。
 //!
 //! macOS の Keychain 検索は Module Directory Service (MDS) の cache を更新するため、system の
@@ -160,6 +164,7 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
         return SandboxPlan::Reject { reason };
     }
     let roots = writable_roots(request);
+    let prefixes = writable_prefixes(request);
     match request.platform {
         Platform::Unsupported => SandboxPlan::Reject {
             reason: "このプラットフォームには OS sandbox backend が無いため、Claude を無保護で起動しません"
@@ -169,14 +174,14 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
             None => reject_backend("sandbox-exec"),
             Some(backend) => SandboxPlan::Launch {
                 program: backend.clone(),
-                argv: macos_argv(request.mode, &roots, program, program_args),
+                argv: macos_argv(request.mode, &roots, &prefixes, program, program_args),
             },
         },
         Platform::Linux => match &request.backend {
             None => reject_backend("bwrap"),
             Some(backend) => SandboxPlan::Launch {
                 program: backend.clone(),
-                argv: linux_argv(&roots, program, program_args),
+                argv: linux_argv(&roots, &prefixes, program, program_args),
             },
         },
     }
@@ -191,7 +196,10 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
         return Some("sandbox backend が absolute path ではありません".to_owned());
     }
     let protected = request.protected_root.as_deref();
-    for root in writable_roots(request) {
+    for root in writable_roots(request)
+        .into_iter()
+        .chain(writable_prefixes(request))
+    {
         if !root.is_absolute() || root == Path::new("/") {
             return Some("writable root が安全な absolute path ではありません".to_owned());
         }
@@ -224,6 +232,22 @@ fn reject_backend(backend: &str) -> SandboxPlan {
 pub fn agent_state_directory(program: &str) -> Option<&'static str> {
     let name = Path::new(program).file_name()?;
     DefaultModel::from_selector(&name.to_string_lossy()).map(DefaultModel::state_directory)
+}
+
+/// exec する program が `$HOME` 直下へ書く global config の path **prefix**。
+///
+/// 値の単一情報源は [`DefaultModel::global_config_prefix`] で、[`agent_state_directory`] と同じく
+/// 起動する CLI からだけ決まる。Claude の global config は state directory（`~/.claude`）の中では
+/// なく `~/.claude.json` にあり、保存は `~/.claude.json.lock` を取って
+/// `~/.claude.json.tmp.<pid>.<random>` を書き、それを rename で被せる形で行う（`.backup.<ms>` も
+/// 隣に置く）。したがって grant は「その 1 ファイル」ではなく **prefix** でなければならず、
+/// prefix が無いと onboarding・folder trust・MCP 承認が毎起動やり直しになる。
+/// 自分の state directory の中に config を持つ provider（Codex / `codex-fugu`）は `None`。
+#[must_use]
+pub fn agent_config_prefix(program: &str) -> Option<&'static str> {
+    let name = Path::new(program).file_name()?;
+    DefaultModel::from_selector(&name.to_string_lossy())
+        .and_then(DefaultModel::global_config_prefix)
 }
 
 /// macOS の Keychain 検索が更新する per-user MDS cache（`<cache>/mds`）。
@@ -270,16 +294,35 @@ fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     roots.into_iter().collect()
 }
 
+/// 起動する agent CLI の global config が使う writable path prefix 集合。
+///
+/// [`writable_roots`](writable_roots) が返す root は directory subtree の grant である。config は
+/// `$HOME` 直下の**兄弟 file 群**（`.claude.json` 本体・`.lock`・`.tmp.<pid>.<random>`・
+/// `.backup.<ms>`）なので、`$HOME` 全体を writable にせずに保存を通すには prefix 単位の grant が要る。
+fn writable_prefixes(request: &SandboxRequest) -> Vec<PathBuf> {
+    let mut prefixes: BTreeSet<PathBuf> = BTreeSet::new();
+    if let Some(home) = &request.home
+        && let Some(prefix) = request
+            .command
+            .first()
+            .and_then(|program| agent_config_prefix(program))
+    {
+        prefixes.insert(home.join(prefix));
+    }
+    prefixes.into_iter().collect()
+}
+
 /// macOS: `sandbox-exec -p <profile> <program> <args…>`。
 fn macos_argv(
     mode: SandboxMode,
     roots: &[PathBuf],
+    prefixes: &[PathBuf],
     program: &str,
     program_args: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
         "-p".to_owned(),
-        macos_profile(mode, roots),
+        macos_profile(mode, roots, prefixes),
         program.to_owned(),
     ];
     argv.extend(program_args.iter().cloned());
@@ -297,7 +340,7 @@ fn macos_argv(
 /// `> /dev/fd/1` を日常的に使い、literal 列挙ではそれらが `Operation not permitted` になるためである。
 /// 代わりに動詞を `file-write-data` に絞ってあるので、`/dev` への node 作成・削除・属性変更は
 /// deny のまま残る。
-fn macos_profile(mode: SandboxMode, roots: &[PathBuf]) -> String {
+fn macos_profile(mode: SandboxMode, roots: &[PathBuf], prefixes: &[PathBuf]) -> String {
     let subpaths = macos_write_roots(roots)
         .iter()
         .fold(String::new(), |mut acc, root| {
@@ -305,8 +348,18 @@ fn macos_profile(mode: SandboxMode, roots: &[PathBuf]) -> String {
             let _ = writeln!(acc, "  (subpath {})", sandbox_string_literal(root));
             acc
         });
+    let prefix_rules = macos_write_roots(prefixes)
+        .iter()
+        .fold(String::new(), |mut acc, prefix| {
+            let _ = writeln!(
+                acc,
+                "(allow file-write* (regex {}))",
+                sandbox_regex_prefix_literal(prefix)
+            );
+            acc
+        });
     format!(
-        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n(allow file-write-data (subpath \"/dev\"))\n",
+        "(version 1)\n;; usagi claude-sandbox mode={}\n(allow default)\n(deny file-write*)\n(allow file-write*\n{subpaths})\n{prefix_rules}(allow file-write-data (subpath \"/dev\"))\n",
         mode.as_str()
     )
 }
@@ -363,11 +416,33 @@ fn sandbox_string_literal(path: &Path) -> String {
     format!("\"{escaped}\"")
 }
 
+/// `sandbox-exec` profile の regex リテラル（`#"^…"`）。path を literal として扱うため、
+/// 英数字・`/`・`_`・`-` 以外はすべて backslash で escape する（`.` を素で通すと任意 1 文字に
+/// なり、`"` を素で通すと literal が途中で閉じる）。先頭 `^` を付けて **prefix 一致**にする。
+fn sandbox_regex_prefix_literal(path: &Path) -> String {
+    let escaped = path
+        .to_string_lossy()
+        .chars()
+        .fold(String::new(), |mut acc, character| {
+            if !character.is_ascii_alphanumeric() && !matches!(character, '/' | '_' | '-') {
+                acc.push('\\');
+            }
+            acc.push(character);
+            acc
+        });
+    format!("#\"^{escaped}\"")
+}
+
 /// Linux: `bwrap --ro-bind / / … --bind-try <root> <root> … <program> <args…>`。
 ///
 /// root 全体を read-only で束ね、writable root だけを read-write で再 bind する。`--bind-try` は
 /// 存在しない root（未作成の Claude state など）でも起動を止めない。
-fn linux_argv(roots: &[PathBuf], program: &str, program_args: &[String]) -> Vec<String> {
+fn linux_argv(
+    roots: &[PathBuf],
+    prefixes: &[PathBuf],
+    program: &str,
+    program_args: &[String],
+) -> Vec<String> {
     let mut argv = vec![
         "--ro-bind".to_owned(),
         "/".to_owned(),
@@ -378,7 +453,7 @@ fn linux_argv(roots: &[PathBuf], program: &str, program_args: &[String]) -> Vec<
         "/proc".to_owned(),
         "--die-with-parent".to_owned(),
     ];
-    for root in roots {
+    for root in roots.iter().chain(prefixes) {
         let path = root.to_string_lossy().into_owned();
         argv.push("--bind-try".to_owned());
         argv.push(path.clone());
@@ -717,6 +792,80 @@ mod tests {
             );
             assert!(invalid_policy_reason(&request).is_none());
         }
+    }
+
+    // Claude keeps onboarding, folder trust and MCP approvals in `~/.claude.json`,
+    // which sits **next to** the state directory rather than inside it, and saves
+    // it by writing `~/.claude.json.tmp.<pid>.<random>` under `~/.claude.json.lock`
+    // and renaming it over the file. Granting only `~/.claude` (or only the exact
+    // file) leaves every save denied, so the trust dialog and the first-run flow
+    // come back on every launch even though the config reads fine.
+    #[test]
+    fn a_claude_launch_can_write_the_global_config_file_family_beside_its_state_directory() {
+        for mode in [SandboxMode::Session, SandboxMode::Root] {
+            let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+            request.mode = mode;
+            if mode == SandboxMode::Root {
+                request.launch_roots.clear();
+            }
+            assert_eq!(
+                writable_prefixes(&request),
+                [PathBuf::from("/home/dev/.claude.json")]
+            );
+            let (_, argv) = plan(&request).into_launch().unwrap();
+            let profile = &argv[1];
+            assert!(
+                profile.contains(r#"(allow file-write* (regex #"^/home/dev/\.claude\.json"))"#),
+                "{profile}"
+            );
+            // prefix grant は `$HOME` そのものを writable にしない。
+            assert!(!profile.contains("(subpath \"/home/dev\")"));
+        }
+    }
+
+    #[test]
+    fn linux_rebinds_the_global_config_file_read_write() {
+        let (_, argv) = plan(&request(Platform::Linux, Some("/usr/bin/bwrap")))
+            .into_launch()
+            .unwrap();
+        assert!(argv.windows(3).any(|window| window[0] == "--bind-try"
+            && window[1] == "/home/dev/.claude.json"
+            && window[2] == window[1]));
+    }
+
+    #[test]
+    fn the_global_config_grant_follows_the_program_that_is_actually_exec_ed() {
+        // config を自分の state directory の中に持つ provider には prefix を配らない。
+        assert_eq!(agent_config_prefix("claude"), Some(".claude.json"));
+        assert_eq!(
+            agent_config_prefix("/usr/local/bin/claude"),
+            Some(".claude.json")
+        );
+        assert_eq!(agent_config_prefix("codex"), None);
+        assert_eq!(agent_config_prefix("codex-fugu"), None);
+        assert_eq!(agent_config_prefix("gemini"), None);
+        assert_eq!(agent_config_prefix(""), None);
+        assert_eq!(agent_config_prefix("/"), None);
+
+        let mut codex = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+        codex.command = vec!["codex".to_owned()];
+        assert!(writable_prefixes(&codex).is_empty());
+        let (_, argv) = plan(&codex).into_launch().unwrap();
+        assert!(!argv[1].contains("regex"));
+
+        // `$HOME` が無ければ prefix も無い。
+        let mut homeless = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+        homeless.home = None;
+        assert!(writable_prefixes(&homeless).is_empty());
+    }
+
+    #[test]
+    fn profile_regex_prefixes_escape_every_non_path_character() {
+        // `.` を素で通すと任意 1 文字、`"` を素で通すと literal が閉じてしまう。
+        assert_eq!(
+            sandbox_regex_prefix_literal(Path::new(r#"/a b/.c"d-e_1"#)),
+            r#"#"^/a\ b/\.c\"d-e_1""#
+        );
     }
 
     #[test]
