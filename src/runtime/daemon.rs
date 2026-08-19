@@ -5951,16 +5951,33 @@ fn session_response_envelope(
 }
 
 fn exact_merged_pr_head(
-    inventory: usagi_core::usecase::client::PrSnapshot,
+    inventory: Option<usagi_core::usecase::client::PrSnapshot>,
     branch_head: Option<String>,
 ) -> Option<String> {
-    branch_head.and_then(|head| {
-        inventory.entries.into_iter().find_map(|entry| {
-            (entry.state == usagi_core::domain::pr_inventory::PrState::Merged
-                && entry.head_oid.as_deref() == Some(head.as_str()))
-            .then_some(head.clone())
+    inventory.and_then(|inventory| {
+        branch_head.and_then(|head| {
+            inventory.entries.into_iter().find_map(|entry| {
+                (entry.state == usagi_core::domain::pr_inventory::PrState::Merged
+                    && entry.head_oid.as_deref() == Some(head.as_str()))
+                .then_some(head.clone())
+            })
         })
     })
+}
+
+fn best_effort_merged_pr_head(
+    inventory: &SharedPrInventory,
+    session_id: SessionId,
+    branch_head: Option<String>,
+) -> Option<String> {
+    // PR state is optional evidence for squash-merge branch deletion. If its
+    // independent projection is unavailable, retain Git's safe `branch -d`
+    // behavior instead of blocking worktree removal.
+    let snapshot = inventory
+        .lock()
+        .ok()
+        .and_then(|mut inventory| inventory.snapshot(session_id).ok());
+    exact_merged_pr_head(snapshot, branch_head)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -6320,12 +6337,7 @@ fn dispatch_session_action(
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .removal_identity(name)?;
-            let inventory = pr_inventory
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .snapshot(id)
-                .map_err(|_| SessionRuntimeError::Storage)?;
-            let merged_head_oid = exact_merged_pr_head(inventory, branch_head);
+            let merged_head_oid = best_effort_merged_pr_head(pr_inventory, id, branch_head);
             perform_remove_with_merged_head(
                 sessions,
                 teardown,
@@ -14564,14 +14576,17 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().head_oid = Some(head.clone());
         let snapshot = usagi_core::usecase::client::PrSnapshot::from((session, inventory.clone()));
         assert_eq!(
-            exact_merged_pr_head(snapshot, Some(head.clone())),
+            exact_merged_pr_head(Some(snapshot), Some(head.clone())),
             Some(head.clone())
         );
 
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Open;
         assert_eq!(
             exact_merged_pr_head(
-                usagi_core::usecase::client::PrSnapshot::from((session, inventory.clone())),
+                Some(usagi_core::usecase::client::PrSnapshot::from((
+                    session,
+                    inventory.clone()
+                ))),
                 Some(head.clone())
             ),
             None
@@ -14579,16 +14594,37 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
         assert_eq!(
             exact_merged_pr_head(
-                usagi_core::usecase::client::PrSnapshot::from((session, inventory)),
+                Some(usagi_core::usecase::client::PrSnapshot::from((
+                    session, inventory
+                ))),
                 Some("b".repeat(40))
             ),
             None
         );
         assert_eq!(
             exact_merged_pr_head(
-                usagi_core::usecase::client::PrSnapshot::from((session, PrInventory::default())),
+                Some(usagi_core::usecase::client::PrSnapshot::from((
+                    session,
+                    PrInventory::default()
+                ))),
                 None
             ),
+            None
+        );
+        assert_eq!(exact_merged_pr_head(None, Some(head)), None);
+    }
+
+    #[test]
+    fn unavailable_pr_inventory_falls_back_to_safe_branch_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("pr-inventory.json"), "not json").unwrap();
+        let inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Active,
+        ))));
+
+        assert_eq!(
+            best_effort_merged_pr_head(&inventory, SessionId::new(), Some("a".repeat(40))),
             None
         );
     }

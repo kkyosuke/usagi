@@ -541,7 +541,7 @@ fn delete_teardown_branch(git: &dyn GitRunner, teardown: &PendingTeardown) -> Re
     let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
         git.run(
             &teardown.repository_root,
-            &["rev-parse", "--verify", &session_branch(&teardown.name)],
+            &["rev-parse", "--verify", &session_branch_ref(&teardown.name)],
         )
         .is_ok_and(|output| output.success && output.stdout.trim() == expected)
     });
@@ -840,7 +840,7 @@ impl SessionRuntime {
             .find(|session| session.name == name)
             .map(|session| session.session_id)
             .ok_or(SessionRuntimeError::UnknownSession)?;
-        let branch = session_branch(name);
+        let branch = session_branch_ref(name);
         let head = self
             .git
             .run(&self.repo_root, &["rev-parse", "--verify", &branch])
@@ -1869,6 +1869,12 @@ fn session_branch(name: &str) -> String {
     format!("usagi/{name}")
 }
 
+/// The fully qualified ref for one session branch. OID comparisons must not use
+/// the short branch name: Git may resolve an identically named tag first.
+fn session_branch_ref(name: &str) -> String {
+    format!("refs/heads/{}", session_branch(name))
+}
+
 fn semantic_key(action: SessionAction, name: &str) -> String {
     format!("{action:?}:{name}").to_ascii_lowercase()
 }
@@ -2422,6 +2428,10 @@ mod tests {
                     .unwrap()
                     .iter()
                     .any(|args| { args == &["branch", expected_flag, "--", "usagi/one"] })
+            );
+            assert_eq!(
+                calls.lock().unwrap()[0],
+                ["rev-parse", "--verify", "refs/heads/usagi/one"]
             );
         }
     }
