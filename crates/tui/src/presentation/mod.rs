@@ -4503,9 +4503,10 @@ fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, i
     let Some(selection) = runtime.tab_selection_at(index) else {
         return;
     };
-    let Some(active) = runtime.panes().active() else {
-        return;
-    };
+    let active = runtime
+        .panes()
+        .active()
+        .expect("a selectable tab always belongs to an active pane");
     if !ui.has_agent_intent_for(active.session_id()) {
         let _ = runtime.select_tab_selection(selection);
         return;
@@ -7905,9 +7906,118 @@ mod tests {
         let _ = runtime.request_pane(target, second_operation, PaneKind::Terminal);
         let _ = runtime.complete_pane(target, second_operation, second);
 
+        // A stale/out-of-range frame hit is inert.
+        select_right_pane_tab(&mut ui, &mut runtime, usize::MAX);
         select_right_pane_tab(&mut ui, &mut runtime, 0);
 
         assert_eq!(runtime.focused_terminal(), Some(first));
+    }
+
+    #[test]
+    fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let first = live_terminal_ref(workspace, session);
+        let second = live_terminal_ref(workspace, session);
+        let continuation = AgentContinuationRef::new();
+        let interrupted = interrupted_history(workspace, Some(session), true);
+        let mut intent = AgentTabIntent::empty(workspace);
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: Some(session),
+            continuation,
+            terminal: first.clone(),
+            select: true,
+        });
+        intent.apply(AgentTabIntentMutation::Upsert {
+            session_id: Some(session),
+            continuation: interrupted.continuation,
+            terminal: interrupted.last_terminal.clone(),
+            select: false,
+        });
+        let durable = Arc::new(Mutex::new(intent.clone()));
+        let mutations = Arc::new(Mutex::new(Vec::new()));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(UnavailableAgentCommandPort),
+            )
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::from([session]),
+                Box::new(MemoryIntentPort {
+                    state: Arc::clone(&durable),
+                    mutations: Arc::clone(&mutations),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
+        for terminal in [first.clone(), second.clone()] {
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+            let _ = runtime.complete_pane(target, operation, terminal);
+        }
+        runtime.inject_pane_event_for_test(
+            target,
+            crate::usecase::application::pane::PaneEvent::RestoreInterrupted {
+                tabs: vec![interrupted.clone()],
+            },
+        );
+        let pending = OperationId::new();
+        let _ = runtime.request_pane(target, pending, PaneKind::Agent);
+
+        let interrupted_index = runtime
+            .active_pane()
+            .tabs()
+            .iter()
+            .position(|tab| {
+                matches!(tab, PaneTab::Interrupted(pane) if pane.tab.continuation == interrupted.continuation)
+            })
+            .expect("interrupted tab is visible");
+        let pending_index = runtime
+            .active_pane()
+            .tabs()
+            .iter()
+            .position(|tab| matches!(tab, PaneTab::Pending(pane) if pane.operation == pending))
+            .expect("pending tab is visible");
+
+        select_right_pane_tab(&mut ui, &mut runtime, pending_index);
+        select_right_pane_tab(&mut ui, &mut runtime, interrupted_index);
+
+        select_right_pane_tab(&mut ui, &mut runtime, 1);
+
+        assert_eq!(runtime.focused_terminal(), Some(second.clone()));
+        assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
+            mutation,
+            AgentTabIntentMutation::Select {
+                session_id: Some(selected),
+                continuation: None,
+            } if *selected == session
+        )));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut failing_ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(UnavailableAgentCommandPort),
+            )
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::from([session]),
+                Box::new(FailingIntentPort {
+                    state: Arc::new(Mutex::new(intent)),
+                    error: AgentTabIntentError::Unavailable,
+                    attempts: Arc::clone(&attempts),
+                }),
+            );
+        select_right_pane_tab(&mut failing_ui, &mut runtime, 0);
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.focused_terminal(), Some(second));
     }
 
     #[test]

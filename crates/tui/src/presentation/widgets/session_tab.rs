@@ -260,6 +260,7 @@ mod tests {
         assert_eq!(tab_at(40, prefix, &tabs, 16), Some(1));
         assert_eq!(tab_at(18, prefix, &tabs, 17), Some(1));
         assert_eq!(tab_at(17, prefix, &tabs, 17), None);
+        assert_eq!(tab_at(15, prefix, &tabs, 8), None);
     }
 
     #[test]
