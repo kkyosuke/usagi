@@ -1,13 +1,13 @@
 ---
 number: 701
 title: feat(tui): sidebar の session 行に Agent 状態行を追加し Garden と語彙を共有する
-status: todo
+status: done
 priority: medium
 labels: [tui]
 dependson: []
 related: []
 created_at: 2026-08-19T11:16:56.297399+00:00
-updated_at: 2026-08-19T11:16:56.297399+00:00
+updated_at: 2026-08-19T11:17:41.792818+00:00
 ---
 
 ## 概要
