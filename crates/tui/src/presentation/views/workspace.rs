@@ -8,7 +8,7 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::SessionId;
+use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -213,6 +213,14 @@ pub struct HomeProjection {
     /// Agent phase 集約から [`SessionStateCounts::tally`] で毎フレーム導出する派生値で、
     /// `DaemonMetrics` にも controller state にも別の情報源を作らない。
     session_states: SessionStateCounts,
+    /// Session-scoped Agent phase used by each sidebar row. This is derived
+    /// from the same runtime phases as `session_states`, then supplemented by
+    /// the latest coherent inventory when this TUI has not seen a phase push.
+    session_phases: BTreeMap<SessionId, TargetPhase>,
+    /// Runtime identities already represented in `session_phases`. Inventory is
+    /// only a fallback for identities absent from this set, so a coarse `Live`
+    /// row cannot overwrite a precise `Ready`/`Waiting` report.
+    observed_agent_runtimes: BTreeSet<AgentRuntimeId>,
     feedback: Option<Feedback>,
     mascot_tick: u64,
     /// Presentation-only message. Runtime state currently supplies `None`; this
@@ -376,7 +384,16 @@ impl HomeProjection {
         let preview = preview_session(state);
         // Derived before the sessions move into the projection: the counts are a
         // fold of the same daemon-authoritative rows, not a second source.
-        let session_states = session_state_counts(state, &sessions);
+        let session_phases = sessions
+            .iter()
+            .map(|session| (session.id, state.phase_for(Target::Session(session.id))))
+            .collect::<BTreeMap<_, _>>();
+        let session_states = session_state_counts(&sessions, &session_phases);
+        let observed_agent_runtimes = state
+            .runtimes()
+            .iter()
+            .map(|runtime| runtime.runtime.agent_runtime_id)
+            .collect();
         // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
         // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
         let garden_sessions = (state.overlay()
@@ -397,7 +414,7 @@ impl HomeProjection {
                         .filter(|entry| entry.runtime.session_id == Some(session.id))
                         .map(|entry| widgets::garden::GardenAgent {
                             runtime_id: entry.runtime.agent_runtime_id,
-                            phase: garden_phase(entry.phase),
+                            phase: entry.phase,
                         })
                         .collect(),
                 })
@@ -416,6 +433,8 @@ impl HomeProjection {
                 state.phase_for(Target::Session(session))
             }),
             session_states,
+            session_phases,
+            observed_agent_runtimes,
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
@@ -581,6 +600,12 @@ impl HomeProjection {
         if let (Some(garden_sessions), Some(inventory)) = (self.garden_sessions.as_mut(), inventory)
         {
             for item in &inventory.runtimes {
+                if self
+                    .observed_agent_runtimes
+                    .contains(&item.runtime.agent_runtime_id)
+                {
+                    continue;
+                }
                 let Some(session_id) = item.runtime.session_id else {
                     // Workspace-root runtimes have no session plot.
                     continue;
@@ -606,6 +631,27 @@ impl HomeProjection {
                     phase: garden_inventory_phase(item.state),
                 });
             }
+        }
+        if let Some(inventory) = inventory {
+            for item in &inventory.runtimes {
+                if self
+                    .observed_agent_runtimes
+                    .contains(&item.runtime.agent_runtime_id)
+                {
+                    continue;
+                }
+                let Some(session_id) = item.runtime.session_id else {
+                    continue;
+                };
+                let Some(phase) = self.session_phases.get_mut(&session_id) else {
+                    continue;
+                };
+                let observed = TargetPhase::from_agent_phase(garden_inventory_phase(item.state));
+                if observed.rank() > phase.rank() {
+                    *phase = observed;
+                }
+            }
+            self.session_states = session_state_counts(&self.sessions, &self.session_phases);
         }
         self.daemon_runtimes = inventory.map(|inventory| {
             inventory
@@ -1370,13 +1416,20 @@ fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> Stri
 /// daemon's phase reports. The classification itself lives in
 /// [`usagi_core::usecase::session_state`], beside the phase aggregation it reuses,
 /// so the rule is stated once instead of in a view.
-fn session_state_counts(state: &AppState, sessions: &[ProjectedSession]) -> SessionStateCounts {
+fn session_state_counts(
+    sessions: &[ProjectedSession],
+    phases: &BTreeMap<SessionId, TargetPhase>,
+) -> SessionStateCounts {
     let classified = sessions
         .iter()
         .map(|session| {
             (
                 session.lifecycle,
-                state.phase_for(Target::Session(session.id)).aggregation(),
+                phases
+                    .get(&session.id)
+                    .copied()
+                    .unwrap_or(TargetPhase::Absent)
+                    .aggregation(),
             )
         })
         .collect::<Vec<_>>();
@@ -1632,19 +1685,6 @@ pub fn terminal_point_at(
         row: start + content_row,
         column,
     })
-}
-
-/// controller が runtime ごとに保持する phase を、Garden の表示語彙へ写す。
-/// `Done` は controller が runtime event の `Ended` / `Exited` / `Interrupted` を共通化した
-/// 値なので、Garden では静止した完了 pose に写す。
-const fn garden_phase(phase: TargetPhase) -> AgentPhase {
-    match phase {
-        TargetPhase::Absent => AgentPhase::Absent,
-        TargetPhase::Ready => AgentPhase::Ready,
-        TargetPhase::Running => AgentPhase::Running,
-        TargetPhase::Waiting => AgentPhase::Waiting,
-        TargetPhase::Done => AgentPhase::Ended,
-    }
 }
 
 /// Coarse fallback used when a runtime exists in the latest daemon inventory
@@ -2247,6 +2287,14 @@ fn home_row_lines_at(
     if let Some(session) = session {
         let modified = widgets::relative_session_time(session.last_modified, now);
         let mut facts = Vec::new();
+        if !session
+            .agent_resume
+            .is_some_and(|resume| resume.interrupted)
+            && let Some(phase) = home.session_phases.get(&session.id).copied()
+            && let Some(label) = sidebar_agent_phase_label(phase)
+        {
+            facts.push(label);
+        }
         if let Some(resume) = session.agent_resume.and_then(resume_label) {
             facts.push(resume.to_owned());
         }
@@ -2288,6 +2336,38 @@ fn home_row_lines_at(
         vec![first, widgets::pad_to_width(&metadata, width)]
     } else {
         vec![first]
+    }
+}
+
+/// Compact, colour-coded Agent state for a session's sidebar continuation row.
+/// `Absent` stays silent, preserving rows that have never hosted an Agent.
+fn sidebar_agent_phase_label(phase: TargetPhase) -> Option<String> {
+    const WIDTH: usize = 9;
+    match phase {
+        TargetPhase::Absent => None,
+        TargetPhase::Ready => Some(
+            Style::new()
+                .dim()
+                .paint(&widgets::pad_to_width("☾ ready", WIDTH)),
+        ),
+        TargetPhase::Running => Some(
+            Role::Success
+                .style()
+                .bold()
+                .paint(&widgets::pad_to_width("▶ running", WIDTH)),
+        ),
+        TargetPhase::Waiting => Some(
+            Role::Warning
+                .style()
+                .bold()
+                .paint(&widgets::pad_to_width("◆ waiting", WIDTH)),
+        ),
+        TargetPhase::Done => Some(
+            Role::Accent
+                .style()
+                .bold()
+                .paint(&widgets::pad_to_width("✓ done", WIDTH)),
+        ),
     }
 }
 
@@ -2859,6 +2939,60 @@ mod tests {
 
         let frame = joined_home(&home);
         assert!(frame.contains("run 2 wait 1 fail 1"), "{frame}");
+        assert!(frame.contains("▶ running ·"), "{frame}");
+        assert!(frame.contains("◆ waiting ·"), "{frame}");
+        assert!(frame.contains("✓ done    ·"), "{frame}");
+    }
+
+    #[test]
+    fn sidebar_uses_inventory_when_no_runtime_phase_push_was_seen() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let runtime = runtime_ref(workspace, session);
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: runtime.clone(),
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        };
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "worker", "/work/worker")],
+        )
+        .with_agent_inventory(Some(&inventory));
+
+        let frame = joined_home(&home);
+        assert!(frame.contains("▶ running ·"), "{frame}");
+        assert!(frame.contains("run 1"), "{frame}");
+
+        // Once a concrete phase push exists for this exact runtime, inventory
+        // remains a fallback and cannot flatten Ready into coarse Live/Running.
+        let mut state = state;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime,
+                phase: AgentPhase::Ready,
+            }),
+        );
+        let precise = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "worker", "/work/worker")],
+        )
+        .with_agent_inventory(Some(&inventory));
+        let frame = joined_home(&precise);
+        assert!(frame.contains("☾ ready"), "{frame}");
+        assert!(!frame.contains("▶ running"), "{frame}");
+        assert!(!frame.contains("run 1"), "{frame}");
     }
 
     /// A failed row and a still-live phase report can overlap for a frame while
@@ -3739,11 +3873,19 @@ mod tests {
         let missing_session = SessionId::new();
         let mut state = AppState::home(workspace, vec![session]);
         let waiting = runtime_ref(workspace, session);
+        let interrupted = runtime_ref(workspace, session);
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::RuntimePhase {
                 runtime: waiting.clone(),
                 phase: AgentPhase::Waiting,
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: interrupted.clone(),
+                phase: AgentPhase::Interrupted,
             }),
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
@@ -3774,6 +3916,9 @@ mod tests {
             runtimes: vec![
                 // The duplicate inventory row must not flatten Waiting to Live.
                 item(waiting.clone(), AgentRuntimeInventoryState::Live),
+                // Concrete controller phases keep Interrupted distinct from a
+                // generic Done fold in Garden.
+                item(interrupted.clone(), AgentRuntimeInventoryState::Interrupted),
                 item(live.clone(), AgentRuntimeInventoryState::Live),
                 // Inventory cannot create a plot for a session absent from Home.
                 item(missing, AgentRuntimeInventoryState::Live),
@@ -3792,7 +3937,7 @@ mod tests {
 
         let garden = home.garden_sessions.as_ref().expect("garden projection");
         assert_eq!(garden.len(), 1);
-        assert_eq!(garden[0].agents.len(), 2);
+        assert_eq!(garden[0].agents.len(), 3);
         assert!(garden[0].agents.contains(&widgets::garden::GardenAgent {
             runtime_id: waiting.agent_runtime_id,
             phase: AgentPhase::Waiting,
@@ -3801,8 +3946,12 @@ mod tests {
             runtime_id: live.agent_runtime_id,
             phase: AgentPhase::Running,
         }));
+        assert!(garden[0].agents.contains(&widgets::garden::GardenAgent {
+            runtime_id: interrupted.agent_runtime_id,
+            phase: AgentPhase::Interrupted,
+        }));
         let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
-        assert!(text.contains("1 run · 1 wait"));
+        assert!(text.contains("1 run · 1 wait · 1 int"));
         assert!(!text.contains("no agents"));
     }
 

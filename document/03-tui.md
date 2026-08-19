@@ -652,8 +652,8 @@ Home sidebar は `session* → + new session` の順序と stable session identi
 予約する note icon に加え、daemon projection に assignment がある場合だけ `[role-id]` badge を描く。badge は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
 
-2 行目は daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`
-のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind + added - removed` を続ける。base branch 名は表示しない。追加数は緑、削除数は赤で描く。相対時刻・commit 差分・追加数・削除数は、表示中の全 session で共有する固定幅の列に配置する。検査は sidebar の描画とは別スレッドで行い、完了後は 1 秒以上あけて現在の session 集合を再検査する。未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
+2 行目は session scope の Agent phase を `☾ ready` / `▶ running` / `◆ waiting` / `✓ done` として先頭に表示する。Agent runtime が無い `absent` は表示せず、interrupted runtime は既存の resume 可否表示を優先する。phase は controller が受け取った runtime-local report を集約し、未観測 runtime は最新の coherent Agent inventory（`reserved → ready`、`live → running`、`interrupted` / `unavailable` / `exited` / `reclaimed → done`）で補うため、Garden と同じ daemon 権威の状態を使う。続いて daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`
+のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind + added - removed` を続ける。base branch 名は表示しない。追加数は緑、削除数は赤で描く。Agent phase・相対時刻・commit 差分・追加数・削除数は、表示中の全 session で共有する固定幅の列に配置する。検査は sidebar の描画とは別スレッドで行い、完了後は 1 秒以上あけて現在の session 集合を再検査する。未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
 session は selected / active を surviving session、または `+ new session` / active なしへ縮退させる。空一覧でも作成 action は残る。作成に失敗した `failed` session は
 Danger 表現で `failed` タグとその失敗理由（daemon の安全な `failure.summary`）を 2 行目に表示し、使用可能な行と区別する。
 

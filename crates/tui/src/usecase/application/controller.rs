@@ -804,7 +804,7 @@ pub enum TargetPhase {
 }
 
 impl TargetPhase {
-    const fn rank(self) -> u8 {
+    pub(crate) const fn rank(self) -> u8 {
         self.aggregation().rank()
     }
 
@@ -822,7 +822,7 @@ impl TargetPhase {
         }
     }
 
-    fn from_agent_phase(phase: AgentPhase) -> Self {
+    pub(crate) fn from_agent_phase(phase: AgentPhase) -> Self {
         match AgentPhaseAggregation::from_phase(phase) {
             AgentPhaseAggregation::Absent => Self::Absent,
             AgentPhaseAggregation::Ready => Self::Ready,
@@ -835,10 +835,14 @@ impl TargetPhase {
 
 /// One runtime-local phase entry. The complete runtime reference is retained so
 /// an update for one pane can never overwrite another pane in the same session.
+///
+/// Keep the daemon's concrete phase here rather than the session-level
+/// [`TargetPhase`] fold. The sidebar can still aggregate it, while surfaces such
+/// as Garden retain the distinction between interrupted, ended, and exited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePhase {
     pub runtime: AgentRuntimeRef,
-    pub phase: TargetPhase,
+    pub phase: AgentPhase,
 }
 
 /// A message which a backend adapter has explicitly classified as safe to show.
@@ -1270,7 +1274,7 @@ impl AppState {
         self.runtimes
             .iter()
             .filter(|entry| entry.runtime.session_id == scope)
-            .map(|entry| entry.phase)
+            .map(|entry| TargetPhase::from_agent_phase(entry.phase))
             .max_by_key(|phase| phase.rank())
             .unwrap_or(TargetPhase::Absent)
     }
@@ -3019,7 +3023,6 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             {
                 return Vec::new();
             }
-            let phase = TargetPhase::from_agent_phase(phase);
             if let Some(entry) = state
                 .runtimes
                 .iter_mut()
