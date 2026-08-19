@@ -3045,6 +3045,55 @@ mod tests {
         );
     }
 
+    /// session 行に属さない runtime は Agent 行に混ぜない。workspace root の Agent と、
+    /// 表示中でない session の Agent が他の session の行数に足されると、その行の記号列も
+    /// pointer の hit-test も嘘になる。
+    #[test]
+    fn runtimes_outside_the_visible_session_rows_join_no_agent_line() {
+        let workspace = WorkspaceId::new();
+        let shown = SessionId::new();
+        let hidden = SessionId::new();
+        let mut state = AppState::home(workspace, vec![shown, hidden]);
+        let root = AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+            },
+            None,
+        )
+        .expect("a root runtime owns a root terminal");
+        for runtime in [root, runtime_ref(workspace, hidden)] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime,
+                    phase: AgentPhase::Running,
+                }),
+            );
+        }
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: runtime_ref(workspace, shown),
+                phase: AgentPhase::Running,
+            }),
+        );
+        // 投影する row は 1 件だけ。root runtime と、行を持たない session の runtime は
+        // どの束にも入らない。
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(shown, "builder", "/work/builder")],
+        );
+        assert_eq!(home.session_agents.len(), 1);
+        assert_eq!(home.session_agents[&shown].len(), 1);
+    }
+
     /// Agent を 1 体も持たない session でも行は残り、`—` で「いない」と言う。空行に
     /// 潰すと、Agent がいないのか描き損ねたのかを読者が区別できない。
     #[test]

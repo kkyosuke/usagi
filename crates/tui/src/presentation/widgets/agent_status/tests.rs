@@ -3,7 +3,7 @@ use usagi_core::domain::session_lifecycle::AgentPhase;
 
 use super::{
     AgentStatus, attention_rank, glyph, glyph_strip, ordered, short_label, status_line, style,
-    summary,
+    summary_parts,
 };
 use crate::presentation::widgets::display_width;
 
@@ -12,6 +12,12 @@ fn agent(id: &str, phase: AgentPhase) -> AgentStatus {
         runtime_id: AgentRuntimeId::parse(id).expect("valid runtime id"),
         phase,
     }
+}
+
+/// 件数要約を 1 本の文字列として読む。production では [`status_line`] が幅に合わせて
+/// 末尾から項目を落とすため、要約そのものは項目の列として組み立てられる。
+fn summary(agents: &[AgentStatus]) -> String {
+    summary_parts(agents).join(" · ")
 }
 
 fn runtime(index: u8, phase: AgentPhase) -> AgentStatus {

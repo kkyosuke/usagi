@@ -103,7 +103,10 @@ const SUMMARY_ORDER: [AgentPhase; 6] = [
     AgentPhase::Ended,
 ];
 
-/// 件数要約の項目を注目順に並べたもの。0 件の phase は含めない。
+/// 件数要約（`1 wait · 2 run`）の項目を注目順に並べたもの。0 件の phase は含めない。
+///
+/// 完成した 1 本の文字列ではなく項目の列を返すのは、[`status_line`] が幅に合わせて
+/// 末尾から落とせるようにするためである。
 fn summary_parts(agents: &[AgentStatus]) -> Vec<String> {
     SUMMARY_ORDER
         .into_iter()
@@ -116,12 +119,6 @@ fn summary_parts(agents: &[AgentStatus]) -> Vec<String> {
             (count > 0).then(|| format!("{count} {}", short_label(phase)))
         })
         .collect()
-}
-
-/// `1 wait · 2 run` 形式の件数要約（色は付けない）。0 件の phase は省く。
-#[must_use]
-pub fn summary(agents: &[AgentStatus]) -> String {
-    summary_parts(agents).join(" · ")
 }
 
 /// `width` 桁に収まる範囲で、Agent 1 つにつき記号 1 つを [`ordered`] の順に描く。
