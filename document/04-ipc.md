@@ -381,7 +381,7 @@ handshake では `pr.snapshot.v1` capability を必須にし、dedicated subscri
 
 | action / event | fields | contract |
 |---|---|---|
-| `snapshot` | `session_id`, `revision?` | canonical URL、optional title、state、pin/dismiss と refresh state を含む current snapshot を返す |
+| `snapshot` | `session_id`, `revision?` | canonical URL、optional title、state、optional `head_oid`、pin/dismiss と refresh state を含む current snapshot を返す。`head_oid` はGitHubが返すPR head commitで、squash merge済みbranchの削除証明にも使う |
 | `subscribe` / `unsubscribe` | `session_id` | connection-local hint subscription を登録・解除する。disconnect は登録を回収する |
 | `pr.updated` | `session_id`, `revision` | inventory mutation を示す lossy hint。client は snapshot を再取得して収束する |
 

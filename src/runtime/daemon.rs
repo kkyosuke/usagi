@@ -135,7 +135,8 @@ use usagi_daemon::usecase::serve::{DaemonRecordPort, GenerationAuthority};
 use usagi_daemon::usecase::serve_standby::{StandbyAuthority, StandbyEndpoint};
 use usagi_daemon::usecase::session_runtime::{
     SessionRuntime, SessionRuntimeError, SharedSessionTeardown, WorktreeTeardown,
-    perform_compensating_remove, perform_create, perform_delegated_create, perform_remove,
+    perform_compensating_remove, perform_create, perform_delegated_create,
+    perform_remove_with_merged_head,
 };
 use usagi_daemon::usecase::session_teardown::{
     PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal, drain_pending_teardowns,
@@ -5949,6 +5950,19 @@ fn session_response_envelope(
     }
 }
 
+fn exact_merged_pr_head(
+    inventory: usagi_core::usecase::client::PrSnapshot,
+    branch_head: Option<String>,
+) -> Option<String> {
+    branch_head.and_then(|head| {
+        inventory.entries.into_iter().find_map(|entry| {
+            (entry.state == usagi_core::domain::pr_inventory::PrState::Merged
+                && entry.head_oid.as_deref() == Some(head.as_str()))
+            .then_some(head.clone())
+        })
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn dispatch_session_action(
     sessions: &SharedSessionRuntime,
@@ -6300,7 +6314,26 @@ fn dispatch_session_action(
         // teardown worker. Keeping the teardown on this connection would hold
         // the reply past every client attempt deadline for a session with a
         // multi-gigabyte `target/`.
-        SessionAction::Remove => perform_remove(sessions, teardown, operation_id, payload),
+        SessionAction::Remove => {
+            let name = string("name")?;
+            let (id, branch_head) = sessions
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .removal_identity(name)?;
+            let inventory = pr_inventory
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .snapshot(id)
+                .map_err(|_| SessionRuntimeError::Storage)?;
+            let merged_head_oid = exact_merged_pr_head(inventory, branch_head);
+            perform_remove_with_merged_head(
+                sessions,
+                teardown,
+                operation_id,
+                payload,
+                merged_head_oid,
+            )
+        }
         _ => sessions
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -13341,7 +13374,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::AcqRel);
             self.unlocked_during_call
                 .store(self.inventory.try_lock().is_ok(), Ordering::Release);
-            Ok("{\"title\":\"production\",\"state\":\"MERGED\"}".into())
+            Ok("{\"title\":\"production\",\"state\":\"MERGED\",\"headRefOid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}".into())
         }
     }
 
@@ -13506,6 +13539,7 @@ mod tests {
                 force: false,
                 delete_branch: false,
                 force_delete_branch: false,
+                merged_head_oid: None,
             });
         signal.notify();
         handle.join().unwrap();
@@ -13584,6 +13618,7 @@ mod tests {
                 force: false,
                 delete_branch: false,
                 force_delete_branch: false,
+                merged_head_oid: None,
             },
         ]));
         let pending_calls = Arc::new(AtomicUsize::new(0));
@@ -14514,6 +14549,48 @@ mod tests {
             assert_eq!(error.message, "durable session failure");
             assert!(body.get("hook").is_none());
         }
+    }
+
+    #[test]
+    fn only_an_exact_merged_pr_head_authorizes_squash_branch_deletion() {
+        use usagi_core::domain::pr_inventory::{PrInventory, PrState, canonicalize};
+
+        let session = SessionId::new();
+        let identity = canonicalize("https://github.com/o/r/pull/1").unwrap();
+        let head = "a".repeat(40);
+        let mut inventory = PrInventory::default();
+        inventory.discover([identity.clone()]);
+        inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
+        inventory.entries.get_mut(&identity).unwrap().head_oid = Some(head.clone());
+        let snapshot = usagi_core::usecase::client::PrSnapshot::from((session, inventory.clone()));
+        assert_eq!(
+            exact_merged_pr_head(snapshot, Some(head.clone())),
+            Some(head.clone())
+        );
+
+        inventory.entries.get_mut(&identity).unwrap().state = PrState::Open;
+        assert_eq!(
+            exact_merged_pr_head(
+                usagi_core::usecase::client::PrSnapshot::from((session, inventory.clone())),
+                Some(head.clone())
+            ),
+            None
+        );
+        inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
+        assert_eq!(
+            exact_merged_pr_head(
+                usagi_core::usecase::client::PrSnapshot::from((session, inventory)),
+                Some("b".repeat(40))
+            ),
+            None
+        );
+        assert_eq!(
+            exact_merged_pr_head(
+                usagi_core::usecase::client::PrSnapshot::from((session, PrInventory::default())),
+                None
+            ),
+            None
+        );
     }
 
     #[test]

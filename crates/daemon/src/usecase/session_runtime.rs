@@ -380,12 +380,30 @@ pub fn perform_remove(
     operation_id: &str,
     payload: &Value,
 ) -> Result<SessionReply, SessionRuntimeError> {
+    perform_remove_with_merged_head(runtime, teardown, operation_id, payload, None)
+}
+
+/// Admits a requested removal with an optional provider-verified merged PR head.
+/// The durable teardown rechecks this OID against the branch after removing the
+/// worktree, so commits added after the PR remain protected.
+///
+/// # Errors
+///
+/// Returns a typed safe error when the removal cannot be admitted or persisted.
+pub fn perform_remove_with_merged_head(
+    runtime: &Mutex<SessionRuntime>,
+    teardown: &TeardownSignal,
+    operation_id: &str,
+    payload: &Value,
+    merged_head_oid: Option<String>,
+) -> Result<SessionReply, SessionRuntimeError> {
     perform_remove_as(
         runtime,
         teardown,
         RemoveKind::Requested,
         operation_id,
         payload,
+        merged_head_oid,
     )
 }
 
@@ -413,6 +431,7 @@ pub fn perform_compensating_remove(
         RemoveKind::Compensating,
         operation_id,
         &json!({"name": name}),
+        None,
     )
 }
 
@@ -422,11 +441,12 @@ fn perform_remove_as(
     kind: RemoveKind,
     operation_id: &str,
     payload: &Value,
+    merged_head_oid: Option<String>,
 ) -> Result<SessionReply, SessionRuntimeError> {
     let step = runtime
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?
-        .begin_remove(kind, operation_id, payload)?;
+        .begin_remove(kind, operation_id, payload, merged_head_oid)?;
     match step {
         SessionRemoveStep::Settled(reply) => Ok(reply),
         SessionRemoveStep::Accepted { reply, .. } => {
@@ -518,11 +538,18 @@ fn delete_teardown_branch(git: &dyn GitRunner, teardown: &PendingTeardown) -> Re
     }
     // Only after the worktree is gone: git refuses to delete a branch that a
     // worktree still has checked out.
+    let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
+        git.run(
+            &teardown.repository_root,
+            &["rev-parse", "--verify", &session_branch(&teardown.name)],
+        )
+        .is_ok_and(|output| output.success && output.stdout.trim() == expected)
+    });
     delete_branch(
         git,
         &teardown.repository_root,
         &session_branch(&teardown.name),
-        teardown.force_delete_branch,
+        teardown.force_delete_branch || squash_merged,
     )
     .map_err(|error| error.to_string())
 }
@@ -792,6 +819,36 @@ impl SessionRuntime {
             }
         }
         Err(SessionRuntimeError::UnknownSession)
+    }
+
+    /// Resolves the stable identity and current branch HEAD used to authorize a
+    /// squash-merged removal. Failed rows remain resolvable so a retry can
+    /// finish a teardown whose first safe branch deletion was refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when lifecycle state or Git cannot be read, or
+    /// an unknown-session error when no durable row has that name.
+    pub fn removal_identity(
+        &self,
+        name: &str,
+    ) -> Result<(SessionId, Option<String>), SessionRuntimeError> {
+        let session_id = self
+            .state()?
+            .sessions
+            .into_iter()
+            .find(|session| session.name == name)
+            .map(|session| session.session_id)
+            .ok_or(SessionRuntimeError::UnknownSession)?;
+        let branch = session_branch(name);
+        let head = self
+            .git
+            .run(&self.repo_root, &["rev-parse", "--verify", &branch])
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        Ok((
+            session_id,
+            head.success.then(|| head.stdout.trim().to_owned()),
+        ))
     }
 
     /// Stable role assignment for a managed session incarnation.
@@ -1131,7 +1188,7 @@ impl SessionRuntime {
         operation_id: &str,
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
-        match self.begin_remove(RemoveKind::Requested, operation_id, payload)? {
+        match self.begin_remove(RemoveKind::Requested, operation_id, payload, None)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
                 let outcome = match self.io.remove_session_tree(
@@ -1143,12 +1200,8 @@ impl SessionRuntime {
                         // Every newly accepted removal carries branch deletion.
                         // Legacy branch-preserving plans can only be replayed as
                         // `Settled`, so they never reach this effect path.
-                        delete_branch(
-                            self.git.as_ref(),
-                            &pending.repository_root,
-                            &session_branch(&pending.name),
-                            pending.force_delete_branch,
-                        )
+                        delete_teardown_branch(self.git.as_ref(), &pending)
+                            .map_err(anyhow::Error::msg)
                     }
                     Err(error) => Err(error),
                 }
@@ -1166,6 +1219,7 @@ impl SessionRuntime {
         kind: RemoveKind,
         operation_id: &str,
         payload: &Value,
+        merged_head_oid: Option<String>,
     ) -> Result<SessionRemoveStep, SessionRuntimeError> {
         let name = session_name(payload)?;
         // A compensation is not a client request: it forces the removal and
@@ -1243,6 +1297,7 @@ impl SessionRuntime {
                         force,
                         delete_branch,
                         force_delete_branch,
+                        merged_head_oid: merged_head_oid.clone(),
                     },
                 },
                 Utc::now(),
@@ -1268,6 +1323,7 @@ impl SessionRuntime {
                 force,
                 delete_branch,
                 force_delete_branch,
+                merged_head_oid,
             },
         })
     }
@@ -1356,6 +1412,7 @@ impl SessionRuntime {
                     force: plan.force,
                     delete_branch: plan.delete_branch,
                     force_delete_branch: plan.force_delete_branch,
+                    merged_head_oid: plan.merged_head_oid.clone(),
                 })
             })
             .collect())
@@ -2310,6 +2367,7 @@ mod tests {
             force: false,
             delete_branch: false,
             force_delete_branch: false,
+            merged_head_oid: None,
         }
     }
 
@@ -2318,6 +2376,117 @@ mod tests {
         assert_eq!(
             delete_teardown_branch(&FakeGit::ok(), &confined_teardown()),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn an_exact_merged_pr_head_force_deletes_only_that_squash_merged_branch() {
+        struct RecordingGit {
+            head: String,
+            calls: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+        impl GitRunner for RecordingGit {
+            fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                Ok(GitOutput {
+                    success: true,
+                    stdout: if args.first() == Some(&"rev-parse") {
+                        self.head.clone()
+                    } else {
+                        String::new()
+                    },
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        for (head, expected_flag) in [("a".repeat(40), "-D"), ("b".repeat(40), "-d")] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut teardown = confined_teardown();
+            teardown.delete_branch = true;
+            teardown.merged_head_oid = Some("a".repeat(40));
+            delete_teardown_branch(
+                &RecordingGit {
+                    head,
+                    calls: Arc::clone(&calls),
+                },
+                &teardown,
+            )
+            .unwrap();
+            assert!(
+                calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|args| { args == &["branch", expected_flag, "--", "usagi/one"] })
+            );
+        }
+    }
+
+    #[test]
+    fn merged_pr_head_is_durable_across_teardown_worker_handoff() {
+        let (tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let signal = TeardownSignal::new();
+        let head = "a".repeat(40);
+        perform_remove_with_merged_head(
+            &runtime,
+            &signal,
+            &operation(),
+            &json!({"name":"one"}),
+            Some(head.clone()),
+        )
+        .unwrap();
+
+        let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
+        assert_eq!(pending[0].merged_head_oid.as_deref(), Some(head.as_str()));
+        let reopened = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
+        let state = reopened.state().unwrap();
+        assert_eq!(
+            state.sessions[0]
+                .delete_plan
+                .as_ref()
+                .unwrap()
+                .merged_head_oid
+                .as_deref(),
+            Some(head.as_str())
+        );
+    }
+
+    #[test]
+    fn removal_identity_treats_a_missing_branch_as_absent_and_rejects_unknown_names() {
+        let (_tmp, rt) = runtime(FakeGit::fail());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+        let runtime = runtime.lock().unwrap();
+        let session_id = runtime.session_id("one").unwrap();
+        assert_eq!(runtime.removal_identity("one").unwrap(), (session_id, None));
+        assert_eq!(
+            runtime.removal_identity("missing"),
+            Err(SessionRuntimeError::UnknownSession)
         );
     }
 
@@ -3766,6 +3935,7 @@ instructions = "direct"
             force: false,
             delete_branch: false,
             force_delete_branch: false,
+            merged_head_oid: None,
         });
         missing_operation.operation_id = None;
 
@@ -4862,6 +5032,7 @@ instructions = "code"
             force: true,
             delete_branch: false,
             force_delete_branch: false,
+            merged_head_oid: None,
         };
 
         let result = WorktreeTeardown::new(
@@ -5238,6 +5409,7 @@ instructions = "code"
                     force: false,
                     delete_branch: false,
                     force_delete_branch: false,
+                    merged_head_oid: None,
                 }
             ),
             Err("injected remove failure".into())
@@ -5558,6 +5730,7 @@ instructions = "code"
             force: false,
             delete_branch: false,
             force_delete_branch: false,
+            merged_head_oid: None,
         };
         assert_eq!(
             SharedSessionTeardown::new(shared).finish(&pending, Ok(())),

@@ -207,6 +207,15 @@ pub enum PrReviewDecision {
     ReviewRequired,
 }
 
+/// Provider metadata published atomically with a refreshed PR state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrRefreshMetadata {
+    pub head_oid: Option<String>,
+    pub draft: bool,
+    pub checks: Option<PrChecksState>,
+    pub review: Option<PrReviewDecision>,
+}
+
 /// One durable inventory entry. `pinned` and `Dismissed` are user-owned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrEntry {
@@ -214,6 +223,11 @@ pub struct PrEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub state: PrState,
+    /// GitHub's exact head commit for this PR. A merged entry may authorize
+    /// deleting a squash-merged session branch only while this still matches
+    /// the branch HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
     #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
@@ -266,6 +280,7 @@ impl PrInventory {
                         identity,
                         title: None,
                         state: PrState::Open,
+                        head_oid: None,
                         pinned: false,
                         refresh: PrRefreshState::Pending,
                         draft: false,
@@ -290,9 +305,7 @@ impl PrInventory {
         identity: &PrIdentity,
         title: Option<String>,
         state: PrState,
-        draft: bool,
-        checks: Option<PrChecksState>,
-        review: Option<PrReviewDecision>,
+        metadata: PrRefreshMetadata,
     ) -> bool {
         let Some(entry) = self.entries.get_mut(identity) else {
             return false;
@@ -302,19 +315,21 @@ impl PrInventory {
         }
         if entry.title == title
             && entry.state == state
+            && entry.head_oid == metadata.head_oid
             && entry.refresh == PrRefreshState::Idle
-            && entry.draft == draft
-            && entry.checks == checks
-            && entry.review == review
+            && entry.draft == metadata.draft
+            && entry.checks == metadata.checks
+            && entry.review == metadata.review
         {
             return false;
         }
         entry.title = title;
         entry.state = state;
+        entry.head_oid = metadata.head_oid;
         entry.refresh = PrRefreshState::Idle;
-        entry.draft = draft;
-        entry.checks = checks;
-        entry.review = review;
+        entry.draft = metadata.draft;
+        entry.checks = metadata.checks;
+        entry.review = metadata.review;
         self.revision += 1;
         true
     }
@@ -352,6 +367,14 @@ impl PrInventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn metadata(head: char) -> PrRefreshMetadata {
+        PrRefreshMetadata {
+            head_oid: Some(head.to_string().repeat(40)),
+            draft: false,
+            checks: None,
+            review: None,
+        }
+    }
     #[test]
     fn canonicalizes_and_strips_suffixes() {
         assert_eq!(
@@ -485,27 +508,21 @@ mod tests {
             &id,
             Some("closed work".into()),
             PrState::Closed,
-            false,
-            None,
-            None
+            metadata('a')
         ));
         assert_eq!(inventory.revision, 2);
         assert!(!inventory.apply_refresh(
             &id,
             Some("closed work".into()),
             PrState::Closed,
-            false,
-            None,
-            None
+            metadata('a')
         ));
         assert!(inventory.set_user_state(&id, PrState::Dismissed, true));
         assert!(!inventory.apply_refresh(
             &id,
             Some("merged work".into()),
             PrState::Merged,
-            false,
-            None,
-            None
+            metadata('b')
         ));
         assert_eq!(inventory.entries[&id].title.as_deref(), Some("closed work"));
     }
@@ -514,16 +531,14 @@ mod tests {
         let known = canonicalize("https://github.com/o/r/pull/10").unwrap();
         let missing = canonicalize("https://github.com/o/r/pull/11").unwrap();
         let mut inventory = PrInventory::default();
-        assert!(!inventory.apply_refresh(&missing, None, PrState::Open, false, None, None));
+        assert!(!inventory.apply_refresh(&missing, None, PrState::Open, metadata('a')));
         inventory.discover([known.clone()]);
         assert!(inventory.set_user_state(&known, PrState::Open, true));
         assert!(!inventory.apply_refresh(
             &known,
             Some("ignored".into()),
             PrState::Closed,
-            false,
-            None,
-            None
+            metadata('a')
         ));
         inventory.mark_refresh_backoff(&known);
         assert_eq!(inventory.entries[&known].refresh, PrRefreshState::Pending);
@@ -564,9 +579,12 @@ mod tests {
             &id,
             Some("ready".into()),
             PrState::Open,
-            true,
-            Some(PrChecksState::Passing),
-            Some(PrReviewDecision::Approved),
+            PrRefreshMetadata {
+                draft: true,
+                checks: Some(PrChecksState::Passing),
+                review: Some(PrReviewDecision::Approved),
+                ..metadata('a')
+            },
         ));
         let entry = &inventory.entries[&id];
         assert!(entry.draft);

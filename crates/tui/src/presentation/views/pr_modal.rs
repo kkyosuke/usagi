@@ -344,6 +344,7 @@ mod tests {
                     .unwrap(),
                 title: Some(format!("PR {index}")),
                 state,
+                head_oid: None,
                 pinned: false,
                 refresh: if index == 0 {
                     PrRefreshState::Pending
@@ -393,6 +394,7 @@ mod tests {
                 .unwrap(),
                 title: Some(format!("metadata {index}")),
                 state: PrState::Open,
+                head_oid: None,
                 pinned: false,
                 refresh: PrRefreshState::Idle,
                 draft,

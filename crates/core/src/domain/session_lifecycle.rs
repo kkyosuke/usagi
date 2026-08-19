@@ -211,6 +211,10 @@ pub struct DeletePlan {
     /// recovery set this. Ordinary user removal remains on Git's safe `-d` mode.
     #[serde(default)]
     pub force_delete_branch: bool,
+    /// Exact PR head GitHub reported as merged. The teardown may force-delete
+    /// a squash-merged branch only when its final HEAD still equals this OID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_head_oid: Option<String>,
 }
 /// A safe failure classification, not raw worker output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -894,6 +898,7 @@ mod tests {
                     force: false,
                     delete_branch: false,
                     force_delete_branch: false,
+                    merged_head_oid: None,
                 },
             },
             now(),
@@ -1116,7 +1121,8 @@ mod tests {
                         targets: vec![],
                         force: false,
                         delete_branch: false,
-                        force_delete_branch: false
+                        force_delete_branch: false,
+                        merged_head_oid: None,
                     }
                 },
                 now()
@@ -1133,7 +1139,8 @@ mod tests {
                         targets: vec![],
                         force: false,
                         delete_branch: false,
-                        force_delete_branch: false
+                        force_delete_branch: false,
+                        merged_head_oid: None,
                     }
                 },
                 now()
@@ -1212,6 +1219,7 @@ mod tests {
                     force: true,
                     delete_branch: false,
                     force_delete_branch: false,
+                    merged_head_oid: None,
                 },
             },
             now(),
@@ -1290,6 +1298,7 @@ mod tests {
                     force: false,
                     delete_branch: false,
                     force_delete_branch: false,
+                    merged_head_oid: None,
                 },
             },
             now(),

@@ -734,7 +734,7 @@ PR refresh/freshness 契約の正本はこの節である。daemon は committed
 GitHub PR URL を `pr-inventory.json` に保存し、単一の低優先度 worker が 250 ms ごとに schedule を進める。
 同じ URL が複数 chunk または複数 session から登録されても scheduler は identity 単位で coalesce し、1 tick
 につき最大 2 identity を canonical URL 順に claim し、2 request を並行実行する。remote provider は shell を介さない固定 argv の
-`gh pr view <canonical-url> --json title,state,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock
+`gh pr view <canonical-url> --json title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock
 を保持しないため、slow provider が terminal output の commit や IPC snapshot を停止させない。
 
 | 結果 | durable snapshot | 次回 schedule |
@@ -742,11 +742,12 @@ GitHub PR URL を `pr-inventory.json` に保存し、単一の低優先度 worke
 | discovery | last-known state を `open`、refresh state を `pending` として追加する | 即時 |
 | Open success | safe title/state/draft/check/review を全対象 session に publish し、refresh state を `idle` に戻す | 60 秒後（freshness window） |
 | Closed success | 同上 | 15 分後 |
-| Merged success | 同上 | schedule から除外 |
+| Merged success | 同上。squash merge 済み branch の安全な削除証明に使う exact `headRefOid` も保存する | schedule から除外 |
 | provider / parse failure | last-known title/state を保持し、refresh state を `backing_off` にする | 2 秒から倍増し、最大 60 秒 |
 
 schedule と retry attempt は process-local であり、inventory が durable SSoT である。daemon restart は pin 済み・
-dismissed・merged を除く保存済み identity を canonical URL 順に即時 schedule へ rebuild する。これにより wall clock や
+dismissed・`headRefOid` 保存済みの merged を除く保存済み identity を canonical URL 順に即時 schedule へ rebuild する。
+旧 snapshot の merged entry に `headRefOid` が無い場合は一度だけ再取得して補完する。これにより wall clock や
 前 process の一時 timer に依存せず、同じ snapshot から同じ順序で再開する。shutdown signal を受けた worker は
 新しい claim を止める。実行中 request も 5 秒の provider timeout で bounded であり、process 終了後に publish
 されない。
@@ -848,7 +849,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
-| branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。未マージ commit があれば Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。TUI でこの削除失敗行を選択し、破棄確認へ Yes と答えた recovery だけは、worktree force と `DeletePlan.force_delete_branch` を対で送り `git branch -D` で削除する。通常の `X` / `--force` は branch を強制削除しない。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
+| branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後の branch HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。TUI でこの削除失敗行を選択し、破棄確認へ Yes と答えた recovery だけは、worktree force と `DeletePlan.force_delete_branch` を対で送り `git branch -D` で削除する。通常の `X` / `--force` は branch を強制削除しない。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
 | Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap し、終了済み・interrupted を含む Agent runtime record を durable inventory から除去してから worktree を撤去する。Agent の終了に失敗した場合は worktree を残して retry する |
 
 daemon 起動時にも session lifecycle の全 `SessionId` と Agent inventory を照合する。session record が既に無い
