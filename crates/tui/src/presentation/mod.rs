@@ -56,7 +56,7 @@ use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
     Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
-    render_home_at, terminal_point_at,
+    render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::{PaneRestoreTarget, WorkspaceRuntime};
@@ -4496,6 +4496,36 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
     true
 }
 
+/// Select one visible managed-session tab after the frame's hit test resolved
+/// its display index. Agent selection is committed before registry mutation,
+/// matching keyboard tab cycling's durability fence.
+fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, index: usize) {
+    let Some(selection) = runtime.tab_selection_at(index) else {
+        return;
+    };
+    let Some(active) = runtime.panes().active() else {
+        return;
+    };
+    if !ui.has_agent_intent_for(active.session_id()) {
+        let _ = runtime.select_tab_selection(selection);
+        return;
+    }
+    let continuation = match &selection {
+        TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+        TabSelection::Interrupted(continuation) => Some(*continuation),
+        TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+    };
+    match ui.mutate_agent_intent(AgentTabIntentMutation::Select {
+        session_id: active.session_id(),
+        continuation,
+    }) {
+        Ok(()) => {
+            let _ = runtime.select_tab_selection(selection);
+        }
+        Err(error) => surface_agent_tab_intent_error(runtime, error),
+    }
+}
+
 fn is_director_new_click(
     key: &Key,
     runtime: &WorkspaceRuntime,
@@ -5841,15 +5871,33 @@ fn drive_workspace_controller(
             let header_action = drawn_material.as_ref().and_then(|material| {
                 home_header_action_at(width, &material.projection, column, row)
             });
-            match (garden_click, header_action) {
-                (Some(click), _) => runtime.apply_event(AppEvent::GardenClick(click)),
-                (None, Some(HomeHeaderAction::Director)) => {
+            let pane_tab = runtime
+                .wants_pane_control_input()
+                .then(|| {
+                    drawn_material.as_ref().and_then(|material| {
+                        right_pane_tab_at(
+                            material.height,
+                            material.width,
+                            &material.projection,
+                            column,
+                            row,
+                        )
+                    })
+                })
+                .flatten();
+            match (garden_click, header_action, pane_tab) {
+                (Some(click), _, _) => runtime.apply_event(AppEvent::GardenClick(click)),
+                (None, Some(HomeHeaderAction::Director), _) => {
                     runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
                 }
-                (None, Some(HomeHeaderAction::Decisions)) => {
+                (None, Some(HomeHeaderAction::Decisions), _) => {
                     runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
                 }
-                (None, None) => {
+                (None, None, Some(index)) => {
+                    select_right_pane_tab(&mut ui, &mut runtime, index);
+                    Vec::new()
+                }
+                (None, None, None) => {
                     runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
                 }
             }
@@ -6960,8 +7008,8 @@ mod tests {
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
         run_workspace_controller_with_backend_and_settings, safe_session_error,
-        sidebar_pointer_event, step_config, step_new, step_open, terminal_geometry, welcome_action,
-        write_banner,
+        select_right_pane_tab, sidebar_pointer_event, step_config, step_new, step_open,
+        terminal_geometry, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -7837,6 +7885,29 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn right_pane_click_selection_reaches_the_runtime_tab_owner() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
+        let first_operation = OperationId::new();
+        let first = live_terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, first_operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, first_operation, first.clone());
+        let second_operation = OperationId::new();
+        let second = live_terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, second_operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, second_operation, second);
+
+        select_right_pane_tab(&mut ui, &mut runtime, 0);
+
+        assert_eq!(runtime.focused_terminal(), Some(first));
     }
 
     #[test]

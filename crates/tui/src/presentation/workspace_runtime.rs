@@ -1325,6 +1325,25 @@ impl WorkspaceRuntime {
         self.adjacent_tab(direction)
     }
 
+    /// Stable selection for one visible tab index. The index comes only from a
+    /// frame hit test; callers receive the tab identity and never use its label
+    /// as an action key.
+    #[must_use]
+    pub fn tab_selection_at(&self, index: usize) -> Option<TabSelection> {
+        self.panes
+            .active_pane()
+            .tabs()
+            .get(index)
+            .map(tab_selection)
+    }
+
+    /// Select an exact stable tab identity, used after a pointer hit test.
+    pub fn select_tab_selection(&mut self, selection: TabSelection) -> Vec<PaneRegistryEffect> {
+        let effects = route_tab_command(&mut self.panes, PaneTabCommand::Select(selection));
+        self.sync_live_pane();
+        effects
+    }
+
     /// Move the selected tab in the active target while retaining its stable
     /// selection identity. The shell persists the resulting Agent order.
     pub fn reorder_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
@@ -2345,6 +2364,34 @@ mod tests {
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Live(second))
         );
+    }
+
+    #[test]
+    fn pointer_index_selects_the_exact_stable_tab_identity() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let first_op = OperationId::new();
+        let first = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, first_op, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, first_op, first.clone());
+        let second_op = OperationId::new();
+        let second = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, second_op, PaneKind::Agent);
+        let _ = runtime.complete_pane(target, second_op, second.clone());
+
+        assert_eq!(
+            runtime.tab_selection_at(0),
+            Some(TabSelection::Live(first.clone()))
+        );
+        assert_eq!(runtime.tab_selection_at(2), None);
+        let _ = runtime.select_tab_selection(TabSelection::Live(first.clone()));
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &PaneSelection::Tab(TabSelection::Live(first.clone()))
+        );
+        assert_eq!(runtime.focused_terminal(), Some(first));
     }
 
     #[test]

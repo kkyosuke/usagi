@@ -1634,6 +1634,40 @@ pub fn terminal_point_at(
     })
 }
 
+/// Resolve a click on the right-pane chip row to its displayed tab index.
+///
+/// This uses the same normalized frame geometry, pane split, prefix, and tab
+/// widget arithmetic as [`render_home`]. Foreground-surface ownership remains a
+/// runtime concern: callers must reject clicks while Switch or an overlay owns
+/// input.
+#[must_use]
+pub fn right_pane_tab_at(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    if usize::from(row) != CHROME_ROWS || usize::from(row) >= height || home.pane_tabs.is_empty() {
+        return None;
+    }
+    let split = panes::split(width, LEFT_WIDTH);
+    let right_left = split.left.saturating_add(1);
+    let right_column = usize::from(column).checked_sub(right_left)?;
+    let header = format!(" {}", home.preview_label());
+    let tabs = home
+        .pane_tabs
+        .iter()
+        .map(|tab| widgets::session_tab::Tab {
+            label: &tab.label,
+            selected: tab.selected,
+            pending_frame: tab.pending.then_some(home.mascot_tick),
+        })
+        .collect::<Vec<_>>();
+    widgets::session_tab::tab_at(split.right, &header, &tabs, right_column)
+}
+
 /// controller が runtime ごとに保持する phase を、Garden の表示語彙へ写す。
 /// `Done` は controller が runtime event の `Ended` / `Exited` / `Interrupted` を共通化した
 /// 値なので、Garden では静止した完了 pose に写す。
@@ -2580,8 +2614,8 @@ mod tests {
         garden_frame, garden_tick, health_badge, health_reason_label, home_header_action_at,
         home_header_layout, home_left_pane, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, short_id, sidebar_metadata, sidecar_labels,
-        terminal_point_at, with_footer_gap,
+        render_home_at, resume_label, right_pane_tab_at, short_id, sidebar_metadata,
+        sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -5185,6 +5219,24 @@ mod tests {
         let name = right_header.find("session").expect("session name");
         let tab = right_header.find("Agent").expect("agent tab");
         assert!(name < tab);
+
+        // The exact rendered chip cells resolve to the stable display index;
+        // its marker row, prefix, divider, and surrounding frame remain inert.
+        let tab_column = u16::try_from(tab).expect("frame column fits u16");
+        let chrome_row = u16::try_from(CHROME_ROWS).expect("chrome row fits u16");
+        let divider_column = u16::try_from(LEFT_WIDTH).expect("divider column fits u16");
+        assert_eq!(
+            right_pane_tab_at(30, 100, &home, tab_column, chrome_row),
+            Some(0)
+        );
+        assert_eq!(
+            right_pane_tab_at(30, 100, &home, tab_column, chrome_row + 1),
+            None
+        );
+        assert_eq!(
+            right_pane_tab_at(30, 100, &home, divider_column, chrome_row),
+            None
+        );
     }
 
     #[test]

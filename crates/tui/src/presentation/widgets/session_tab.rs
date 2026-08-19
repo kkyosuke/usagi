@@ -91,6 +91,34 @@ pub fn render_with_prefix(width: usize, prefix: &str, tabs: &[Tab<'_>]) -> [Stri
     ]
 }
 
+/// Resolve a chip-row column to the tab drawn by [`render_with_prefix`].
+///
+/// The hit test deliberately shares the renderer's display-width arithmetic:
+/// ANSI in the prefix and wide glyphs in labels consume exactly the same cells
+/// here as they do on screen. A chip clipped by `width` remains clickable only
+/// across its visible cells; the one-cell gaps between chips stay inert.
+#[must_use]
+pub fn tab_at(width: usize, prefix: &str, tabs: &[Tab<'_>], column: usize) -> Option<usize> {
+    if column >= width {
+        return None;
+    }
+    let mut cursor = super::display_width(prefix).saturating_add(1);
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            cursor = cursor.saturating_add(1);
+        }
+        let end = cursor.saturating_add(super::display_width(tab.label).saturating_add(2));
+        if (cursor..end.min(width)).contains(&column) {
+            return Some(index);
+        }
+        cursor = end;
+        if cursor >= width {
+            break;
+        }
+    }
+    None
+}
+
 /// tab が無い右ペイン本文を、静的うさぎと案内文で中央に置く。
 ///
 /// この関数は tick や runtime を受け取らないため、同じ geometry と message なら常に同じ
@@ -151,6 +179,7 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
         Tab, WAVE_TICKS_PER_POSITION, empty_pane, empty_pane_with_detail, pending_label, render,
+        tab_at,
     };
     use crate::presentation::widgets::display_width;
 
@@ -205,6 +234,32 @@ mod tests {
             }],
         );
         assert!(rows.iter().all(|row| display_width(row) == 6));
+    }
+
+    #[test]
+    fn chip_hit_test_matches_prefix_wide_labels_gaps_and_clipping() {
+        let tabs = [
+            Tab {
+                label: "端末",
+                selected: true,
+                pending_frame: None,
+            },
+            Tab {
+                label: "Agent",
+                selected: false,
+                pending_frame: None,
+            },
+        ];
+        let prefix = "\u{1b}[1m session\u{1b}[0m";
+        // Prefix is 8 cells plus the renderer's spacer. The first chip is 6
+        // cells (` 端末 `), followed by one inert separator cell.
+        assert_eq!(tab_at(40, prefix, &tabs, 8), None);
+        assert_eq!(tab_at(40, prefix, &tabs, 9), Some(0));
+        assert_eq!(tab_at(40, prefix, &tabs, 14), Some(0));
+        assert_eq!(tab_at(40, prefix, &tabs, 15), None);
+        assert_eq!(tab_at(40, prefix, &tabs, 16), Some(1));
+        assert_eq!(tab_at(18, prefix, &tabs, 17), Some(1));
+        assert_eq!(tab_at(17, prefix, &tabs, 17), None);
     }
 
     #[test]
