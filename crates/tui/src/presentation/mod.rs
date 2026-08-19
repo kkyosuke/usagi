@@ -5022,6 +5022,7 @@ fn drain_controller_host_actions(
                         SessionCommand::Remove {
                             name,
                             force: request.force,
+                            force_delete_branch: request.force_delete_branch,
                         },
                         SessionBackendCompletion::Remove {
                             session: request.session,
@@ -7683,6 +7684,7 @@ mod tests {
                 workspace,
                 session,
                 force: true,
+                force_delete_branch: false,
             },
             Effect::LaunchAgent {
                 workspace,
@@ -7819,6 +7821,7 @@ mod tests {
                 workspace,
                 session: SessionId::new(),
                 force: false,
+                force_delete_branch: false,
             },
             Effect::LaunchAgent {
                 workspace,
@@ -7907,6 +7910,7 @@ mod tests {
             workspace,
             session,
             force: true,
+            force_delete_branch: false,
         });
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -11938,6 +11942,7 @@ mod tests {
                     workspace,
                     session,
                     force: false,
+                    force_delete_branch: false,
                 },
                 completions,
             ),

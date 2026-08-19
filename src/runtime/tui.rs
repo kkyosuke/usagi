@@ -3188,9 +3188,17 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             SessionCommand::SelectRemove { .. } => {
                 return Err("session selection must be handled by the TUI".to_owned());
             }
-            SessionCommand::Remove { name, force } => (
+            SessionCommand::Remove {
+                name,
+                force,
+                force_delete_branch,
+            } => (
                 SessionAction::Remove,
-                serde_json::json!({"name": name, "force": force}),
+                serde_json::json!({
+                    "name": name,
+                    "force": force,
+                    "force_delete_branch": force_delete_branch,
+                }),
             ),
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();

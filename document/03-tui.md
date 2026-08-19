@@ -745,7 +745,8 @@ sidebar は daemon snapshot の `available` session に加えて、名前を占�
 回収経路であり、session の scope や checkout を再び使用可能にはしない。各行の可否は snapshot の lifecycle
 から client 側で導出する（`SessionLifecycle::capabilities` が正本）。ただし delete stage の `failed` 行を Enter で選択した場合は
 既存 pane より先に「強制削除しますか？」の Yes/No modal を開く。Yes だけが同じ stable session identity の
-`force=true` remove を送信し、No / Esc は何も削除せず閉じる。`deleting` session も表示し、削除中の行
+worktree 強制削除と未マージ branch の破棄を許可した remove を送信し、No / Esc は何も削除せず閉じる。
+通常の `X` / `--force` は従来どおり worktree だけを強制し、未マージ branch は保護する。`deleting` session も表示し、削除中の行
 （Danger の `✂` と wave）として描く。daemon は remove を受理した時点で応答し、worktree の撤去は daemon 所有の
 worker が続けるため（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）、この行は
 撤去が終わるまで（巨大な `target/` では分オーダー）残り、完了で消える。`deleting` は使用不可かつ削除不可

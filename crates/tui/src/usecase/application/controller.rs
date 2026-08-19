@@ -2081,6 +2081,8 @@ pub enum Effect {
         workspace: WorkspaceId,
         session: SessionId,
         force: bool,
+        /// Whether the confirmed recovery may discard an unmerged session branch.
+        force_delete_branch: bool,
     },
     /// Open a workspace and request the Home snapshot for this exact incarnation.
     ///
@@ -3545,6 +3547,7 @@ fn commit_force_remove(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
         workspace: state.workspace,
         session,
         force: true,
+        force_delete_branch: true,
     }]
 }
 
@@ -4022,6 +4025,7 @@ fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
         workspace: state.workspace,
         session,
         force,
+        force_delete_branch: false,
     }]
 }
 
@@ -4608,6 +4612,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                     workspace: state.workspace,
                     session: active_session,
                     force,
+                    force_delete_branch: false,
                 })
             } else {
                 state.notice = Some(Notice::new("invalid close arguments"));
@@ -7249,6 +7254,7 @@ mod tests {
                 workspace,
                 session: first,
                 force: false,
+                force_delete_branch: false,
             }]
         );
         assert_eq!(state.selected(), Selection::NewSession);
@@ -7260,6 +7266,7 @@ mod tests {
                 workspace,
                 session: second,
                 force: true,
+                force_delete_branch: false,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
@@ -7324,6 +7331,7 @@ mod tests {
                 workspace,
                 session,
                 force: false,
+                force_delete_branch: false,
             }]
         );
     }
@@ -7380,6 +7388,7 @@ mod tests {
                 workspace,
                 session,
                 force: true,
+                force_delete_branch: true,
             }]
         );
         assert_eq!(state.overlay(), None);
@@ -7715,6 +7724,7 @@ mod tests {
                 workspace,
                 session,
                 force: true,
+                force_delete_branch: false,
             }]
         );
 

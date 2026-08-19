@@ -2138,7 +2138,12 @@ fn home_failed_row_lines(
     selected: bool,
     current: bool,
 ) -> Vec<String> {
-    let clipped = widgets::clip_to_width(&session.label, width.saturating_sub(9));
+    let label_width = if session.failure_stage == Some(FailureStage::Delete) {
+        width.saturating_sub(2)
+    } else {
+        width.saturating_sub(9)
+    };
+    let clipped = widgets::clip_to_width(&session.label, label_width);
     let label = if selected {
         Role::Danger.style().bold().paint(&clipped)
     } else {
@@ -4493,6 +4498,25 @@ mod tests {
         assert!(strip(&frame).contains("remove failed"));
         assert!(!frame.contains("private detail"));
         assert!(!strip(&frame).contains("feature  failed"));
+    }
+
+    #[test]
+    fn delete_failure_row_uses_the_space_freed_by_the_removed_failed_tag() {
+        let session = SessionId::new();
+        let mut failed = projected_session(session, "abcdefghijklmnop", "/work/abcdefghijklmnop");
+        failed.lifecycle = SessionLifecycle::Failed;
+        failed.failure_stage = Some(FailureStage::Delete);
+
+        let lines = super::home_failed_row_lines(
+            &failed,
+            Selection::Target(Target::Session(session)),
+            12,
+            true,
+            false,
+        );
+
+        assert!(strip(&lines[0]).contains("abcdefghi…"));
+        assert_eq!(widgets::display_width(&lines[0]), 12);
     }
 
     #[test]

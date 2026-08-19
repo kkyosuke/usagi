@@ -1170,20 +1170,33 @@ impl SessionRuntime {
         let name = session_name(payload)?;
         // A compensation is not a client request: it forces the removal and
         // branch deletion, and neither is negotiable through a payload. A
-        // requested removal also attempts to delete the branch, but only with
-        // Git's safe `-d` mode so unmerged work leaves a diagnosable failed row.
+        // requested removal normally uses Git's safe `-d` mode. Only the
+        // separately confirmed failed-delete recovery may request `-D`.
         let compensating = kind == RemoveKind::Compensating;
         let force = compensating || force(payload)?;
+        let requested_force_delete_branch = force_delete_branch(payload)?;
+        if requested_force_delete_branch && !force {
+            return Err(SessionRuntimeError::InvalidRequest);
+        }
+        let force_delete_branch = compensating || requested_force_delete_branch;
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
-        let semantic_key = remove_semantic_key(kind, &name, force);
+        let semantic_key = remove_semantic_key(kind, &name, force, force_delete_branch);
         if let Some(existing) = before
             .operations
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
-            if !remove_operation_matches(&before, existing, kind, &name, force, &semantic_key) {
+            if !remove_operation_matches(
+                &before,
+                existing,
+                kind,
+                &name,
+                force,
+                force_delete_branch,
+                &semantic_key,
+            ) {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
             if existing.status == OperationStatus::Accepted {
@@ -1216,7 +1229,6 @@ impl SessionRuntime {
             }));
         }
         let delete_branch = true;
-        let force_delete_branch = compensating;
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
         let removing = self
@@ -1744,6 +1756,16 @@ fn force(payload: &Value) -> Result<bool, SessionRuntimeError> {
     }
 }
 
+/// Parse the separately confirmed permission to discard an unmerged branch.
+/// It is independent from worktree force so legacy `--force` callers retain
+/// their existing branch-preserving behavior.
+fn force_delete_branch(payload: &Value) -> Result<bool, SessionRuntimeError> {
+    match payload.get("force_delete_branch") {
+        Some(value) => value.as_bool().ok_or(SessionRuntimeError::InvalidRequest),
+        None => Ok(false),
+    }
+}
+
 /// Keep the actionable Git reason on one bounded display line. Session names
 /// are validated before Git is invoked, and the command has no user-supplied
 /// argv or environment, so this only carries the worktree command's own
@@ -1818,35 +1840,47 @@ fn create_semantic_key(origin: CreateOrigin, name: &str, role_id: Option<&RoleId
 /// derived from the session lifecycle and captured in its `DeletePlan`. `force`
 /// is spelled out even when false so opposite destructive intents cannot share
 /// an operation id.
-fn remove_semantic_key(kind: RemoveKind, name: &str, force: bool) -> String {
+fn remove_semantic_key(
+    kind: RemoveKind,
+    name: &str,
+    force: bool,
+    force_delete_branch: bool,
+) -> String {
     let action = semantic_key(SessionAction::Remove, name);
     let origin = match kind {
         RemoveKind::Requested => "requested",
         RemoveKind::Compensating => "compensating",
     };
-    format!("{action}:origin={origin}:force={force}")
+    format!("{action}:origin={origin}:force={force}:force_delete_branch={force_delete_branch}")
 }
 
 /// Whether an existing journal proves it represents this removal intent.
 ///
-/// Current journals compare their complete canonical key. A legacy
-/// `remove:<name>` key did not record force or origin; it is replay-compatible
+/// Current journals compare their complete canonical key. Earlier keys omitted
+/// either the branch-force choice or every option. They are replay-compatible
 /// only while the session still carries the matching operation and `DeletePlan`,
-/// which independently prove both effecting choices. Once that evidence is
-/// gone (notably after success), guessing would correlate an unknown old intent
-/// with a new request, so reuse fails closed.
+/// which independently prove all effecting choices. Once that evidence is gone
+/// (notably after success), guessing would correlate an unknown old intent with
+/// a new request, so reuse fails closed.
 fn remove_operation_matches(
     state: &WorkspaceLifecycleState,
     operation: &OperationJournal,
     kind: RemoveKind,
     name: &str,
     force: bool,
+    force_delete_branch: bool,
     requested_key: &str,
 ) -> bool {
     if operation.semantic_key == requested_key {
         return true;
     }
-    if operation.semantic_key != semantic_key(SessionAction::Remove, name) {
+    let action = semantic_key(SessionAction::Remove, name);
+    let origin = match kind {
+        RemoveKind::Requested => "requested",
+        RemoveKind::Compensating => "compensating",
+    };
+    let previous_canonical_key = format!("{action}:origin={origin}:force={force}");
+    if operation.semantic_key != action && operation.semantic_key != previous_canonical_key {
         return false;
     }
     for session in &state.sessions {
@@ -1857,10 +1891,13 @@ fn remove_operation_matches(
             return false;
         };
         let branch_delete_matches = match kind {
-            RemoveKind::Compensating => plan.delete_branch && plan.force_delete_branch,
-            // Legacy requested plans preserved the branch; current requested
-            // plans delete it safely. Neither may force branch deletion.
-            RemoveKind::Requested => !plan.force_delete_branch,
+            RemoveKind::Compensating => {
+                plan.delete_branch && plan.force_delete_branch && force_delete_branch
+            }
+            RemoveKind::Requested => {
+                plan.force_delete_branch == force_delete_branch
+                    && (!force_delete_branch || plan.delete_branch)
+            }
         };
         return plan.force == force && branch_delete_matches;
     }
@@ -3986,6 +4023,7 @@ instructions = "code"
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One recovery scenario proves safe failure, confirmed retry, and final cleanup.
     fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
         struct UnmergedBranchGit {
             calls: Arc<Mutex<Vec<Vec<String>>>>,
@@ -3996,7 +4034,7 @@ instructions = "code"
                     .lock()
                     .unwrap()
                     .push(args.iter().map(|arg| (*arg).to_owned()).collect());
-                Ok(if args.first() == Some(&"branch") {
+                Ok(if args.get(..2) == Some(["branch", "-d"].as_slice()) {
                     GitOutput {
                         success: false,
                         stdout: String::new(),
@@ -4060,6 +4098,66 @@ instructions = "code"
                 .unwrap()
                 .iter()
                 .any(|args| { args == &["branch", "-d", "--", "usagi/one"] })
+        );
+        drop(state);
+
+        perform_remove(
+            &runtime,
+            &signal,
+            &operation(),
+            &json!({
+                "name":"one",
+                "force":true,
+                "force_delete_branch":true,
+            }),
+        )
+        .unwrap();
+        let reports = drain_pending_teardowns(
+            &SharedSessionTeardown::new(Arc::clone(&runtime)),
+            &WorktreeTeardown::new(
+                UnmergedBranchGit {
+                    calls: Arc::clone(&calls),
+                },
+                SystemSessionWorktreeIo,
+            ),
+            &|| false,
+        );
+
+        assert_eq!(reports[0].effect_error, None);
+        assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|args| { args == &["branch", "-D", "--", "usagi/one"] })
+        );
+    }
+
+    #[test]
+    fn forced_branch_delete_requires_worktree_force() {
+        let (_tmp, rt) = runtime(FakeGit::ok());
+        let runtime = Arc::new(Mutex::new(rt));
+        perform_create(
+            &runtime,
+            &FakeGit::ok(),
+            &operation(),
+            &json!({"name":"one"}),
+        )
+        .unwrap();
+
+        let error = perform_remove(
+            &runtime,
+            &TeardownSignal::new(),
+            &operation(),
+            &json!({"name":"one", "force_delete_branch":true}),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, SessionRuntimeError::InvalidRequest);
+        assert_eq!(
+            runtime.lock().unwrap().state().unwrap().sessions[0].lifecycle,
+            SessionLifecycle::Available
         );
     }
 
@@ -4470,7 +4568,7 @@ instructions = "code"
         assert_eq!(state.operations.len(), 2);
         assert_eq!(
             state.operations[1].semantic_key,
-            "remove:triage:origin=compensating:force=true"
+            "remove:triage:origin=compensating:force=true:force_delete_branch=true"
         );
         assert!(
             state.sessions[0]
@@ -4499,12 +4597,13 @@ instructions = "code"
         let mut state = runtime.lock().unwrap().state().unwrap();
         let mut legacy_operation = state.operations.last().unwrap().clone();
         legacy_operation.semantic_key = semantic_key(SessionAction::Remove, "triage");
-        let requested_key = remove_semantic_key(RemoveKind::Compensating, "triage", true);
+        let requested_key = remove_semantic_key(RemoveKind::Compensating, "triage", true, true);
         assert!(remove_operation_matches(
             &state,
             &legacy_operation,
             RemoveKind::Compensating,
             "triage",
+            true,
             true,
             &requested_key,
         ));
@@ -4517,7 +4616,8 @@ instructions = "code"
             RemoveKind::Compensating,
             "missing",
             true,
-            &remove_semantic_key(RemoveKind::Compensating, "missing", true),
+            true,
+            &remove_semantic_key(RemoveKind::Compensating, "missing", true, true),
         ));
         let mut wrong_id_operation = legacy_operation.clone();
         wrong_id_operation.operation_id = OperationId::new();
@@ -4526,6 +4626,7 @@ instructions = "code"
             &wrong_id_operation,
             RemoveKind::Compensating,
             "triage",
+            true,
             true,
             &requested_key,
         ));
@@ -4536,6 +4637,7 @@ instructions = "code"
             &legacy_operation,
             RemoveKind::Compensating,
             "triage",
+            true,
             true,
             &requested_key,
         ));
@@ -4549,6 +4651,7 @@ instructions = "code"
             RemoveKind::Compensating,
             "triage",
             true,
+            true,
             &requested_key,
         ));
         let plan = state.sessions[0].delete_plan.as_mut().unwrap();
@@ -4559,6 +4662,7 @@ instructions = "code"
             &legacy_operation,
             RemoveKind::Compensating,
             "triage",
+            true,
             true,
             &requested_key,
         ));

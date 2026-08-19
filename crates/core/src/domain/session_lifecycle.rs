@@ -207,8 +207,8 @@ pub struct DeletePlan {
     pub delete_branch: bool,
     /// Whether branch deletion may discard unmerged commits.
     ///
-    /// Only daemon-owned compensation sets this. User-requested removal always
-    /// uses Git's safe `-d` mode, independently of worktree `force`.
+    /// Daemon-owned compensation and the explicitly confirmed failed-delete
+    /// recovery set this. Ordinary user removal remains on Git's safe `-d` mode.
     #[serde(default)]
     pub force_delete_branch: bool,
 }

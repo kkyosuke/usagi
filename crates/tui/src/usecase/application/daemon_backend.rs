@@ -80,6 +80,8 @@ pub struct RemoveSessionRequest {
     pub session: SessionId,
     /// Whether the daemon should force removal of a busy session.
     pub force: bool,
+    /// Whether a confirmed recovery may discard the session's unmerged branch.
+    pub force_delete_branch: bool,
 }
 
 /// An Agent-launch request derived from [`Effect::LaunchAgent`].
@@ -412,11 +414,13 @@ impl DaemonBackend {
                 workspace,
                 session,
                 force,
+                force_delete_branch,
             } => self.sessions.remove(
                 RemoveSessionRequest {
                     workspace,
                     session,
                     force,
+                    force_delete_branch,
                 },
                 self.completions(),
             ),
@@ -893,6 +897,7 @@ mod tests {
             workspace: WorkspaceId::new(),
             session: SessionId::new(),
             force: true,
+            force_delete_branch: false,
         });
         assert_eq!(flow, Flow::Continue);
         assert!(matches!(
@@ -1209,6 +1214,7 @@ mod tests {
             workspace,
             session,
             force: false,
+            force_delete_branch: false,
         };
         assert_eq!(remove.clone(), remove);
         assert!(format!("{remove:?}").contains("RemoveSessionRequest"));
