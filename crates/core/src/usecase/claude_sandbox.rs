@@ -8,12 +8,21 @@
 //! **fail-closed**: sandbox backend が無い、または未対応 platform では [`SandboxPlan::Reject`] を
 //! 返し、Claude を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
 //!
-//! session の writable root は provisioner が渡す own worktree だけである。root coordinator では、
-//! その起動固有 root に platform / 環境由来の普遍領域（`$TMPDIR`・`/tmp`・`/var/tmp`・起動する
-//! agent CLI 自身の state・macOS の Keychain と system / per-user の MDS cache）を加える。daemon
-//! の再起動は sandbox 外の bootstrap broker に委譲し、data home は writable root に含めない。
-//! sandbox は書き込みだけをこの root 集合に閉じ込め、読み取りは許す（読み取り側の論理境界は
+//! 起動固有の writable root は provisioner が渡す（session は own worktree、root coordinator は
+//! repository-local root を持たない）。**その起動固有 root に、両 mode とも同じ普遍領域**
+//! （`$TMPDIR`・`/tmp`・`/var/tmp`・起動する agent CLI 自身の state・macOS の Keychain と
+//! system / per-user の MDS cache）を加える。daemon の再起動は sandbox 外の bootstrap broker に
+//! 委譲し、data home は writable root に含めない。sandbox は書き込みだけをこの root 集合に
+//! 閉じ込め、読み取りは許す（読み取り側の論理境界は
 //! [`crate::usecase::workspace_guard`] の `PreToolUse` フックが担う）。
+//!
+//! 普遍領域を session から落とすと、agent CLI は**その worktree の中でしか動けない**という以前に
+//! **起動できない**。Claude Code は tool を実行するたびに `$TMPDIR` を無視した固定 path
+//! （`/tmp/claude-<uid>/<cwd の slug>`）へ scratchpad を作るため、`/tmp` を落とすと全 tool 呼び出しが
+//! `EPERM: operation not permitted, mkdir` で失敗する。`~/.claude` を落とすと onboarding・theme・
+//! permission mode・MCP 承認といった利用者の設定が毎起動リセットされ、macOS の Keychain / MDS を
+//! 落とすと認証が 401 で失敗する。**session と root を分けるのは repository への書き込み境界**
+//! （起動固有 root と `protected_root`）であって、agent 自身の scratch / state / 認証領域ではない。
 //!
 //! macOS の Keychain 検索は Module Directory Service (MDS) の cache を更新するため、system の
 //! `/private/var/db/mds` だけでなく **per-user cache**（`$DARWIN_USER_CACHE_DIR/mds`）にも書ける
@@ -230,9 +239,6 @@ pub fn macos_mds_cache_root(cache_dir: &Path) -> PathBuf {
 /// 起動固有の root（provisioner 由来）と普遍領域を結合し、重複を除いた決定的な writable root 集合。
 fn writable_roots(request: &SandboxRequest) -> Vec<PathBuf> {
     let mut roots: BTreeSet<PathBuf> = request.launch_roots.iter().cloned().collect();
-    if request.mode == SandboxMode::Session {
-        return roots.into_iter().collect();
-    }
     roots.insert(PathBuf::from("/tmp"));
     roots.insert(PathBuf::from("/var/tmp"));
     if let Some(tmpdir) = &request.tmpdir {
@@ -673,14 +679,43 @@ mod tests {
         );
     }
 
+    // A session launch that only owns its worktree cannot run the agent at all:
+    // Claude Code writes its scratchpad to a fixed `/tmp/claude-<uid>/…` that
+    // ignores `$TMPDIR`, keeps onboarding / settings / permission mode in
+    // `~/.claude`, and reads credentials through the macOS Keychain and MDS
+    // cache. Both scopes therefore carry the same universal areas; only the
+    // repository write boundary differs.
     #[test]
-    fn session_roots_never_include_shared_environment_or_platform_state() {
+    fn a_session_launch_carries_the_same_universal_areas_as_a_root_launch() {
+        let mut session = request(Platform::MacOs, Some("/sandbox"));
+        session.command = vec!["/usr/local/bin/claude".to_owned()];
+        let mut root = session.clone();
+        root.mode = SandboxMode::Root;
+        root.launch_roots.clear();
+
+        let mut expected = writable_roots(&root);
+        assert!(expected.contains(&PathBuf::from("/tmp")));
+        assert!(expected.contains(&PathBuf::from("/home/dev/.claude")));
+        expected.push(PathBuf::from("/repo/.usagi/sessions/work"));
+        expected.sort();
+        assert_eq!(writable_roots(&session), expected);
+    }
+
+    // The worktree is the only repository-local root a session may write, and no
+    // universal area may cover the protected workspace.
+    #[test]
+    fn a_session_launch_grants_no_repository_root_beyond_its_own_worktree() {
         for platform in [Platform::MacOs, Platform::Linux] {
             let request = request(platform, Some("/sandbox"));
+            let repository_roots = writable_roots(&request)
+                .into_iter()
+                .filter(|root| root.starts_with("/repo"))
+                .collect::<Vec<_>>();
             assert_eq!(
-                writable_roots(&request),
+                repository_roots,
                 [PathBuf::from("/repo/.usagi/sessions/work")]
             );
+            assert!(invalid_policy_reason(&request).is_none());
         }
     }
 
