@@ -49,7 +49,7 @@ use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::SessionId;
+use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -605,9 +605,20 @@ impl HomeProjection {
     /// Attach the latest coherent daemon Agent inventory to Garden and the
     /// status modal. Runtime identity is shortened only for the modal; Garden
     /// joins by stable `SessionId` / `AgentRuntimeId`, never visible labels.
+    ///
+    /// The inventory is also the **membership authority**: a runtime it no longer
+    /// holds in a present state ([`present_agent_phase`]) leaves neither a rabbit
+    /// nor a sidebar glyph, even when this TUI still remembers the last
+    /// runtime-local phase it pushed. Controller phases accumulate for the life
+    /// of a session, so without this an Agent the user closed kept a `done`
+    /// rabbit in the garden that owned no Closeup tab.
     #[must_use]
     pub fn with_agent_inventory(mut self, inventory: Option<&AgentInventory>) -> Self {
         if let Some(inventory) = inventory {
+            // Present runtimes per session, from the one observation that also
+            // decides the Closeup tab strip.
+            let mut present: BTreeMap<SessionId, Vec<(AgentRuntimeId, AgentPhase)>> =
+                BTreeMap::new();
             for item in &inventory.runtimes {
                 let Some(session_id) = item.runtime.session_id else {
                     // Workspace-root runtimes belong to no session row.
@@ -617,20 +628,38 @@ impl HomeProjection {
                     // A stale or foreign session cannot create a row or a plot.
                     continue;
                 }
-                let agents = self.session_agents.entry(session_id).or_default();
-                if agents
-                    .iter()
-                    .any(|agent| agent.runtime_id == item.runtime.agent_runtime_id)
-                {
-                    // A runtime-local push carries the daemon's concrete phase,
-                    // while the durable inventory state is a coarse summary of
-                    // the same runtime. Keep the push.
+                let Some(phase) = present_agent_phase(item.state) else {
+                    // Exited, reclaimed, and unavailable runtimes own no tab.
                     continue;
-                }
-                agents.push(widgets::agent_status::AgentStatus {
-                    runtime_id: item.runtime.agent_runtime_id,
-                    phase: inventory_agent_phase(item.state),
+                };
+                present
+                    .entry(session_id)
+                    .or_default()
+                    .push((item.runtime.agent_runtime_id, phase));
+            }
+            // Drop what the inventory does not hold any more, then add the
+            // runtimes this TUI has not seen a phase push for. Runtime-local
+            // phases stay authoritative for the *phase* of a surviving runtime:
+            // they are more precise than the coarse durable state (notably
+            // `Waiting`).
+            self.session_agents.retain(|session_id, agents| {
+                let held = present.get(session_id);
+                agents.retain(|agent| {
+                    held.is_some_and(|held| {
+                        held.iter()
+                            .any(|(runtime_id, _)| *runtime_id == agent.runtime_id)
+                    })
                 });
+                !agents.is_empty()
+            });
+            for (session_id, held) in present {
+                let agents = self.session_agents.entry(session_id).or_default();
+                for (runtime_id, phase) in held {
+                    if agents.iter().any(|agent| agent.runtime_id == runtime_id) {
+                        continue;
+                    }
+                    agents.push(widgets::agent_status::AgentStatus { runtime_id, phase });
+                }
             }
             // Garden は sidebar と同じ束を描く。inventory を重ねたあとに配り直すことで、
             // 庭とサイドバーが別々の Agent 数を出す余地を残さない。
@@ -1705,18 +1734,21 @@ pub fn right_pane_tab_at(
     widgets::session_tab::tab_at(split.right, &header, &tabs, right_column)
 }
 
-/// Coarse fallback used when a runtime exists in the latest daemon inventory
-/// but this TUI has not observed a runtime-local phase push for it yet.
-const fn inventory_agent_phase(state: AgentRuntimeInventoryState) -> AgentPhase {
+/// Whether one durable inventory state still owns a Closeup tab, and the coarse
+/// phase to draw for it until a runtime-local push refines it.
+///
+/// `None` means the runtime is gone: `Exited` / `Reclaimed` were closed and
+/// `Unavailable` (spawn failure, unprovable ownership) never became attachable.
+/// None of the three is an interrupted tab either, so drawing them would put a
+/// rabbit and a sidebar glyph on an Agent the user cannot open.
+const fn present_agent_phase(state: AgentRuntimeInventoryState) -> Option<AgentPhase> {
     match state {
-        AgentRuntimeInventoryState::Reserved => AgentPhase::Ready,
-        AgentRuntimeInventoryState::Live => AgentPhase::Running,
-        AgentRuntimeInventoryState::Interrupted | AgentRuntimeInventoryState::Unavailable => {
-            AgentPhase::Interrupted
-        }
-        AgentRuntimeInventoryState::Exited | AgentRuntimeInventoryState::Reclaimed => {
-            AgentPhase::Exited
-        }
+        AgentRuntimeInventoryState::Reserved => Some(AgentPhase::Ready),
+        AgentRuntimeInventoryState::Live => Some(AgentPhase::Running),
+        AgentRuntimeInventoryState::Interrupted => Some(AgentPhase::Interrupted),
+        AgentRuntimeInventoryState::Exited
+        | AgentRuntimeInventoryState::Reclaimed
+        | AgentRuntimeInventoryState::Unavailable => None,
     }
 }
 
@@ -1775,6 +1807,10 @@ pub fn garden_fits(raw_height: usize, raw_width: usize) -> bool {
 ///
 /// `None` は「この frame は Garden ではない」で、呼び出し側は通常の Home の hit test
 /// を続ける。
+///
+/// うさぎの rectangle は区画の内側にあり、frame では区画より先に並ぶ。最初に当たった
+/// rectangle を採るので、うさぎを押せば `agent` 付きの [`GardenClick::Visit`]、区画の
+/// nameplate や余白を押せば session だけの `Visit` になる。
 #[must_use]
 pub fn garden_click_at(
     raw_height: usize,
@@ -1791,8 +1827,9 @@ pub fn garden_click_at(
             .hitboxes
             .iter()
             .find(|hitbox| hitbox.contains(column, row))
-            .map_or(GardenClick::Dismiss, |hitbox| {
-                GardenClick::Visit(hitbox.session_id)
+            .map_or(GardenClick::Dismiss, |hitbox| GardenClick::Visit {
+                session: hitbox.session_id,
+                agent: hitbox.agent,
             }),
     )
 }
@@ -4292,25 +4329,125 @@ mod tests {
         assert!(!text.contains("no agents"));
     }
 
+    /// 区画に居るのは tab を持つ Agent だけである。exited / reclaimed / unavailable は
+    /// Closeup の tab を持たないので、うさぎにも sidebar の記号にもならない。
     #[test]
-    fn garden_maps_every_inventory_state_to_a_visible_phase() {
+    fn only_a_runtime_that_still_owns_a_tab_becomes_a_rabbit() {
         let cases = [
-            (AgentRuntimeInventoryState::Reserved, AgentPhase::Ready),
-            (AgentRuntimeInventoryState::Live, AgentPhase::Running),
+            (
+                AgentRuntimeInventoryState::Reserved,
+                Some(AgentPhase::Ready),
+            ),
+            (AgentRuntimeInventoryState::Live, Some(AgentPhase::Running)),
             (
                 AgentRuntimeInventoryState::Interrupted,
-                AgentPhase::Interrupted,
+                Some(AgentPhase::Interrupted),
             ),
-            (
-                AgentRuntimeInventoryState::Unavailable,
-                AgentPhase::Interrupted,
-            ),
-            (AgentRuntimeInventoryState::Exited, AgentPhase::Exited),
-            (AgentRuntimeInventoryState::Reclaimed, AgentPhase::Exited),
+            (AgentRuntimeInventoryState::Unavailable, None),
+            (AgentRuntimeInventoryState::Exited, None),
+            (AgentRuntimeInventoryState::Reclaimed, None),
         ];
         for (state, expected) in cases {
-            assert_eq!(super::inventory_agent_phase(state), expected);
+            assert_eq!(super::present_agent_phase(state), expected, "{state:?}");
         }
+    }
+
+    /// controller の runtime-local phase は session が生きている限り積み上がるので、
+    /// 利用者が閉じた Agent の `done` うさぎが庭に残っていた。membership は tab strip と
+    /// 同じ observation（最新 coherent inventory）で決める。
+    #[test]
+    fn a_closed_agent_leaves_no_rabbit_and_no_sidebar_glyph() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let closed = runtime_ref(workspace, session);
+        let live = runtime_ref(workspace, session);
+        for (runtime, phase) in [
+            (closed.clone(), AgentPhase::Exited),
+            (live.clone(), AgentPhase::Running),
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase { runtime, phase }),
+            );
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let rows = &[projected_session(session, "builder", "/work/builder")];
+        // inventory を観測する前は、TUI が持っている runtime-local phase がすべてである。
+        let unobserved = HomeProjection::from_state(&state, "atlas", Path::new("/work"), rows);
+        assert_eq!(unobserved.session_agents[&session].len(), 2);
+
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                AgentRuntimeInventoryItem {
+                    runtime: closed.clone(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Exited,
+                    resumed_from: None,
+                },
+                AgentRuntimeInventoryItem {
+                    runtime: live.clone(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                },
+            ],
+            resumable: Vec::new(),
+        };
+        let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), rows)
+            .with_agent_inventory(Some(&inventory));
+        assert_eq!(
+            home.session_agents[&session],
+            vec![widgets::agent_status::AgentStatus {
+                runtime_id: live.agent_runtime_id,
+                phase: AgentPhase::Running,
+            }]
+        );
+        let garden = home.garden_sessions.as_ref().expect("garden projection");
+        assert_eq!(garden[0].agents, home.session_agents[&session]);
+        let text = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        assert!(text.contains("1 run"), "{text}");
+        assert!(!text.contains("done"), "{text}");
+    }
+
+    /// inventory が 1 体も残していない session は、記号のある 3 行目を
+    /// `—`（Agent 無し）へ戻す。空の束を残して「観測していない」と混ぜない。
+    #[test]
+    fn a_session_whose_agents_all_closed_reports_no_agents() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let closed = runtime_ref(workspace, session);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: closed.clone(),
+                phase: AgentPhase::Exited,
+            }),
+        );
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: closed,
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Reclaimed,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        };
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        )
+        .with_agent_inventory(Some(&inventory));
+        assert!(home.session_agents.is_empty());
     }
 
     /// 自動表示は renderer が庭を描ける端末サイズでだけ許す。判定は
@@ -4348,13 +4485,18 @@ mod tests {
         let home = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &projected);
 
         let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
+        // Agent の居ない庭なので、rectangle は区画ぶんだけである。
         assert_eq!(frame.hitboxes.len(), 3);
+        assert!(frame.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()));
         for hitbox in &frame.hitboxes {
             let column = u16::try_from(hitbox.column + hitbox.width / 2).expect("fits a u16");
             let row = u16::try_from(hitbox.row + hitbox.height / 2).expect("fits a u16");
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
-                Some(GardenClick::Visit(hitbox.session_id)),
+                Some(GardenClick::Visit {
+                    session: hitbox.session_id,
+                    agent: None,
+                }),
                 "the centre of a plot is its own usagi"
             );
         }
@@ -4375,6 +4517,84 @@ mod tests {
         );
         assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
         assert_eq!(garden_click_at(13, 100, &home, now(), 10, 10), None);
+    }
+
+    /// うさぎ 1 羽は 1 Agent である。押されたうさぎの stable `AgentRuntimeId` を
+    /// click に載せ、nameplate や余白は session だけの訪問に留める。
+    #[test]
+    fn a_click_on_a_usagi_names_the_agent_it_drew() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let runtimes = (0..2)
+            .map(|_| runtime_ref(workspace, session))
+            .collect::<Vec<_>>();
+        for runtime in &runtimes {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime.clone(),
+                    phase: AgentPhase::Running,
+                }),
+            );
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        );
+        let frame = garden_frame(24, 100, &home, now()).expect("the garden owns this frame");
+        let rabbits = frame
+            .hitboxes
+            .iter()
+            .filter(|hitbox| hitbox.agent.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(rabbits.len(), 2);
+        // うさぎは区画の内側にあり、区画より先に並ぶ（click は先に当たったものを採る）。
+        let plot = frame
+            .hitboxes
+            .iter()
+            .position(|hitbox| hitbox.agent.is_none())
+            .expect("the plot itself is a target");
+        assert_eq!(plot, 2);
+        for rabbit in rabbits {
+            let column = u16::try_from(rabbit.column + rabbit.width / 2).expect("fits a u16");
+            let row = u16::try_from(rabbit.row + rabbit.height / 2).expect("fits a u16");
+            assert_eq!(
+                garden_click_at(24, 100, &home, now(), column, row),
+                Some(GardenClick::Visit {
+                    session,
+                    agent: rabbit.agent,
+                }),
+            );
+            assert!(
+                runtimes
+                    .iter()
+                    .any(|runtime| Some(runtime.agent_runtime_id) == rabbit.agent)
+            );
+        }
+        // nameplate 行は区画そのものなので、agent を名指さない。
+        let nameplate = frame.hitboxes[plot];
+        assert_eq!(
+            garden_click_at(
+                24,
+                100,
+                &home,
+                now(),
+                u16::try_from(nameplate.column).expect("fits a u16"),
+                u16::try_from(nameplate.row).expect("fits a u16"),
+            ),
+            Some(GardenClick::Visit {
+                session,
+                agent: None,
+            }),
+        );
     }
 
     #[test]

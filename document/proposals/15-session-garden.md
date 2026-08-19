@@ -117,9 +117,6 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
 
 ### この案で決めていないこと
 
-- **click の粒度**。現在の hitbox は区画 = session で、遷移先も session の Closeup に一本化している
-  （[起こし方とクリック遷移](#起こし方とクリック遷移)）。うさぎ単位の hitbox にして「その agent の tab へ入る」
-  ことは自然な拡張だが、遷移先が増えるため別途決める。
 - **workspace root の agent**。runtime は session に属さないもの（root 実行）を表現できる。庭は session の
   区画しか持たないため、root の agent をどこに描くか、あるいは描かないかは決めていない。
 - **agent ごとの表示名**。現在の runtime 参照は表示用の label を持たないため、うさぎは名前ではなく状態と
@@ -146,8 +143,14 @@ session が plot 数を超える場合は末尾を `+ N more in session list` �
 
 - **最初の入力は wake-up として消費する**。`Ctrl-C` / `Ctrl-Q` も最初の 1 回は終了操作にしない。見えていない
   terminal や modal へ意図しない入力を通さないためである。
-- **hitbox は renderer と同じ layout 関数が返す `SessionId` 付き rectangle を使う**。controller が画面座標から
-  session 順を再計算しないため、CJK label、端末 resize、表示上限によって click target がずれない。
+- **hitbox は renderer と同じ layout 関数が返す rectangle を使う**。区画に `SessionId`、うさぎ 1 羽に
+  `AgentRuntimeId` を束縛し、controller が画面座標から session 順や羽の順を再計算しないため、CJK label、
+  端末 resize、表示上限によって click target がずれない。
+- **click の粒度はうさぎ = agent とする**。うさぎを押したら訪問先の Closeup でその agent の tab を選ぶ。
+  Garden が増やす target semantics は無く、tab の選択は tab strip の click と同じ stable identity の経路を通る。
+  一致する tab が無い場合（押した瞬間に終了した、pane を復元していない）は session の Closeup に留めて、
+  位置の近い別 tab を選ばない。session そのものの pose（`creating` / `deleting` / `failed` と PR merge の
+  celebration）は agent 1 体に対応しないので、`AgentRuntimeId` を束縛しない。
 - **うさぎの click は double click を待たない**。screen saver 上では 1 回で訪問できるほうが速く、誤爆しても
   遷移先は読み取り可能な既存 Closeup にすぎない。
 
@@ -185,11 +188,12 @@ daemon lifecycle / Agent phase
        GardenSession[] ── stable SessionId ──► existing Selection / Target
               │
               ▼
- pure garden renderer(tick, size, reduced_motion) ──► hitboxes(SessionId, rect)
+ pure garden renderer(tick, size, reduced_motion) ──► hitboxes(SessionId, AgentRuntimeId?, rect)
 ```
 
 `GardenSession` は表示に必要な `id`、safe label、lifecycle、**その session に属する agent ごとの phase**、
-safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、並び順の tie-break に使う。
+safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、並び順の tie-break と
+うさぎ 1 羽ぶんの hitbox に使う。
 filesystem path、provider-native ID、terminal output、raw error は renderer に渡さない。
 
 ## UI sample
@@ -214,6 +218,11 @@ production 配線より先に確認するための presentation-only surface で
 [3. TUI#session garden](../03-tui.md#session-garden)）。production の庭は session ごとに controller の runtime-local
 phase と最新 coherent Agent inventory を結合して各 agent の phase を描く。controller が runtime の `Ended` /
 `Exited` / `Interrupted` を `TargetPhase::Done` へ畳んだ場合も、庭では瞬きへ戻さず静止した `done` pose になる。
+
+**うさぎが居るかどうかは inventory が決める**。controller の runtime-local phase は session が生きている限り
+積み上がるので、それを membership に使うと利用者が閉じた agent が `done` のうさぎとして残り、Closeup に
+tab が無いうさぎを押せてしまう。tab strip と同じ observation を権威にすることで、庭の羽数と開ける tab が
+一致する（正本は [3. TUI#区画とうさぎ](../03-tui.md#区画とうさぎ)）。
 
 ## 実装順序と受け入れ条件
 

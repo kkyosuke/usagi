@@ -4,7 +4,7 @@
 //! frame と同じ layout から [`GardenHitbox`] も返すため、後続実装は座標から session
 //! identity を再計算せず click target を解決できる。
 
-use usagi_core::domain::id::SessionId;
+use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
 use crate::presentation::theme::{Role, Style, garden_rabbit_style};
@@ -27,6 +27,9 @@ const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - 1;
 /// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
 const SPRITE_ROWS: usize = 4;
 const COMPACT_RABBIT_WIDTH: usize = 8;
+/// plot の中で sprite が始まる行（nameplate と status 行の下）。うさぎの hitbox は
+/// この行から [`SPRITE_ROWS`] 行ぶんで、nameplate と status 行は区画のままにする。
+const SPRITE_TOP_ROW: usize = PLOT_CONTENT_ROWS - SPRITE_ROWS;
 const MAX_VISIBLE_AGENTS: usize = PLOT_WIDTH / COMPACT_RABBIT_WIDTH;
 const RUNNING_ACTION_CYCLE_TICKS: u64 = 25;
 const RUNNING_ACTION_SEQUENCE_ROUNDS: u64 = 4;
@@ -91,6 +94,10 @@ pub type GardenAgent = agent_status::AgentStatus;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GardenHitbox {
     pub session_id: SessionId,
+    /// この rectangle が 1 羽のうさぎ（= 1 agent）なら、その stable runtime identity。
+    /// `None` は区画そのもの（nameplate・status 行・うさぎの居ない余白）で、click は
+    /// session の訪問だけを意味する。
+    pub agent: Option<AgentRuntimeId>,
     pub column: usize,
     pub row: usize,
     pub width: usize,
@@ -112,9 +119,30 @@ impl GardenHitbox {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GardenFrame {
     pub rows: Vec<String>,
+    /// うさぎの rectangle は必ず、それを含む区画の rectangle より **先** に並ぶ。
+    /// click 解決は最初に当たったものを採るため、うさぎが区画に優先する。
     pub hitboxes: Vec<GardenHitbox>,
     /// 端末に収まらず描画しなかった session 数。
     pub hidden_sessions: usize,
+}
+
+/// 1 区画の描画結果と、その中に置いたうさぎの横位置。
+///
+/// 描画と hit test が同じ 1 度の layout 計算を共有するための型である。座標を
+/// あとから再計算しないので、羽数・表示上限・端末幅が変わっても click target が
+/// 絵とずれない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Plot {
+    rows: [String; PLOT_CONTENT_ROWS],
+    rabbits: Vec<PlacedRabbit>,
+}
+
+/// 区画の左端からの offset で表した、うさぎ 1 羽ぶんの列範囲。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacedRabbit {
+    runtime_id: AgentRuntimeId,
+    offset: usize,
+    width: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,7 +198,7 @@ pub fn render(
     let grid_top = HEADER_ROWS + garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2;
     rows.resize_with(grid_top, || " ".repeat(width));
 
-    let mut hitboxes = Vec::with_capacity(visible);
+    let mut hitboxes = Vec::with_capacity(visible * (1 + MAX_VISIBLE_AGENTS));
     for plot_row in 0..used_rows {
         let start = plot_row * columns;
         let end = (start + columns).min(visible);
@@ -184,18 +212,33 @@ pub fn render(
         for local_row in 0..PLOT_CONTENT_ROWS {
             let mut line = " ".repeat(row_left);
             for plot in &plots {
-                line.push_str(&pad_to_width(&plot[local_row], PLOT_WIDTH));
+                line.push_str(&pad_to_width(&plot.rows[local_row], PLOT_WIDTH));
             }
             rows.push(pad_to_width(&line, width));
         }
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
         rows.push(ground_row(width, content_width));
-        for (column, session) in sessions[start..end].iter().enumerate() {
+        for (column, (session, plot)) in sessions[start..end].iter().zip(&plots).enumerate() {
+            let plot_column = row_left + column * PLOT_WIDTH;
+            let plot_row_top = grid_top + plot_row * PLOT_HEIGHT;
+            // うさぎは区画の内側にあるので、区画より先に積む（click 解決は最初に
+            // 当たった rectangle を採る）。
+            for rabbit in &plot.rabbits {
+                hitboxes.push(GardenHitbox {
+                    session_id: session.id,
+                    agent: Some(rabbit.runtime_id),
+                    column: plot_column + rabbit.offset,
+                    row: plot_row_top + SPRITE_TOP_ROW,
+                    width: rabbit.width,
+                    height: SPRITE_ROWS,
+                });
+            }
             hitboxes.push(GardenHitbox {
                 session_id: session.id,
-                column: row_left + column * PLOT_WIDTH,
-                row: grid_top + plot_row * PLOT_HEIGHT,
+                agent: None,
+                column: plot_column,
+                row: plot_row_top,
                 width: PLOT_WIDTH,
                 height: PLOT_HEIGHT,
             });
@@ -313,14 +356,18 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
 
-fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> [String; PLOT_CONTENT_ROWS] {
+fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let nameplate = clip_to_width(&session.label, PLOT_WIDTH);
     let label = Style::new().dim().paint(&nameplate);
-    let [status, ears, head, body, feet] = match session.lifecycle {
+    let ([status, ears, head, body, feet], rabbits) = match session.lifecycle {
         SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
-        _ => lifecycle_plot(session, tick, reduced_motion),
+        // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
+        _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
     };
-    [centered(PLOT_WIDTH, &label), status, ears, head, body, feet]
+    Plot {
+        rows: [centered(PLOT_WIDTH, &label), status, ears, head, body, feet],
+        rabbits,
+    }
 }
 
 /// 庭の幅いっぱいに敷いた地面の 1 行。
@@ -428,11 +475,12 @@ fn lifecycle_plot(
     ]
 }
 
+/// `Available` な区画の status 行 + sprite 4 行と、その中のうさぎの横位置。
 fn available_plot(
     session: &GardenSession,
     tick: u64,
     reduced_motion: bool,
-) -> [String; PLOT_CONTENT_ROWS - 1] {
+) -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
     if session.pr_merged {
         let rabbit = if reduced_motion || tick.is_multiple_of(2) {
             ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"]
@@ -440,26 +488,33 @@ fn available_plot(
             [" ✨  ✨", "  /)/)", " \\(^o^)/", " c(\")(\")"]
         };
         let [ears, head, body, feet] = sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
-        return [
-            centered(
-                PLOT_WIDTH,
-                &Role::Success.style().bold().paint("PR merged! ✨"),
-            ),
-            ears,
-            head,
-            body,
-            feet,
-        ];
+        // celebration は session の祝いの姿で、特定の agent ではない。
+        return (
+            [
+                centered(
+                    PLOT_WIDTH,
+                    &Role::Success.style().bold().paint("PR merged! ✨"),
+                ),
+                ears,
+                head,
+                body,
+                feet,
+            ],
+            Vec::new(),
+        );
     }
     let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
-        return [
-            centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
-            " ".repeat(PLOT_WIDTH),
-            " ".repeat(PLOT_WIDTH),
-            " ".repeat(PLOT_WIDTH),
-            " ".repeat(PLOT_WIDTH),
-        ];
+        return (
+            [
+                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
+                " ".repeat(PLOT_WIDTH),
+                " ".repeat(PLOT_WIDTH),
+                " ".repeat(PLOT_WIDTH),
+                " ".repeat(PLOT_WIDTH),
+            ],
+            Vec::new(),
+        );
     }
 
     if agents.len() == 1 {
@@ -471,13 +526,21 @@ fn available_plot(
             &agent.runtime_id.as_str(),
         );
         let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
-        return [
-            centered(PLOT_WIDTH, &status_style.paint(status)),
-            ears,
-            head,
-            body,
-            feet,
-        ];
+        // 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
+        return (
+            [
+                centered(PLOT_WIDTH, &status_style.paint(status)),
+                ears,
+                head,
+                body,
+                feet,
+            ],
+            vec![PlacedRabbit {
+                runtime_id: agent.runtime_id,
+                offset: 0,
+                width: PLOT_WIDTH,
+            }],
+        );
     }
 
     let visible = &agents[..agents.len().min(MAX_VISIBLE_AGENTS)];
@@ -499,7 +562,22 @@ fn available_plot(
         }
     }
     let [ears, head, body, feet] = rows.map(|row| centered(PLOT_WIDTH, &row));
-    [centered(PLOT_WIDTH, &status), ears, head, body, feet]
+    // 各 compact sprite は必ず COMPACT_RABBIT_WIDTH 桁へ揃うので、`centered` が
+    // 与える左端は羽数だけから決まる（同じ式で hitbox の offset を出せる）。
+    let left = PLOT_WIDTH.saturating_sub(visible.len() * COMPACT_RABBIT_WIDTH) / 2;
+    let placed = visible
+        .iter()
+        .enumerate()
+        .map(|(index, agent)| PlacedRabbit {
+            runtime_id: agent.runtime_id,
+            offset: left + index * COMPACT_RABBIT_WIDTH,
+            width: COMPACT_RABBIT_WIDTH,
+        })
+        .collect();
+    (
+        [centered(PLOT_WIDTH, &status), ears, head, body, feet],
+        placed,
+    )
 }
 
 fn agent_appearance(
@@ -656,6 +734,26 @@ mod tests {
     /// animation offset が 0 になる id（先頭 2 桁が `00`）。tick をそのまま phase として扱える。
     const STEADY_ID: &str = "00000000-0000-4000-8000-000000000001";
 
+    /// 区画そのものの rectangle だけ（うさぎ 1 羽ずつの rectangle を除く）。
+    fn plots(frame: &super::GardenFrame) -> Vec<super::GardenHitbox> {
+        frame
+            .hitboxes
+            .iter()
+            .filter(|hitbox| hitbox.agent.is_none())
+            .copied()
+            .collect()
+    }
+
+    /// うさぎ 1 羽ずつの rectangle だけ。
+    fn rabbits(frame: &super::GardenFrame) -> Vec<super::GardenHitbox> {
+        frame
+            .hitboxes
+            .iter()
+            .filter(|hitbox| hitbox.agent.is_some())
+            .copied()
+            .collect()
+    }
+
     fn plain(frame: &super::GardenFrame) -> Vec<String> {
         frame
             .rows
@@ -762,7 +860,7 @@ mod tests {
         let frame = render(24, 100, "my-project", &fixtures(), 0, false).expect("garden fits");
         assert_eq!(frame.rows.len(), 24);
         assert!(frame.rows.iter().all(|row| display_width(row) == 100));
-        assert_eq!(frame.hitboxes.len(), 4);
+        assert_eq!(plots(&frame).len(), 4);
         for hitbox in frame.hitboxes {
             assert!(hitbox.contains(hitbox.column, hitbox.row));
             assert!(!hitbox.contains(hitbox.column + hitbox.width, hitbox.row));
@@ -865,6 +963,108 @@ mod tests {
             "the waiting agent must stay visible"
         );
         assert_eq!(text.matches("o.o").count(), super::MAX_VISIBLE_AGENTS);
+    }
+
+    /// うさぎ 1 羽は 1 agent なので、羽ごとに hitbox を返す。box は必ず区画の内側で、
+    /// 描かれたうさぎの絵に重なり、注意順（`Waiting` が先頭）と同じ並びになる。
+    #[test]
+    fn every_visible_rabbit_owns_the_cells_it_is_drawn_in() {
+        let waiting = agent("f0000000-0000-4000-8000-000000000001", AgentPhase::Waiting);
+        let running = agent("10000000-0000-4000-8000-000000000001", AgentPhase::Running);
+        let ready = agent("30000000-0000-4000-8000-000000000001", AgentPhase::Ready);
+        let folded = agent("40000000-0000-4000-8000-000000000001", AgentPhase::Ended);
+        let hidden = agent("50000000-0000-4000-8000-000000000001", AgentPhase::Exited);
+        let sessions = vec![GardenSession {
+            id: SessionId::parse(STEADY_ID).expect("fixture id"),
+            label: "many".to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            selected: false,
+            failure_summary: None,
+            pr_merged: false,
+            agents: vec![folded, running, waiting, hidden, ready],
+        }];
+        let frame = render(24, 100, "x", &sessions, 0, true).expect("garden fits");
+        let rabbits = rabbits(&frame);
+        // 区画に置けるのは MAX_VISIBLE_AGENTS 羽までで、畳まれた分は box を持たない
+        // （status 行の記号列だけが残る）。
+        assert_eq!(rabbits.len(), super::MAX_VISIBLE_AGENTS);
+        assert_eq!(
+            rabbits
+                .iter()
+                .map(|rabbit| rabbit.agent.expect("a rabbit names its runtime"))
+                .collect::<Vec<_>>(),
+            vec![waiting.runtime_id, running.runtime_id, ready.runtime_id],
+        );
+        let plot = plots(&frame)[0];
+        let rows = plain(&frame);
+        for rabbit in &rabbits {
+            assert_eq!(rabbit.session_id, plot.session_id);
+            assert_eq!(rabbit.width, super::COMPACT_RABBIT_WIDTH);
+            // 区画の内側、かつ nameplate / status 行より下（地面より上）。
+            assert!(rabbit.column >= plot.column);
+            assert!(rabbit.column + rabbit.width <= plot.column + plot.width);
+            assert!(rabbit.row > plot.row);
+            assert!(rabbit.row + rabbit.height < plot.row + plot.height);
+            // box の中に、そのうさぎの絵がある。
+            let drawn = (rabbit.row..rabbit.row + rabbit.height).any(|row| {
+                rows[row]
+                    .chars()
+                    .skip(rabbit.column)
+                    .take(rabbit.width)
+                    .any(|cell| cell != ' ')
+            });
+            assert!(drawn, "no usagi is drawn in {rabbit:?}");
+        }
+        // 羽は横に並び、重ならない。
+        for pair in rabbits.windows(2) {
+            assert_eq!(pair[0].row, pair[1].row);
+            assert_eq!(pair[0].column + pair[0].width, pair[1].column);
+        }
+    }
+
+    /// 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
+    #[test]
+    fn a_lone_rabbit_owns_the_whole_width_of_its_plot() {
+        let sessions = vec![session(
+            STEADY_ID,
+            "one",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        )];
+        let frame = render(24, 100, "x", &sessions, 0, true).expect("garden fits");
+        let rabbits = rabbits(&frame);
+        let plot = plots(&frame)[0];
+        assert_eq!(rabbits.len(), 1);
+        assert_eq!(rabbits[0].column, plot.column);
+        assert_eq!(rabbits[0].width, plot.width);
+        assert_eq!(rabbits[0].height, super::SPRITE_ROWS);
+        assert_eq!(rabbits[0].row, plot.row + super::SPRITE_TOP_ROW);
+    }
+
+    /// lifecycle の pose と celebration は session そのものの姿で、agent 1 体に
+    /// 対応しない。押しても訪問先は session だけになる。
+    #[test]
+    fn a_session_pose_names_no_agent() {
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Deleting,
+            SessionLifecycle::Failed,
+        ] {
+            let sessions = vec![session(STEADY_ID, "one", lifecycle, AgentPhase::Running)];
+            let frame = render(24, 100, "x", &sessions, 0, true).expect("garden fits");
+            assert!(rabbits(&frame).is_empty(), "{lifecycle:?}");
+            assert_eq!(plots(&frame).len(), 1);
+        }
+        let mut celebrating = session(
+            STEADY_ID,
+            "one",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        celebrating.pr_merged = true;
+        let frame = render(24, 100, "x", &[celebrating], 0, true).expect("garden fits");
+        assert!(rabbits(&frame).is_empty());
     }
 
     #[test]
@@ -1324,9 +1524,10 @@ mod tests {
         // すると 2 羽が左へ寄って庭が偏るので、その行に実際に並ぶ数で中央へ寄せる。
         let sessions = fixtures()[..2].to_vec();
         let frame = render(41, 145, "x", &sessions, 1, false).expect("garden fits");
-        assert_eq!(frame.hitboxes.len(), 2);
-        let left = frame.hitboxes[0].column;
-        let right_gap = 145 - (frame.hitboxes[1].column + frame.hitboxes[1].width);
+        let plots = plots(&frame);
+        assert_eq!(plots.len(), 2);
+        let left = plots[0].column;
+        let right_gap = 145 - (plots[1].column + plots[1].width);
         assert!(
             left.abs_diff(right_gap) <= 1,
             "the row is off-centre: {left} left vs {right_gap} right"
