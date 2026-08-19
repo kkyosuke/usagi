@@ -5873,7 +5873,7 @@ fn drive_workspace_controller(
                 home_header_action_at(width, &material.projection, column, row)
             });
             let pane_tab = runtime
-                .wants_pane_control_input()
+                .wants_right_pane_tab_click()
                 .then(|| {
                     drawn_material.as_ref().and_then(|material| {
                         right_pane_tab_at(
