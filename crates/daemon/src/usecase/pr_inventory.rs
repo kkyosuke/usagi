@@ -1249,6 +1249,16 @@ mod tests {
             .checks,
             Some(PrChecksState::Failing)
         );
+        assert_eq!(
+            parse_gh_pr_view(r#"{"title":"x","state":"OPEN","headRefOid":"not-an-oid"}"#),
+            None
+        );
+        assert_eq!(
+            parse_gh_pr_view(&format!(
+                r#"{{"title":"x","state":"OPEN","headRefOid":"{HEAD_OID}","reviewDecision":"UNKNOWN"}}"#
+            )),
+            None
+        );
         for invalid in [
             "not json",
             "{}",
@@ -1256,7 +1266,6 @@ mod tests {
             "{\"title\":\"x\"}",
             "{\"title\":\"x\",\"state\":1}",
             "{\"title\":\"x\",\"state\":\"DRAFT\"}",
-            r#"{"title":"x","state":"OPEN","reviewDecision":"UNKNOWN"}"#,
             r#"{"title":"x","state":"OPEN","statusCheckRollup":{}}"#,
         ] {
             assert_eq!(parse_gh_pr_view(invalid), None);
