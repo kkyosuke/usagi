@@ -16,9 +16,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use usagi_core::domain::agent::AgentResumeRelation;
+use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
-use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 use usagi_core::usecase::client::DaemonMetrics;
 
@@ -1346,6 +1346,52 @@ impl WorkspaceRuntime {
         self.adjacent_tab(direction)
     }
 
+    /// Index of the active pane's tab owning one exact Agent runtime, for the
+    /// Garden's rabbit click.
+    ///
+    /// The join is by stable identity only: the runtime's own `TerminalRef`
+    /// incarnation for a live tab, and its conversation lineage for an
+    /// interrupted one. `inventory` is the latest coherent Agent inventory, which
+    /// is the only place a runtime this TUI never pushed a phase for (an
+    /// interrupted lineage from before it started) can be resolved from.
+    ///
+    /// `None` means the rabbit owns no tab in this pane — a runtime that exited
+    /// between the frame and the press, or one whose pane has not been restored
+    /// yet. The caller then leaves the plain session activation in place instead
+    /// of selecting an unrelated tab by position.
+    #[must_use]
+    pub fn agent_tab_index(
+        &self,
+        runtime_id: AgentRuntimeId,
+        inventory: Option<&AgentInventory>,
+    ) -> Option<usize> {
+        let local = self
+            .state
+            .runtimes()
+            .iter()
+            .find(|entry| entry.runtime.agent_runtime_id == runtime_id)
+            .map(|entry| entry.runtime.terminal.clone());
+        let held = inventory.and_then(|inventory| {
+            inventory
+                .runtimes
+                .iter()
+                .find(|item| item.runtime.agent_runtime_id == runtime_id)
+        });
+        let terminal = local.or_else(|| held.map(|item| item.runtime.terminal.clone()))?;
+        let continuation = held.map(|item| item.continuation);
+        self.panes
+            .active_pane()
+            .tabs()
+            .iter()
+            .position(|tab| match tab {
+                PaneTab::Live(live) => live.terminal.fences(&terminal),
+                PaneTab::Interrupted(pane) => {
+                    continuation.is_some_and(|continuation| pane.tab.continuation == continuation)
+                }
+                PaneTab::Pending(_) | PaneTab::Ready(_) => false,
+            })
+    }
+
     /// Stable selection for one visible tab index. The index comes only from a
     /// frame hit test; callers receive the tab identity and never use its label
     /// as an action key.
@@ -1566,7 +1612,7 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentResumeRelation, CloseOutcome, PaneEvent, PaneKind, PaneRegistryEffect,
+        AgentResumeRelation, CloseOutcome, InterruptedTab, PaneEvent, PaneKind, PaneRegistryEffect,
         PaneRestoreTarget, PaneTab, ResumeRejection, TabSelection, WorkspaceRuntime, tab_selection,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
@@ -1582,11 +1628,14 @@ mod tests {
     use crate::usecase::terminal_input::LiveTerminalAction;
     use chrono::Utc;
     use std::collections::BTreeMap;
-    use usagi_core::domain::id::{
-        AgentContinuationRef, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
-        WorkspaceId, WorktreeId,
+    use usagi_core::domain::agent::{
+        AgentInventory, AgentRuntimeInventoryItem, AgentRuntimeInventoryState, ProviderResumeReason,
     };
-    use usagi_core::domain::session_lifecycle::SessionLifecycle;
+    use usagi_core::domain::id::{
+        AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
+        SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    };
+    use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
     #[test]
@@ -2122,6 +2171,157 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::CreateSession { .. })),
             "{effects:?}"
+        );
+    }
+
+    /// Garden の click は羽ごとの stable `AgentRuntimeId` を運ぶので、その runtime を
+    /// 持つ tab を identity で引き当てる（並び順や label では引かない）。
+    #[test]
+    fn a_rabbit_resolves_to_the_tab_its_runtime_owns() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let first = terminal_ref(workspace, session);
+        let second = terminal_ref(workspace, session);
+        let mut runtime = closeup_on(workspace, session);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: vec![
+                    LivePane {
+                        terminal: first.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: second.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(first.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+
+        // 起動待ちの placeholder は runtime identity を持たないので、決して一致しない。
+        let _ = runtime.request_pane(
+            Target::Session(session),
+            OperationId::new(),
+            PaneKind::Agent,
+        );
+
+        // controller が phase を観測した runtime は inventory 無しでも引ける。
+        let second_runtime = AgentRuntimeRef {
+            agent_runtime_id: AgentRuntimeId::new(),
+            terminal: second.clone(),
+            session_id: Some(session),
+        };
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
+            runtime: second_runtime.clone(),
+            phase: AgentPhase::Running,
+        }));
+        assert_eq!(
+            runtime.agent_tab_index(second_runtime.agent_runtime_id, None),
+            Some(1)
+        );
+
+        // 観測していない runtime は、最新 coherent inventory からだけ引ける。
+        let first_runtime = AgentRuntimeRef {
+            agent_runtime_id: AgentRuntimeId::new(),
+            terminal: first,
+            session_id: Some(session),
+        };
+        assert_eq!(
+            runtime.agent_tab_index(first_runtime.agent_runtime_id, None),
+            None
+        );
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: first_runtime.clone(),
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        };
+        assert_eq!(
+            runtime.agent_tab_index(first_runtime.agent_runtime_id, Some(&inventory)),
+            Some(0)
+        );
+
+        // どの tab も持たない runtime（押した瞬間に終了していた等）は None で、
+        // 位置だけが近い無関係な tab を選ばない。起動待ちの placeholder も
+        // runtime identity を持たないので一致しない。
+        assert_eq!(runtime.agent_tab_index(AgentRuntimeId::new(), None), None);
+        let elsewhere = AgentRuntimeRef {
+            agent_runtime_id: AgentRuntimeId::new(),
+            terminal: terminal_ref(workspace, session),
+            session_id: Some(session),
+        };
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
+            runtime: elsewhere.clone(),
+            phase: AgentPhase::Running,
+        }));
+        assert_eq!(
+            runtime.agent_tab_index(elsewhere.agent_runtime_id, None),
+            None
+        );
+    }
+
+    /// 中断された会話は live な incarnation を持たないので、lineage で引き当てる。
+    #[test]
+    fn an_interrupted_rabbit_resolves_through_its_conversation_lineage() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = terminal_ref(workspace, session);
+        let continuation = AgentContinuationRef::new();
+        let mut runtime = closeup_on(workspace, session);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: Vec::new(),
+                selected: None,
+                selected_interrupted: None,
+                interrupted: vec![InterruptedTab {
+                    continuation,
+                    session_id: Some(session),
+                    last_terminal: terminal.clone(),
+                    provider: None,
+                    last_known_phase: None,
+                    reason: ProviderResumeReason::ProviderMetadataUnavailable,
+                    target: None,
+                }],
+            }],
+        ));
+        let interrupted = AgentRuntimeRef {
+            agent_runtime_id: AgentRuntimeId::new(),
+            terminal,
+            session_id: Some(session),
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: interrupted.clone(),
+                continuation,
+                state: AgentRuntimeInventoryState::Interrupted,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        };
+        assert_eq!(
+            runtime.agent_tab_index(interrupted.agent_runtime_id, Some(&inventory)),
+            Some(0)
+        );
+        // lineage を知らずに（inventory 無しで）中断 tab を引き当てることはない。
+        assert_eq!(
+            runtime.agent_tab_index(interrupted.agent_runtime_id, None),
+            None
         );
     }
 

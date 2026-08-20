@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
 use usagi_core::domain::id::{
-    AgentContinuationRef, AgentRuntimeRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, OperationId, SessionId, UserDecisionId,
+    WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pullrequest::{PrLink, PrState};
@@ -1860,13 +1861,21 @@ pub enum AppEvent {
 
 /// What a click on the open Garden landed on.
 ///
-/// Resolved by presentation from the `SessionId`-tagged rectangles the garden
-/// renderer returns for the frame currently on screen.
+/// Resolved by presentation from the `SessionId`- and `AgentRuntimeId`-tagged
+/// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
-    /// A rabbit's plot. Its stable session becomes selected/active and its
+    /// A session's plot. Its stable session becomes selected/active and its
     /// existing Closeup opens.
-    Visit(SessionId),
+    ///
+    /// `agent` is the exact rabbit that was pressed, when the press landed on
+    /// one. The reducer's activation does not depend on it: the shell uses it to
+    /// focus that Agent's own tab inside the Closeup this activation opens, and
+    /// a rabbit whose tab has meanwhile gone simply lands on the session.
+    Visit {
+        session: SessionId,
+        agent: Option<AgentRuntimeId>,
+    },
     /// Anywhere else in the garden. The click is consumed and the Home from
     /// before the screen saver comes back.
     Dismiss,
@@ -4771,7 +4780,7 @@ fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> 
         return Vec::new();
     }
     state.overlay = None;
-    let GardenClick::Visit(session) = click else {
+    let GardenClick::Visit { session, .. } = click else {
         return Vec::new();
     };
     let selection = Selection::Target(Target::Session(session));
@@ -8567,7 +8576,10 @@ mod tests {
         assert!(
             update(
                 &mut state,
-                AppEvent::GardenClick(GardenClick::Visit(second))
+                AppEvent::GardenClick(GardenClick::Visit {
+                    session: second,
+                    agent: None,
+                })
             )
             .is_empty()
         );
@@ -8605,7 +8617,16 @@ mod tests {
         let (selected, active) = (state.selected(), state.active());
         state.overlay = Some(Overlay::Garden);
 
-        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Visit(gone))).is_empty());
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Visit {
+                    session: gone,
+                    agent: None,
+                })
+            )
+            .is_empty()
+        );
         assert_eq!(state.overlay(), None);
         assert_eq!(state.selected(), selected);
         assert_eq!(state.active(), active);
@@ -8620,7 +8641,13 @@ mod tests {
         let mut state = sized_home(workspace, vec![session], 100, 30);
         let route = state.route();
 
-        for click in [GardenClick::Visit(session), GardenClick::Dismiss] {
+        for click in [
+            GardenClick::Visit {
+                session,
+                agent: None,
+            },
+            GardenClick::Dismiss,
+        ] {
             assert!(update(&mut state, AppEvent::GardenClick(click)).is_empty());
             assert_eq!(state.overlay(), None);
             assert_eq!(state.route(), route);
@@ -8646,7 +8673,10 @@ mod tests {
         assert!(
             update(
                 &mut state,
-                AppEvent::GardenClick(GardenClick::Visit(session))
+                AppEvent::GardenClick(GardenClick::Visit {
+                    session,
+                    agent: None,
+                })
             )
             .is_empty()
         );

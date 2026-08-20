@@ -66,7 +66,7 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice,
+    Feedback, GardenClick, NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice,
     SessionRoleCatalog, SessionRoleProjection, Target,
 };
 #[cfg(test)]
@@ -4499,6 +4499,29 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
 /// Select one visible managed-session tab after the frame's hit test resolved
 /// its display index. Agent selection is committed before registry mutation,
 /// matching keyboard tab cycling's durability fence.
+/// Focus the Agent tab of the rabbit a Garden click landed on.
+///
+/// The Garden itself owns no target semantics beyond the session activation the
+/// reducer already performed ([`GardenClick`]); this only moves the selection
+/// inside the Closeup that activation opened, through the same stable-identity
+/// path a click on the tab strip uses.
+fn visit_garden_agent(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, click: GardenClick) {
+    let GardenClick::Visit {
+        agent: Some(runtime_id),
+        ..
+    } = click
+    else {
+        return;
+    };
+    if !runtime.wants_right_pane_tab_click() {
+        return;
+    }
+    let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
+        return;
+    };
+    select_right_pane_tab(ui, runtime, index);
+}
+
 fn select_right_pane_tab(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, index: usize) {
     let Some(selection) = runtime.tab_selection_at(index) else {
         return;
@@ -5920,7 +5943,15 @@ fn drive_workspace_controller(
                 })
                 .flatten();
             match (garden_click, header_action, pane_tab) {
-                (Some(click), _, _) => runtime.apply_event(AppEvent::GardenClick(click)),
+                (Some(click), _, _) => {
+                    let effects = runtime.apply_event(AppEvent::GardenClick(click));
+                    // The activation this event performed made the clicked
+                    // session's pane the active one, so the rabbit's own tab can
+                    // be selected now. A rabbit whose tab has meanwhile gone
+                    // leaves the plain session Closeup as it is.
+                    visit_garden_agent(&mut ui, &mut runtime, click);
+                    effects
+                }
                 (None, Some(HomeHeaderAction::Director), _) => {
                     runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
                 }
@@ -7044,7 +7075,7 @@ mod tests {
         run_workspace_controller_with_backend_and_config,
         run_workspace_controller_with_backend_and_settings, safe_session_error,
         select_right_pane_tab, sidebar_pointer_event, step_config, step_new, step_open,
-        terminal_geometry, welcome_action, write_banner,
+        terminal_geometry, visit_garden_agent, welcome_action, write_banner,
     };
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
@@ -7052,6 +7083,7 @@ mod tests {
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
     use crate::presentation::widgets::strip_ansi;
+    use crate::presentation::workspace_runtime::PaneRestoreTarget;
     use crate::usecase::application::agent_tab_intent::{
         AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabProjection,
         AgentTabSlotIntent, AgentTabTargetProjection,
@@ -7564,9 +7596,14 @@ mod tests {
                 row,
             )
         };
+        // Agent の居ない session なので、押せるのは区画（agent 無しの訪問）である。
+        let visit = Some(GardenClick::Visit {
+            session,
+            agent: None,
+        });
         let plot = (0..24)
             .flat_map(|row| (0..80).map(move |column| (column, row)))
-            .find(|&(column, row)| resolve(column, row) == Some(GardenClick::Visit(session)))
+            .find(|&(column, row)| resolve(column, row) == visit)
             .expect("the garden draws a clickable usagi for its session");
         assert_eq!(resolve(0, 23), Some(GardenClick::Dismiss));
 
@@ -7597,6 +7634,114 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
         assert_eq!(runtime.state().overlay(), None);
         assert_eq!(runtime.state().active(), before);
+    }
+
+    /// うさぎの click は session を訪問したうえで、その agent 自身の tab を開く。
+    /// 区画（nameplate や余白）の click は従来どおり session の Closeup までで、
+    /// tab 選択を動かさない。
+    #[test]
+    fn clicking_a_usagi_opens_that_agents_tab() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let first = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        };
+        let second = TerminalRef {
+            terminal_id: TerminalId::new(),
+            ..first.clone()
+        };
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let (interaction, revision) = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            interaction,
+            revision,
+            vec![PaneRestoreTarget {
+                target: Target::Session(session),
+                panes: vec![
+                    LivePane {
+                        terminal: first.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                    LivePane {
+                        terminal: second.clone(),
+                        kind: PaneKind::Agent,
+                    },
+                ],
+                selected: Some(first.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+        let runtime_id = AgentRuntimeId::new();
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
+            runtime: AgentRuntimeRef {
+                agent_runtime_id: runtime_id,
+                terminal: second.clone(),
+                session_id: Some(session),
+            },
+            phase: usagi_core::domain::session_lifecycle::AgentPhase::Running,
+        }));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        // 区画の click（agent 無し）は tab を動かさない。
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let plot_click = GardenClick::Visit {
+            session,
+            agent: None,
+        };
+        let _ = runtime.apply_event(AppEvent::GardenClick(plot_click));
+        visit_garden_agent(&mut ui, &mut runtime, plot_click);
+        assert_eq!(runtime.focused_terminal(), Some(first.clone()));
+
+        // うさぎの click は、その runtime を持つ tab を選ぶ。
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let rabbit_click = GardenClick::Visit {
+            session,
+            agent: Some(runtime_id),
+        };
+        let _ = runtime.apply_event(AppEvent::GardenClick(rabbit_click));
+        visit_garden_agent(&mut ui, &mut runtime, rabbit_click);
+        assert_eq!(runtime.focused_terminal(), Some(second.clone()));
+
+        // 押した瞬間に終了していたうさぎは、無関係な tab を選ばない（選択はそのまま）。
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let gone = GardenClick::Visit {
+            session,
+            agent: Some(AgentRuntimeId::new()),
+        };
+        let _ = runtime.apply_event(AppEvent::GardenClick(gone));
+        visit_garden_agent(&mut ui, &mut runtime, gone);
+        assert_eq!(runtime.focused_terminal(), Some(second));
+
+        // Dismiss は訪問ですらないので、agent の焦点も動かさない。
+        visit_garden_agent(&mut ui, &mut runtime, GardenClick::Dismiss);
+    }
+
+    /// tab strip がまだ無い session（Closeup が action launcher を開く）では、
+    /// うさぎの click は session の訪問までで止まる。launcher の裏の pane を
+    /// 勝手に選ばない。
+    #[test]
+    fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let click = GardenClick::Visit {
+            session,
+            agent: Some(AgentRuntimeId::new()),
+        };
+        let _ = runtime.apply_event(AppEvent::GardenClick(click));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        visit_garden_agent(&mut ui, &mut runtime, click);
+        assert_eq!(runtime.focused_terminal(), None);
     }
 
     #[test]

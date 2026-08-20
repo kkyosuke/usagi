@@ -665,8 +665,10 @@ Danger 表現で `failed` タグとその失敗理由（daemon の安全な `fai
 記号も置けない幅では、描けなかった Agent 数を `+N` に畳む。Agent を 1 体も持たない session は `—` を出し、
 「0 体」と「まだ観測していない」を同じ空行に潰さない。行の順序・記号・語彙は
 [Session Garden](#session-garden) の plot と共有し、両者は同じ投影を読む。この投影は controller が観測した
-runtime-local phase に、workspace open 時の最新 coherent Agent inventory を重ねたものである
-（重複する `AgentRuntimeId` は、daemon が報告した phase をそのまま保つ runtime-local phase を優先する）。色は phase そのものの
+runtime-local phase に、最新の coherent Agent inventory を重ねたものである
+（重複する `AgentRuntimeId` は、daemon が報告した phase をそのまま保つ runtime-local phase を優先する）。
+どの runtime を数えるかは inventory が決め、[区画とうさぎ](#区画とうさぎ) と同じ規則で
+tab を持たない runtime は数えない。色は phase そのものの
 情報なので cursor 行では落とさず、cursor でない Switch 行だけを 2 行目の Git 列と同じ規則で行ごと沈める。
 
 行数は Agent の有無で変えない。pointer の hit-test は row 種別だけから行数を導き、view が重ねる daemon
@@ -836,19 +838,27 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新�
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
-うさぎの membership と stable identity は、controller が既に phase を観測した runtime に加え、workspace open 時の
-最新 coherent Agent inventory から補う。同じ `AgentRuntimeId` が両方にある場合は、daemon が報告した phase を
-そのまま保つ controller の runtime-local phase を優先する。inventory にだけある runtime は `reserved → ready`、`live → running`、
-`interrupted` / `unavailable → interrupted`、`exited` / `reclaimed → done` に写す。workspace root の runtime と、
-Home に存在しない session の runtime は区画へ加えない。
+**どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
+membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
+`reserved` / `live` / `interrupted` で保持する runtime だけが 1 羽になり、`exited` / `reclaimed`（閉じた）と
+`unavailable`（起動に失敗した・所有を証明できない）は tab を持たないのでうさぎにも sidebar の記号にもならない。
+controller の runtime-local phase は session が生きている限り積み上がるため、この絞り込みが無いと利用者が
+閉じた Agent が `done` のうさぎとして庭に残る。
+
+phase は 2 つの投影を重ねて決める。同じ `AgentRuntimeId` を controller が既に観測していれば、daemon が報告した
+phase をそのまま保つ runtime-local phase を優先し、まだ観測していない runtime は inventory の粗い state
+（`reserved → ready`、`live → running`、`interrupted → interrupted`）で描く。inventory を 1 度も観測していない
+（起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase がそのまま
+うさぎになる。workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
 
 複数 runtime は注目順（`waiting → running → ready → interrupted → idle → done`）に並べ、同 phase の
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
 [Session sidebar rows](#session-sidebar-rows) の agent 行と共有する（同じ session の Agent が
 2 つの surface で違う数・違う順に見えることが無いよう、投影も 1 つに束ねる）。4 羽目以降は末尾から畳むが、
 畳まれた runtime も状態内訳の記号列には現れるため、描けなかった Agent が何をしているかは失われない。
-`Ended` / `Exited` は瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さない
-ため描かない。区画の幅と `SessionId` hitbox は羽数で変えない。session の選択状態は Garden に装飾せず、
+controller が runtime の `Ended` / `Exited` を観測した runtime（tab は残っており、inventory も保持している）は
+瞬きへ戻さず、`done` の静止 pose で描く。workspace root の runtime は session 区画に属さないため描かない。
+区画の幅と区画の hitbox は羽数で変えない（うさぎ 1 羽ぶんの hitbox はその内側に別に置く）。session の選択状態は Garden に装飾せず、
 すべて同じ dim の nameplate で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
@@ -889,11 +899,20 @@ frame loop が monotonic time と user input を観測して経過時間を cont
 |---|---|
 | 任意の key / paste | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
-| うさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入る。double click 待ちは無い |
-| うさぎ以外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
+| うさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
+| 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ session の Closeup へ入るところまでで、tab の選択は動かさない |
+| 区画の外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 
-click は frame を描いたのと同じ layout 関数が返す `SessionId` 付き rectangle に当てて解決する。controller は
-画面座標から session 順を再計算しないため、CJK label・端末 resize・表示上限で click target がずれない。
+click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は区画に stable
+`SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛し、うさぎは区画の内側にあるので先に判定する。
+controller は画面座標から session 順や羽の順を再計算しないため、CJK label・端末 resize・表示上限で click target が
+ずれない。session の pose（`creating` / `deleting` / `failed`）と PR merge の celebration は session そのものの姿で
+agent 1 体に対応しないため、`AgentRuntimeId` を束縛せず session の訪問だけになる。
+
+tab の選択も stable identity だけで引く。押されたうさぎの runtime が持つ terminal incarnation（live tab）、
+または会話 lineage（中断 tab）と一致する tab を選び、一致する tab が無ければ（押した瞬間に終了した、pane を
+まだ復元していない）session の Closeup をそのまま残す。位置の近い無関係な tab は選ばない。
+
 click と同時に session が snapshot から消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
 うさぎの click は sidebar の activation と同じ経路を通るので、使用できない checkout（`failed`）は選択されるが
 attach されない。Garden から daemon command は発行しない。
