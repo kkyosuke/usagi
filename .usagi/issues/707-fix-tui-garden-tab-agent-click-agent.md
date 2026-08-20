@@ -1,13 +1,13 @@
 ---
 number: 707
 title: fix(tui): Garden のうさぎを tab のある Agent だけにし、click でその Agent を開く
-status: in-progress
+status: done
 priority: medium
 labels: [tui, garden, bug, v2]
 dependson: []
 related: [674, 687, 701]
 created_at: 2026-08-19T23:56:38.142519+00:00
-updated_at: 2026-08-19T23:56:43.123461+00:00
+updated_at: 2026-08-20T00:13:47.180527+00:00
 ---
 
 ## 概要
