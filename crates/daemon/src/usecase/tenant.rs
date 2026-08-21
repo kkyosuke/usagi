@@ -48,6 +48,10 @@ pub trait WorkspaceRuntimes: Send + Sync {
     /// The workspace adopted for exactly this root.
     fn workspace_at(&self, root: &Path) -> Option<Tenant<SharedSessionRuntime>>;
 
+    /// The workspace that owns this path: the one whose root is the path itself
+    /// or its closest adopted ancestor.
+    fn owner_of_path(&self, path: &Path) -> Option<Tenant<SharedSessionRuntime>>;
+
     /// Every workspace this daemon holds, ordered by root.
     fn all(&self) -> Vec<Tenant<SharedSessionRuntime>>;
 }
@@ -381,6 +385,10 @@ where
 
     fn workspace_at(&self, root: &Path) -> Option<Tenant<SharedSessionRuntime>> {
         self.tenant(root)
+    }
+
+    fn owner_of_path(&self, path: &Path) -> Option<Tenant<SharedSessionRuntime>> {
+        self.owner_of(path)
     }
 
     fn all(&self) -> Vec<Tenant<SharedSessionRuntime>> {

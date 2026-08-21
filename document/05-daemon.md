@@ -203,7 +203,7 @@ fence する。2 つは異なる問いに答えるため、片方が他方を包
 
 | fence | node | scope | 守る対象 |
 |---|---|---|---|
-| workspace fence | `<workspace>/.usagi/daemon/daemon.lock` | canonical workspace root。runtime mode と `$USAGI_HOME` に依存しない | workspace の所有権（`<workspace>/.usagi/sessions/<name>` の worktree、`usagi/<name>` branch、session 名） |
+| workspace fence | `<workspace>/.usagi/daemon/daemon.lock` | canonical workspace root。runtime mode と `$USAGI_HOME` に依存しない。daemon は adopt した workspace の数だけ保持する（[tenant registry](#tenant-registry)） | workspace の所有権（`<workspace>/.usagi/sessions/<name>` の worktree、`usagi/<name>` branch、session 名） |
 | 単一インスタンス lock | `<data-dir>/daemon/daemon.lock` | mode 別 data directory（[daemon data directory](#daemon-data-directory) が正本） | その data directory の record・locator・endpoint・durable state |
 
 取得順序は **workspace fence → 単一インスタンス lock** に固定する。順序が固定なので、逆向きに競合する 2 つの
@@ -238,7 +238,8 @@ standby が fence の外に居ることは fence の契約を弱めない。read
 workspace fence の node は **runtime mode の子 directory の下に置かない**。data directory は `$USAGI_HOME` と
 runtime mode で選ばれるため、同一 workspace に対して mode を変えるだけで別の単一インスタンス lock に届いてしまい、
 2 つの独立した lifecycle state が同じ worktree 集合を権威として書き換えられる。fence を workspace 側に置くことで
-**1 machine × 1 canonical workspace root に daemon は 1 つ**が成立する。mode split が分離するのは **data** であり、
+**1 machine × 1 canonical workspace root に所有者は 1 つ**が成立する（1 つの daemon が複数の workspace を所有しても、
+1 つの workspace の所有者は 1 つのままである）。mode split が分離するのは **data** であり、
 **workspace の所有権ではない**（git worktree は共有された物理状態なので、mode を分けても分離できない）。
 
 path の綴り違い（末尾セパレータ、`.` / `..`、symlink 経由、macOS の `/tmp` → `/private/tmp` firmlink）でも回避
@@ -587,6 +588,33 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
+
+### tenant registry
+
+daemon は起動した workspace だけでなく、**client が選んだ workspace を adopt して同時に serve する**。保持している
+workspace 1 件（tenant）は「canonical root・`WorkspaceId`・保持中の workspace fence・lifecycle runtime」の組である。
+
+```text
+daemon process（machine あたり 1 つ）
+├─ tenant /…/AccelHack   fence ─ lifecycle runtime ─ w/<digest>/sessions.json
+├─ tenant /…/usagi       fence ─ lifecycle runtime ─ w/<digest>/sessions.json
+└─ 共有: locator / record / 単一インスタンス lock / generation registry / allocator / shard / dispatch / PR inventory
+```
+
+| 契機 | 動作 |
+|---|---|
+| 起動 | 起動時 cwd の workspace を **initial tenant** として登録する。fence は `serve` が既に取得しているので取り直さない（同じ process が同じ node へ 2 本目の `flock` を試すと拒否される） |
+| adopt | client が `selected` で申告した workspace を、その handshake の中で adopt する。canonical 化 → workspace fence 取得 → state subtree 解決 → lifecycle document open → 登録の順で、`serve` の取得順と同じである |
+| 拒否 | fence を別 process が持つ、root が解決できない、tenant 上限（既定 32）に達した場合は **その workspace だけ**を typed refusal にする。保持中の tenant の接続は影響を受けない |
+| 停止 | shutdown は全 tenant を閉じ、fence を返す |
+
+adopt は client の handshake の中で走るため、fence の待ち時間は起動時（departing owner を待つ 2 秒）より短い
+200 ms に固定する。待ち続けると pre-handshake deadline に当たり、拒否ではなく切断として観測されてしまう。
+
+**workspace ごとに 1 つ**の資源（lifecycle document、fence）は tenant が持ち、**daemon ごとに 1 つ**の資源
+（PTY registry、Agent runtime とその provisioner、teardown worker、PR inventory）は request が名指す
+`workspace_id` で tenant を引く。daemon 全体で 1 つしかない集約（PR inventory の prune、Agent の session 再照合）は
+**全 tenant の和**で判定する。1 workspace 分で判定すると他 workspace の記録を消してしまう。
 
 ### workspace state subtree
 

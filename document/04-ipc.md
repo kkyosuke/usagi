@@ -143,12 +143,16 @@ readiness failure は最初の handoff write より前に typed error / `side_ef
 
 ## workspace fence
 
-daemon が権威を持つ workspace root は起動時に 1 つだけ確定する（[5. daemon](05-daemon.md#daemon-process-lifecycle)）。
-一方 client の接続先は data directory（`$USAGI_HOME` と runtime mode）から解決するため **workspace に依存しない**。
+daemon が権威を持つ workspace root は起動時に 1 つ確定し、以後は client が選んだ workspace を adopt して増える
+（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）。一方 client の接続先は data directory
+（`$USAGI_HOME` と runtime mode）から解決するため **workspace に依存しない**。
 したがって handshake が workspace を照合しなければ、workspace B で実行した client が workspace A の daemon へ
 接続し、A の session 一覧・scope・PR inventory をそのまま受け取る（`session remove` は A の worktree を撤去する）。
-`ClientHello.workspace` はこれを閉じるための申告であり、daemon は自分の trusted repository root と
-突き合わせて admit / refuse を決める。
+`ClientHello.workspace` はこれを閉じるための申告であり、daemon は申告から **この接続が扱う workspace（trusted
+root）を解決**し、その root と申告を突き合わせて admit / refuse を決める。daemon は複数の workspace を tenant として
+保持できるため（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）、解決の答えは起動時に固定された 1 つの
+root ではなく、その daemon が保持する workspace のいずれかである。fence 自体は解決の後段にそのまま残り、誤った
+endpoint に届いた client を拒否する backstop として働く。
 
 | 申告 | wire | 意味 |
 |---|---|---|
@@ -157,7 +161,27 @@ daemon が権威を持つ workspace root は起動時に 1 つだけ確定する
 | unbound | `{"scope":"unbound"}` | workspace resource を一切扱わない接続 |
 | 欠落 | field 省略 | fence 以前の client。typed error で拒否する |
 
-admit の条件は次のとおりで、比較は path component 単位である（`<root>-2` は `<root>` の子ではない。末尾スラッシュや `.` / `..` の綴り差は同じ root になる）。
+解決は申告の種類ごとに次のとおりで、**generation fence の後**に走る。順序が逆だと、別 generation を目指した
+client が拒否される過程でこの daemon に workspace を adopt させられてしまう。
+
+| 申告 | 解決 |
+|---|---|
+| `selected` | canonical 化した root を **adopt する**（すでに保持していればそれを使う）。adopt できない workspace はこの接続だけを拒否する |
+| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない path は拒否する（directory だけでは workspace root を名指せないため、adopt はしない） |
+| `unbound` | workspace resource を扱わないので、起動時の workspace を答える |
+| 欠落 | 起動時の workspace を答え、下の fence が拒否する |
+
+`selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
+他の workspace の接続には影響しない。
+
+| 理由 | 例 |
+|---|---|
+| 別の daemon がその workspace を fence している | 別 mode・別 build の daemon が稼働している |
+| root が解決できない | 削除された path、非 UTF-8 |
+| tenant 上限に達した | 開いたままの workspace が多すぎる |
+
+解決した root と申告の突き合わせ（fence 本体）は次のとおりで、比較は path component 単位である（`<root>-2` は
+`<root>` の子ではない。末尾スラッシュや `.` / `..` の綴り差は同じ root になる）。
 
 | 判定 | 条件 |
 |---|---|
@@ -202,12 +226,12 @@ daemon はどの workspace の client も admit してしまうため、capabili
 （accept 時に UID を検証済みで、到達できた peer は任意の root を綴れる）。したがって `unbound` は
 per-request の権限判定ではなく、「workspace 作業をしない」という申告である。
 
-data directory ごとに daemon は 1 つ、その daemon が serve する workspace も 1 つなので、
-**別 workspace を同時に扱うことはできない**。この制約は選択の申告として表に出る。daemon が動いていない状態で
-workspace を開くと、その workspace を serve する daemon が起動する（起動する lifecycle child の cwd が開く
-workspace になる。[5. daemon](05-daemon.md#daemon-process-lifecycle) が startup cwd = workspace root の正本）。
-既に別 workspace を serve している daemon に対する選択は typed refusal になり、TUI は理由（serve している
-workspace）と復帰手順を提示して、別 workspace の session 一覧を別 workspace の title で表示することはない
+data directory ごとに daemon は 1 つだが、その daemon は **複数の workspace を同時に serve する**。daemon が
+動いていない状態で workspace を開くと、その workspace を serve する daemon が起動する（起動する lifecycle child の
+cwd が開く workspace になる。[5. daemon](05-daemon.md#daemon-process-lifecycle) が startup cwd = workspace root の
+正本）。既に別の workspace を serve している daemon に対する選択は、その workspace を adopt して admit する。
+adopt できない場合だけ typed refusal になり、TUI は理由と復帰手順を提示して、別 workspace の session 一覧を
+別 workspace の title で表示することはない
 （[3. TUI#workspace-の選択と-daemon](03-tui.md#workspace-の選択と-daemon)）。
 
 ## attempt deadline と reconnect budget

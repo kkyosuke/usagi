@@ -1688,6 +1688,104 @@ fn effective_role_instruction(
     Ok(Some((selected, definition.instructions.clone())))
 }
 
+/// Resolves the workspace a connecting client will act on, adopting it when the
+/// client selected one this daemon does not hold yet.
+///
+/// This is the point where "which workspace does this daemon serve?" stops being
+/// a start-up constant. What each declaration means is unchanged
+/// ([4. IPC の workspace fence](../../document/04-ipc.md#workspace-fence)); only
+/// the answer's source moves from one fixed root to the tenant registry.
+struct TenantWorkspaces {
+    tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
+    /// The workspace this process started in. A client that names no workspace
+    /// touches no workspace resource, so it is admitted against this one.
+    initial: PathBuf,
+}
+
+impl TenantWorkspaces {
+    /// The canonical spelling of a declared root, or the typed refusal for a
+    /// root that cannot be resolved on this machine.
+    fn canonical(root: &str) -> Result<PathBuf, usagi_core::infrastructure::ipc::ProtocolError> {
+        paths::canonical_workspace_root(root).map_err(|_| {
+            usagi_core::infrastructure::ipc::workspace_refusal(
+                "the declared workspace does not resolve on this machine",
+                root,
+            )
+        })
+    }
+}
+
+impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
+    fn resolve(
+        &self,
+        declared: Option<&ClientWorkspace>,
+    ) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+        match declared {
+            // A client that names no workspace reads no workspace state, so the
+            // workspace it is admitted against is immaterial; the one this
+            // process started in keeps the refusal message meaningful.
+            None | Some(ClientWorkspace::Unbound) => Ok(paths::wire_workspace_root(&self.initial)),
+            // Selecting a workspace is what opens it: this daemon takes
+            // authority over it now, or refuses that workspace alone.
+            Some(ClientWorkspace::Selected { root }) => {
+                let root = Self::canonical(root)?;
+                self.tenants.adopt(&root).map_err(|error| {
+                    usagi_core::infrastructure::ipc::workspace_refusal(
+                        &error.to_string(),
+                        &paths::wire_workspace_root(&root),
+                    )
+                })?;
+                Ok(paths::wire_workspace_root(&root))
+            }
+            // A bound client says where it is running, not which workspace to
+            // open. A directory alone does not name a workspace root, so this
+            // resolves only against what the daemon already holds rather than
+            // adopting whatever directory the caller stood in.
+            //
+            // The declared path need not exist: an Agent hook or a session tool
+            // names a worktree path that its own teardown may already have
+            // removed. Ancestor matching is a spelling comparison, so an
+            // unresolvable path is compared as declared rather than refused.
+            Some(ClientWorkspace::Bound { root }) => {
+                let root =
+                    paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
+                let owner = self.tenants.owner_of(&root).ok_or_else(|| {
+                    usagi_core::infrastructure::ipc::workspace_refusal(
+                        "this daemon has not opened the workspace this client runs in",
+                        &paths::wire_workspace_root(&self.initial),
+                    )
+                })?;
+                Ok(paths::wire_workspace_root(owner.root()))
+            }
+        }
+    }
+}
+
+/// The workspace a connection acts on, once its handshake resolved one.
+///
+/// The handshake has already adopted or refused; this is the lookup of what it
+/// settled on. A miss means the workspace was retired between the two steps, and
+/// the connection is closed rather than served another workspace's state.
+fn connection_workspace(
+    workspaces: &Workspaces,
+    initial: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+    declared: Option<&ClientWorkspace>,
+) -> Option<ConnectionWorkspace> {
+    let tenant = match declared {
+        None | Some(ClientWorkspace::Unbound) => initial.clone(),
+        Some(ClientWorkspace::Selected { root }) => {
+            workspaces.workspace_at(&paths::canonical_workspace_root(root).ok()?)?
+        }
+        Some(ClientWorkspace::Bound { root }) => workspaces.owner_of_path(
+            &paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root)),
+        )?,
+    };
+    Some(ConnectionWorkspace {
+        tenant,
+        workspaces: Arc::clone(workspaces),
+    })
+}
+
 /// The workspace one connection acts on, plus the daemon's other workspaces.
 ///
 /// A connection is bound to one workspace by its handshake, and the session
@@ -2774,6 +2872,10 @@ fn spawn_ipc_server(
     // Daemon-wide components (the PTY registry, the Agent runtime and its
     // provisioners) resolve the workspace each request names through this port,
     // rather than capturing the workspace this process started in.
+    let resolver = Arc::new(TenantWorkspaces {
+        tenants: Arc::clone(&tenants),
+        initial: initial.root().to_path_buf(),
+    });
     let workspaces: Workspaces = tenants;
     // The inventory is a whole-snapshot document, so exactly one generation may
     // write it. This process is the active one; a draining generation's projector
@@ -2960,6 +3062,7 @@ fn spawn_ipc_server(
         data_dir.to_path_buf(),
         initial,
         workspaces,
+        resolver,
         teardown,
         terminal,
         agent,
@@ -4061,6 +4164,7 @@ fn start_ipc_accept_loop(
     data_dir: PathBuf,
     initial: usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
     workspaces: Workspaces,
+    resolver: Arc<TenantWorkspaces>,
     teardown: Arc<TeardownSignal>,
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
@@ -4157,14 +4261,13 @@ fn start_ipc_accept_loop(
                             continue;
                         };
                         let server = server.clone();
-                        // The workspace this connection acts on. The handshake
-                        // binds it; every session command it issues belongs to
-                        // that workspace, while requests that name a workspace
-                        // resolve through the registry.
-                        let bound = ConnectionWorkspace {
-                            tenant: initial.clone(),
-                            workspaces: Arc::clone(&workspaces),
-                        };
+                        // The workspace this connection acts on is decided by its
+                        // handshake, below: every session command it issues
+                        // belongs to that workspace, while requests that name a
+                        // workspace resolve through the registry.
+                        let connection_initial = initial.clone();
+                        let connection_workspaces = Arc::clone(&workspaces);
+                        let connection_resolver = Arc::clone(&resolver);
                         let teardown = Arc::clone(&teardown);
                         let terminal = Arc::clone(&terminal);
                         let visibility = visibility.clone();
@@ -4221,11 +4324,13 @@ fn start_ipc_accept_loop(
                                 let mut reader = PreHandshakeDeadlineStream::new(stream, deadline);
                                 let mut writer =
                                     PreHandshakeDeadlineStream::new(writer, deadline);
-                                let admitted = usagi_daemon::presentation::ipc::handshake_admitted(
-                                    &mut reader,
-                                    &mut writer,
-                                    &server,
-                                );
+                                let admitted =
+                                    usagi_daemon::presentation::ipc::handshake_admitted_with(
+                                        &mut reader,
+                                        &mut writer,
+                                        &server,
+                                        Some(connection_resolver.as_ref()),
+                                    );
                                 // Capacity covers the complete hello response, on
                                 // every success/refusal/error path, but never the
                                 // established connection that follows it.
@@ -4248,6 +4353,20 @@ fn start_ipc_accept_loop(
                                         ));
                                         return;
                                     }
+                                };
+                                // The handshake resolved which workspace this
+                                // connection acts on; a workspace retired between
+                                // the two steps closes the connection rather than
+                                // serving another workspace's state.
+                                let Some(bound) = connection_workspace(
+                                    &connection_workspaces,
+                                    &connection_initial,
+                                    admitted.client.workspace.as_ref(),
+                                ) else {
+                                    ErrorLog::record(
+                                        "daemon admitted connection closed: its workspace is no longer held",
+                                    );
+                                    return;
                                 };
                                 // A pre-handshake timeout must not become an idle
                                 // policy for an admitted subscription. Failure to
@@ -9857,8 +9976,19 @@ struct FileWorkspaceFence {
     path: PathBuf,
     workspace: PathBuf,
     pid: u32,
+    /// How long to wait for a departing owner before refusing. A start can wait
+    /// for the previous daemon to exit; an adoption happens inside a client's
+    /// handshake, which has its own deadline, so it refuses quickly instead.
+    patience: Duration,
     held: RefCell<Option<std::fs::File>>,
 }
+
+/// How long a `serve` start waits for a departing owner to release a workspace.
+const WORKSPACE_FENCE_PATIENCE: Duration = Duration::from_secs(2);
+
+/// How long an adoption waits. It runs inside the client's pre-handshake
+/// deadline, so a contended workspace is reported rather than waited out.
+const WORKSPACE_ADOPTION_PATIENCE: Duration = Duration::from_millis(200);
 
 /// Builds a [`FileWorkspaceFence`] for any workspace this daemon adopts.
 ///
@@ -9875,6 +10005,7 @@ impl WorkspaceFenceFactory for FileWorkspaceFences {
             path: paths::workspace_fence_path(workspace_root),
             workspace: workspace_root.to_path_buf(),
             pid: self.pid,
+            patience: WORKSPACE_ADOPTION_PATIENCE,
             held: RefCell::new(None),
         })
     }
@@ -9915,7 +10046,6 @@ impl TenantRuntimeOpener for SystemTenantOpener {
 
 impl WorkspaceFence for FileWorkspaceFence {
     fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
-        const TIMEOUT: Duration = Duration::from_secs(2);
         const POLL: Duration = Duration::from_millis(20);
         // `<workspace>/.usagi` is user-visible project metadata, so it keeps
         // ordinary directory permissions; only the `daemon/` child holding the
@@ -9926,7 +10056,7 @@ impl WorkspaceFence for FileWorkspaceFence {
             "daemon workspace fence",
             PrivateLockModePolicy::OwnerLegacy0644,
         )?;
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + self.patience;
         loop {
             match FileExt::try_lock_exclusive(&file) {
                 Ok(()) => {
@@ -10250,6 +10380,7 @@ fn run_inner(
         path: paths::workspace_fence_path(&workspace_root),
         workspace: workspace_root.clone(),
         pid,
+        patience: WORKSPACE_FENCE_PATIENCE,
         held: RefCell::new(None),
     };
     let ready = IpcReady::new(&data_dir, &workspace_root, &lock);
@@ -12102,6 +12233,7 @@ mod tests {
             path: paths::workspace_fence_path(&workspace),
             workspace,
             pid,
+            patience: WORKSPACE_FENCE_PATIENCE,
             held: RefCell::new(None),
         }
     }
@@ -12267,6 +12399,125 @@ mod tests {
                 .to_string()
                 .contains("Storage")
         );
+    }
+
+    #[test]
+    fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
+        use usagi_core::infrastructure::ipc::WorkspaceResolver;
+
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let data = temporary.path().join("data");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        for directory in [&data, &first, &second] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let daemon_dir = data.join("daemon");
+        let first_root = paths::canonical_workspace_root(&first).unwrap();
+        let second_root = paths::canonical_workspace_root(&second).unwrap();
+        let generation = usagi_core::domain::id::DaemonGeneration::new();
+        let tenants = Arc::new(TenantRegistry::new(
+            daemon_dir.clone(),
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            SystemTenantOpener {
+                data_home: data.clone(),
+                generation,
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+        let initial = tenants.adopt_initial(&first_root).unwrap();
+        let workspaces: Workspaces = tenants.clone();
+        let resolver = TenantWorkspaces {
+            tenants: Arc::clone(&tenants),
+            initial: first_root.clone(),
+        };
+        let wire = |root: &Path| paths::wire_workspace_root(root);
+
+        // A client that names no workspace is answered with the one this process
+        // started in: it reads no workspace state either way.
+        for declared in [None, Some(ClientWorkspace::Unbound)] {
+            assert_eq!(
+                resolver.resolve(declared.as_ref()).unwrap(),
+                wire(&first_root)
+            );
+        }
+
+        // Selecting a workspace this daemon has never seen adopts it, and the
+        // second selection is the same tenant rather than a second adoption.
+        let selected = ClientWorkspace::Selected {
+            root: wire(&second_root),
+        };
+        assert_eq!(
+            resolver.resolve(Some(&selected)).unwrap(),
+            wire(&second_root)
+        );
+        assert_eq!(
+            resolver.resolve(Some(&selected)).unwrap(),
+            wire(&second_root)
+        );
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // A bound client resolves to the workspace containing it, including from
+        // a path that no longer exists — a worktree its own teardown removed.
+        for candidate in [
+            second_root.clone(),
+            second_root.join(".usagi/sessions/gone"),
+        ] {
+            let bound = ClientWorkspace::Bound {
+                root: wire(&candidate),
+            };
+            assert_eq!(resolver.resolve(Some(&bound)).unwrap(), wire(&second_root));
+        }
+
+        // A bound client outside every held workspace is refused with the typed
+        // fence refusal rather than adopting the directory it stood in.
+        let outside = tempfile::tempdir_in("/tmp").unwrap();
+        let refusal = resolver
+            .resolve(Some(&ClientWorkspace::Bound {
+                root: wire(&paths::canonical_workspace_root(outside.path()).unwrap()),
+            }))
+            .unwrap_err();
+        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
+            &refusal
+        ));
+        assert!(refusal.message.contains("has not opened"), "{refusal:?}");
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // A selected root that does not resolve on this machine is refused, and
+        // nothing is adopted for it.
+        let refusal = resolver
+            .resolve(Some(&ClientWorkspace::Selected {
+                root: wire(&temporary.path().join("absent")),
+            }))
+            .unwrap_err();
+        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
+            &refusal
+        ));
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // The connection binds the workspace its handshake settled on.
+        for (declared, expected) in [
+            (None, first_root.clone()),
+            (Some(ClientWorkspace::Unbound), first_root.clone()),
+            (Some(selected.clone()), second_root.clone()),
+            (
+                Some(ClientWorkspace::Bound {
+                    root: wire(&second_root.join("nested")),
+                }),
+                second_root.clone(),
+            ),
+        ] {
+            let bound = connection_workspace(&workspaces, &initial, declared.as_ref())
+                .expect("the handshake resolved this workspace");
+            assert_eq!(bound.tenant.root(), expected);
+        }
+
+        // A workspace retired between the handshake and the lookup closes the
+        // connection instead of serving another workspace's state.
+        assert!(tenants.retire(&second_root));
+        assert!(connection_workspace(&workspaces, &initial, Some(&selected)).is_none());
     }
 
     #[test]

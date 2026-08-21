@@ -117,6 +117,25 @@ pub fn handshake_admitted(
     writer: &mut dyn Write,
     server: &ServerProtocol,
 ) -> io::Result<Option<AdmittedConnection>> {
+    handshake_admitted_with(reader, writer, server, None)
+}
+
+/// As [`handshake_admitted`], but with the connection's workspace resolved by
+/// `workspaces` instead of fixed to the one root the server policy carries.
+///
+/// A daemon that owns several workspaces resolves the one this connection acts
+/// on here — adopting a selected workspace, refusing a root it does not hold —
+/// and the workspace fence then compares the declaration against that root.
+///
+/// # Errors
+///
+/// Returns the same IO failures [`handshake_admitted`] does.
+pub fn handshake_admitted_with(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    server: &ServerProtocol,
+    workspaces: Option<&dyn usagi_core::infrastructure::ipc::WorkspaceResolver>,
+) -> io::Result<Option<AdmittedConnection>> {
     let Some(first) = read_json_frame::<Bootstrap>(reader, server.limits.max_frame_bytes as usize)?
     else {
         return Ok(None);
@@ -127,7 +146,13 @@ pub fn handshake_admitted(
             "client hello must be the first frame",
         ));
     };
-    match negotiate(&hello, server) {
+    let negotiated = match workspaces {
+        Some(workspaces) => {
+            usagi_core::infrastructure::ipc::negotiate_with(&hello, server, workspaces)
+        }
+        None => negotiate(&hello, server),
+    };
+    match negotiated {
         Ok(reply) => {
             write_json_frame(
                 writer,

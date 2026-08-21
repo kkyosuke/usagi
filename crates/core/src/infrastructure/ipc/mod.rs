@@ -818,6 +818,18 @@ fn comparable_root(root: &str) -> Option<&Path> {
     Some(Path::new(root)).filter(|path| path.is_absolute())
 }
 
+/// The typed workspace-fence refusal, for a peer that decides the resolution
+/// itself.
+///
+/// A daemon holding several workspaces answers "which workspace serves this
+/// client?" from its own registry, and a miss there is the same refusal the
+/// fence itself produces: never retryable, never a reason to start or replace a
+/// daemon, and carrying the workspace it *does* serve.
+#[must_use]
+pub fn workspace_refusal(reason: &str, trusted_root: &str) -> ProtocolError {
+    workspace_refused(reason, trusted_root)
+}
+
 fn workspace_refused(reason: &str, trusted_root: &str) -> ProtocolError {
     let root = if trusted_root.is_empty() {
         "unavailable"
@@ -839,11 +851,54 @@ pub fn is_workspace_mismatch(error: &ProtocolError) -> bool {
     error.code == ErrorCode::PermissionDenied && error.error_id == WORKSPACE_MISMATCH_ERROR_ID
 }
 
+/// Resolves which workspace serves a connection.
+///
+/// A daemon that owns exactly one workspace answers with that root, which is
+/// what [`negotiate`] does. A daemon that owns several answers from its own
+/// registry — adopting the workspace a client selected, or refusing a root it
+/// does not hold — and the fence below then compares the client's declaration
+/// against the resolved root exactly as before. The fence is therefore never
+/// bypassed by the resolution: it is the backstop for a client that reached the
+/// wrong endpoint.
+pub trait WorkspaceResolver {
+    /// The trusted root serving `declared`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed [`WORKSPACE_MISMATCH_ERROR_ID`] refusal when no
+    /// workspace of this daemon can serve the declaration.
+    fn resolve(&self, declared: Option<&ClientWorkspace>) -> Result<String, ProtocolError>;
+}
+
+/// The resolver of a daemon that serves exactly one workspace.
+struct FixedWorkspace<'a>(&'a str);
+
+impl WorkspaceResolver for FixedWorkspace<'_> {
+    fn resolve(&self, _: Option<&ClientWorkspace>) -> Result<String, ProtocolError> {
+        Ok(self.0.to_owned())
+    }
+}
+
 /// Negotiate version/capabilities, rejecting a mismatched generation and a
 /// foreign workspace before normal traffic.
 pub fn negotiate(
     hello: &ClientHello,
     server: &ServerProtocol,
+) -> Result<ServerHello, ProtocolError> {
+    negotiate_with(hello, server, &FixedWorkspace(&server.workspace_root))
+}
+
+/// As [`negotiate`], but with the workspace resolved by `workspaces` rather than
+/// fixed to the one root the server policy carries.
+///
+/// # Errors
+///
+/// Returns the same typed refusals [`negotiate`] does, plus whatever refusal the
+/// resolver produces for a workspace this daemon cannot serve.
+pub fn negotiate_with(
+    hello: &ClientHello,
+    server: &ServerProtocol,
+    workspaces: &dyn WorkspaceResolver,
 ) -> Result<ServerHello, ProtocolError> {
     if hello
         .expected_daemon_generation
@@ -860,7 +915,12 @@ pub fn negotiate(
     // Both fences answer "is this the daemon you meant?", so they precede
     // feature negotiation: a client pointed at the wrong workspace learns that
     // instead of a protocol or capability detail of a daemon it cannot use.
-    workspace_admission(hello.workspace.as_ref(), &server.workspace_root)?;
+    //
+    // Resolution runs *after* the generation fence, so a client that reached the
+    // wrong daemon generation cannot make this one adopt a workspace on its way
+    // to being refused.
+    let trusted = workspaces.resolve(hello.workspace.as_ref())?;
+    workspace_admission(hello.workspace.as_ref(), &trusted)?;
     let protocol = hello
         .supported_protocols
         .iter()
