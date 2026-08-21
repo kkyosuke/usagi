@@ -138,11 +138,11 @@ daemon-owned の terminal と operation は離脱でも停止しない。**離�
 閉じることで daemon が subscription を解放する（[connection epoch と subscription 無効化](#connection-epoch-と-subscription-無効化)）。
 専用の detach request は送らない。
 
-**プロセス内で同時に接続する daemon は 1 つだけである**。daemon が serve する workspace は 1 つに確定して
-いるため（[workspace の選択と daemon](#workspace-の選択と-daemon)）、離脱で旧 workspace の接続を完全に閉じてから
-次の workspace の daemon へ接続し直す。複数 daemon への接続を同時に持つことはない。戻った Welcome から
-別 workspace を選んだときの fence 拒否も、起動直後と同じく**その画面に留まって notice に出す**。無言で
-前の workspace へ戻ることはしない。
+**プロセス内で同時に接続する daemon は 1 つだけである**。接続は workspace ごとに開き直す：離脱で旧 workspace の
+接続を完全に閉じてから、次の workspace として handshake をやり直す（[workspace の選択と
+daemon](#workspace-の選択と-daemon)）。多くの場合その接続先は同じ daemon process だが、pane・pump の所有者を
+曖昧にしないため、接続そのものは 1 本に保つ。戻った Welcome から別 workspace を選んだときの fence 拒否も、
+起動直後と同じく**その画面に留まって notice に出す**。無言で前の workspace へ戻ることはしない。
 
 戻り先の Welcome は**開いた時点の Recent 順序を保つ**。workspace を開いた時点で `record_opened` 済みなので
 離れた workspace は先頭にあり、entry 画面が daemon も store も読み直さない原則（[workspace の選択と
@@ -189,8 +189,8 @@ Overview / Closeup を生成する Home runtime へ渡す。この束縛は work
 
 ## workspace の選択と daemon
 
-session 一覧・scope・PR inventory は daemon が権威であり、**daemon が serve する workspace は起動時に確定した
-1 つだけ**である（[5. daemon](05-daemon.md#daemon-process-lifecycle)）。一方 TUI が開く workspace は、起動した
+session 一覧・scope・PR inventory は daemon が権威である。daemon は起動した workspace に加えて、**client が選んだ
+workspace を adopt して同時に serve する**（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）。一方 TUI が開く workspace は、起動した
 directory ではなく利用者の選択（`usagi open <path>` / `usagi <path>`、Welcome の Recent、Open 一覧、New の作成
 成功）で決まる。この節はその 2 つを一致させる契約の正本であり、wire の申告と admit 条件は
 [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence) が正本である。
@@ -203,7 +203,8 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 |---|---|
 | daemon が動いていない | 選択した workspace で daemon を起動する（起動する lifecycle child の cwd が選択した root になる）。起動した directory に束縛された daemon は作らない |
 | daemon が選択した workspace を serve している | そのまま開く。TUI の起動 directory は問わない（workspace 内・subdirectory・session worktree・workspace 外のいずれでもよい） |
-| daemon が別の workspace を serve している | 開かずに拒否し、serve している workspace root と復帰手順（`usagi daemon stop` して目的の workspace で起動する）を提示する。registry への登録も Recent の更新も行わない |
+| daemon が別の workspace を serve している | 稼働中の daemon がその workspace を **adopt して**開く（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）。daemon を止める必要はない |
+| 選択した workspace を別の daemon が所有している | 開かずに拒否し、所有者と復帰手順を提示する。registry への登録も Recent の更新も行わない |
 | 選択した path が UTF-8 でない | 開かずに拒否する。daemon の権威記録（`sessions.json`）と workspace registry はどちらも JSON なので、その root は書き留められず**どの daemon も所有できない**。daemon を起動もしない |
 
 拒否の提示先は入口ごとに異なるが、内容は同じ 1 つの message である。

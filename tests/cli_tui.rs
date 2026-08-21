@@ -1732,14 +1732,122 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
     );
 }
 
-/// One data directory has one daemon, and that daemon serves one workspace. So
-/// the workspace a TUI opens — not the directory it was launched from — is what
-/// the handshake declares: opening `<path>` starts the daemon *for* `<path>`,
-/// keeps working from any directory, and is refused with the served workspace
-/// once a different one is being served (#549). Before this, the refused case
-/// silently rendered `<path>`'s title over the served workspace's session list.
+/// One daemon holds several workspaces at once: selecting a workspace it has not
+/// opened yet adopts it, and each adopted workspace keeps its own lifecycle
+/// document. A workspace another process already fences is refused on its own,
+/// without disturbing the ones this daemon holds (#710).
 #[test]
-fn opening_a_workspace_binds_the_daemon_to_it_and_refuses_the_ones_it_does_not_serve() {
+fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() {
+    use usagi_core::infrastructure::ipc::ClientWorkspace;
+    use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
+
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let _daemon = home.spawn_serve();
+    let daemon_dir = home.path().join("daemon");
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            daemon_dir.join("daemon.json").is_file()
+                && daemon_dir.join("current.json").is_file()
+                && daemon_fixture::lifecycle_state_path(home.path()).is_file()
+        }),
+        "daemon did not publish its production endpoint"
+    );
+
+    let connect = |workspace: ClientWorkspace| {
+        IpcClient::connect(
+            connect_current(home.path()).expect("the published endpoint is connectable"),
+            "multi-workspace-e2e".to_owned(),
+            usagi_core::domain::id::OperationId::new().to_string(),
+            ClientPolicy::cli(),
+            shipping_build_identity(),
+            workspace,
+        )
+    };
+    let selected = |root: &Path| ClientWorkspace::Selected {
+        root: usagi_core::infrastructure::paths::wire_workspace_root(
+            usagi_core::infrastructure::paths::canonical_workspace_root(root)
+                .expect("the fixture workspace resolves"),
+        ),
+    };
+
+    // A workspace this daemon has never seen is adopted by selecting it.
+    let second = daemon_fixture::short_dir("usagi-second-");
+    assert!(connect(selected(second.path())).is_ok());
+
+    // A workspace another process fences is refused alone: the refusal names it,
+    // and the workspaces this daemon holds keep answering.
+    let fenced = daemon_fixture::short_dir("usagi-fenced-");
+    let fenced_root = usagi_core::infrastructure::paths::canonical_workspace_root(fenced.path())
+        .expect("the fenced workspace resolves");
+    let held = hold_workspace_fence(&fenced_root);
+    let refused = connect(selected(fenced.path()))
+        .err()
+        .expect("a workspace another daemon owns must not be adopted");
+    let ClientError::Protocol(refusal) = refused else {
+        panic!("the refusal must be a typed protocol error: {refused}");
+    };
+    assert_eq!(refusal.error_id, "workspace-mismatch");
+    assert!(
+        refusal.message.contains("already owns this workspace"),
+        "{refusal:?}"
+    );
+    drop(held);
+    assert!(connect(selected(second.path())).is_ok());
+
+    // Each adopted workspace has its own state subtree, so neither is described
+    // by the other's lifecycle document.
+    let adopted = usagi_core::infrastructure::workspace_state::adopted(&home.path().join("daemon"))
+        .expect("the adopted workspaces are readable")
+        .into_iter()
+        .map(|state| state.root().to_path_buf())
+        .collect::<Vec<_>>();
+    assert!(
+        adopted.contains(
+            &usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap()
+        ),
+        "{adopted:?}"
+    );
+    assert!(!adopted.contains(&fenced_root), "{adopted:?}");
+    stop_daemon(&home);
+}
+
+/// Hold a workspace's fence the way a second daemon would, from a process this
+/// test controls, so the daemon under test meets a genuinely owned workspace.
+fn hold_workspace_fence(workspace_root: &Path) -> std::fs::File {
+    use fs2::FileExt;
+
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let path = usagi_core::infrastructure::paths::workspace_fence_path(workspace_root);
+    let directory = path.parent().expect("the fence node has a parent");
+    std::fs::create_dir_all(directory).expect("the fence directory is creatable");
+    // The node is daemon-private, and a daemon refuses a fence directory that is
+    // not: the point of this fixture is an owned workspace, not a broken one.
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+        .expect("the fence directory is private");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&path)
+        .expect("the fence node is openable");
+    FileExt::try_lock_exclusive(&file).expect("the fence is free");
+    file
+}
+
+/// The workspace a TUI opens — not the directory it was launched from — is what
+/// the handshake declares: opening `<path>` starts the daemon *for* `<path>` and
+/// keeps working from any directory (#549). One daemon now adopts a second
+/// workspace on selection (#710) instead of refusing it, and each open shows its
+/// own workspace: the earlier bug was rendering `<path>`'s title over the served
+/// workspace's session list, which adoption must not reintroduce.
+#[test]
+fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
     let _guard = DAEMON_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1777,27 +1885,38 @@ fn opening_a_workspace_binds_the_daemon_to_it_and_refuses_the_ones_it_does_not_s
         Some(opened_root.to_str().expect("a UTF-8 fixture path")),
     );
 
-    // That daemon cannot describe a second workspace, so the open is refused with
-    // the workspace it does serve and the step that switches to the other one.
-    // Nothing of the refused workspace is rendered.
-    let refused = home.run_at(
+    // A second workspace is adopted by the same daemon rather than refused, and
+    // it is described as itself: its own name, its own (empty) session list.
+    let elsewhere_root =
+        usagi_core::infrastructure::paths::canonical_workspace_root(elsewhere.path())
+            .expect("the second workspace resolves");
+    let second = home.run_at(
         opened.path(),
         &[OsStr::new("open"), elsewhere.path().as_os_str()],
     );
-    let message = stderr(&refused);
+    assert!(second.status.success(), "{}", stderr(&second));
     assert!(
-        message.contains(&format!(
-            "this daemon serves the workspace {}",
-            opened_root.display()
-        )),
-        "{message}"
-    );
-    assert!(message.contains("usagi daemon stop"), "{message}");
-    assert!(
-        !stdout(&refused).contains("Sessions"),
+        stdout(&second).contains(
+            elsewhere_root
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .expect("the fixture directory has a name")
+        ),
         "{}",
-        stdout(&refused)
+        stdout(&second)
     );
+
+    // Both workspaces now have their own lifecycle document, so neither is
+    // described by the other's state.
+    let adopted = usagi_core::infrastructure::workspace_state::adopted(
+        &channel_data_dir(home.path()).join("daemon"),
+    )
+    .expect("the adopted workspaces are readable")
+    .into_iter()
+    .map(|state| state.root().to_path_buf())
+    .collect::<Vec<_>>();
+    assert!(adopted.contains(&opened_root), "{adopted:?}");
+    assert!(adopted.contains(&elsewhere_root), "{adopted:?}");
 
     // The served workspace still opens, from any directory: the declaration
     // follows the selection, not the working directory.

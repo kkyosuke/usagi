@@ -117,6 +117,25 @@ pub fn handshake_admitted(
     writer: &mut dyn Write,
     server: &ServerProtocol,
 ) -> io::Result<Option<AdmittedConnection>> {
+    handshake_admitted_with(reader, writer, server, None)
+}
+
+/// As [`handshake_admitted`], but with the connection's workspace resolved by
+/// `workspaces` instead of fixed to the one root the server policy carries.
+///
+/// A daemon that owns several workspaces resolves the one this connection acts
+/// on here — adopting a selected workspace, refusing a root it does not hold —
+/// and the workspace fence then compares the declaration against that root.
+///
+/// # Errors
+///
+/// Returns the same IO failures [`handshake_admitted`] does.
+pub fn handshake_admitted_with(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    server: &ServerProtocol,
+    workspaces: Option<&dyn usagi_core::infrastructure::ipc::WorkspaceResolver>,
+) -> io::Result<Option<AdmittedConnection>> {
     let Some(first) = read_json_frame::<Bootstrap>(reader, server.limits.max_frame_bytes as usize)?
     else {
         return Ok(None);
@@ -127,7 +146,13 @@ pub fn handshake_admitted(
             "client hello must be the first frame",
         ));
     };
-    match negotiate(&hello, server) {
+    let negotiated = match workspaces {
+        Some(workspaces) => {
+            usagi_core::infrastructure::ipc::negotiate_with(&hello, server, workspaces)
+        }
+        None => negotiate(&hello, server),
+    };
+    match negotiated {
         Ok(reply) => {
             write_json_frame(
                 writer,
@@ -860,6 +885,42 @@ mod tests {
             read_json_frame::<Bootstrap>(&mut Cursor::new(output), 1024).unwrap(),
             Some(Bootstrap::ServerHello(result))
         );
+    }
+
+    /// A daemon holding several workspaces resolves the connection's one during
+    /// the handshake. What it resolves is what the fence then compares against,
+    /// so a resolver that answers with another root refuses the client rather
+    /// than serving it that workspace.
+    #[test]
+    fn a_resolved_workspace_is_what_the_fence_compares_against() {
+        struct Resolved(&'static str);
+        impl usagi_core::infrastructure::ipc::WorkspaceResolver for Resolved {
+            fn resolve(
+                &self,
+                _: Option<&ClientWorkspace>,
+            ) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+                Ok(self.0.to_owned())
+            }
+        }
+
+        // The client declares the trusted root; a resolver that agrees admits it.
+        let admit = |resolver: &dyn usagi_core::infrastructure::ipc::WorkspaceResolver| {
+            let mut input = Vec::new();
+            write_json_frame(&mut input, &hello(), 1024).unwrap();
+            let mut output = Vec::new();
+            handshake_admitted_with(
+                &mut Cursor::new(input),
+                &mut output,
+                &server(),
+                Some(resolver),
+            )
+            .unwrap()
+        };
+        assert!(admit(&Resolved(TRUSTED_ROOT)).is_some());
+
+        // A resolver that answers with a different workspace does not bypass the
+        // fence: the declaration no longer matches, so the client is refused.
+        assert!(admit(&Resolved("/workspace/other")).is_none());
     }
 
     #[test]

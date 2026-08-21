@@ -167,11 +167,39 @@ type SharedUserEnvironment = UserEnvironment<OpCli>;
 
 struct TrustedLoginShell {
     profile: LoginShellProfile,
-    /// The configured environment for this daemon's repository, resolved at launch
+    /// The configured environment for the launch's workspace, resolved at launch
     /// time. `None` in tests that exercise only the shell profile.
     environment: Option<Arc<SharedUserEnvironment>>,
-    /// The repository the configured workspace bindings belong to.
+    /// Where the workspace whose configured bindings apply is found. A launch
+    /// names its workspace, so a daemon holding several resolves it per request
+    /// instead of binding the one it was started in. `None` in tests that
+    /// exercise only the shell profile, which then use [`Self::workspace_root`].
+    workspaces: Option<Workspaces>,
+    /// The repository the configured workspace bindings belong to, when no
+    /// registry is bound.
     workspace_root: PathBuf,
+}
+
+impl TrustedLoginShell {
+    /// The workspace whose configured bindings this launch inherits.
+    fn launch_workspace_root(
+        &self,
+        request: &usagi_core::domain::terminal_launch::TerminalLaunchRequest,
+    ) -> Result<PathBuf, usagi_core::domain::terminal_launch::TerminalLaunchValidationError> {
+        let Some(workspaces) = self.workspaces.as_ref() else {
+            return Ok(self.workspace_root.clone());
+        };
+        // The scope resolver has already refused a workspace this daemon does not
+        // hold, so a miss here is a fenced launch that lost its workspace between
+        // the two steps. It fails closed rather than inheriting another
+        // workspace's environment.
+        workspaces
+            .workspace(request.scope.workspace_id)
+            .map(|tenant| tenant.root().to_path_buf())
+            .ok_or(
+                usagi_core::domain::terminal_launch::TerminalLaunchValidationError::ScopeMismatch,
+            )
+    }
 }
 
 impl TerminalProfileResolver for TrustedLoginShell {
@@ -186,7 +214,8 @@ impl TerminalProfileResolver for TrustedLoginShell {
         let Some(environment) = self.environment.as_ref() else {
             return Ok(resolved);
         };
-        let user = environment.resolved(&self.workspace_root).map_err(|_| {
+        let workspace_root = self.launch_workspace_root(request)?;
+        let user = environment.resolved(&workspace_root).map_err(|_| {
             usagi_core::domain::terminal_launch::TerminalLaunchValidationError::InvalidEnvironment
         })?;
         with_user_environment(resolved, &user)
@@ -477,7 +506,7 @@ impl OutputJournal for DiscardJournal {
 /// Resolves the checkout path for a launch scope through the single managed
 /// session writer, so agents never receive a client supplied path.
 struct RootCodexProvisioner {
-    sessions: SharedSessionRuntime,
+    workspaces: Workspaces,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
     /// The executable this profile launches: `codex`, or `codex-fugu` for the
@@ -497,11 +526,11 @@ impl CodexProvisioner for RootCodexProvisioner {
         &mut self,
         context: &ProvisionContext,
     ) -> Result<CodexProvision, CodexProvisionFailure> {
-        let (working_directory, workspace_root) = working_directories(&self.sessions, context)
+        let (working_directory, workspace_root) = working_directories(&self.workspaces, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let mode = sandbox_mode(context);
         let role =
-            effective_role_instruction(&self.sessions, &self.data_home, &workspace_root, context)
+            effective_role_instruction(&self.workspaces, &self.data_home, &workspace_root, context)
                 .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let local_llm_model = context
             .inject_mcp
@@ -685,7 +714,7 @@ fn repair_codex_arg0_permissions_with_limit(
 }
 
 struct RootClaudeProvisioner {
-    sessions: SharedSessionRuntime,
+    workspaces: Workspaces,
     mcp_command: PathBuf,
     data_home: paths::DataHome,
     /// daemon bootstrap の trusted environment から一度だけ確定した backend。
@@ -724,7 +753,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         &mut self,
         context: &ProvisionContext,
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
-        let (working_directory, workspace_root) = working_directories(&self.sessions, context)
+        let (working_directory, workspace_root) = working_directories(&self.workspaces, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
@@ -760,7 +789,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let role =
-            effective_role_instruction(&self.sessions, &self.data_home, &workspace_root, context)
+            effective_role_instruction(&self.workspaces, &self.data_home, &workspace_root, context)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let local_llm_model = context
             .inject_mcp
@@ -1584,10 +1613,14 @@ fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness 
     }
 }
 fn working_directories(
-    sessions: &SharedSessionRuntime,
+    workspaces: &Workspaces,
     context: &ProvisionContext,
 ) -> Result<(PathBuf, PathBuf), ()> {
-    let runtime = sessions.lock().map_err(|_| ())?;
+    // The launch names its workspace, so the runtime that materializes it is the
+    // one holding that identity. A daemon serving several workspaces would
+    // otherwise provision every Agent from the workspace it was started in.
+    let tenant = workspaces.workspace(context.scope.workspace_id).ok_or(())?;
+    let runtime = tenant.runtime().lock().map_err(|_| ())?;
     let workspace_root = runtime.repository_root().to_path_buf();
     // A workspace-root launch has no session; its trusted cwd is the repository
     // root. A session launch resolves that session's worktree path.
@@ -1612,7 +1645,7 @@ fn working_directories(
 /// remains in this ephemeral provision path and is never copied into a launch
 /// request, durable snapshot, dispatch record, response, or log.
 fn effective_role_instruction(
-    sessions: &SharedSessionRuntime,
+    workspaces: &Workspaces,
     data_home: &paths::DataHome,
     workspace_root: &Path,
     context: &ProvisionContext,
@@ -1620,7 +1653,10 @@ fn effective_role_instruction(
     use usagi_core::domain::role::RoleScope;
 
     let assigned = match context.scope.session_id {
-        Some(session_id) => sessions
+        Some(session_id) => workspaces
+            .workspace(context.scope.workspace_id)
+            .ok_or(())?
+            .runtime()
             .lock()
             .map_err(|_| ())?
             .session_role(session_id)
@@ -1652,16 +1688,148 @@ fn effective_role_instruction(
     Ok(Some((selected, definition.instructions.clone())))
 }
 
+/// Resolves the workspace a connecting client will act on, adopting it when the
+/// client selected one this daemon does not hold yet.
+///
+/// This is the point where "which workspace does this daemon serve?" stops being
+/// a start-up constant. What each declaration means is unchanged
+/// ([4. IPC の workspace fence](../../document/04-ipc.md#workspace-fence)); only
+/// the answer's source moves from one fixed root to the tenant registry.
+struct TenantWorkspaces {
+    tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
+    /// The workspace this process started in. A client that names no workspace
+    /// touches no workspace resource, so it is admitted against this one.
+    initial: PathBuf,
+}
+
+impl TenantWorkspaces {
+    /// The canonical spelling of a declared root, or the typed refusal for a
+    /// root that cannot be resolved on this machine.
+    fn canonical(root: &str) -> Result<PathBuf, usagi_core::infrastructure::ipc::ProtocolError> {
+        paths::canonical_workspace_root(root).map_err(|_| {
+            usagi_core::infrastructure::ipc::workspace_refusal(
+                "the declared workspace does not resolve on this machine",
+                root,
+            )
+        })
+    }
+}
+
+impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
+    fn resolve(
+        &self,
+        declared: Option<&ClientWorkspace>,
+    ) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+        match declared {
+            // A client that names no workspace reads no workspace state, so the
+            // workspace it is admitted against is immaterial; the one this
+            // process started in keeps the refusal message meaningful.
+            None | Some(ClientWorkspace::Unbound) => Ok(paths::wire_workspace_root(&self.initial)),
+            // Selecting a workspace is what opens it: this daemon takes
+            // authority over it now, or refuses that workspace alone.
+            Some(ClientWorkspace::Selected { root }) => {
+                let root = Self::canonical(root)?;
+                self.tenants.adopt(&root).map_err(|error| {
+                    usagi_core::infrastructure::ipc::workspace_refusal(
+                        &error.to_string(),
+                        &paths::wire_workspace_root(&root),
+                    )
+                })?;
+                Ok(paths::wire_workspace_root(&root))
+            }
+            // A bound client says where it is running, not which workspace to
+            // open. A directory alone does not name a workspace root, so this
+            // resolves only against what the daemon already holds rather than
+            // adopting whatever directory the caller stood in.
+            //
+            // The declared path need not exist: an Agent hook or a session tool
+            // names a worktree path that its own teardown may already have
+            // removed. Ancestor matching is a spelling comparison, so an
+            // unresolvable path is compared as declared rather than refused.
+            Some(ClientWorkspace::Bound { root }) => {
+                let root =
+                    paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
+                let owner = self.tenants.owner_of(&root).ok_or_else(|| {
+                    usagi_core::infrastructure::ipc::workspace_refusal(
+                        "this daemon has not opened the workspace this client runs in",
+                        &paths::wire_workspace_root(&self.initial),
+                    )
+                })?;
+                Ok(paths::wire_workspace_root(owner.root()))
+            }
+        }
+    }
+}
+
+/// The workspace a connection acts on, once its handshake resolved one.
+///
+/// The handshake has already adopted or refused; this is the lookup of what it
+/// settled on. A miss means the workspace was retired between the two steps, and
+/// the connection is closed rather than served another workspace's state.
+fn connection_workspace(
+    workspaces: &Workspaces,
+    initial: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+    declared: Option<&ClientWorkspace>,
+) -> Option<ConnectionWorkspace> {
+    let tenant = match declared {
+        None | Some(ClientWorkspace::Unbound) => initial.clone(),
+        Some(ClientWorkspace::Selected { root }) => {
+            workspaces.workspace_at(&paths::canonical_workspace_root(root).ok()?)?
+        }
+        Some(ClientWorkspace::Bound { root }) => workspaces.owner_of_path(
+            &paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root)),
+        )?,
+    };
+    Some(ConnectionWorkspace {
+        tenant,
+        workspaces: Arc::clone(workspaces),
+    })
+}
+
+/// The workspace one connection acts on, plus the daemon's other workspaces.
+///
+/// A connection is bound to one workspace by its handshake, and the session
+/// commands it issues belong to that workspace. Requests that *name* a workspace
+/// — an Agent launch, a terminal scope — are resolved through the registry
+/// instead, so the identity in the request decides which runtime answers it.
+#[derive(Clone)]
+struct ConnectionWorkspace {
+    tenant: usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+    workspaces: Workspaces,
+}
+
+impl ConnectionWorkspace {
+    /// The lifecycle runtime of the workspace this connection is bound to.
+    fn sessions(&self) -> &SharedSessionRuntime {
+        self.tenant.runtime()
+    }
+
+    /// A scope resolver that answers for whichever workspace a request names.
+    fn scope_resolver(&self) -> SharedScopeResolver {
+        SharedScopeResolver(Arc::clone(&self.workspaces))
+    }
+}
+
 /// The #268 scope resolver, adapted to the Agent owner's product-neutral
 /// `(workspace, session)` input by deriving the available session's worktree.
-struct SharedScopeResolver(SharedSessionRuntime);
+struct SharedScopeResolver(Workspaces);
 impl SessionScopeResolver for SharedScopeResolver {
     fn resolve_available_scope(
         &self,
         workspace: WorkspaceId,
         session: Option<SessionId>,
     ) -> Result<ResolvedAgentScope, ScopeResolveError> {
-        let runtime = self.0.lock().map_err(|_| ScopeResolveError::Storage)?;
+        // The request names its workspace, so the runtime that answers it is the
+        // one holding that identity — not whichever workspace this daemon was
+        // started in.
+        let tenant = self
+            .0
+            .workspace(workspace)
+            .ok_or(ScopeResolveError::Unavailable)?;
+        let runtime = tenant
+            .runtime()
+            .lock()
+            .map_err(|_| ScopeResolveError::Storage)?;
         // A workspace-root agent (no session) resolves to the trusted repository
         // root and its durable root-worktree identity; a session agent resolves
         // that session's available worktree. Neither trusts a client path.
@@ -1693,14 +1861,18 @@ impl SessionScopeResolver for SharedScopeResolver {
 /// Resolves the complete client fence for a generic terminal. Unlike the Agent
 /// resolver, generic terminal requests already carry a worktree ID, so the
 /// runtime verifies that exact identity before admitting a PTY spawn.
-struct SharedTerminalScopeResolver(SharedSessionRuntime);
+struct SharedTerminalScopeResolver(Workspaces);
 impl TerminalScopeResolver for SharedTerminalScopeResolver {
     fn resolve_available_scope(
         &self,
         requested: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
     ) -> Result<ResolvedTerminalScope, TerminalScopeResolveError> {
-        let runtime = self
+        let tenant = self
             .0
+            .workspace(requested.workspace_id)
+            .ok_or(TerminalScopeResolveError::Unavailable)?;
+        let runtime = tenant
+            .runtime()
             .lock()
             .map_err(|_| TerminalScopeResolveError::Unavailable)?;
         // A workspace-root scope (no session) resolves to the trusted repository
@@ -2232,7 +2404,10 @@ struct SharedTerminal(
         >,
     >,
 );
-type SharedSessionRuntime = Arc<Mutex<SessionRuntime>>;
+type SharedSessionRuntime = usagi_daemon::usecase::tenant::SharedSessionRuntime;
+
+/// The workspaces this daemon holds, as the daemon-wide components see them.
+type Workspaces = Arc<dyn usagi_daemon::usecase::tenant::WorkspaceRuntimes>;
 type SharedTerminalRuntime = Arc<
     Mutex<
         GenericTerminalRuntime<
@@ -2694,6 +2869,14 @@ fn spawn_ipc_server(
     ));
     let initial = tenants.adopt_initial(workspace_root)?;
     let runtime = initial.runtime().clone();
+    // Daemon-wide components (the PTY registry, the Agent runtime and its
+    // provisioners) resolve the workspace each request names through this port,
+    // rather than capturing the workspace this process started in.
+    let resolver = Arc::new(TenantWorkspaces {
+        tenants: Arc::clone(&tenants),
+        initial: initial.root().to_path_buf(),
+    });
+    let workspaces: Workspaces = tenants;
     // The inventory is a whole-snapshot document, so exactly one generation may
     // write it. This process is the active one; a draining generation's projector
     // is refused the document rather than merged with it (#562).
@@ -2750,7 +2933,7 @@ fn spawn_ipc_server(
         daemon_generation,
         workspace_root,
         pty,
-        Arc::clone(&runtime),
+        Arc::clone(&workspaces),
         Arc::clone(&user_environment),
         retention.clone(),
         &children,
@@ -2776,7 +2959,7 @@ fn spawn_ipc_server(
     let agent = open_agent_runtime(
         data_dir,
         daemon_generation,
-        Arc::clone(&runtime),
+        Arc::clone(&workspaces),
         agent_pty,
         mcp_command,
         user_environment,
@@ -2785,7 +2968,7 @@ fn spawn_ipc_server(
         &children,
         hydrate_retained,
     )?;
-    reconcile_removed_session_agents(&runtime, &agent)?;
+    reconcile_removed_session_agents(&workspaces, &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
@@ -2823,11 +3006,11 @@ fn spawn_ipc_server(
     )?);
     background_workers.push(start_pr_refresh_worker(
         Arc::clone(&pr_inventory),
-        Arc::clone(&runtime),
+        Arc::clone(&workspaces),
         Arc::clone(&shutdown),
     )?);
     let (teardown, teardown_worker) = start_session_teardown_worker(
-        Arc::clone(&runtime),
+        Arc::clone(&workspaces),
         Arc::clone(&agent),
         Arc::clone(&shutdown),
     )?;
@@ -2835,7 +3018,10 @@ fn spawn_ipc_server(
     // Before any client can observe them: roll back the sessions a delegation
     // created and then died before dispatching into.
     let compensated = reconcile_orphan_delegations(
-        &runtime,
+        &ConnectionWorkspace {
+            tenant: initial.clone(),
+            workspaces: Arc::clone(&workspaces),
+        },
         &DispatchStore::new(data_dir.join("daemon")),
         &teardown,
     );
@@ -2874,7 +3060,9 @@ fn spawn_ipc_server(
         listener,
         server,
         data_dir.to_path_buf(),
-        runtime,
+        initial,
+        workspaces,
+        resolver,
         teardown,
         terminal,
         agent,
@@ -2903,14 +3091,23 @@ fn spawn_ipc_server(
 /// older daemon. This startup pass repairs the historical state where session
 /// teardown removed the lifecycle row without closing its Agent owner.
 fn reconcile_removed_session_agents(
-    sessions: &SharedSessionRuntime,
+    workspaces: &Workspaces,
     agent: &SharedAgentRuntime,
 ) -> std::io::Result<usize> {
-    let retained = sessions
-        .lock()
-        .map_err(|_| std::io::Error::other("session owner is unavailable"))?
-        .session_ids()
-        .map_err(|error| std::io::Error::other(error.safe_message()))?;
+    // The Agent runtime is daemon-wide while sessions belong to workspaces, so
+    // what is still owned is the union over every workspace this daemon holds.
+    // Reconciling against one workspace would close the Agents of the others.
+    let mut retained = std::collections::BTreeSet::new();
+    for tenant in workspaces.all() {
+        retained.extend(
+            tenant
+                .runtime()
+                .lock()
+                .map_err(|_| std::io::Error::other("session owner is unavailable"))?
+                .session_ids()
+                .map_err(|error| std::io::Error::other(error.safe_message()))?,
+        );
+    }
     let mut agent = agent
         .lock()
         .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
@@ -3036,12 +3233,12 @@ fn bind_ipc_listener(
 /// progress while `gh` is slow.
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
-    sessions: SharedSessionRuntime,
+    workspaces: Workspaces,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_pr_refresh_worker(
         pr_inventory,
-        Some(sessions),
+        Some(workspaces),
         shutdown,
         GhProcess,
         ProductionRefreshClock {
@@ -3051,9 +3248,21 @@ fn start_pr_refresh_worker(
     )
 }
 
+/// Every managed session this daemon still owns, across all its workspaces.
+///
+/// `None` when a workspace cannot be read: pruning on a partial view would
+/// discard records the unreadable workspace still owns.
+fn retained_sessions(workspaces: &Workspaces) -> Option<std::collections::BTreeSet<SessionId>> {
+    let mut retained = std::collections::BTreeSet::new();
+    for tenant in workspaces.all() {
+        retained.extend(tenant.runtime().lock().ok()?.session_ids().ok()?);
+    }
+    Some(retained)
+}
+
 fn spawn_pr_refresh_worker<R, C>(
     pr_inventory: SharedPrInventory,
-    sessions: Option<SharedSessionRuntime>,
+    workspaces: Option<Workspaces>,
     shutdown: Arc<ShutdownRequest>,
     runner: R,
     clock: C,
@@ -3075,9 +3284,12 @@ where
                 ErrorLog::record("PR refresh schedule rebuild failed");
             }
             while !shutdown.is_requested() {
-                if let Some(sessions) = &sessions
-                    && let Ok(sessions) = sessions.lock()
-                    && let Ok(retained) = sessions.session_ids()
+                // The inventory is daemon-wide while sessions belong to
+                // workspaces, so what it may keep is the union over every
+                // workspace this daemon holds. Pruning against one of them
+                // would drop the others' pull requests.
+                if let Some(workspaces) = &workspaces
+                    && let Some(retained) = retained_sessions(workspaces)
                     && let Ok(mut projector) = pr_inventory.lock()
                     && projector.retain_sessions(&retained).is_err()
                 {
@@ -3115,13 +3327,13 @@ where
 /// Its work list is derived from durable state, so it also resumes a teardown
 /// that a previous daemon was interrupted in.
 fn start_session_teardown_worker(
-    sessions: SharedSessionRuntime,
+    workspaces: Workspaces,
     agent: SharedAgentRuntime,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<(Arc<TeardownSignal>, std::thread::JoinHandle<()>)> {
     let signal = Arc::new(TeardownSignal::new());
     let worker = spawn_session_teardown_worker(
-        SharedSessionTeardown::new(sessions),
+        WorkspacesTeardown { workspaces },
         AgentAndWorktreeTeardown {
             agent,
             worktree: WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
@@ -3131,6 +3343,41 @@ fn start_session_teardown_worker(
         SESSION_TEARDOWN_TICK,
     )?;
     Ok((signal, worker))
+}
+
+/// The unfinished teardowns of every workspace this daemon holds.
+///
+/// One worker drains them all, because the work is process-level (`git worktree
+/// remove` plus `remove_dir_all`) rather than per workspace. Each teardown names
+/// the repository it belongs to, which is what routes its outcome back to the
+/// workspace that recorded it.
+struct WorkspacesTeardown {
+    workspaces: Workspaces,
+}
+
+impl TeardownJournal for WorkspacesTeardown {
+    fn pending(&self) -> Vec<PendingTeardown> {
+        self.workspaces
+            .all()
+            .into_iter()
+            .flat_map(|tenant| SharedSessionTeardown::new(tenant.runtime().clone()).pending())
+            .collect()
+    }
+
+    fn finish(
+        &self,
+        teardown: &PendingTeardown,
+        outcome: Result<(), String>,
+    ) -> Result<(), String> {
+        // A teardown outcome belongs to the workspace whose durable record
+        // produced it. Recording it anywhere else would leave that record
+        // `Deleting` forever while corrupting another workspace's state.
+        let tenant = self
+            .workspaces
+            .workspace_at(&teardown.repository_root)
+            .ok_or_else(|| "session lifecycle owner is unavailable".to_owned())?;
+        SharedSessionTeardown::new(tenant.runtime().clone()).finish(teardown, outcome)
+    }
 }
 
 /// Orders session destruction so no Agent process or durable Agent inventory
@@ -3527,7 +3774,7 @@ fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
 fn open_agent_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
-    sessions: SharedSessionRuntime,
+    workspaces: Workspaces,
     pty: AgentPty,
     mcp_command: PathBuf,
     environment: Arc<SharedUserEnvironment>,
@@ -3578,7 +3825,7 @@ fn open_agent_runtime(
     // safe unknown-profile error rather than crash the daemon.
     let _ = registry.register_supported(
         CodexAdapter::new(RootCodexProvisioner {
-            sessions: Arc::clone(&sessions),
+            workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
             program: DefaultModel::OpenAi.command(),
@@ -3590,7 +3837,7 @@ fn open_agent_runtime(
             sandbox_passthrough,
         }),
         CodexAdapter::sakana(RootCodexProvisioner {
-            sessions: Arc::clone(&sessions),
+            workspaces: Arc::clone(&workspaces),
             mcp_command: mcp_command.clone(),
             data_home: data_home.clone(),
             program: DefaultModel::SakanaAi.command(),
@@ -3602,7 +3849,7 @@ fn open_agent_runtime(
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
-            sessions,
+            workspaces,
             mcp_command,
             data_home,
             sandbox_backend,
@@ -3816,7 +4063,7 @@ fn new_terminal_runtime(
     generation: usagi_core::domain::id::DaemonGeneration,
     repo_root: PathBuf,
     pty: DaemonPty,
-    sessions: SharedSessionRuntime,
+    workspaces: Workspaces,
     environment: Arc<SharedUserEnvironment>,
     retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     children: &Arc<SpawnedChildren>,
@@ -3832,13 +4079,16 @@ fn new_terminal_runtime(
     let runtime = GenericTerminalRuntime::from_snapshot_with_retention(
         generation,
         TrustedLoginShell {
+            // The launch cwd is replaced by the authoritative resolved scope, so
+            // this placeholder never reaches a spawned child.
             profile: LoginShellProfile::new(terminal_environment(), repo_root.clone()),
             environment: Some(environment),
+            workspaces: Some(Arc::clone(&workspaces)),
             workspace_root: repo_root,
         },
         store,
         pty,
-        SharedTerminalScopeResolver(sessions),
+        SharedTerminalScopeResolver(workspaces),
         snapshot,
         retention,
     )
@@ -3912,7 +4162,9 @@ fn start_ipc_accept_loop(
     listener: SecureUnixListener,
     server: usagi_core::infrastructure::ipc::ServerProtocol,
     data_dir: PathBuf,
-    runtime: SharedSessionRuntime,
+    initial: usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+    workspaces: Workspaces,
+    resolver: Arc<TenantWorkspaces>,
     teardown: Arc<TeardownSignal>,
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
@@ -4009,8 +4261,13 @@ fn start_ipc_accept_loop(
                             continue;
                         };
                         let server = server.clone();
-                        let session = Arc::clone(&runtime);
-                        let scope_sessions = Arc::clone(&runtime);
+                        // The workspace this connection acts on is decided by its
+                        // handshake, below: every session command it issues
+                        // belongs to that workspace, while requests that name a
+                        // workspace resolve through the registry.
+                        let connection_initial = initial.clone();
+                        let connection_workspaces = Arc::clone(&workspaces);
+                        let connection_resolver = Arc::clone(&resolver);
                         let teardown = Arc::clone(&teardown);
                         let terminal = Arc::clone(&terminal);
                         let visibility = visibility.clone();
@@ -4067,11 +4324,13 @@ fn start_ipc_accept_loop(
                                 let mut reader = PreHandshakeDeadlineStream::new(stream, deadline);
                                 let mut writer =
                                     PreHandshakeDeadlineStream::new(writer, deadline);
-                                let admitted = usagi_daemon::presentation::ipc::handshake_admitted(
-                                    &mut reader,
-                                    &mut writer,
-                                    &server,
-                                );
+                                let admitted =
+                                    usagi_daemon::presentation::ipc::handshake_admitted_with(
+                                        &mut reader,
+                                        &mut writer,
+                                        &server,
+                                        Some(connection_resolver.as_ref()),
+                                    );
                                 // Capacity covers the complete hello response, on
                                 // every success/refusal/error path, but never the
                                 // established connection that follows it.
@@ -4094,6 +4353,20 @@ fn start_ipc_accept_loop(
                                         ));
                                         return;
                                     }
+                                };
+                                // The handshake resolved which workspace this
+                                // connection acts on; a workspace retired between
+                                // the two steps closes the connection rather than
+                                // serving another workspace's state.
+                                let Some(bound) = connection_workspace(
+                                    &connection_workspaces,
+                                    &connection_initial,
+                                    admitted.client.workspace.as_ref(),
+                                ) else {
+                                    ErrorLog::record(
+                                        "daemon admitted connection closed: its workspace is no longer held",
+                                    );
+                                    return;
                                 };
                                 // A pre-handshake timeout must not become an idle
                                 // policy for an admitted subscription. Failure to
@@ -4157,19 +4430,19 @@ fn start_ipc_accept_loop(
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
                                         Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
-                                        Some("session") => dispatch_session(&session, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
-                                        Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &scope_sessions, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
-                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &scope_sessions, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
+                                        Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                         }
                                     },
@@ -4352,7 +4625,7 @@ impl Drop for ShutdownOnIpcWorkerExit {
 
 fn dispatch_dispatch_tool(
     agent: &SharedAgentRuntime,
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     decisions: &UserDecisionStore,
     wait: DecisionWaitContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -4377,16 +4650,16 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::AgentInbox
         )
     }) {
-        dispatch_agent_tool(agent, sessions, request_id, body, hello)
+        dispatch_agent_tool(agent, bound, request_id, body, hello)
     } else {
-        dispatch_user_decision(agent, sessions, decisions, wait, request_id, body, hello)
+        dispatch_user_decision(agent, bound, decisions, wait, request_id, body, hello)
     }
 }
 
 #[allow(clippy::too_many_lines)] // One handler keeps authentication and durable routing atomic.
 fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -4457,7 +4730,8 @@ fn dispatch_agent_tool(
                     "agent caller provenance is unknown",
                 )
             })?;
-        let snapshot = sessions
+        let snapshot = bound
+            .sessions()
             .lock()
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
@@ -4552,7 +4826,8 @@ fn dispatch_agent_tool(
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
                 drop(runtime);
-                let created = sessions
+                let created = bound
+                    .sessions()
                     .lock()
                     .map_err(|_| {
                         ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
@@ -4577,7 +4852,7 @@ fn dispatch_agent_tool(
                             "created session is not available",
                         )
                     })?;
-                let scope = SharedScopeResolver(Arc::clone(sessions));
+                let scope = bound.scope_resolver();
                 let dispatch_intent = DispatchIntent {
                     workspace,
                     session_name: session_name.clone(),
@@ -5162,7 +5437,7 @@ impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecision
 #[allow(clippy::too_many_lines)] // The complete wire-to-store error mapping is one atomic routing contract.
 fn dispatch_user_decision(
     agent: &SharedAgentRuntime,
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     store: &UserDecisionStore,
     wait: DecisionWaitContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -5236,7 +5511,8 @@ fn dispatch_user_decision(
     }
 
     let workspace = (|| -> Result<_, ProtocolError> {
-        sessions
+        bound
+            .sessions()
             .lock()
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
@@ -5540,7 +5816,7 @@ fn consume_user_decision_events(
 
 fn dispatch_dispatch(
     agent: &SharedAgentRuntime,
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5560,7 +5836,7 @@ fn dispatch_dispatch(
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let session_id = (|| {
-        let mut runtime = sessions.lock().map_err(|_| {
+        let mut runtime = bound.sessions().lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
         })?;
         let snapshot = runtime.snapshot().map_err(|_| {
@@ -5586,7 +5862,7 @@ fn dispatch_dispatch(
         })
     })();
     let result = session_id.and_then(|session_id| {
-        let scope = SharedScopeResolver(Arc::clone(sessions));
+        let scope = bound.scope_resolver();
         dispatch_agent_after_preflight(agent, &operation_id, &intent, session_id, &scope)
     });
     match result {
@@ -5764,7 +6040,7 @@ fn dispatch_metrics(
 }
 
 fn dispatch_session(
-    session: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
     agent: &SharedAgentRuntime,
     pr_inventory: &SharedPrInventory,
@@ -5787,7 +6063,7 @@ fn dispatch_session(
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let result = dispatch_session_action(
-        session,
+        bound,
         teardown,
         agent,
         pr_inventory,
@@ -5992,7 +6268,7 @@ fn best_effort_merged_pr_head(
 
 #[allow(clippy::too_many_lines)]
 fn dispatch_session_action(
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
     agent: &SharedAgentRuntime,
     pr_inventory: &SharedPrInventory,
@@ -6006,7 +6282,8 @@ fn dispatch_session_action(
     use usagi_daemon::usecase::agent_ipc::PromptMode;
 
     let reply = |body: serde_json::Value| {
-        let revision = sessions
+        let revision = bound
+            .sessions()
             .lock()
             .ok()
             .and_then(|runtime| runtime.snapshot().ok())
@@ -6033,13 +6310,15 @@ fn dispatch_session_action(
             .map_err(|_| SessionRuntimeError::Storage)?
             .caller_session(credential)
             .ok_or(SessionRuntimeError::ScopeUnavailable)?;
-        sessions
+        bound
+            .sessions()
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
             .session_scope_by_id(session_id)
     };
     let named_session = |name: &str| {
-        sessions
+        bound
+            .sessions()
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
             .session_id(name)
@@ -6072,11 +6351,12 @@ fn dispatch_session_action(
                     (Some(name), named_session(name)?)
                 }
             };
-            let target = sessions
+            let target = bound
+                .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_scope_by_id(id)?;
-            let resolver = SharedScopeResolver(Arc::clone(sessions));
+            let resolver = bound.scope_resolver();
             let admission = resume_agent_after_preflight(
                 agent,
                 operation_id,
@@ -6099,7 +6379,8 @@ fn dispatch_session_action(
             }))
         }
         SessionAction::List | SessionAction::Status | SessionAction::Overview => {
-            let mut status = sessions
+            let mut status = bound
+                .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .handle(action, operation_id, payload)?;
@@ -6271,7 +6552,7 @@ fn dispatch_session_action(
             reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
         }
         SessionAction::DelegateBrief => reply(delegate_brief(
-            sessions,
+            bound,
             teardown,
             agent,
             operation_id,
@@ -6284,7 +6565,8 @@ fn dispatch_session_action(
                     .and_then(serde_json::Value::as_u64)
                     .and_then(|value| u32::try_from(value).ok())
                     .ok_or(SessionRuntimeError::InvalidRequest)?;
-                let root = sessions
+                let root = bound
+                    .sessions()
                     .lock()
                     .map_err(|_| SessionRuntimeError::Storage)?
                     .repository_root()
@@ -6310,7 +6592,8 @@ fn dispatch_session_action(
                 )
             };
             let requested_role = payload.get("role").cloned();
-            let created = sessions
+            let created = bound
+                .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .handle(
@@ -6318,7 +6601,8 @@ fn dispatch_session_action(
                     operation_id,
                     &serde_json::json!({"name": name, "role": requested_role}),
                 )?;
-            let id = sessions
+            let id = bound
+                .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_id(&name)?;
@@ -6335,7 +6619,9 @@ fn dispatch_session_action(
         // released, so a long `git worktree add` never freezes concurrent
         // readers (session list, terminal poll, user-decision list) on the
         // daemon. The fast durable transitions still run under the lock.
-        SessionAction::Create => perform_create(sessions, &SystemGit, operation_id, payload),
+        SessionAction::Create => {
+            perform_create(bound.sessions(), &SystemGit, operation_id, payload)
+        }
         // Remove goes further: it answers as soon as the session is durably
         // `Deleting` and hands the unbounded worktree teardown to the daemon's
         // teardown worker. Keeping the teardown on this connection would hold
@@ -6343,20 +6629,22 @@ fn dispatch_session_action(
         // multi-gigabyte `target/`.
         SessionAction::Remove => {
             let name = string("name")?;
-            let (id, branch_head) = sessions
+            let (id, branch_head) = bound
+                .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .removal_identity(name)?;
             let merged_head_oid = best_effort_merged_pr_head(pr_inventory, id, branch_head);
             perform_remove_with_merged_head(
-                sessions,
+                bound.sessions(),
                 teardown,
                 operation_id,
                 payload,
                 merged_head_oid,
             )
         }
-        _ => sessions
+        _ => bound
+            .sessions()
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
             .handle(action, operation_id, payload),
@@ -6413,7 +6701,7 @@ fn new_agent_selector(
 /// rolled back: the worktree may already hold a running worker, so the caller
 /// gets the session and run identity to reconcile instead.
 fn delegate_brief(
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
     agent: &SharedAgentRuntime,
     operation_id: &str,
@@ -6450,7 +6738,10 @@ fn delegate_brief(
         let caller = runtime
             .mcp_dispatch_caller(credential)
             .ok_or(SessionRuntimeError::ScopeUnavailable)?;
-        let sessions = sessions.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let sessions = bound
+            .sessions()
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?;
         let workspace = sessions
             .snapshot()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -6473,16 +6764,17 @@ fn delegate_brief(
         })?;
 
     let created = perform_delegated_create(
-        sessions,
+        bound.sessions(),
         &SystemGit,
         operation_id,
         &serde_json::json!({"name": name, "role": payload.get("role").cloned()}),
     )?;
-    let id = sessions
+    let id = bound
+        .sessions()
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?
         .session_id(&name)?;
-    let scope = SharedScopeResolver(Arc::clone(sessions));
+    let scope = bound.scope_resolver();
     let dispatch_intent = DispatchIntent {
         workspace,
         session_name: name.clone(),
@@ -6496,7 +6788,7 @@ fn delegate_brief(
         Ok(admission) => admission,
         Err(error) => {
             return Err(compensate_delegation(
-                sessions,
+                bound.sessions(),
                 teardown,
                 id,
                 &name,
@@ -6569,11 +6861,12 @@ fn compensate_delegation(
 /// not an orphan: that operation reached the dispatch side, which owns its
 /// outcome. Only a create with nothing at all behind it is rolled back.
 fn reconcile_orphan_delegations(
-    sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     dispatch: &DispatchStore,
     teardown: &TeardownSignal,
 ) -> usize {
-    let Ok(candidates) = sessions
+    let Ok(candidates) = bound
+        .sessions()
         .lock()
         .map_err(|_| ())
         .and_then(|sessions| sessions.delegated_sessions().map_err(|_| ()))
@@ -6588,7 +6881,7 @@ fn reconcile_orphan_delegations(
         })
         .filter(|candidate| {
             perform_compensating_remove(
-                sessions,
+                bound.sessions(),
                 teardown,
                 &usagi_core::domain::id::OperationId::new().to_string(),
                 &candidate.name,
@@ -6642,7 +6935,7 @@ fn admit_agent_dispatch_request(
 
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
-    scope_sessions: &SharedSessionRuntime,
+    bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6668,7 +6961,7 @@ fn dispatch_agent(
     let Some(request) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
-    let scope = SharedScopeResolver(Arc::clone(scope_sessions));
+    let scope = bound.scope_resolver();
     if let AgentDispatchRequest::Inventory(workspace) = &request {
         let result = agent
             .lock()
@@ -9683,8 +9976,19 @@ struct FileWorkspaceFence {
     path: PathBuf,
     workspace: PathBuf,
     pid: u32,
+    /// How long to wait for a departing owner before refusing. A start can wait
+    /// for the previous daemon to exit; an adoption happens inside a client's
+    /// handshake, which has its own deadline, so it refuses quickly instead.
+    patience: Duration,
     held: RefCell<Option<std::fs::File>>,
 }
+
+/// How long a `serve` start waits for a departing owner to release a workspace.
+const WORKSPACE_FENCE_PATIENCE: Duration = Duration::from_secs(2);
+
+/// How long an adoption waits. It runs inside the client's pre-handshake
+/// deadline, so a contended workspace is reported rather than waited out.
+const WORKSPACE_ADOPTION_PATIENCE: Duration = Duration::from_millis(200);
 
 /// Builds a [`FileWorkspaceFence`] for any workspace this daemon adopts.
 ///
@@ -9701,6 +10005,7 @@ impl WorkspaceFenceFactory for FileWorkspaceFences {
             path: paths::workspace_fence_path(workspace_root),
             workspace: workspace_root.to_path_buf(),
             pid: self.pid,
+            patience: WORKSPACE_ADOPTION_PATIENCE,
             held: RefCell::new(None),
         })
     }
@@ -9741,7 +10046,6 @@ impl TenantRuntimeOpener for SystemTenantOpener {
 
 impl WorkspaceFence for FileWorkspaceFence {
     fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
-        const TIMEOUT: Duration = Duration::from_secs(2);
         const POLL: Duration = Duration::from_millis(20);
         // `<workspace>/.usagi` is user-visible project metadata, so it keeps
         // ordinary directory permissions; only the `daemon/` child holding the
@@ -9752,7 +10056,7 @@ impl WorkspaceFence for FileWorkspaceFence {
             "daemon workspace fence",
             PrivateLockModePolicy::OwnerLegacy0644,
         )?;
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + self.patience;
         loop {
             match FileExt::try_lock_exclusive(&file) {
                 Ok(()) => {
@@ -10076,6 +10380,7 @@ fn run_inner(
         path: paths::workspace_fence_path(&workspace_root),
         workspace: workspace_root.clone(),
         pid,
+        patience: WORKSPACE_FENCE_PATIENCE,
         held: RefCell::new(None),
     };
     let ready = IpcReady::new(&data_dir, &workspace_root, &lock);
@@ -11928,6 +12233,7 @@ mod tests {
             path: paths::workspace_fence_path(&workspace),
             workspace,
             pid,
+            patience: WORKSPACE_FENCE_PATIENCE,
             held: RefCell::new(None),
         }
     }
@@ -12093,6 +12399,125 @@ mod tests {
                 .to_string()
                 .contains("Storage")
         );
+    }
+
+    #[test]
+    fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
+        use usagi_core::infrastructure::ipc::WorkspaceResolver;
+
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let data = temporary.path().join("data");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        for directory in [&data, &first, &second] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let daemon_dir = data.join("daemon");
+        let first_root = paths::canonical_workspace_root(&first).unwrap();
+        let second_root = paths::canonical_workspace_root(&second).unwrap();
+        let generation = usagi_core::domain::id::DaemonGeneration::new();
+        let tenants = Arc::new(TenantRegistry::new(
+            daemon_dir.clone(),
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            SystemTenantOpener {
+                data_home: data.clone(),
+                generation,
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+        let initial = tenants.adopt_initial(&first_root).unwrap();
+        let workspaces: Workspaces = tenants.clone();
+        let resolver = TenantWorkspaces {
+            tenants: Arc::clone(&tenants),
+            initial: first_root.clone(),
+        };
+        let wire = |root: &Path| paths::wire_workspace_root(root);
+
+        // A client that names no workspace is answered with the one this process
+        // started in: it reads no workspace state either way.
+        for declared in [None, Some(ClientWorkspace::Unbound)] {
+            assert_eq!(
+                resolver.resolve(declared.as_ref()).unwrap(),
+                wire(&first_root)
+            );
+        }
+
+        // Selecting a workspace this daemon has never seen adopts it, and the
+        // second selection is the same tenant rather than a second adoption.
+        let selected = ClientWorkspace::Selected {
+            root: wire(&second_root),
+        };
+        assert_eq!(
+            resolver.resolve(Some(&selected)).unwrap(),
+            wire(&second_root)
+        );
+        assert_eq!(
+            resolver.resolve(Some(&selected)).unwrap(),
+            wire(&second_root)
+        );
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // A bound client resolves to the workspace containing it, including from
+        // a path that no longer exists — a worktree its own teardown removed.
+        for candidate in [
+            second_root.clone(),
+            second_root.join(".usagi/sessions/gone"),
+        ] {
+            let bound = ClientWorkspace::Bound {
+                root: wire(&candidate),
+            };
+            assert_eq!(resolver.resolve(Some(&bound)).unwrap(), wire(&second_root));
+        }
+
+        // A bound client outside every held workspace is refused with the typed
+        // fence refusal rather than adopting the directory it stood in.
+        let outside = tempfile::tempdir_in("/tmp").unwrap();
+        let refusal = resolver
+            .resolve(Some(&ClientWorkspace::Bound {
+                root: wire(&paths::canonical_workspace_root(outside.path()).unwrap()),
+            }))
+            .unwrap_err();
+        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
+            &refusal
+        ));
+        assert!(refusal.message.contains("has not opened"), "{refusal:?}");
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // A selected root that does not resolve on this machine is refused, and
+        // nothing is adopted for it.
+        let refusal = resolver
+            .resolve(Some(&ClientWorkspace::Selected {
+                root: wire(&temporary.path().join("absent")),
+            }))
+            .unwrap_err();
+        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
+            &refusal
+        ));
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // The connection binds the workspace its handshake settled on.
+        for (declared, expected) in [
+            (None, first_root.clone()),
+            (Some(ClientWorkspace::Unbound), first_root.clone()),
+            (Some(selected.clone()), second_root.clone()),
+            (
+                Some(ClientWorkspace::Bound {
+                    root: wire(&second_root.join("nested")),
+                }),
+                second_root.clone(),
+            ),
+        ] {
+            let bound = connection_workspace(&workspaces, &initial, declared.as_ref())
+                .expect("the handshake resolved this workspace");
+            assert_eq!(bound.tenant.root(), expected);
+        }
+
+        // A workspace retired between the handshake and the lookup closes the
+        // connection instead of serving another workspace's state.
+        assert!(tenants.retire(&second_root));
+        assert!(connection_workspace(&workspaces, &initial, Some(&selected)).is_none());
     }
 
     #[test]
@@ -14278,7 +14703,18 @@ mod tests {
         std::io::Write::write_all(&mut peer, b"pipelined request").unwrap();
         drop(peer);
 
-        assert!(connection.peer_disconnected());
+        // The close is observed through `poll`, so it lands when the kernel has
+        // processed the peer's exit rather than when `drop` returns. A single
+        // sample turns that ordinary scheduling delay into a failure on a loaded
+        // machine, so the observation is driven until it lands.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !connection.peer_disconnected() {
+            assert!(
+                Instant::now() < deadline,
+                "the peer close was never observed"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -15135,6 +15571,12 @@ mod tests {
         )
         .unwrap();
         let context = provision_context(None);
+        let workspaces = one_workspace(
+            &data.join("daemon"),
+            &workspace,
+            sessions,
+            context.scope.workspace_id,
+        );
         let catalog = |instructions: &str| {
             format!(
                 r#"version = 1
@@ -15149,14 +15591,14 @@ instructions = "{instructions}"
         };
 
         std::fs::write(data.join("roles.toml"), catalog("first launch policy")).unwrap();
-        let first = effective_role_instruction(&sessions, &data_home, &workspace, &context)
+        let first = effective_role_instruction(&workspaces, &data_home, &workspace, &context)
             .unwrap()
             .unwrap();
         assert_eq!(first.0.as_str(), "director");
         assert_eq!(first.1, "first launch policy");
 
         std::fs::write(data.join("roles.toml"), catalog("next launch policy")).unwrap();
-        let next = effective_role_instruction(&sessions, &data_home, &workspace, &context)
+        let next = effective_role_instruction(&workspaces, &data_home, &workspace, &context)
             .unwrap()
             .unwrap();
         assert_eq!(next.1, "next launch policy");
@@ -15297,6 +15739,7 @@ instructions = "{instructions}"
             },
         };
         let terminal = TrustedLoginShell {
+            workspaces: None,
             profile: LoginShellProfile::new(
                 BTreeMap::from([("SHELL".to_owned(), "/bin/sh".to_owned())]),
                 workspace.path().to_path_buf(),
@@ -15323,6 +15766,63 @@ instructions = "{instructions}"
         assert_eq!(agent["SHARED"], "workspace");
         assert_eq!(agent["WORKSPACE_ONLY"], "workspace");
         assert!(!agent.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
+    }
+
+    /// A registry holding exactly one workspace, for tests that exercise a
+    /// single runtime through the daemon's per-workspace resolution.
+    fn one_workspace(
+        daemon_dir: &Path,
+        root: &Path,
+        runtime: SharedSessionRuntime,
+        workspace_id: WorkspaceId,
+    ) -> Workspaces {
+        struct FixedOpener {
+            runtime: SharedSessionRuntime,
+            workspace_id: WorkspaceId,
+        }
+        impl TenantRuntimeOpener for FixedOpener {
+            type Runtime = SharedSessionRuntime;
+            fn open(
+                &self,
+                _: &Path,
+                _: &Path,
+            ) -> std::io::Result<OpenedTenant<SharedSessionRuntime>> {
+                Ok(OpenedTenant {
+                    runtime: Arc::clone(&self.runtime),
+                    workspace_id: self.workspace_id,
+                })
+            }
+        }
+        let registry = Arc::new(TenantRegistry::new(
+            daemon_dir.to_path_buf(),
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            FixedOpener {
+                runtime,
+                workspace_id,
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+        registry
+            .adopt_initial(root)
+            .expect("the fixture workspace is adopted");
+        registry
+    }
+
+    /// A connection bound to one workspace, for tests that exercise a single
+    /// runtime through the per-connection resolution.
+    fn bound_to(
+        daemon_dir: &Path,
+        root: &Path,
+        runtime: SharedSessionRuntime,
+        workspace_id: WorkspaceId,
+    ) -> ConnectionWorkspace {
+        let workspaces = one_workspace(daemon_dir, root, runtime, workspace_id);
+        let tenant = workspaces
+            .workspace_at(root)
+            .expect("the fixture workspace is adopted");
+        ConnectionWorkspace { tenant, workspaces }
     }
 
     fn provision_context(session: Option<SessionId>) -> ProvisionContext {
@@ -16154,6 +16654,7 @@ instructions = "{instructions}"
             },
         };
         let launch = TrustedLoginShell {
+            workspaces: None,
             profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
             environment: None,
             workspace_root: PathBuf::new(),
@@ -16656,6 +17157,7 @@ instructions = "{instructions}"
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),
             TrustedLoginShell {
+                workspaces: None,
                 profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
                 environment: None,
                 workspace_root: PathBuf::new(),
@@ -17025,8 +17527,14 @@ instructions = "{instructions}"
             })
             .unwrap();
 
+        let bound = bound_to(
+            &temporary.path().join("tenants"),
+            &temporary.path().join("repository"),
+            Arc::clone(&sessions),
+            WorkspaceId::new(),
+        );
         assert_eq!(
-            reconcile_orphan_delegations(&sessions, &dispatch, &teardown),
+            reconcile_orphan_delegations(&bound, &dispatch, &teardown),
             1
         );
 
@@ -17051,7 +17559,7 @@ instructions = "{instructions}"
         // A second start finds nothing new: the orphan is already `Deleting`, so
         // it is the teardown worker's, not another compensation's.
         assert_eq!(
-            reconcile_orphan_delegations(&sessions, &dispatch, &teardown),
+            reconcile_orphan_delegations(&bound, &dispatch, &teardown),
             0
         );
         assert_ne!(orphan, dispatched);
@@ -17076,6 +17584,15 @@ instructions = "{instructions}"
             )
             .unwrap(),
         ));
+        // Bound before the test poisons the runtime lock: the compensation path
+        // under test is the one that meets an unreadable workspace, not a
+        // fixture that cannot be built.
+        let bound = bound_to(
+            &temporary.path().join("tenants"),
+            &temporary.path().join("repository"),
+            Arc::clone(&sessions),
+            WorkspaceId::new(),
+        );
         let teardown = TeardownSignal::new();
         let run = usagi_core::domain::id::OperationId::new().to_string();
         let delegate = |name: &str| {
@@ -17147,7 +17664,7 @@ instructions = "{instructions}"
         // rather than guessing at an empty candidate set.
         assert_eq!(
             reconcile_orphan_delegations(
-                &sessions,
+                &bound,
                 &DispatchStore::new(temporary.path().join("dispatch")),
                 &teardown
             ),
@@ -17399,6 +17916,7 @@ instructions = "{instructions}"
         let mut first = GenericTerminalRuntime::new(
             first_generation,
             TrustedLoginShell {
+                workspaces: None,
                 profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
                 environment: None,
                 workspace_root: PathBuf::new(),
@@ -17447,6 +17965,7 @@ instructions = "{instructions}"
         let mut second = GenericTerminalRuntime::from_snapshot(
             second_generation,
             TrustedLoginShell {
+                workspaces: None,
                 profile: LoginShellProfile::new(BTreeMap::new(), dir.path().to_path_buf()),
                 environment: None,
                 workspace_root: PathBuf::new(),
