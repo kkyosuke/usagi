@@ -1,13 +1,13 @@
 ---
 number: 713
 title: refactor(daemon): workspace に束縛された component を tenant registry 経由で解決する
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, refactor, workspace]
 dependson: [709]
 related: [710]
 created_at: 2026-08-21T02:02:40.666621+00:00
-updated_at: 2026-08-21T02:02:40.666621+00:00
+updated_at: 2026-08-21T02:20:05.805184+00:00
 ---
 
 設計は [document/proposals/17-multi-workspace-daemon.md](../../document/proposals/17-multi-workspace-daemon.md) が正本。段階 3（#710）の前提として、実装中に分割した issue。
