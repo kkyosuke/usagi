@@ -569,6 +569,20 @@ impl SessionRuntime {
         self.root_worktree_id
     }
 
+    /// Returns the durable workspace identity this runtime bound.
+    ///
+    /// A daemon that owns several workspaces routes a fenced request to the
+    /// runtime whose identity the request names, so the identity has to be
+    /// readable without going through a scope resolution first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::Storage`] when the durable state cannot be
+    /// read.
+    pub fn workspace_id(&self) -> Result<WorkspaceId, SessionRuntimeError> {
+        Ok(self.state()?.workspace_id)
+    }
+
     /// Resolves the trusted workspace-root scope. The client never supplies the
     /// path: the workspace and root-worktree identities are verified against the
     /// daemon's durable state, and the returned path is always the trusted
@@ -5462,6 +5476,9 @@ instructions = "code"
 
         let (tmp, mut runtime) = runtime(FakeGit::ok());
         let state = runtime.state().unwrap();
+        // A daemon holding several workspaces routes by this identity, so it is
+        // readable without resolving a scope first.
+        assert_eq!(runtime.workspace_id().unwrap(), state.workspace_id);
         assert_eq!(
             runtime.resolve_root_scope(WorkspaceId::new(), runtime.root_worktree_id()),
             Err(SessionRuntimeError::ScopeUnavailable)
