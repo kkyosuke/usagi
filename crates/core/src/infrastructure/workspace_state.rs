@@ -111,21 +111,17 @@ pub fn resolve(daemon_dir: &Path, workspace_root: &Path) -> Result<WorkspaceStat
             Some(_) => {}
             None => {
                 create_private_dir(&dir)?;
-                json_file::write_atomic(
-                    &dir,
-                    &dir.join(paths::WORKSPACE_STATE_ROOT_FILE),
-                    &RecordedRoot {
-                        root: workspace_root.to_path_buf(),
-                    },
-                )
-                // The context is built eagerly: a lazy one would be a closure
-                // this crate cannot make fail on demand, and an untested closure
-                // is worse than one allocation on a path taken once per adopted
-                // workspace.
-                .context(format!(
-                    "could not record the workspace root in {}",
-                    dir.display()
-                ))?;
+                let path = dir.join(paths::WORKSPACE_STATE_ROOT_FILE);
+                let recorded = RecordedRoot {
+                    root: workspace_root.to_path_buf(),
+                };
+                // The context is built eagerly, and the call that consumes it is
+                // kept to one line. A lazy context would be a closure this crate
+                // cannot make fail on demand, and a `?` on a line of its own is
+                // only ever reached by the failure — both are invisible to a
+                // suite that never sees this write fail.
+                let failure = format!("could not record the root in {}", dir.display());
+                json_file::write_atomic(&dir, &path, &recorded).context(failure)?;
                 return Ok(WorkspaceState {
                     root: workspace_root.to_path_buf(),
                     dir,
@@ -238,25 +234,21 @@ pub fn migrate_legacy(daemon_dir: &Path) -> Result<Option<WorkspaceState>> {
     } else {
         target
     };
-    std::fs::rename(&legacy, &destination).context(format!(
+    let failure = format!(
         "could not move {} to {}",
         legacy.display(),
         destination.display()
-    ))?;
-    json_file::write_atomic(
-        daemon_dir,
-        &daemon_dir.join(MIGRATION_RECORD_FILE),
-        &MigrationRecord {
-            schema: "usagi-lifecycle-migration-v1".into(),
-            root: state.root.clone(),
-            moved_to: state.dir.clone(),
-            retired,
-        },
-    )
-    .context(format!(
-        "could not record the migration in {}",
-        daemon_dir.display()
-    ))?;
+    );
+    std::fs::rename(&legacy, &destination).context(failure)?;
+    let record = MigrationRecord {
+        schema: "usagi-lifecycle-migration-v1".into(),
+        root: state.root.clone(),
+        moved_to: state.dir.clone(),
+        retired,
+    };
+    let path = daemon_dir.join(MIGRATION_RECORD_FILE);
+    let failure = format!("could not record the migration in {}", daemon_dir.display());
+    json_file::write_atomic(daemon_dir, &path, &record).context(failure)?;
     Ok(Some(state))
 }
 
