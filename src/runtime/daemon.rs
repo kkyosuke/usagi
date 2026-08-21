@@ -147,6 +147,9 @@ use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
     DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
 };
+use usagi_daemon::usecase::tenant::{
+    DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
+};
 use usagi_daemon::usecase::terminal::{
     Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
 };
@@ -2673,15 +2676,26 @@ fn spawn_ipc_server(
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let owner = daemon_process.clone();
-    let repo_root = workspace_root.to_path_buf();
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let runtime = open_session_runtime(
-        repo_root.clone(),
-        &workspace_state_dir(&data_dir.join("daemon"), workspace_root)?,
-        data_dir,
-        daemon_generation,
-    )?;
+    // The workspaces this daemon holds. The one it was started in is registered
+    // with the fence `serve` already took for the process's lifetime; any later
+    // one acquires its own before it becomes a tenant.
+    let tenants = Arc::new(TenantRegistry::new(
+        data_dir.join("daemon"),
+        FileWorkspaceFences {
+            pid: std::process::id(),
+        },
+        SystemTenantOpener {
+            data_home: data_dir.to_path_buf(),
+            generation: daemon_generation,
+        },
+        DEFAULT_TENANT_LIMIT,
+    ));
+    let initial = tenants
+        .adopt_initial(workspace_root)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let runtime = initial.runtime().clone();
     // The inventory is a whole-snapshot document, so exactly one generation may
     // write it. This process is the active one; a draining generation's projector
     // is refused the document rather than merged with it (#562).
@@ -9674,6 +9688,59 @@ struct FileWorkspaceFence {
     held: RefCell<Option<std::fs::File>>,
 }
 
+/// Builds a [`FileWorkspaceFence`] for any workspace this daemon adopts.
+///
+/// The daemon serves one workspace per tenant and holds one fence per tenant, so
+/// the fence stops being a single start-up value and becomes something the
+/// registry asks for by root.
+struct FileWorkspaceFences {
+    pid: u32,
+}
+
+impl WorkspaceFenceFactory for FileWorkspaceFences {
+    fn fence_for(&self, workspace_root: &Path) -> Box<dyn WorkspaceFence + Send> {
+        Box::new(FileWorkspaceFence {
+            path: paths::workspace_fence_path(workspace_root),
+            workspace: workspace_root.to_path_buf(),
+            pid: self.pid,
+            held: RefCell::new(None),
+        })
+    }
+}
+
+/// Opens one workspace's lifecycle runtime with the real git and filesystem
+/// seams, reading the shared catalogs from the data home every workspace shares.
+struct SystemTenantOpener {
+    data_home: PathBuf,
+    generation: usagi_core::domain::id::DaemonGeneration,
+}
+
+impl TenantRuntimeOpener for SystemTenantOpener {
+    type Runtime = SharedSessionRuntime;
+
+    fn open(
+        &self,
+        workspace_root: &Path,
+        state_dir: &Path,
+    ) -> std::io::Result<OpenedTenant<Self::Runtime>> {
+        let runtime = open_session_runtime(
+            workspace_root.to_path_buf(),
+            state_dir,
+            &self.data_home,
+            self.generation,
+        )?;
+        let workspace_id = runtime
+            .lock()
+            .map_err(|_| std::io::Error::other("session runtime is unavailable"))?
+            .workspace_id()
+            .map_err(|error| std::io::Error::other(error.safe_message()))?;
+        Ok(OpenedTenant {
+            runtime,
+            workspace_id,
+        })
+    }
+}
+
 impl WorkspaceFence for FileWorkspaceFence {
     fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
         const TIMEOUT: Duration = Duration::from_secs(2);
@@ -10090,18 +10157,6 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<
     // is the root the runtime will adopt.
     SessionRuntime::bound_workspace_root(owner.dir(), owner.root().to_path_buf())
         .map_err(|error| std::io::Error::other(format!("{error:?}")))
-}
-
-/// The state subtree this daemon keeps `workspace_root`'s lifecycle document in.
-///
-/// Resolution creates the subtree when it is absent, so the first start of a
-/// workspace adopts it. The daemon directory itself keeps the locator, record,
-/// registry, and shards: those belong to the daemon incarnation, not to any one
-/// workspace.
-fn workspace_state_dir(daemon_dir: &Path, workspace_root: &Path) -> std::io::Result<PathBuf> {
-    workspace_state::resolve(daemon_dir, workspace_root)
-        .map(|state| state.dir().to_path_buf())
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
 /// The state subtree of an already adopted `workspace_root`, without creating
@@ -12029,7 +12084,10 @@ mod tests {
         // to a candidate the runtime would not adopt. Here the unreadable
         // document is the workspace's own, inside its state subtree.
         let canonical = paths::canonical_workspace_root(workspace.path()).unwrap();
-        let state_dir = workspace_state_dir(&daemon, &canonical).unwrap();
+        let state_dir = workspace_state::resolve(&daemon, &canonical)
+            .unwrap()
+            .dir()
+            .to_path_buf();
         std::fs::write(state_dir.join("sessions.json"), "not json").unwrap();
         assert!(
             bound_workspace_root(&daemon, workspace.path())
@@ -12062,7 +12120,6 @@ mod tests {
         std::fs::write(&container, "").unwrap();
         for error in [
             bound_workspace_root(&daemon, workspace.path()).unwrap_err(),
-            workspace_state_dir(&daemon, &canonical).unwrap_err(),
             adopted_workspace_state_dir(&daemon, &canonical).unwrap_err(),
         ] {
             assert!(error.to_string().contains("could not"), "{error}");
@@ -12096,7 +12153,10 @@ mod tests {
             canonical
         );
         assert!(!legacy.exists());
-        let state_dir = workspace_state_dir(&daemon, &canonical).unwrap();
+        let state_dir = workspace_state::resolve(&daemon, &canonical)
+            .unwrap()
+            .dir()
+            .to_path_buf();
         assert!(state_dir.join("sessions.json").is_file());
 
         // A subdirectory of an adopted workspace resolves to the workspace, so a
