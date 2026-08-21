@@ -574,6 +574,60 @@ fn daemon_client(home: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
     .unwrap()
 }
 
+/// A client bound to one specific workspace, for a daemon holding several.
+///
+/// [`daemon_client`] declares whichever workspace the fixture adopted first,
+/// which is ambiguous once a test opens two of them.
+fn daemon_client_at(
+    home: &Path,
+    workspace_root: &Path,
+) -> IpcClient<std::os::unix::net::UnixStream> {
+    let data_dir = channel_data_dir(home);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let stream = loop {
+        if let Ok(stream) = connect_current(&data_dir) {
+            break stream;
+        }
+        assert!(Instant::now() < deadline, "daemon socket was unavailable");
+        thread::sleep(Duration::from_millis(20));
+    };
+    IpcClient::connect(
+        stream,
+        "workspace-switch-e2e".to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                usagi_core::infrastructure::paths::canonical_workspace_root(workspace_root)
+                    .expect("the fixture workspace resolves"),
+            ),
+        },
+    )
+    .unwrap()
+}
+
+fn create_session_in(home: &Path, workspace_root: &Path, name: &str) -> SessionId {
+    let mut client = daemon_client_at(home, workspace_root);
+    let reply = client
+        .request(DaemonRequest::Session {
+            action: SessionAction::Create,
+            operation_id: OperationId::new().to_string(),
+            payload: serde_json::json!({"name": name}),
+        })
+        .unwrap();
+    let body = match reply {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+    };
+    let session = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == name)
+        .unwrap();
+    serde_json::from_value(session["session_id"].clone()).unwrap()
+}
+
 fn create_session(home: &Path, name: &str) -> (WorkspaceId, SessionId) {
     let mut client = daemon_client(home);
     let reply = client
@@ -1382,6 +1436,148 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"q");
 
+    let status = match wait_with_timeout(&mut child, Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
+            drop(slave);
+            drop(master);
+            let _ = reader.join();
+            let screen = screen_since(&captured, baseline).unwrap_or_default();
+            panic!("{error}: screen={screen:?}");
+        }
+    };
+    assert!(status.success());
+
+    drop(slave);
+    drop(master);
+    let _ = reader.join();
+    stop_daemon(&home);
+}
+
+/// Switching workspaces no longer costs the first workspace's runtimes: the
+/// daemon adopts the second workspace during the switch instead of refusing it,
+/// and the terminal left running in the first one keeps its PTY child (#711).
+///
+/// The daemon is stopped before the TUI starts, so the switch is the moment the
+/// second workspace is adopted rather than something an earlier `open` already
+/// arranged.
+#[test]
+#[allow(clippy::too_many_lines)] // The two-workspace switch is intentionally chronological.
+fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
+    let _serial = serial();
+    let home = short_home();
+    let roots = tempfile::tempdir().unwrap();
+    let first = roots.path().join("switch-first");
+    let second = roots.path().join("switch-second");
+    for workspace in [&first, &second] {
+        fs::create_dir(workspace).unwrap();
+        git(workspace, &["init", "-q"]);
+        git(workspace, &["config", "user.email", "tui-e2e@example.test"]);
+        git(workspace, &["config", "user.name", "TUI E2E"]);
+        fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+        git(workspace, &["add", "README.md"]);
+        git(workspace, &["commit", "-qm", "fixture"]);
+    }
+
+    write_prompt_settings(home.path());
+    let fixture = tempfile::tempdir().unwrap();
+    let shell = fixture.path().join("fixture-shell");
+    let spawn_count = fixture.path().join("shell-spawn-count");
+    write_terminal_fixture(&shell, &spawn_count);
+
+    // Register both workspaces, then stop the daemon: the TUI below cold-starts
+    // one for the workspace it opens, and must adopt the other when it switches.
+    for workspace in [&first, &second] {
+        let registered = home
+            .command_at(
+                Channel::Local,
+                workspace,
+                &["open".as_ref(), workspace.as_os_str()],
+            )
+            .env("SHELL", &shell)
+            .output()
+            .expect("workspace registers with fixture login shell");
+        assert!(registered.status.success());
+    }
+    // A session in each workspace, so both Home screens have a scope to open.
+    // Declaring the workspace explicitly is what keeps this unambiguous while
+    // the daemon holds two of them.
+    create_session_in(home.path(), &first, "first-session");
+    create_session_in(home.path(), &second, "second-session");
+    stop_daemon(&home);
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    // The TUI cold-starts the daemon, so the fixture login shell has to be in
+    // *its* environment: the daemon inherits it and every terminal it launches
+    // then reports its pid on the screen.
+    let mut child = TuiChild(
+        home.command_at(Channel::Local, &first, &["hop".as_ref()])
+            .env("SHELL", &shell)
+            .env(SANDBOX_PASSTHROUGH, "1")
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave.try_clone().unwrap()))
+            .spawn()
+            .expect("usagi hop starts on the PTY"),
+    );
+
+    // Recent lists the most recently opened workspace first, so the second entry
+    // is the workspace registered first.
+    wait_for_screen_since(&captured, baseline, "Recent");
+    send(&mut master, b"2");
+    wait_for_screen_since(&captured, baseline, "[switch]");
+    wait_for_screen_since(&captured, baseline, "switch-first");
+
+    // A live PTY child in the first workspace.
+    submit_closeup_command(&mut master, &captured, baseline, "terminal open");
+    wait_for_screen_since(&captured, baseline, "generic-ready-unique:");
+    let live = displayed_terminal_pid(&captured, baseline);
+    assert!(process_is_alive(live));
+
+    // Leave for Welcome, then open the other workspace. The same daemon adopts
+    // it: no refusal, no restart.
+    send(&mut master, b"\x0f\x0f");
+    wait_for_screen_since(&captured, baseline, "[switch]");
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"w");
+    wait_for_screen_absent_since(&captured, baseline, "[switch]");
+    wait_for_screen_since(&captured, baseline, "Recent");
+
+    // The needle must distinguish the new screen from the old one: `[switch]`
+    // was on screen before the switch, so the second workspace's own name is
+    // what proves this open landed in it. Reconstruction stays anchored to the
+    // original baseline, because a fresh one only holds the deltas since it.
+    send(&mut master, b"1");
+    wait_for_screen_since(&captured, baseline, "switch-second");
+
+    // The first workspace's child survived the switch, and both workspaces now
+    // have their own state subtree under the one daemon.
+    assert!(
+        process_is_alive(live),
+        "switching workspaces must not end the first workspace's runtimes"
+    );
+    let adopted = usagi_core::infrastructure::workspace_state::adopted(
+        &Channel::Local.data_dir(home.path()).join("daemon"),
+    )
+    .expect("the adopted workspaces are readable")
+    .into_iter()
+    .map(|state| state.root().to_path_buf())
+    .collect::<Vec<_>>();
+    for workspace in [&first, &second] {
+        let root = usagi_core::infrastructure::paths::canonical_workspace_root(workspace).unwrap();
+        assert!(adopted.contains(&root), "{adopted:?}");
+    }
+
+    send(&mut master, b"\x11");
+    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
+    send(&mut master, b"q");
     let status = match wait_with_timeout(&mut child, Duration::from_secs(10)) {
         Ok(status) => status,
         Err(error) => {
