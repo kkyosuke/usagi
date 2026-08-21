@@ -80,7 +80,8 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
             .join(".usagi/sessions/mcp-e2e-session/.git")
             .exists()
     );
-    let lifecycle = fs::read_to_string(mcp.data_dir().join("daemon/sessions.json")).unwrap();
+    let lifecycle =
+        fs::read_to_string(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap();
     assert!(lifecycle.contains("mcp-e2e-session"));
 }
 
@@ -140,7 +141,8 @@ instructions = "ROLE_SECRET_REVIEWER_INSTRUCTION"
         .unwrap();
     assert_eq!(review["role_id"], "reviewer");
 
-    let lifecycle = fs::read_to_string(mcp.data_dir().join("daemon/sessions.json")).unwrap();
+    let lifecycle =
+        fs::read_to_string(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap();
     assert!(lifecycle.contains("\"role_id\": \"reviewer\""));
     assert!(!lifecycle.contains("ROLE_SECRET_"));
 
@@ -300,7 +302,7 @@ printf '%s\n%s\n%s\n' \
 fn production_dispatch_uses_the_trusted_root_before_and_after_session_creation() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();
-    let lifecycle_path = mcp.data_dir().join("daemon/sessions.json");
+    let lifecycle_path = support::daemon::lifecycle_state_path(&mcp.data_dir());
 
     // The MCP snapshot still advertises `fixture-codex`, but the workspace root
     // no longer allows it. The daemon decides that without any side effect.
@@ -772,7 +774,7 @@ fn production_delegate_issue_preserves_ambiguity_without_session_or_queue_side_e
     fs::write(&first, source).unwrap();
     fs::write(&second, source).unwrap();
 
-    let sessions_path = mcp.data_dir().join("daemon/sessions.json");
+    let sessions_path = support::daemon::lifecycle_state_path(&mcp.data_dir());
     let dispatch_path = mcp.data_dir().join("daemon/dispatch.json");
     let sessions_before = fs::read(&sessions_path).unwrap();
     let dispatch_before = fs::read(&dispatch_path).ok();
@@ -1195,9 +1197,10 @@ fi
         ),
     );
 
-    let lifecycle: serde_json::Value =
-        serde_json::from_slice(&fs::read(mcp.data_dir().join("daemon/sessions.json")).unwrap())
-            .unwrap();
+    let lifecycle: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap(),
+    )
+    .unwrap();
     let workspace: WorkspaceId =
         serde_json::from_value(lifecycle["state"]["workspace_id"].clone()).unwrap();
     let mut client = mcp.daemon_client();

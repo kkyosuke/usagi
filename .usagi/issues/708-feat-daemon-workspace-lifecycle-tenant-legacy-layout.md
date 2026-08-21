@@ -1,13 +1,13 @@
 ---
 number: 708
 title: feat(daemon): workspace lifecycle 文書を tenant ごとに分離し legacy layout から移行する
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, lifecycle, workspace]
 dependson: []
 related: []
 created_at: 2026-08-20T23:33:23.460781+00:00
-updated_at: 2026-08-21T00:09:55.259254+00:00
+updated_at: 2026-08-21T00:59:14.953813+00:00
 ---
 
 設計は [document/proposals/17-multi-workspace-daemon.md](../../document/proposals/17-multi-workspace-daemon.md) が正本。本 issue はその段階 1。

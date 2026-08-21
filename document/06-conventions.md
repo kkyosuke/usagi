@@ -281,7 +281,7 @@ daemon の workspace root は**起動時 cwd** で決まるため（[5. daemon](
 | 保証 | 内容 |
 |---|---|
 | cwd の隔離 | 起動ごとに fixture workspace を `.current_dir()` に設定し、cwd がチェックアウトの内側でないことを assert する |
-| workspace root の回帰検出 | fixture の teardown で、起動した daemon が `sessions.json` に記録した `repository_root` が fixture であることを assert する |
+| workspace root の回帰検出 | fixture の teardown で、起動した daemon が adopt した workspace（`daemon/w/<digest>/root.json`）がすべて fixture であることを assert する |
 | exact reap | teardown で graceful stop を試み、残った場合だけ `daemon.json` の pid + process-start identity が一致する incarnation へ SIGTERM → SIGKILL と段階的に落とす |
 
 `daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
