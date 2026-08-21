@@ -887,6 +887,42 @@ mod tests {
         );
     }
 
+    /// A daemon holding several workspaces resolves the connection's one during
+    /// the handshake. What it resolves is what the fence then compares against,
+    /// so a resolver that answers with another root refuses the client rather
+    /// than serving it that workspace.
+    #[test]
+    fn a_resolved_workspace_is_what_the_fence_compares_against() {
+        struct Resolved(&'static str);
+        impl usagi_core::infrastructure::ipc::WorkspaceResolver for Resolved {
+            fn resolve(
+                &self,
+                _: Option<&ClientWorkspace>,
+            ) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
+                Ok(self.0.to_owned())
+            }
+        }
+
+        // The client declares the trusted root; a resolver that agrees admits it.
+        let admit = |resolver: &dyn usagi_core::infrastructure::ipc::WorkspaceResolver| {
+            let mut input = Vec::new();
+            write_json_frame(&mut input, &hello(), 1024).unwrap();
+            let mut output = Vec::new();
+            handshake_admitted_with(
+                &mut Cursor::new(input),
+                &mut output,
+                &server(),
+                Some(resolver),
+            )
+            .unwrap()
+        };
+        assert!(admit(&Resolved(TRUSTED_ROOT)).is_some());
+
+        // A resolver that answers with a different workspace does not bypass the
+        // fence: the declaration no longer matches, so the client is refused.
+        assert!(admit(&Resolved("/workspace/other")).is_none());
+    }
+
     #[test]
     fn admitted_non_terminal_connection_continues_after_the_handshake_boundary() {
         let mut input = Vec::new();
