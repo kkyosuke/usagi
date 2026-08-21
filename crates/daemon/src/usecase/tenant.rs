@@ -120,6 +120,15 @@ impl std::fmt::Display for AdoptError {
 
 impl std::error::Error for AdoptError {}
 
+impl From<AdoptError> for io::Error {
+    /// The composition root speaks `io::Error`, and every adoption failure is
+    /// safe to show: the refusals name a workspace and a pid, and the storage
+    /// one names paths.
+    fn from(error: AdoptError) -> Self {
+        Self::other(error.to_string())
+    }
+}
+
 /// One adopted workspace, as the rest of the daemon sees it.
 ///
 /// The fence is deliberately *not* here: it is not `Sync`, and a tenant handle
@@ -521,6 +530,11 @@ mod tests {
             }
         );
         assert!(error.to_string().contains("pid 4242"), "{error}, {error:?}");
+        // The composition root speaks `io::Error`; the message survives.
+        assert_eq!(
+            io::Error::from(error.clone()).to_string(),
+            error.to_string()
+        );
         assert!(
             AdoptError::Owned {
                 workspace: "/workspace/two".into(),

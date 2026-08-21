@@ -2692,9 +2692,7 @@ fn spawn_ipc_server(
         },
         DEFAULT_TENANT_LIMIT,
     ));
-    let initial = tenants
-        .adopt_initial(workspace_root)
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let initial = tenants.adopt_initial(workspace_root)?;
     let runtime = initial.runtime().clone();
     // The inventory is a whole-snapshot document, so exactly one generation may
     // write it. This process is the active one; a draining generation's projector
@@ -12094,6 +12092,39 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("Storage")
+        );
+    }
+
+    #[test]
+    fn the_fence_factory_owns_one_workspace_per_root() {
+        let first = tempfile::tempdir_in("/tmp").unwrap();
+        let second = tempfile::tempdir_in("/tmp").unwrap();
+        let fences = FileWorkspaceFences { pid: 4242 };
+
+        // Each root gets its own fence node, so owning one workspace never
+        // implies owning another.
+        let held = fences.fence_for(first.path());
+        assert_eq!(held.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+        assert_eq!(
+            fences.fence_for(second.path()).acquire().unwrap(),
+            WorkspaceFenceOutcome::Acquired
+        );
+
+        // A second owner of the same root is refused and names the holder, which
+        // is what lets one workspace be refused without disturbing the rest.
+        let contender = std::thread::spawn({
+            let root = first.path().to_path_buf();
+            move || FileWorkspaceFences { pid: 5252 }.fence_for(&root).acquire()
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            contender,
+            WorkspaceFenceOutcome::Held {
+                workspace: first.path().display().to_string(),
+                owner: Some(4242),
+            }
         );
     }
 

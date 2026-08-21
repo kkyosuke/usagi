@@ -1,13 +1,13 @@
 ---
 number: 709
 title: feat(daemon): tenant registry と workspace fence の多重保持で workspace を on-demand adopt する
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, lifecycle, workspace]
 dependson: [708]
 related: []
 created_at: 2026-08-20T23:33:39.823990+00:00
-updated_at: 2026-08-21T00:10:11.622604+00:00
+updated_at: 2026-08-21T01:12:32.621736+00:00
 ---
 
 設計は [document/proposals/17-multi-workspace-daemon.md](../../document/proposals/17-multi-workspace-daemon.md) が正本。本 issue はその段階 2。#708 が前提。
