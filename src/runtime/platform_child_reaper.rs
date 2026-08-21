@@ -208,7 +208,11 @@ mod tests {
             reaper.spawn(&mut missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
-        assert_eq!(reaper.tracked(), Some(0));
+        // `tracked` reads through a `try_lock`, so it answers `None` while the
+        // reaper thread holds the children. A single sample turns that ordinary
+        // contention into a failure on a loaded machine (the coverage run is
+        // instrumented and slow), so the observation is driven until it lands.
+        wait_until(Duration::from_secs(5), || reaper.tracked() == Some(0));
 
         let unavailable = PlatformChildReaper {
             state: Weak::new(),
