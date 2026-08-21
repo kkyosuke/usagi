@@ -244,9 +244,10 @@ runtime mode で選ばれるため、同一 workspace に対して mode を変�
 path の綴り違い（末尾セパレータ、`.` / `..`、symlink 経由、macOS の `/tmp` → `/private/tmp` firmlink）でも回避
 できない。`flock` は inode に対する排他であり、加えて workspace root は fence 前に canonical 化される。
 workspace root の解決は process ごとに 1 回だけ行い、fence と session runtime が同じ値を使う。候補は起動時 cwd だが、
-`sessions.json` に durable な `repository_root` があればそれが勝つ（[session tree と ignore
-rules](#session-tree-と-ignore-rules)）。したがって subdirectory から起動しても、runtime が所有しない workspace を
-fence することはない。
+**adopt 済みの workspace のうち、その cwd を含む最長の root** があればそれが勝ち、さらにその workspace の
+`sessions.json` に durable な `repository_root` があればそれが勝つ（[workspace state subtree](#workspace-state-subtree)、
+[session tree と ignore rules](#session-tree-と-ignore-rules)）。したがって subdirectory や session worktree から
+起動しても、runtime が所有しない workspace を fence することはない。
 
 workspace fence の node には、取得した owner が自分の pid を 1 行書く。別の data directory の daemon は互いの
 `daemon.json` を読めないため、この hint が cross-mode の唯一の発見経路である（`daemon status` は自分の mode の
@@ -577,12 +578,30 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `shards/<generation>.json` | durable atomic JSON | owner generation ごとの runtime shard。自 generation の resource reservation / child identity / runtime state、その resource の durable record 本体（Agent runtime record と generic terminal record を opaque payload として持つ）、in-flight terminal command、active consumer 向け outbox を持つ。writer はその generation の process だけである |
 | `shards/<generation>.lock` | lock file | 対応する shard の read・compare-and-swap を直列化する |
 | `generations/<generation>/sock` | Unix domain socket | generation ごとの IPC endpoint。socket と locator は所有者・permission・symlink を検証して利用する |
-| `sessions.json` | JSON | managed session の lifecycle、operation journal、stable identity と trusted repository root。daemon restart をまたいで共有する |
+| `w/<digest>/root.json` | JSON | その subtree が属する canonical workspace root。subtree 名は短縮 digest なので、名前だけでは所属を証明できない。読み手は必ずこのファイルと突き合わせ、不一致は miss として次の候補（`<digest>-1`, `-2` …）を見る（[workspace state subtree](#workspace-state-subtree)） |
+| `w/<digest>/sessions.json` | JSON | その workspace の managed session の lifecycle、operation journal、stable identity と trusted repository root。daemon restart をまたいで共有する |
+| `lifecycle-migration.json` | JSON | legacy layout（`daemon/sessions.json`）から subtree へ document を移した一方向 migration の記録。移した root・移動先・retire したかを持つ |
+| `sessions.json.migrated` | 退役した legacy JSON | 移行時に subtree が既に authoritative な document を持っていた場合、legacy の bytes をここへ退役させる。調査用に残るが、どの build も再び読まない |
 | `runtime-migration.json` | durable atomic JSON | legacy store から shard への一方向 migration の記録。schema、移行した generation、adopt 件数、証明不能だった件数を持つ（[legacy record の adoption](#legacy-record-の-adoption)） |
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
+
+### workspace state subtree
+
+daemon の state のうち **workspace が所有するもの**（lifecycle document）だけを `daemon/w/<digest>/` の subtree へ
+置き、それ以外（locator・record・単一インスタンス lock・generation registry・allocator・shard・dispatch・inbox・
+PR inventory）は `daemon/` 直下に残す。前者は workspace ごとに 1 つ、後者は daemon incarnation ごとに 1 つだからである。
+
+| 項目 | 規則 |
+|---|---|
+| digest | canonical workspace root を domain separation tag と length prefix 付きの SHA-256 に通し、先頭 6 byte を hex 12 文字にする（bootstrap broker key と同じ作り） |
+| 所属の証明 | `root.json` に canonical root を記録し、読み書きの前に必ず突き合わせる。名前が一致しても root が違えば **miss** として扱う |
+| 衝突 | miss のときは `<digest>-1`, `-2` … と候補を進める。16 件で打ち切り、共有せずに refuse する |
+| socket | subtree を経由しない。generation socket は `daemon/generations/<generation>/sock` のままなので、`sun_path` の長さ予算は変わらない |
+| 起動時の解決 | 起動 cwd を canonical 化し、**その path を含む adopted root のうち最長のもの**を採用する。subdirectory や session worktree（`<root>/.usagi/sessions/<name>`）から起動しても、workspace root が bind される |
+| legacy layout | `daemon/sessions.json` があれば、初回の解決が document をその `repository_root` の subtree へ rename し、`lifecycle-migration.json` に記録する。subtree が既に document を持つ場合は上書きせず、legacy を `sessions.json.migrated` へ退役させる |
 
 runtime mode は `USAGI_RUNTIME_MODE=production`（本番モード）、`USAGI_RUNTIME_MODE=development`（開発モード）、または `USAGI_RUNTIME_MODE=local`（ローカルモード）で明示する。production は `$USAGI_HOME` または `~/.usagi` 自体を使い、development はその `dev/` 子 directory、local はその `local/` 子 directory を使う。3 つの綴りはいずれも明示指定として尊重され、artifact の既定に上書きされない。環境変数を未指定または不正な値にした場合は、**その artifact に焼き込まれた既定 mode**（[artifact の既定 mode](#artifact-の既定-mode)）を使う。プロジェクト内の runtime state も同じ定義を使い、production は `<project_root>/.usagi/`、development は `<project_root>/.usagi/dev/`、local は `<project_root>/.usagi/local/` に保存する。旧 `device/` / `develop/` / `development/` との互換処理は行わない。
 したがって development 中・local mode 中に本番用の record / locator / lock / daemon-owned state へ触れず、必要なら `USAGI_RUNTIME_MODE=development cargo run` で local mode のまま開発用状態を選べる。`USAGI_HOME` を明示しても同じ分離を適用する。daemon が起動する Agent の MCP server には選択した mode も転送するため、Agent の完了報告も同じ daemon に届く。

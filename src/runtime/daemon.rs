@@ -44,6 +44,7 @@ use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::infrastructure::store::workspace::Storage;
+use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::claude_sandbox::{self, SandboxMode};
 use usagi_core::usecase::client::{
     ClientError, ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient,
@@ -2677,7 +2678,8 @@ fn spawn_ipc_server(
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let runtime = open_session_runtime(
         repo_root.clone(),
-        &data_dir.join("daemon"),
+        &workspace_state_dir(&data_dir.join("daemon"), workspace_root)?,
+        data_dir,
         daemon_generation,
     )?;
     // The inventory is a whole-snapshot document, so exactly one generation may
@@ -3771,11 +3773,13 @@ where
 fn open_session_runtime(
     repo_root: PathBuf,
     state_dir: &Path,
+    data_home: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> std::io::Result<SharedSessionRuntime> {
-    SessionRuntime::open(
+    SessionRuntime::open_at(
         repo_root,
         state_dir,
+        data_home,
         generation,
         SystemGit,
         SystemSessionWorktreeIo,
@@ -8020,6 +8024,9 @@ const STANDBY_CUSTODY_TICK: Duration = Duration::from_secs(1);
 /// role admission fence.
 struct StandbyIpc<'a> {
     data_dir: &'a Path,
+    /// The workspace this process would take authority over. A standby reads
+    /// that workspace's durable state to hydrate; it never adopts a new one.
+    workspace_root: PathBuf,
     build: BuildIdentity,
     pid: u32,
     shutdown: Arc<ShutdownRequest>,
@@ -8035,9 +8042,15 @@ struct StandbyIpc<'a> {
 
 impl<'a> StandbyIpc<'a> {
     /// Bind the standby endpoint seam for one `serve --standby` process.
-    fn new(data_dir: &'a Path, pid: u32, shutdown: Arc<ShutdownRequest>) -> Self {
+    fn new(
+        data_dir: &'a Path,
+        workspace_root: PathBuf,
+        pid: u32,
+        shutdown: Arc<ShutdownRequest>,
+    ) -> Self {
         Self {
             data_dir,
+            workspace_root,
             build: current_build(),
             pid,
             shutdown,
@@ -8071,7 +8084,7 @@ impl<'a> StandbyIpc<'a> {
     /// that initializes it is by definition the one that owns it.
     fn hydrate(&self) -> std::io::Result<(PathBuf, u64)> {
         let store = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(
-            &self.data_dir.join("daemon"),
+            &adopted_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
         );
         let (root, state) = store
             .load_with_workspace()
@@ -9926,7 +9939,7 @@ fn run_inner(
             // directory for a cold start from a client; a supervised start needs
             // the same pin.
             let data_home = paths::DataHome::from_selected(&data_dir, paths::runtime_mode());
-            let workspace = bound_workspace_root(&daemon_dir, std::env::current_dir()?)?;
+            let workspace = bound_workspace_root(&daemon_dir, &std::env::current_dir()?)?;
             let path = install_service(&std::env::current_exe()?, &data_home, &workspace)?;
             return writeln!(
                 out,
@@ -9992,7 +10005,7 @@ fn run_inner(
     // that guards the workspace and the runtime that owns it must key on the same
     // path, or a daemon could fence one workspace and then take authority over
     // another.
-    let workspace_root = bound_workspace_root(&daemon_dir, std::env::current_dir()?)?;
+    let workspace_root = bound_workspace_root(&daemon_dir, &std::env::current_dir()?)?;
     let pid = std::process::id();
     let workspace = FileWorkspaceFence {
         path: paths::workspace_fence_path(&workspace_root),
@@ -10014,7 +10027,12 @@ fn run_inner(
     };
     // The standby seams share this process's one shutdown request, so a SIGTERM
     // to a standby takes the same graceful path it takes to an active daemon.
-    let standby_endpoint = StandbyIpc::new(&data_dir, pid, Arc::clone(&ready.shutdown));
+    let standby_endpoint = StandbyIpc::new(
+        &data_dir,
+        workspace_root.clone(),
+        pid,
+        Arc::clone(&ready.shutdown),
+    );
     let standby_authority = StandbyRegistryAuthority::new(&data_dir, &standby_endpoint, pid);
     let env = DaemonEnv {
         store: &store,
@@ -10041,14 +10059,70 @@ fn run_inner(
 /// locks or publishes.
 ///
 /// The candidate is the startup working directory — the same value the session
-/// runtime takes — but a durable `repository_root` from a previous start wins, so
-/// starting from a subdirectory cannot fence a workspace the runtime will not
-/// own. Canonicalization then collapses spelling differences.
-fn bound_workspace_root(daemon_dir: &Path, candidate: PathBuf) -> std::io::Result<PathBuf> {
-    let bound = SessionRuntime::bound_workspace_root(daemon_dir, candidate)
-        .map_err(|error| std::io::Error::other(format!("{error:?}")))?;
-    paths::canonical_workspace_root(&bound)
+/// runtime takes — but an already adopted workspace that contains it wins, and
+/// within that workspace a durable `repository_root` from a previous start wins
+/// again. Starting from a subdirectory or a session worktree therefore cannot
+/// fence a workspace the runtime will not own. Canonicalization collapses
+/// spelling differences before any of that comparison happens.
+fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<PathBuf> {
+    // A data directory written before workspace state subtrees existed keeps its
+    // lifecycle document beside the locator. Moving it is the first thing any
+    // start does, so no later reader has to know both layouts.
+    workspace_state::migrate_legacy(daemon_dir)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let candidate = paths::canonical_workspace_root(candidate)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    // An adopted workspace wins over the startup directory, so starting from a
+    // subdirectory or a session worktree fences the workspace that owns it
+    // rather than adopting the directory itself as a second workspace.
+    //
+    // Resolution here is read-only. Every daemon verb asks which workspace it is
+    // about to talk about, including the ones that only read a record, and
+    // creating a subtree for each of those would adopt whatever directory the
+    // caller happened to stand in. The subtree is created where the workspace is
+    // actually opened, in the process that serves it.
+    let Some(owner) = workspace_state::owner(daemon_dir, &candidate)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?
+    else {
+        return Ok(candidate);
+    };
+    // Within an adopted subtree the durable document still has the last word: it
+    // is the root the runtime will adopt.
+    SessionRuntime::bound_workspace_root(owner.dir(), owner.root().to_path_buf())
+        .map_err(|error| std::io::Error::other(format!("{error:?}")))
+}
+
+/// The state subtree this daemon keeps `workspace_root`'s lifecycle document in.
+///
+/// Resolution creates the subtree when it is absent, so the first start of a
+/// workspace adopts it. The daemon directory itself keeps the locator, record,
+/// registry, and shards: those belong to the daemon incarnation, not to any one
+/// workspace.
+fn workspace_state_dir(daemon_dir: &Path, workspace_root: &Path) -> std::io::Result<PathBuf> {
+    workspace_state::resolve(daemon_dir, workspace_root)
+        .map(|state| state.dir().to_path_buf())
         .map_err(|error| std::io::Error::other(format!("{error:#}")))
+}
+
+/// The state subtree of an already adopted `workspace_root`, without creating
+/// one.
+///
+/// A standby hydrates read-only — every write belongs to the active generation —
+/// so an unadopted workspace is reported as uninitialized rather than adopted
+/// here.
+fn adopted_workspace_state_dir(
+    daemon_dir: &Path,
+    workspace_root: &Path,
+) -> std::io::Result<PathBuf> {
+    workspace_state::owner(daemon_dir, workspace_root)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?
+        .map(|state| state.dir().to_path_buf())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "durable runtime state is not initialized; a standby hydrates it read-only",
+            )
+        })
 }
 
 /// The workspace this process opened, once a surface has selected one.
@@ -11942,24 +12016,103 @@ mod tests {
         // With no durable state the bound root is the (canonicalized) startup
         // directory, which is what the session runtime would adopt.
         assert_eq!(
-            bound_workspace_root(&daemon, workspace.path().join(".")).unwrap(),
+            bound_workspace_root(&daemon, &workspace.path().join(".")).unwrap(),
             paths::canonical_workspace_root(workspace.path()).unwrap()
         );
 
         // A startup directory that no longer resolves is a startup failure, not a
         // fence that silently keys some other path.
-        let error = bound_workspace_root(&daemon, workspace.path().join("absent")).unwrap_err();
+        let error = bound_workspace_root(&daemon, &workspace.path().join("absent")).unwrap_err();
         assert!(error.to_string().contains("workspace root"), "{error}");
 
         // Unreadable durable state fails the same way, rather than falling back
-        // to a candidate the runtime would not adopt.
-        std::fs::write(daemon.join("sessions.json"), "not json").unwrap();
+        // to a candidate the runtime would not adopt. Here the unreadable
+        // document is the workspace's own, inside its state subtree.
+        let canonical = paths::canonical_workspace_root(workspace.path()).unwrap();
+        let state_dir = workspace_state_dir(&daemon, &canonical).unwrap();
+        std::fs::write(state_dir.join("sessions.json"), "not json").unwrap();
         assert!(
-            bound_workspace_root(&daemon, workspace.path().to_path_buf())
+            bound_workspace_root(&daemon, workspace.path())
                 .unwrap_err()
                 .to_string()
                 .contains("Storage")
         );
+    }
+
+    #[test]
+    fn workspace_state_resolution_reports_every_failure_it_can_meet() {
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let canonical = paths::canonical_workspace_root(workspace.path()).unwrap();
+        let daemon = workspace.path().join("data/daemon");
+        ensure_private_dir_all(&daemon).unwrap();
+
+        // A legacy document that cannot be parsed names the workspace this
+        // daemon would otherwise adopt, so the start fails instead of adopting
+        // the startup directory in its place.
+        let legacy = daemon.join("sessions.json");
+        std::fs::write(&legacy, "not json").unwrap();
+        let error = bound_workspace_root(&daemon, workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("sessions.json"), "{error}");
+        std::fs::remove_file(&legacy).unwrap();
+
+        // A container that cannot be enumerated is reported rather than read as
+        // "no workspace has been adopted", which would adopt a second subtree
+        // for a workspace that already owns one.
+        let container = daemon.join(paths::WORKSPACE_STATE_DIR);
+        std::fs::write(&container, "").unwrap();
+        for error in [
+            bound_workspace_root(&daemon, workspace.path()).unwrap_err(),
+            workspace_state_dir(&daemon, &canonical).unwrap_err(),
+            adopted_workspace_state_dir(&daemon, &canonical).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("could not"), "{error}");
+        }
+    }
+
+    #[test]
+    fn bound_workspace_root_migrates_a_legacy_document_and_prefers_the_adopted_owner() {
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let canonical = paths::canonical_workspace_root(workspace.path()).unwrap();
+        let daemon = workspace.path().join("data/daemon");
+        ensure_private_dir_all(&daemon).unwrap();
+
+        // A data directory written before workspace subtrees existed keeps its
+        // lifecycle document beside the locator. The first resolution moves it
+        // into the subtree of the workspace it names, and binds that workspace.
+        let legacy = daemon.join("sessions.json");
+        std::fs::write(
+            &legacy,
+            format!(
+                r#"{{"repository_root":{:?},"state":{{"format":"usagi-workspace-lifecycle","version":{{"major":2,"minor":0}},"workspace_id":"543166c9-3923-4086-b3c9-05a69a66550c","state_revision":0,"sessions":[],"operations":[],"updated_at":"2026-08-20T23:22:45.487133Z"}}}}"#,
+                canonical.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+
+        let subdirectory = workspace.path().join("nested/deeper");
+        std::fs::create_dir_all(&subdirectory).unwrap();
+        assert_eq!(
+            bound_workspace_root(&daemon, &subdirectory).unwrap(),
+            canonical
+        );
+        assert!(!legacy.exists());
+        let state_dir = workspace_state_dir(&daemon, &canonical).unwrap();
+        assert!(state_dir.join("sessions.json").is_file());
+
+        // A subdirectory of an adopted workspace resolves to the workspace, so a
+        // daemon started there fences what it will actually own rather than
+        // adopting the subdirectory as a second workspace.
+        assert_eq!(
+            adopted_workspace_state_dir(&daemon, &canonical).unwrap(),
+            state_dir
+        );
+        let unadopted = tempfile::tempdir_in("/tmp").unwrap();
+        let error = adopted_workspace_state_dir(
+            &daemon,
+            &paths::canonical_workspace_root(unadopted.path()).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
@@ -14886,6 +15039,7 @@ mod tests {
         let sessions = open_session_runtime(
             workspace.clone(),
             &data.join("daemon"),
+            &data,
             DaemonGeneration::new(),
         )
         .unwrap();
@@ -16612,6 +16766,7 @@ instructions = "{instructions}"
         let first = open_session_runtime(
             original_root.clone(),
             &daemon_state,
+            temporary.path(),
             usagi_core::domain::id::DaemonGeneration::new(),
         )
         .unwrap();
@@ -16619,6 +16774,7 @@ instructions = "{instructions}"
         let restored = open_session_runtime(
             restart_directory,
             &daemon_state,
+            temporary.path(),
             usagi_core::domain::id::DaemonGeneration::new(),
         )
         .unwrap();

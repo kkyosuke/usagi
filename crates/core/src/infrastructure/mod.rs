@@ -14,6 +14,8 @@
 //!   markdown ＋ 派生 `index.json` の汎用ストア）。
 //! - [`store`] — entity 別ストア（issue / memory / workspace レジストリ / state.json）。
 //! - [`daemon`] — daemon lifecycle レコード（`daemon.json`）の store。
+//! - [`workspace_state`] — workspace ごとの daemon state subtree の解決（digest・
+//!   `root.json` による所属証明・legacy layout からの移行）。
 //! - [`git`] — worktree ライフサイクル等の git 操作（subprocess は `GitRunner` で注入）。
 //! - [`ipc`] — daemon とクライアントが Unix domain socket で交わす IPC プロトコル型と
 //!   フレーミング（transport は注入）。
@@ -30,3 +32,4 @@ pub mod persistence;
 pub mod role_catalog;
 pub mod runtime_model;
 pub mod store;
+pub mod workspace_state;

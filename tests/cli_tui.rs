@@ -1255,7 +1255,7 @@ fn a_client_started_daemon_binds_the_fixture_workspace_root() {
     assert_daemon_running(&home);
 
     let state: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(home.data_dir().join("daemon/sessions.json")).unwrap(),
+        &std::fs::read(daemon_fixture::lifecycle_state_path(&home.data_dir())).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -1672,7 +1672,10 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
         wait_until(Duration::from_secs(15), || {
             daemon_dir.join("daemon.json").is_file()
                 && daemon_dir.join("current.json").is_file()
-                && daemon_dir.join("sessions.json").is_file()
+                // The lifecycle document lands in the adopted workspace's state
+                // subtree, so its presence is what proves the daemon opened the
+                // workspace rather than only publishing an endpoint.
+                && daemon_fixture::lifecycle_state_path(home.path()).is_file()
         }),
         "daemon did not publish its production endpoint"
     );
@@ -1763,8 +1766,10 @@ fn opening_a_workspace_binds_the_daemon_to_it_and_refuses_the_ones_it_does_not_s
         )
     );
     let recorded: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(channel_data_dir(home.path()).join("daemon/sessions.json"))
-            .expect("the started daemon recorded its lifecycle state"),
+        &std::fs::read(daemon_fixture::lifecycle_state_path(&channel_data_dir(
+            home.path(),
+        )))
+        .expect("the started daemon recorded its lifecycle state"),
     )
     .expect("the lifecycle state is JSON");
     assert_eq!(

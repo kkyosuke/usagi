@@ -17,6 +17,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 /// The repository-relative directory holding usagi's per-project metadata.
 pub const STATE_DIR: &str = ".usagi";
@@ -41,6 +42,35 @@ pub const WORKSPACE_FENCE_DIR: &str = "daemon";
 
 /// The workspace-scoped single-daemon fence node's file name.
 pub const WORKSPACE_FENCE_FILE: &str = "daemon.lock";
+
+/// The directory below `<data-dir>/daemon/` that holds one state subtree per
+/// workspace the daemon has adopted.
+///
+/// The daemon stays one process per machine, so only the state a *workspace*
+/// owns lives here — the lifecycle document that binds a `repository_root`.
+/// The locator, the record, the single-instance lock, the generation registry,
+/// and the runtime shards stay directly under `daemon/`, because they belong to
+/// the daemon incarnation rather than to any one workspace.
+pub const WORKSPACE_STATE_DIR: &str = "w";
+
+/// The file inside a workspace state subtree naming the canonical workspace
+/// root that subtree belongs to.
+///
+/// The subtree is named by a shortened digest, so a name alone cannot prove
+/// whose state it holds. Every reader compares this file before using or
+/// writing the subtree, which turns a digest collision into a miss rather than
+/// into two workspaces sharing one lifecycle document.
+pub const WORKSPACE_STATE_ROOT_FILE: &str = "root.json";
+
+/// Domain separation for [`workspace_state_digest`], so the digest of a path
+/// here can never equal the digest the bootstrap broker derives for the same
+/// path.
+const WORKSPACE_STATE_DIGEST_TAG: &[u8] = b"usagi-daemon-workspace-v1";
+
+/// How much of the digest names the subtree. Six bytes keep the path short
+/// enough to stay clear of `sun_path` budgets elsewhere in the daemon
+/// directory; collisions are resolved by probing, not by length.
+const WORKSPACE_STATE_DIGEST_BYTES: usize = 6;
 
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
@@ -309,9 +339,86 @@ pub fn wire_workspace_root(root: impl AsRef<Path>) -> String {
         .unwrap_or_default()
 }
 
+/// The digest naming the state subtree of `workspace_root`.
+///
+/// The input is length-prefixed after a domain separation tag, the same shape
+/// the bootstrap broker key uses, so no two different inputs can be spelled
+/// into one digest by concatenation.
+#[must_use]
+pub fn workspace_state_digest(workspace_root: impl AsRef<Path>) -> String {
+    use std::fmt::Write as _;
+
+    let mut digest = Sha256::new();
+    for component in [
+        WORKSPACE_STATE_DIGEST_TAG,
+        workspace_root.as_ref().as_os_str().as_encoded_bytes(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    let digest = digest.finalize();
+    let mut name = String::with_capacity(WORKSPACE_STATE_DIGEST_BYTES * 2);
+    for byte in &digest[..WORKSPACE_STATE_DIGEST_BYTES] {
+        write!(&mut name, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    name
+}
+
+/// The `attempt`-th candidate state subtree for `workspace_root` below
+/// `daemon_dir`.
+///
+/// Attempt 0 is the digest itself; later attempts append `-<attempt>` so a
+/// digest collision lands on a free neighbour instead of on another
+/// workspace's state.
+#[must_use]
+pub fn workspace_state_dir(
+    daemon_dir: impl AsRef<Path>,
+    workspace_root: impl AsRef<Path>,
+    attempt: u32,
+) -> PathBuf {
+    let digest = workspace_state_digest(workspace_root);
+    let name = if attempt == 0 {
+        digest
+    } else {
+        format!("{digest}-{attempt}")
+    };
+    daemon_dir.as_ref().join(WORKSPACE_STATE_DIR).join(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_state_dirs_are_deterministic_domain_separated_and_probeable() {
+        let daemon = Path::new("/data/daemon");
+        let root = Path::new("/workspace/one");
+
+        // Deterministic and hex-spelled, so a subtree name can be predicted from
+        // the root alone.
+        let digest = workspace_state_digest(root);
+        assert_eq!(digest, workspace_state_digest(root));
+        assert_eq!(digest.len(), WORKSPACE_STATE_DIGEST_BYTES * 2);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(digest, workspace_state_digest("/workspace/two"));
+
+        // Length prefixing keeps concatenations apart: `/a` + `/bc` must not
+        // digest to the same value as `/ab` + `/c`.
+        assert_ne!(
+            workspace_state_digest("/a/bc"),
+            workspace_state_digest("/ab/c")
+        );
+
+        // Attempt 0 is the digest itself; later attempts are its neighbours.
+        assert_eq!(
+            workspace_state_dir(daemon, root, 0),
+            daemon.join(WORKSPACE_STATE_DIR).join(&digest)
+        );
+        assert_eq!(
+            workspace_state_dir(daemon, root, 2),
+            daemon.join(WORKSPACE_STATE_DIR).join(format!("{digest}-2"))
+        );
+    }
 
     #[test]
     fn wire_workspace_root_keeps_absolute_utf8_roots_and_empties_the_rest() {

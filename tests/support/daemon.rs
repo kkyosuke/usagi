@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::ipc::ClientWorkspace;
+use usagi_core::infrastructure::workspace_state;
 
 /// daemon の graceful stop を待つ上限。
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -285,20 +286,15 @@ impl DaemonHome {
 
     /// この fixture が起動した daemon の workspace root が fixture であることを確認する。
     ///
-    /// daemon は起動時 cwd を `sessions.json` の `repository_root` として durable に記録するため、
-    /// 「開発者の worktree に束縛されていない」ことをプロセス外から観測できる。
+    /// daemon は adopt した workspace ごとに state subtree を作り、その `root.json` に
+    /// canonical root を durable に記録するため、「開発者の worktree に束縛されていない」ことを
+    /// プロセス外から観測できる。
     pub fn assert_fixture_workspace_root(&self) {
         for channel in [Channel::Local, Channel::Production] {
-            let path = channel.data_dir(self.path()).join("daemon/sessions.json");
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let state: serde_json::Value =
-                serde_json::from_slice(&bytes).expect("daemon の lifecycle state は JSON である");
-            let root = state["repository_root"]
-                .as_str()
-                .expect("lifecycle state は workspace root を記録する");
-            assert_outside_checkout(Path::new(root), "daemon の workspace root");
+            let daemon_dir = channel.data_dir(self.path()).join("daemon");
+            for state in workspace_state::adopted(&daemon_dir).unwrap_or_default() {
+                assert_outside_checkout(state.root(), "daemon の workspace root");
+            }
         }
     }
 
@@ -428,12 +424,34 @@ pub fn client_workspace(data_dir: &Path) -> ClientWorkspace {
     }
 }
 
+/// この data directory の daemon が adopt した workspace の lifecycle document。
+///
+/// document は workspace ごとの state subtree（`daemon/w/<digest>/sessions.json`）にあり、
+/// fixture の daemon が adopt するのは fixture workspace だけなので最初の 1 件を返す。
+/// まだ adopt されていない場合は legacy 位置を返し、読み手にそのまま「無い」と観測させる。
+pub fn lifecycle_state_path(data_dir: &Path) -> PathBuf {
+    let daemon_dir = data_dir.join("daemon");
+    workspace_state::adopted(&daemon_dir)
+        .ok()
+        .and_then(|adopted| {
+            adopted
+                .first()
+                .map(|state| state.dir().join("sessions.json"))
+        })
+        .unwrap_or_else(|| daemon_dir.join("sessions.json"))
+}
+
 fn recorded_workspace_root(data_dir: &Path) -> Option<String> {
-    let bytes = std::fs::read(data_dir.join("daemon/sessions.json")).ok()?;
-    let state: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let root = usagi_core::infrastructure::paths::wire_workspace_root(PathBuf::from(
-        state["repository_root"].as_str()?,
-    ));
+    // daemon は adopt した workspace ごとに state subtree を持つ。fixture の daemon が
+    // adopt するのは fixture workspace だけなので、最初の 1 件がその root である。
+    let adopted = workspace_state::adopted(&data_dir.join("daemon")).ok()?;
+    let state = adopted.first()?;
+    // subtree は root を記録した直後に作られ、lifecycle document はそのあとに書かれる。
+    // document が現れるまでは daemon がまだその workspace を開いていないので、申告しない。
+    if !state.dir().join("sessions.json").exists() {
+        return None;
+    }
+    let root = usagi_core::infrastructure::paths::wire_workspace_root(state.root());
     (!root.is_empty()).then_some(root)
 }
 

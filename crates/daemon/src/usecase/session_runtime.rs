@@ -618,6 +618,11 @@ impl SessionRuntime {
     ///
     /// The root this binds is the one [`Self::bound_workspace_root`] predicts for
     /// the same `state_dir`; a fixture test pins the two together.
+    ///
+    /// The data home is taken to be the parent of `state_dir`, which holds while
+    /// the state directory is `<data-dir>/daemon`. A workspace state subtree sits
+    /// deeper than that, so a daemon that owns several workspaces opens each one
+    /// through [`Self::open_at`] with the data home spelled out.
     pub fn open<G: GitRunner + Send + 'static, I: SessionWorktreeIo + Send + Sync + 'static>(
         candidate_repo_root: PathBuf,
         state_dir: &Path,
@@ -625,11 +630,41 @@ impl SessionRuntime {
         git: G,
         io: I,
     ) -> Result<Self, SessionRuntimeError> {
-        let store = DaemonLifecycleStore::new(state_dir);
         let data_home = state_dir
             .parent()
             .ok_or(SessionRuntimeError::Storage)?
             .to_path_buf();
+        Self::open_at(
+            candidate_repo_root,
+            state_dir,
+            &data_home,
+            generation,
+            git,
+            io,
+        )
+    }
+
+    /// Open the runtime whose lifecycle document lives in `state_dir`, reading
+    /// the role catalog and teardown guards from `data_home`.
+    ///
+    /// The two are separate because the workspace's state subtree is not a child
+    /// of the data home: `<data-dir>/daemon/w/<digest>` holds the document while
+    /// `<data-dir>` still holds the settings, catalogs, and stores every
+    /// workspace shares.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lifecycle state cannot be loaded or initialized.
+    pub fn open_at<G: GitRunner + Send + 'static, I: SessionWorktreeIo + Send + Sync + 'static>(
+        candidate_repo_root: PathBuf,
+        state_dir: &Path,
+        data_home: &Path,
+        generation: DaemonGeneration,
+        git: G,
+        io: I,
+    ) -> Result<Self, SessionRuntimeError> {
+        let store = DaemonLifecycleStore::new(state_dir);
+        let data_home = data_home.to_path_buf();
         let repo_root = if let Some((repository_root, mut state)) = store
             .load_with_workspace()
             .map_err(|_| SessionRuntimeError::Storage)?
