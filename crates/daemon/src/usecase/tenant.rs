@@ -28,6 +28,30 @@ use usagi_core::domain::id::WorkspaceId;
 use usagi_core::infrastructure::daemon::{WorkspaceFence, WorkspaceFenceOutcome};
 use usagi_core::infrastructure::workspace_state;
 
+/// The lifecycle runtime of one workspace, shared between the connections and
+/// workers that serve it.
+pub type SharedSessionRuntime =
+    std::sync::Arc<Mutex<crate::usecase::session_runtime::SessionRuntime>>;
+
+/// Read access to the workspaces a daemon holds, for the components that are
+/// daemon-wide but act on one workspace at a time.
+///
+/// The PTY registry, the Agent runtime, its provisioners, and the teardown
+/// worker are single objects for the whole daemon — they own process-level
+/// resources — yet every request they serve names a workspace. They resolve it
+/// through this port instead of capturing one workspace's runtime at
+/// construction, which is what let a daemon serve exactly one workspace.
+pub trait WorkspaceRuntimes: Send + Sync {
+    /// The workspace with this durable identity, when this daemon holds it.
+    fn workspace(&self, workspace: WorkspaceId) -> Option<Tenant<SharedSessionRuntime>>;
+
+    /// The workspace adopted for exactly this root.
+    fn workspace_at(&self, root: &Path) -> Option<Tenant<SharedSessionRuntime>>;
+
+    /// Every workspace this daemon holds, ordered by root.
+    fn all(&self) -> Vec<Tenant<SharedSessionRuntime>>;
+}
+
 /// How many workspaces one daemon may hold at once.
 ///
 /// The bound is not about memory: every tenant holds a workspace fence, so an
@@ -343,6 +367,24 @@ where
         self.held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl<F, O> WorkspaceRuntimes for TenantRegistry<F, O>
+where
+    F: WorkspaceFenceFactory + Send + Sync,
+    O: TenantRuntimeOpener<Runtime = SharedSessionRuntime> + Send + Sync,
+{
+    fn workspace(&self, workspace: WorkspaceId) -> Option<Tenant<SharedSessionRuntime>> {
+        self.by_workspace_id(workspace)
+    }
+
+    fn workspace_at(&self, root: &Path) -> Option<Tenant<SharedSessionRuntime>> {
+        self.tenant(root)
+    }
+
+    fn all(&self) -> Vec<Tenant<SharedSessionRuntime>> {
+        self.adopted()
     }
 }
 
