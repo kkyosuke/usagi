@@ -128,6 +128,28 @@ impl ErrorLog {
         Ok(())
     }
 
+    /// The message of the last entry recorded on `date`, without its timestamp.
+    ///
+    /// This is how a caller that only observes silence — a `usagi daemon start`
+    /// waiting on a detached child whose stderr goes to `/dev/null` — reads back
+    /// the reason that child recorded for itself. A missing or unreadable file,
+    /// and a file whose last line is not an entry, are all simply "nothing
+    /// recorded": this reports a failure, it must never become one.
+    #[must_use]
+    pub fn last_entry(&self, date: NaiveDate) -> Option<String> {
+        let contents = fs::read_to_string(self.file_for(date)).ok()?;
+        // Entries are `[YYYY-MM-DD HH:MM:SS] message`. A multi-line entry's
+        // continuation lines are indented and carry no timestamp, so scanning
+        // back for the last *timestamped* line lands on the entry itself and
+        // reports its first line rather than a fragment of its middle.
+        contents
+            .lines()
+            .rev()
+            .filter_map(|line| line.strip_prefix('[')?.split_once("] "))
+            .map(|(_, message)| message.to_owned())
+            .next()
+    }
+
     /// Delete daily log files whose date is older than `retention_days` before
     /// `today`. Returns how many files were removed; a missing directory is
     /// treated as "nothing to prune".
@@ -188,6 +210,49 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let log = ErrorLog::new(dir.path().join("logs"));
         (dir, log)
+    }
+
+    /// A detached daemon writes here and nowhere else, so this reader is the
+    /// only way a waiting `start` can say *why* nothing registered.
+    #[test]
+    fn the_last_entry_is_readable_back_without_its_timestamp() {
+        let (_dir, log) = temp_log();
+        let day = at(2026, 8, 24);
+
+        // Nothing recorded — a missing directory and a missing file are both
+        // "no reason", never an error of their own.
+        assert_eq!(log.last_entry(day.date_naive()), None);
+
+        log.append(day, "path must be shorter than SUN_LEN")
+            .unwrap();
+        log.append(day, "daemon panicked in the accept loop")
+            .unwrap();
+        assert_eq!(
+            log.last_entry(day.date_naive()).as_deref(),
+            Some("daemon panicked in the accept loop")
+        );
+        // A different day has its own file and its own last entry.
+        assert_eq!(log.last_entry(at(2026, 8, 25).date_naive()), None);
+
+        // A multi-line entry reports its first line: the continuation lines are
+        // indented and carry no timestamp, so they are not entries themselves.
+        log.append(day, "outer failure\ncaused by: inner detail")
+            .unwrap();
+        assert_eq!(
+            log.last_entry(day.date_naive()).as_deref(),
+            Some("outer failure")
+        );
+    }
+
+    /// A file whose tail is not an entry must read as "nothing recorded" rather
+    /// than as a line of garbage presented to the operator as a cause.
+    #[test]
+    fn a_tail_that_is_not_an_entry_reads_as_nothing_recorded() {
+        let (_dir, log) = temp_log();
+        let day = at(2026, 8, 24);
+        fs::create_dir_all(log.dir()).unwrap();
+        fs::write(log.file_for(day.date_naive()), "no timestamp here\n\n").unwrap();
+        assert_eq!(log.last_entry(day.date_naive()), None);
     }
 
     #[test]

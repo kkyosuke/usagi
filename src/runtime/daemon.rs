@@ -1713,6 +1713,51 @@ impl TenantWorkspaces {
             )
         })
     }
+
+    /// Every workspace this daemon currently holds, in wire spelling.
+    ///
+    /// A refusal names these rather than one fixed root, so a reader can tell
+    /// whether the workspace they meant is among them.
+    fn served(&self) -> Vec<String> {
+        let mut served: Vec<String> = self
+            .tenants
+            .adopted()
+            .iter()
+            .map(|tenant| paths::wire_workspace_root(tenant.root()))
+            .collect();
+        served.sort_unstable();
+        served
+    }
+}
+
+/// The workspace root enclosing `path`: the nearest ancestor that is a git
+/// repository, skipping the session worktrees usagi itself creates.
+///
+/// This is what makes a bound directory adoptable without adopting *any*
+/// directory a caller happened to stand in. A usagi workspace is a git
+/// repository — a session is a worktree of one — so a path with no repository
+/// above it names no workspace, and running `usagi session create` in a
+/// downloads folder still refuses.
+///
+/// A session worktree carries its own `.git` file, so it would otherwise answer
+/// as its own workspace. Those are skipped: a client inside
+/// `<root>/.usagi/sessions/<name>` belongs to `<root>`.
+fn enclosing_workspace_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .filter(|candidate| !is_session_worktree_path(candidate))
+        .find(|candidate| candidate.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// Whether `path` is at or below a `\.usagi/sessions/<name>` worktree.
+fn is_session_worktree_path(path: &Path) -> bool {
+    let components: Vec<_> = path
+        .components()
+        .map(|component| component.as_os_str().to_owned())
+        .collect();
+    components
+        .windows(2)
+        .any(|pair| pair[0] == *".usagi" && pair[1] == *"sessions")
 }
 
 impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
@@ -1730,17 +1775,26 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
             Some(ClientWorkspace::Selected { root }) => {
                 let root = Self::canonical(root)?;
                 self.tenants.adopt(&root).map_err(|error| {
-                    usagi_core::infrastructure::ipc::workspace_refusal(
+                    // The refused root is the one this daemon could *not* take,
+                    // so naming it as the workspace served would contradict the
+                    // sentence it is appended to.
+                    usagi_core::infrastructure::ipc::workspace_refusal_serving(
                         &error.to_string(),
-                        &paths::wire_workspace_root(&root),
+                        &self.served(),
                     )
                 })?;
                 Ok(paths::wire_workspace_root(&root))
             }
             // A bound client says where it is running, not which workspace to
-            // open. A directory alone does not name a workspace root, so this
-            // resolves only against what the daemon already holds rather than
-            // adopting whatever directory the caller stood in.
+            // open. What the daemon already holds answers first, so a client
+            // anywhere inside an adopted workspace resolves to it.
+            //
+            // A miss is not the end: a CLI or MCP client is as entitled to open a
+            // workspace as the TUI is, and refusing here is what forced an
+            // operator to open every new repository in the TUI once before their
+            // CLI would work in it. Adoption is still not "whatever directory the
+            // caller stood in" — only the git repository enclosing it, which is
+            // the only thing a usagi session can be a worktree of.
             //
             // The declared path need not exist: an Agent hook or a session tool
             // names a worktree path that its own teardown may already have
@@ -1749,13 +1803,25 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
             Some(ClientWorkspace::Bound { root }) => {
                 let root =
                     paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
-                let owner = self.tenants.owner_of(&root).ok_or_else(|| {
-                    usagi_core::infrastructure::ipc::workspace_refusal(
-                        "this daemon has not opened the workspace this client runs in",
-                        &paths::wire_workspace_root(&self.initial),
+                if let Some(owner) = self.tenants.owner_of(&root) {
+                    return Ok(paths::wire_workspace_root(owner.root()));
+                }
+                let enclosing = enclosing_workspace_root(&root).ok_or_else(|| {
+                    usagi_core::infrastructure::ipc::workspace_refusal_serving(
+                        &format!(
+                            "{} is not inside a git repository, so it names no usagi workspace",
+                            paths::wire_workspace_root(&root)
+                        ),
+                        &self.served(),
                     )
                 })?;
-                Ok(paths::wire_workspace_root(owner.root()))
+                self.tenants.adopt(&enclosing).map_err(|error| {
+                    usagi_core::infrastructure::ipc::workspace_refusal_serving(
+                        &error.to_string(),
+                        &self.served(),
+                    )
+                })?;
+                Ok(paths::wire_workspace_root(&enclosing))
             }
         }
     }
@@ -5708,6 +5774,13 @@ fn dispatch_user_decision(
                     ErrorCode::RevisionConflict,
                     "decision is not pending or is outside this workspace",
                 ),
+                // Nothing was written, so retrying after the backlog clears is
+                // safe and is the intended response.
+                UserDecisionDispatchError::Decision(UserDecisionError::PendingLimitReached) => (
+                    ErrorCode::ResourceExhausted,
+                    "this workspace already holds the maximum number of unanswered decisions; \
+                     answer some before asking another",
+                ),
                 UserDecisionDispatchError::Cancelled => {
                     (ErrorCode::Cancelled, "decision wait was cancelled")
                 }
@@ -9612,14 +9685,47 @@ impl DaemonLauncher for ServeLauncher {
         command.spawn()?;
         Ok(())
     }
+
+    fn recorded_failure(&self) -> Option<String> {
+        ErrorLog::open_default()
+            .ok()?
+            .last_entry(chrono::Local::now().date_naive())
+    }
+
+    fn failure_log_hint(&self) -> Option<String> {
+        ErrorLog::open_default()
+            .ok()
+            .map(|log| log.dir().display().to_string())
+    }
 }
 
 const BROKER_PING: u8 = b'P';
 const BROKER_START: u8 = b'S';
+/// Retire this broker: reply, then close the endpoint and leave the loop.
+///
+/// A broker outlives the daemon on purpose, so nothing else ends it. Without
+/// this request `usagi daemon stop` leaves a usagi process running that the
+/// operator has no command to stop, and one accumulates per workspace and per
+/// executable path.
+const BROKER_STOP: u8 = b'X';
 const BROKER_OK: u8 = b'O';
 const BROKER_READINESS_ATTEMPTS: u32 = 100;
 const BROKER_IO_TIMEOUT: Duration = Duration::from_secs(1);
 const BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a broker stays up with no request and no daemon to serve.
+///
+/// The broker exists to cold-start a daemon for a client that cannot spawn one
+/// itself, so it must outlive the daemon it started. It must not outlive the
+/// *use* of the workspace: a build that ran once, a test binary, a checkout that
+/// was deleted all leave a broker that would otherwise never exit.
+///
+/// The wait is only charged while no daemon is reachable. A running daemon means
+/// the broker's job — being there when that daemon dies — is still pending, so
+/// an idle hour next to a live daemon is not idleness.
+const BROKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// How often the idle watch re-checks. Coarse on purpose: it costs a connect
+/// attempt against the daemon endpoint each time.
+const BROKER_IDLE_POLL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Eq)]
 struct BootstrapBrokerAddress {
@@ -9781,18 +9887,149 @@ fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::i
     ))
 }
 
+/// What answering one broker request decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrokerOutcome {
+    /// Whether the peer is told the request succeeded.
+    accepted: bool,
+    /// Whether the broker closes its endpoint after replying.
+    retire: bool,
+}
+
+impl BrokerOutcome {
+    const fn served(accepted: bool) -> Self {
+        Self {
+            accepted,
+            retire: false,
+        }
+    }
+
+    const RETIRE: Self = Self {
+        accepted: true,
+        retire: true,
+    };
+}
+
 fn handle_bootstrap_broker_request(
     request: u8,
     launch: impl FnOnce() -> std::io::Result<()>,
-) -> bool {
+) -> BrokerOutcome {
     match request {
-        BROKER_PING => true,
-        BROKER_START => launch().is_ok(),
-        _ => false,
+        BROKER_PING => BrokerOutcome::served(true),
+        BROKER_START => BrokerOutcome::served(launch().is_ok()),
+        // Retiring is acknowledged before it happens: the peer asked for the
+        // endpoint to go away, so its disappearance is the success case.
+        BROKER_STOP => BrokerOutcome::RETIRE,
+        _ => BrokerOutcome::served(false),
     }
 }
 
-fn serve_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) -> std::io::Result<()> {
+/// Whether a broker that has been idle for `idle_for` may retire now.
+///
+/// A live daemon keeps the broker alive however long it has been quiet: the
+/// broker's whole purpose is to already exist when that daemon dies, and a
+/// sandboxed client cannot spawn a replacement for it.
+const fn broker_may_retire(idle_for: Duration, timeout: Duration, daemon_live: bool) -> bool {
+    !daemon_live && idle_for.as_secs() >= timeout.as_secs()
+}
+
+/// How long a broker tolerates being unused before retiring itself.
+#[derive(Debug, Clone, Copy)]
+struct BrokerIdlePolicy {
+    timeout: Duration,
+    poll: Duration,
+}
+
+impl BrokerIdlePolicy {
+    const fn production() -> Self {
+        Self {
+            timeout: BROKER_IDLE_TIMEOUT,
+            poll: BROKER_IDLE_POLL,
+        }
+    }
+}
+
+/// The last time a broker answered a request, shared with its idle watch.
+struct BrokerActivity {
+    state: Mutex<BrokerActivityState>,
+    signal: Condvar,
+}
+
+struct BrokerActivityState {
+    last: Instant,
+    stopped: bool,
+}
+
+impl BrokerActivity {
+    fn started() -> Self {
+        Self {
+            state: Mutex::new(BrokerActivityState {
+                last: Instant::now(),
+                stopped: false,
+            }),
+            signal: Condvar::new(),
+        }
+    }
+
+    fn touch(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.last = Instant::now();
+        }
+    }
+
+    /// Stop the idle watch and let it be joined without waiting out a poll.
+    fn stop(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.stopped = true;
+        }
+        self.signal.notify_all();
+    }
+}
+
+/// Watch an idle broker and ask it to retire once nothing needs it.
+///
+/// The retirement is delivered as an ordinary [`BROKER_STOP`] request rather
+/// than by killing the loop from outside: the accept loop stays blocked (so a
+/// cold start pays no polling latency), and the endpoint is torn down by the
+/// same path an operator's `usagi daemon stop` takes.
+fn spawn_broker_idle_watch(
+    activity: &Arc<BrokerActivity>,
+    address: BootstrapBrokerAddress,
+    data_dir: &Path,
+    idle: BrokerIdlePolicy,
+) -> std::thread::JoinHandle<()> {
+    let activity = Arc::clone(activity);
+    let data_dir = data_dir.to_path_buf();
+    std::thread::spawn(move || {
+        loop {
+            let Ok(state) = activity.state.lock() else {
+                return;
+            };
+            let Ok((state, _)) = activity.signal.wait_timeout(state, idle.poll) else {
+                return;
+            };
+            if state.stopped {
+                return;
+            }
+            let idle_for = state.last.elapsed();
+            // The daemon probe is IO, so the lock is released before it runs.
+            drop(state);
+            let daemon_live =
+                usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
+            if broker_may_retire(idle_for, idle.timeout, daemon_live) {
+                let _ = request_bootstrap_broker(&address, BROKER_STOP);
+                return;
+            }
+        }
+    })
+}
+
+fn serve_bootstrap_broker(
+    data_dir: &Path,
+    workspace: &Path,
+    exe: &Path,
+    idle: BrokerIdlePolicy,
+) -> std::io::Result<()> {
     use std::os::unix::fs::FileTypeExt as _;
 
     let workspace = paths::canonical_workspace_root(workspace)
@@ -9826,6 +10063,13 @@ fn serve_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) -> std:
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
+    let activity = Arc::new(BrokerActivity::started());
+    let watch = spawn_broker_idle_watch(
+        &activity,
+        bootstrap_broker_address(data_dir, &workspace, &exe),
+        data_dir,
+        idle,
+    );
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
@@ -9845,11 +10089,22 @@ fn serve_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) -> std:
         if stream.read_exact(&mut request).is_err() {
             continue;
         }
-        let accepted = handle_bootstrap_broker_request(request[0], || {
+        // A peer that reached this point is using the broker, so the idle clock
+        // restarts even for a request that is refused.
+        activity.touch();
+        let outcome = handle_bootstrap_broker_request(request[0], || {
             launch_broker_daemon(&exe, &workspace, data_dir)
         });
-        let _ = stream.write_all(&[if accepted { BROKER_OK } else { b'E' }]);
+        let _ = stream.write_all(&[if outcome.accepted { BROKER_OK } else { b'E' }]);
+        if outcome.retire {
+            break;
+        }
     }
+    // The watch is joined rather than detached: leaving it running would keep a
+    // thread of this process alive past the endpoint it watches, and in tests it
+    // would outlive the case that started it.
+    activity.stop();
+    let _ = watch.join();
     drop(listener);
     let _ = std::fs::remove_file(socket);
     Ok(())
@@ -10181,6 +10436,7 @@ fn run_broker_lifecycle_command(command: CliDaemonCommand) -> Option<std::io::Re
                 &data_dir,
                 &std::env::current_dir()?,
                 &std::env::current_exe()?,
+                BrokerIdlePolicy::production(),
             )
         })());
     }
@@ -10422,7 +10678,31 @@ fn run_inner(
         seamless: observed_seamless_refusal(&data_dir),
         rollover: &rollover,
     };
-    usagi_daemon::presentation::run(out, command, info, &env)
+    // A stop that leaves the broker running leaves a usagi process the operator
+    // has no command to end. Retirement follows the stop rather than preceding
+    // it, so a refused stop keeps the broker that a later cold start needs.
+    let stopping = matches!(command, PresentationDaemonCommand::Stop(_));
+    let outcome = usagi_daemon::presentation::run(out, command, info, &env);
+    if stopping && outcome.is_ok() {
+        retire_bootstrap_broker(&data_dir, &workspace_root, &launcher.exe);
+    }
+    outcome
+}
+
+/// Ask the broker for `workspace` and `exe` to close its endpoint.
+///
+/// Best effort by construction: there may be no broker (nothing started one, or
+/// it already retired), and a daemon that is going away anyway must not fail a
+/// stop because a helper could not be reached.
+fn retire_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) {
+    let Ok(exe) = exe.canonicalize() else {
+        return;
+    };
+    let Ok(workspace) = paths::canonical_workspace_root(workspace) else {
+        return;
+    };
+    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
+    let _ = request_bootstrap_broker(&address, BROKER_STOP);
 }
 
 /// Resolve the canonical workspace root this daemon would bind, before anything
@@ -12471,8 +12751,9 @@ mod tests {
             assert_eq!(resolver.resolve(Some(&bound)).unwrap(), wire(&second_root));
         }
 
-        // A bound client outside every held workspace is refused with the typed
-        // fence refusal rather than adopting the directory it stood in.
+        // A bound client in a directory with no repository above it is refused:
+        // a usagi session is a git worktree, so such a path names no workspace.
+        // Nothing is adopted for it.
         let outside = tempfile::tempdir_in("/tmp").unwrap();
         let refusal = resolver
             .resolve(Some(&ClientWorkspace::Bound {
@@ -12482,8 +12763,41 @@ mod tests {
         assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
             &refusal
         ));
-        assert!(refusal.message.contains("has not opened"), "{refusal:?}");
+        assert!(
+            refusal.message.contains("not inside a git repository"),
+            "{refusal:?}"
+        );
+        // The refusal names what this daemon really holds. Claiming one root
+        // while holding two, or naming the very root that was just refused, is
+        // what made this message unreadable.
+        assert!(refusal.message.contains(&wire(&first_root)), "{refusal:?}");
+        assert!(refusal.message.contains(&wire(&second_root)), "{refusal:?}");
         assert_eq!(tenants.adopted().len(), 2);
+
+        // A CLI or MCP client is as entitled to open a workspace as the TUI is.
+        // Running inside a repository this daemon has never seen adopts that
+        // repository — from its root, from a subdirectory, and from a session
+        // worktree, all of which resolve to the repository root itself.
+        let third = temporary.path().join("third");
+        std::fs::create_dir_all(third.join(".git")).unwrap();
+        std::fs::create_dir_all(third.join("crates/core")).unwrap();
+        let third_root = paths::canonical_workspace_root(&third).unwrap();
+        for candidate in [
+            third_root.clone(),
+            third_root.join("crates/core"),
+            third_root.join(".usagi/sessions/worker"),
+        ] {
+            assert_eq!(
+                resolver
+                    .resolve(Some(&ClientWorkspace::Bound {
+                        root: wire(&candidate),
+                    }))
+                    .unwrap(),
+                wire(&third_root),
+                "{candidate:?} did not resolve to its repository root"
+            );
+        }
+        assert_eq!(tenants.adopted().len(), 3);
 
         // A selected root that does not resolve on this machine is refused, and
         // nothing is adopted for it.
@@ -12495,7 +12809,7 @@ mod tests {
         assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
             &refusal
         ));
-        assert_eq!(tenants.adopted().len(), 2);
+        assert_eq!(tenants.adopted().len(), 3);
 
         // The connection binds the workspace its handshake settled on.
         for (declared, expected) in [
@@ -15932,26 +16246,49 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn bootstrap_broker_accepts_only_ping_and_start() {
+    fn bootstrap_broker_accepts_only_ping_start_and_stop() {
         let launches = std::cell::Cell::new(0_u8);
-        assert!(handle_bootstrap_broker_request(BROKER_PING, || {
-            launches.set(launches.get() + 1);
-            Ok(())
-        }));
+        let count = |request| {
+            handle_bootstrap_broker_request(request, || {
+                launches.set(launches.get() + 1);
+                Ok(())
+            })
+        };
+
+        assert_eq!(count(BROKER_PING), BrokerOutcome::served(true));
         assert_eq!(launches.get(), 0);
-        assert!(handle_bootstrap_broker_request(BROKER_START, || {
-            launches.set(launches.get() + 1);
-            Ok(())
-        }));
+        assert_eq!(count(BROKER_START), BrokerOutcome::served(true));
         assert_eq!(launches.get(), 1);
-        assert!(!handle_bootstrap_broker_request(b'X', || {
-            launches.set(launches.get() + 1);
-            Ok(())
-        }));
+        // An unknown byte is refused without starting anything, and without
+        // ending the broker: a stray peer must not be able to retire it.
+        assert_eq!(count(b'Z'), BrokerOutcome::served(false));
         assert_eq!(launches.get(), 1);
-        assert!(!handle_bootstrap_broker_request(BROKER_START, || {
-            Err(std::io::Error::other("launch refused"))
-        }));
+        assert_eq!(
+            handle_bootstrap_broker_request(BROKER_START, || Err(std::io::Error::other(
+                "launch refused"
+            ))),
+            BrokerOutcome::served(false)
+        );
+        // Stop is the one request that ends the loop, and it starts no daemon.
+        assert_eq!(count(BROKER_STOP), BrokerOutcome::RETIRE);
+        assert_eq!(launches.get(), 1);
+    }
+
+    /// The broker exists so that a sandboxed client can cold-start a daemon it
+    /// cannot spawn itself. Retiring next to a live daemon would remove exactly
+    /// the helper that daemon's death is going to need.
+    #[test]
+    fn an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive() {
+        let timeout = Duration::from_secs(60);
+        assert!(broker_may_retire(Duration::from_secs(60), timeout, false));
+        assert!(broker_may_retire(Duration::from_secs(600), timeout, false));
+        assert!(!broker_may_retire(Duration::from_secs(59), timeout, false));
+        for idle in [Duration::from_secs(0), Duration::from_secs(86_400)] {
+            assert!(
+                !broker_may_retire(idle, timeout, true),
+                "a live daemon must keep its broker"
+            );
+        }
     }
 
     #[test]
@@ -16019,49 +16356,111 @@ instructions = "{instructions}"
         assert!(run_broker_lifecycle_command(CliDaemonCommand::Start).is_none());
     }
 
-    #[test]
-    fn an_idle_broker_client_cannot_block_the_next_request_forever() {
+    /// One broker serving a throwaway workspace, plus everything a test needs to
+    /// address it and to know it finished.
+    struct BrokerFixture {
+        workspace_dir: tempfile::TempDir,
+        _data_parent: tempfile::TempDir,
+        address: BootstrapBrokerAddress,
+        server: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    fn start_broker(idle: BrokerIdlePolicy) -> BrokerFixture {
         let workspace_dir = tempfile::tempdir_in("/tmp").unwrap();
         let workspace = workspace_dir.path().canonicalize().unwrap();
         let data_parent = tempfile::tempdir_in("/tmp").unwrap();
         let data = data_parent.path().join("data");
         let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
         let address = bootstrap_broker_address(&data, &workspace, &exe);
-        let server_data = data.clone();
-        let server_workspace = workspace.clone();
-        let server_exe = exe.clone();
+        let (server_data, server_workspace, server_exe) =
+            (data.clone(), workspace.clone(), exe.clone());
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            let result = serve_bootstrap_broker(&server_data, &server_workspace, &server_exe);
+            let result = serve_bootstrap_broker(&server_data, &server_workspace, &server_exe, idle);
             let _ = finished_tx.send(result.as_ref().err().map(ToString::to_string));
             result
         });
-        let mut idle = None;
-        for _ in 0..100 {
-            if let Ok(stream) = std::os::unix::net::UnixStream::connect(&address.socket) {
-                idle = Some(stream);
-                break;
+        for _ in 0..500 {
+            if std::os::unix::net::UnixStream::connect(&address.socket).is_ok() {
+                return BrokerFixture {
+                    workspace_dir,
+                    _data_parent: data_parent,
+                    address,
+                    server,
+                };
             }
             if let Ok(error) = finished_rx.try_recv() {
                 panic!("broker failed before binding its socket: {error:?}");
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let idle = idle.expect("broker socket became ready");
-        drop(std::os::unix::net::UnixStream::connect(&address.socket).unwrap());
+        panic!("broker socket never became ready");
+    }
+
+    /// A broker that never retires is a process the operator cannot end: nothing
+    /// else stops it, and one accumulates per workspace and per executable path.
+    #[test]
+    fn a_stop_request_retires_the_broker_and_removes_its_endpoint() {
+        let fixture = start_broker(BrokerIdlePolicy {
+            timeout: Duration::from_secs(3600),
+            poll: Duration::from_secs(3600),
+        });
+
+        // Retirement is acknowledged, so a caller learns the endpoint is going
+        // rather than having to infer it from a closed connection.
+        request_bootstrap_broker(&fixture.address, BROKER_STOP).unwrap();
+
+        fixture.server.join().unwrap().unwrap();
+        assert!(!fixture.address.socket.exists());
+        assert!(
+            std::os::unix::net::UnixStream::connect(&fixture.address.socket).is_err(),
+            "a retired broker still answered"
+        );
+        fixture.workspace_dir.close().unwrap();
+    }
+
+    /// With no daemon to outlive and no request to serve, the broker is holding
+    /// a process open for a workspace nobody is using.
+    #[test]
+    fn an_unused_broker_retires_itself_once_nothing_needs_it() {
+        let fixture = start_broker(BrokerIdlePolicy {
+            timeout: Duration::ZERO,
+            poll: Duration::from_millis(20),
+        });
+
+        // The idle watch reaches the broker through its own endpoint, so the
+        // accept loop stays blocked until then and pays no polling latency.
+        let started = Instant::now();
+        fixture.server.join().unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the idle watch did not retire an unused broker"
+        );
+        assert!(!fixture.address.socket.exists());
+        fixture.workspace_dir.close().unwrap();
+    }
+
+    #[test]
+    fn an_idle_broker_client_cannot_block_the_next_request_forever() {
+        let fixture = start_broker(BrokerIdlePolicy {
+            timeout: Duration::from_secs(3600),
+            poll: Duration::from_secs(3600),
+        });
+        let idle = std::os::unix::net::UnixStream::connect(&fixture.address.socket).unwrap();
+        drop(std::os::unix::net::UnixStream::connect(&fixture.address.socket).unwrap());
 
         let started = Instant::now();
-        request_bootstrap_broker(&address, BROKER_PING).unwrap();
+        request_bootstrap_broker(&fixture.address, BROKER_PING).unwrap();
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "an idle peer blocked the broker beyond its IO deadline"
         );
         drop(idle);
 
-        workspace_dir.close().unwrap();
-        let _ = request_bootstrap_broker(&address, BROKER_PING);
-        server.join().unwrap().unwrap();
-        assert!(!address.socket.exists());
+        fixture.workspace_dir.close().unwrap();
+        let _ = request_bootstrap_broker(&fixture.address, BROKER_PING);
+        fixture.server.join().unwrap().unwrap();
+        assert!(!fixture.address.socket.exists());
     }
 
     #[test]

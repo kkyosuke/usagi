@@ -176,6 +176,28 @@ pub trait DaemonLauncher {
     /// # Errors
     /// Returns an error when the process cannot be spawned.
     fn launch(&self) -> io::Result<()>;
+
+    /// The failure the launched daemon recorded for itself, if it recorded one.
+    ///
+    /// A launched daemon is detached with its stderr discarded, exactly as in
+    /// production, so a start that never registers looks the same from here
+    /// whatever went wrong — a socket path over the platform limit, a data
+    /// directory with the wrong mode, a workspace another daemon owns. The
+    /// daemon writes the real reason to its error log, and this is how the
+    /// waiting `start` reads it back instead of reporting only that a deadline
+    /// passed.
+    ///
+    /// Implementations return the most recent entry. The caller compares the
+    /// value from before the launch with the value after, so a stale entry from
+    /// an earlier failure is not reported as this one's cause.
+    fn recorded_failure(&self) -> Option<String> {
+        None
+    }
+
+    /// Where a reader can find the full log behind [`Self::recorded_failure`].
+    fn failure_log_hint(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Pauses between daemon lifecycle polls: `start` waits for a freshly launched

@@ -13,6 +13,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 
 use crate::domain::supervisor::{
     SupervisorEvent, SupervisorRun, SupervisorRunId, SupervisorRunQuery, reduce,
@@ -22,6 +23,15 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 const SNAPSHOT_SUFFIX: &str = ".snapshot.json";
 const JOURNAL_SUFFIX: &str = ".events.jsonl";
 const CHECKPOINT_SUFFIX: &str = ".replay.json";
+
+/// How many finished supervisor runs are kept on disk.
+///
+/// One run is a snapshot, a journal and a checkpoint, and nothing removed them.
+/// Every `supervisor_list` reads *all* of them and replays each journal past its
+/// snapshot, so on a long-lived daemon a listing gets slower with every run ever
+/// started and the state directory grows without limit. A finished run is
+/// history: this keeps the recent ones for inspection and drops the rest.
+const RUN_RETENTION: usize = 128;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 struct ReplayCheckpoint {
@@ -76,7 +86,64 @@ impl SupervisorStore {
     /// Returns an error when the state directory or snapshot cannot be written.
     pub fn initialize(&self, run: &SupervisorRun) -> Result<()> {
         json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)?;
-        self.write_checkpoint(run.supervisor_run_id, run.state_revision, 0)
+        self.write_checkpoint(run.supervisor_run_id, run.state_revision, 0)?;
+        // Starting a run is the moment the directory grows, so it is also where
+        // the bound is charged. Pruning is best effort: a run that failed to be
+        // removed is retried at the next start, and refusing to start a new run
+        // because old history could not be deleted would be the worse failure.
+        let _ = self.prune_finished_runs();
+        Ok(())
+    }
+
+    /// Delete the finished runs past [`RUN_RETENTION`], oldest first.
+    ///
+    /// Only terminal runs are eligible: a run still planning, running, verifying
+    /// or waiting on a person is live state, whatever its age. Each removal takes
+    /// the snapshot, journal and checkpoint together, and the snapshot goes last
+    /// so an interrupted prune leaves a run that [`Self::runs`] can still read
+    /// and that the next prune will finish.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state directory cannot be listed or an
+    /// aggregate cannot be read.
+    pub fn prune_finished_runs(&self) -> Result<usize> {
+        let mut finished: Vec<(DateTime<Utc>, SupervisorRunId)> = self
+            .runs()?
+            .into_iter()
+            .filter(|run| run.state.terminal())
+            .map(|run| {
+                (
+                    run.terminal_at.unwrap_or(run.updated_at),
+                    run.supervisor_run_id,
+                )
+            })
+            .collect();
+        let Some(over) = finished.len().checked_sub(RUN_RETENTION) else {
+            return Ok(0);
+        };
+        if over == 0 {
+            return Ok(0);
+        }
+        finished.sort_by_key(|(finished_at, id)| (*finished_at, *id));
+        let mut removed = 0;
+        for (_, id) in finished.into_iter().take(over) {
+            for path in [
+                self.journal_path(id),
+                self.checkpoint_path(id),
+                self.snapshot_path(id),
+            ] {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).context(format!("failed to remove {}", path.display()));
+                    }
+                }
+            }
+            removed += 1;
+        }
+        Ok(removed)
     }
     /// Loads and reconstructs a run, replaying complete events not yet reflected
     /// by the snapshot.
@@ -578,5 +645,84 @@ mod tests {
                 .to_string()
                 .contains("snapshot disappeared")
         );
+    }
+
+    /// Every `supervisor_list` reads all snapshots and replays each journal past
+    /// it, so runs that are never removed make listing slower with every run
+    /// ever started and grow the state directory without limit.
+    #[test]
+    fn finished_runs_are_pruned_while_live_ones_are_kept_whatever_their_age() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+
+        // The oldest run of all, still waiting on a person. Age is not what
+        // makes a run eligible; being finished is.
+        let live = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let live_id = live.supervisor_run_id;
+        store.initialize(&live).unwrap();
+
+        let mut finished = Vec::new();
+        for index in 0..(RUN_RETENTION + 20) {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                "task".into(),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(i64::try_from(index).unwrap() + 1),
+            );
+            run.state = SupervisorRunState::Succeeded;
+            run.terminal_at = Some(run.created_at);
+            finished.push(run.supervisor_run_id);
+            store.initialize(&run).unwrap();
+        }
+
+        let kept = store.runs().unwrap();
+        let kept_finished = kept.iter().filter(|run| run.state.terminal()).count();
+        assert!(
+            kept_finished <= RUN_RETENTION,
+            "supervisor history grew past its bound: {kept_finished}"
+        );
+        assert!(
+            kept.iter().any(|run| run.supervisor_run_id == live_id),
+            "a live run was pruned as history"
+        );
+
+        // A pruned run leaves nothing behind: snapshot, journal and checkpoint
+        // all go, or the directory would keep growing anyway.
+        let surviving: Vec<_> = kept.iter().map(|run| run.supervisor_run_id).collect();
+        for id in finished {
+            if !surviving.contains(&id) {
+                assert!(!store.snapshot_path(id).exists(), "snapshot survived");
+                assert!(!store.journal_path(id).exists(), "journal survived");
+                assert!(!store.checkpoint_path(id).exists(), "checkpoint survived");
+            }
+        }
+    }
+
+    /// Below the bound nothing is removed, so an ordinary daemon never loses a
+    /// run it might be asked about.
+    #[test]
+    fn pruning_removes_nothing_while_the_history_is_within_its_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        for index in 0..3 {
+            let mut run = SupervisorRun::new(
+                "caller".into(),
+                "task".into(),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(index),
+            );
+            run.state = SupervisorRunState::Failed;
+            store.initialize(&run).unwrap();
+        }
+        assert_eq!(store.prune_finished_runs().unwrap(), 0);
+        assert_eq!(store.runs().unwrap().len(), 3);
     }
 }

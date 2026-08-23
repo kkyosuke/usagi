@@ -2301,10 +2301,43 @@ fn verify_private(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "unsafe daemon endpoint ownership, type, mode, or link count",
+            unsafe_private_message(path, mode, directory, &metadata),
         ));
     }
     Ok(())
+}
+
+/// Why one path failed the private-endpoint check, in terms the operator can
+/// act on.
+///
+/// The refusal used to name neither the path nor the requirement, which made a
+/// `$USAGI_HOME` created with the ordinary umask read as a mysterious permission
+/// error on every command. What is wrong is knowable here, so it is said here.
+fn unsafe_private_message(
+    path: &Path,
+    mode: u32,
+    directory: bool,
+    metadata: &fs::Metadata,
+) -> String {
+    let expected = if directory { "directory" } else { "socket" };
+    let found = if metadata.file_type().is_symlink() {
+        "a symlink".to_owned()
+    } else if metadata.is_dir() {
+        "a directory".to_owned()
+    } else if metadata.file_type().is_socket() {
+        format!("a socket with {} links", metadata.nlink())
+    } else {
+        "neither a directory nor a socket".to_owned()
+    };
+    format!(
+        "{} must be a private {expected} owned by uid {} with mode {:04o}, but it is {found} \
+         owned by uid {} with mode {:04o}",
+        path.display(),
+        effective_uid(),
+        mode,
+        metadata.uid(),
+        metadata.mode() & 0o7777,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -3934,6 +3967,42 @@ mod tests {
         cleanup.retire().unwrap();
         // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
         unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    /// A `$USAGI_HOME` created with the ordinary umask fails this check on every
+    /// command. Naming neither the path nor the required mode turned that into a
+    /// mysterious permission error with nothing to act on.
+    #[test]
+    fn an_unsafe_private_path_is_refused_by_name_with_what_it_needs() {
+        let temp = TempDir::new_in("/tmp").unwrap();
+
+        let group_readable = temp.path().join("data");
+        fs::create_dir(&group_readable).unwrap();
+        fs::set_permissions(&group_readable, fs::Permissions::from_mode(0o755)).unwrap();
+        let refusal = verify_private(&group_readable, DIR_MODE, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains(&group_readable.display().to_string()),
+            "{refusal}"
+        );
+        assert!(refusal.contains("0700"), "{refusal}");
+        assert!(refusal.contains("0755"), "{refusal}");
+        assert!(refusal.contains("private directory"), "{refusal}");
+
+        // The socket case reports what it found instead of a directory, so a
+        // stray regular file at the endpoint path is not read as a mode problem.
+        let not_a_socket = temp.path().join("endpoint.sock");
+        fs::write(&not_a_socket, b"").unwrap();
+        fs::set_permissions(&not_a_socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let refusal = verify_private(&not_a_socket, SOCKET_MODE, false)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("private socket"), "{refusal}");
+        assert!(
+            refusal.contains("neither a directory nor a socket"),
+            "{refusal}"
+        );
     }
 
     #[test]
