@@ -1049,6 +1049,22 @@ impl AgentRuntime {
         outcome
     }
 
+    /// Whether this workspace still has an Agent runtime that is running.
+    ///
+    /// A retirement asks this before giving the workspace back: its PTY children
+    /// belong to that workspace's scopes, and releasing the workspace while one
+    /// is alive would hand its worktrees to a second owner.
+    #[must_use]
+    pub fn has_running_agent(&self, workspace: WorkspaceId) -> bool {
+        self.coordinator.snapshot().records.iter().any(|record| {
+            record.runtime.terminal.workspace_id == workspace
+                && matches!(
+                    record.state,
+                    crate::usecase::terminal::TerminalRuntimeState::Running
+                )
+        })
+    }
+
     /// Returns one deterministic, secret-free inventory for workspace-root and
     /// managed-session Agent runtimes.
     #[must_use]
@@ -4430,6 +4446,10 @@ mod tests {
         assert_eq!(double_click.terminal, resumed.terminal);
         assert_eq!(double_click.continuation, resumed.continuation);
         assert_eq!(double_click.resume_relation, resumed.resume_relation);
+        // The workspace-wide question a retirement asks: this workspace has a
+        // running Agent, another workspace does not.
+        assert!(runtime.has_running_agent(workspace));
+        assert!(!runtime.has_running_agent(WorkspaceId::new()));
         let inventory = runtime.inventory(workspace);
         assert_eq!(inventory.runtimes.len(), 2);
         assert!(
