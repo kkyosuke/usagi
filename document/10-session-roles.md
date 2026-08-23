@@ -113,6 +113,10 @@ adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral 
 tool 名と引数を列挙せず、`tools/list` のスキーマが正本であることと、手順が resource
 `usagi://guides/orchestration` にあることだけを述べる（正本は [7. MCP サーバ#tool 面](07-mcp.md#tool-面)）。
 
+各行は launch scope に依存せず真である文にする。行が述べるのは「どこで何が受理されるか」で、
+「この agent が何をしてよいか」ではない。例えば issue の書き込みは session worktree でだけ受理されるので、
+session では許可、root では拒否として同じ 1 行が両方で真になる。scope 別の variant を作らない。
+
 | 行 | 条件 |
 |---|---|
 | `- session:` | MCP を配線する launch では常に載る（session 系統は無効化できない） |

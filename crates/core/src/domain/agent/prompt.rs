@@ -47,15 +47,20 @@ const ROOT_SCOPE: &str = "<context>\nあなたは usagi が管理するワーク
 
 const SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
 
-const TOOLS_OPEN: &str = "<tools>\nusagi の MCP server が配線されています。tool 名と引数は tools/list のスキーマが正本です。";
+const TOOLS_OPEN: &str = "<tools>\ntool 名と引数は tools/list のスキーマが正本です。";
 const TOOLS_CLOSE: &str = "</tools>";
 
-/// Session orchestration is never disabled, so this line is present whenever an
+/// Every line must hold in both scopes, so a family never needs a root variant
+/// and a session variant. The issue line states where writes are accepted rather
+/// than whether *this* agent may write: in a session worktree that reads as the
+/// permission, at the workspace root as the refusal, and both are true.
+///
+/// Session orchestration is never disabled, so its line is present whenever an
 /// MCP server is wired. It carries the pointer to the guide resource instead of
 /// the procedure itself, so the prompt does not restate what the guide owns.
 const SESSION_TOOLS: &str = "- session: session の作成・観測・委譲・完了報告は daemon が権威です。手順は resource usagi://guides/orchestration を読んでください。";
-const ISSUE_TOOLS: &str = "- issue: 作業の起点となる backlog を検索・参照・更新できます。";
-const MEMORY_TOOLS: &str = "- memory: workspace を越えて残す判断や制約を検索・保存できます。";
+const ISSUE_TOOLS: &str = "- issue: 作業の起点となる backlog を検索・参照できます。git 追跡下のため、書き込みは session worktree からだけ受理されます。";
+const MEMORY_TOOLS: &str = "- memory: session をまたいで残す判断や制約を検索・保存できます。";
 const LOCAL_LLM_TOOLS: &str = "- local_llm_ask: トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
 
 /// The immutable boundary of the checkout the launch runs in.
@@ -225,6 +230,17 @@ mod tests {
             .collect();
         assert!(lines.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(lines.iter().all(|line| *line > tools && *line < role));
+    }
+
+    #[test]
+    fn the_tools_fragment_does_not_branch_on_scope() {
+        // Each line is written to hold in both scopes, so the same families
+        // produce the same block. A scope-dependent claim would need two
+        // variants per family and could disagree with the other scope.
+        let root = launch_system_prompt(PromptScope::Root, Some(ALL), None);
+        let session = launch_system_prompt(PromptScope::Session, Some(ALL), None);
+        let block = |prompt: &str| prompt[prompt.find("<tools>").unwrap()..].to_owned();
+        assert_eq!(block(&root), block(&session));
     }
 
     #[test]
