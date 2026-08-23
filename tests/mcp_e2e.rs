@@ -64,6 +64,41 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
     }
 }
 
+/// The registry and the Agent prompt must come from the same settings, or an
+/// Agent is told about a family its own MCP server refused to register. Issue
+/// off with Memory on makes that observable: the prompt has to lose exactly the
+/// issue line and keep the rest.
+#[test]
+fn production_disabled_family_leaves_both_the_registry_and_the_agent_prompt() {
+    let mut mcp = McpHarness::start_with_tool_availability(false, true);
+    let tools = mcp.tools();
+    let names = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(names.iter().all(|name| !name.starts_with("issue_")));
+    assert!(!names.contains(&"session_delegate_issue"));
+    assert!(names.iter().any(|name| name.starts_with("memory_")));
+
+    drop(mcp.launch_caller());
+    let capture = wait_for_fixture_argv(&mcp, "codex", None, "<tools>");
+    let prompt = shipping_system_prompt(&capture);
+    assert!(
+        prompt.contains("- session:"),
+        "the session line is not conditional: {prompt}"
+    );
+    assert!(
+        prompt.contains("- memory:"),
+        "an enabled family lost its line: {prompt}"
+    );
+    assert!(
+        !prompt.contains("- issue:"),
+        "a disabled family stayed in the prompt: {prompt}"
+    );
+    // A disabled family is not described as missing either.
+    assert!(!prompt.contains("issue"), "{prompt}");
+}
+
 #[test]
 fn production_session_create_reaches_daemon_and_durable_lifecycle() {
     let mut mcp = McpHarness::start();
@@ -872,20 +907,10 @@ fn wait_for_fixture_argv(
     }
 }
 
-fn assert_shipping_role_argv(
-    capture: &FixtureArgv,
-    role_id: &str,
-    instructions: &str,
-    user_prompt: Option<&str>,
-    local_llm: bool,
-) {
-    let role = RoleId::new(role_id).unwrap();
-    let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
-        usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(local_llm)),
-        Some((&role, instructions)),
-    );
-    let system_prompt = if capture.runtime == "claude" {
+/// The single ephemeral system-prompt value a shipping launch passed, read
+/// through each product's own grammar.
+fn shipping_system_prompt(capture: &FixtureArgv) -> String {
+    if capture.runtime == "claude" {
         let positions = capture
             .arguments
             .iter()
@@ -923,7 +948,23 @@ fn assert_shipping_role_argv(
             .as_str()
             .expect("developer_instructions must remain a TOML string")
             .to_owned()
-    };
+    }
+}
+
+fn assert_shipping_role_argv(
+    capture: &FixtureArgv,
+    role_id: &str,
+    instructions: &str,
+    user_prompt: Option<&str>,
+    local_llm: bool,
+) {
+    let role = RoleId::new(role_id).unwrap();
+    let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
+        usagi_core::domain::agent::prompt::PromptScope::Session,
+        Some(shipping_tool_families(local_llm)),
+        Some((&role, instructions)),
+    );
+    let system_prompt = shipping_system_prompt(capture);
     assert!(
         system_prompt == expected,
         "shipping system prompt composition or ordering changed"
