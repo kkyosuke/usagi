@@ -1,13 +1,13 @@
 ---
 number: 715
 title: Agent 起動 prompt を配線済み MCP tool 系統から組む
-status: todo
+status: done
 priority: medium
 labels: []
 dependson: []
 related: []
 created_at: 2026-08-23T23:06:26.005949+00:00
-updated_at: 2026-08-23T23:06:26.005949+00:00
+updated_at: 2026-08-23T23:06:48.283065+00:00
 ---
 
 ## 背景
