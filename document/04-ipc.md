@@ -167,9 +167,17 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 | 申告 | 解決 |
 |---|---|
 | `selected` | canonical 化した root を **adopt する**（すでに保持していればそれを使う）。adopt できない workspace はこの接続だけを拒否する |
-| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない path は拒否する（directory だけでは workspace root を名指せないため、adopt はしない） |
+| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない場合は、その path を含む**最も近い git repository** を workspace root として adopt する。repository が無ければ拒否する |
 | `unbound` | workspace resource を扱わないので、起動時の workspace を答える |
 | 欠落 | 起動時の workspace を答え、下の fence が拒否する |
+
+`bound` が adopt する対象を「その path を含む最も近い git repository」に限るのは、`bound` が「開く対象」ではなく
+「動いている場所」の申告だからである。申告された directory をそのまま adopt すると、client がたまたま立っていた
+downloads folder が workspace になってしまう。usagi の session は git worktree なので、**repository でない path は
+そもそも workspace を名指していない**。この境界により、CLI と MCP の client も TUI と同じように新しい repository を
+開けるようになり、かつ repository の外では従来どおり拒否される。session worktree（`<root>/.usagi/sessions/<name>`）は
+自身の `.git` を持つが、それは workspace ではなくその workspace の worktree なので、探索は読み飛ばして親の
+repository へ遡る。
 
 `selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。
@@ -195,7 +203,9 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 選択側の正本）。
 
 拒否は `permission_denied` / `error_id = workspace-mismatch` / `retry_mode = never` / `side_effect = none` の
-typed `ProtocolError` であり、message は **serve している workspace root** を含む。client はこれを
+typed `ProtocolError` であり、message は **その daemon が serve している workspace root を過不足なく列挙する**
+（1 つも無ければその旨）。1 つに固定して名乗ると、複数 workspace を保持する daemon が実態と違うことを言い、
+adopt に失敗した root をそのまま「serve している」と名乗る自己矛盾した文になる。client はこれを
 そのまま提示し、`unavailable` へ丸めない。bootstrap はこの拒否を「到達不能」と解釈しないため、
 daemon の cold start、stale endpoint recovery、rollover、cold restart のいずれも起こさない
 （別 workspace を正当に所有している daemon を壊さないため）。readiness 待ちも即座に打ち切る。

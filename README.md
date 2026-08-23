@@ -246,7 +246,8 @@ service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 
 復帰を担うが、`usagi daemon stop` による意図した停止の扱いは異なる（LaunchAgent は起動し直し、systemd unit は
 停止のまま残す）。Linux でログアウトをまたいで常駐させるには `loginctl enable-linger` が別途必要である。
 詳細は [service supervision](document/05-daemon.md#service-supervision) を参照する。
-登録しない場合も、TUI・`usagi mcp`・`usagi session ...` の接続時に daemon は自動起動する。全コマンドの現在の動作は
+登録しない場合も、TUI・`usagi mcp`・`usagi session ...` の接続時に daemon は自動起動し、まだ開いていない
+リポジトリはその接続で開く（先に TUI で開いておく必要はない）。全コマンドの現在の動作は
 [実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
 
 ## アーキテクチャ

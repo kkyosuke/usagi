@@ -181,9 +181,25 @@ client から workspace、実行ファイル、argv を受け取らず、start �
 
 broker は対応する `bootstrap-broker-<digest>.lock` を process lifetime にわたって保持するため、同じ workspace と executable の
 候補 broker は 1 process だけが残る。別 workspace や別 executable は独立した endpoint を使い、誤った workspace・build の daemon を
-起動しない。daemon 停止・crash 後も broker は残り、root Agent の read-only sandbox から cold start を仲介する。workspace が消えた後の
-要求では broker も終了し、socket を回収する。接続ごとの read / write には deadline を設け、request byte を送らない client が accept loop を
-占有し続けることを許さない。
+起動しない。daemon の crash 後も broker は残り、root Agent の read-only sandbox から cold start を仲介する。接続ごとの
+read / write には deadline を設け、request byte を送らない client が accept loop を占有し続けることを許さない。
+
+#### broker の終わり方
+
+broker が daemon より長生きするのは意図した設計だが、**終わる手段を持たない設計ではない**。broker の identity は
+`(canonical workspace, executable path)` なので、終わらせる手段がないと build ごと・worktree ごとに 1 process ずつ
+永久に増える。次の 3 つが broker の終端であり、いずれも同じ accept loop から endpoint を回収して抜ける。
+
+| 終端 | 契機 | 挙動 |
+|---|---|---|
+| stop 要求 | `usagi daemon stop`（`--force` を含む）が成功したとき | 合成ルートが同じ `(workspace, executable)` の broker へ stop request を送る。broker は ack してから endpoint を閉じる。stop が拒否された場合は送らない（後の cold start に broker が要る） |
+| idle 失効 | 最後の request から 1 時間が経過し、かつ daemon endpoint へ接続できないとき | broker 自身の idle watch が 1 分ごとに判定し、条件を満たすと自分の endpoint へ stop request を送って終了する |
+| workspace の消失 | workspace directory が消えた後に request が届いたとき | 従来どおり終了して socket を回収する |
+
+idle 失効が **daemon の不在を条件にする**のは、broker の役目が「daemon が死んだときにそこに居ること」だからである。
+daemon が動いている間は、どれだけ request が無くても idle とはみなさない。逆に daemon が居らず誰も要求しない状態が続く
+workspace は、もう使われていない。`usagi daemon stop` の直後は daemon も broker も残らないため、次の起動は通常の
+client bootstrap が broker を起動し直すところから始まる。
 
 通常 client は従来どおり `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によってその lock を開けない client だけが
 broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の build identity・workspace handshake を通して接続する。
@@ -588,6 +604,23 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
+
+#### durable store の retention
+
+`dispatch.json`・inbox・`user-decisions.json` は **書き込みのたびに文書全体を read-modify-write** する。上限が無ければ
+N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続ける。したがって各 store は
+書き込み経路そのものに上限を持ち、maintenance tick の実行有無に依存しない。
+
+| store | 上限 | 決して落とさないもの |
+|---|---|---|
+| `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
+| inbox | 既読 256 件。総数の上限は 4096 | 未読の報告。未読が上限を超えたときだけ最古の未読を落とし、error log に記録する（silent loss にしない） |
+| `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件まで | pending の decision と、未 ACK の outbox event が参照する record |
+| `supervisor-runs/` | 終了済み run 128 件（snapshot / journal / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run |
+
+未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、上限に達した workspace では**既存を捨てずに
+新しい要求を拒否する**。拒否は `resource_exhausted` で、durable state を一切変更しないため、人が backlog を消化した
+あとの retry が安全である。
 
 ### tenant registry
 
