@@ -13,8 +13,12 @@ use usagi_core::domain::AppInfo;
 mod runtime;
 mod tui_input;
 
+// `main` returns `ExitCode`, not `io::Result<ExitCode>`: the `Result` form makes
+// Rust print a failure with `Debug`, which spells a deliberate message as
+// `Error: Custom { kind: Other, error: "…" }`. Reporting goes through
+// `process_outcome` so every failing CLI path renders as one line of prose.
 #[coverage(off)] // Final process argv and stdio composition.
-fn main() -> std::io::Result<ExitCode> {
+fn main() -> ExitCode {
     let info = AppInfo {
         name: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
@@ -22,5 +26,6 @@ fn main() -> std::io::Result<ExitCode> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    runtime::cli::dispatch(args, &mut stdout, &mut stderr, &info)
+    let result = runtime::cli::dispatch(args, &mut stdout, &mut stderr, &info);
+    runtime::cli::process_outcome(result, &mut stderr)
 }

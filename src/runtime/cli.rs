@@ -596,6 +596,35 @@ fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+/// Render a failure that reached the process boundary, as the message the
+/// caller wrote rather than as the Rust value carrying it.
+///
+/// Returning `io::Result` from `main` makes Rust print the error with `Debug`,
+/// so a carefully written `io::Error::other("…")` reaches the terminal spelled
+/// `Error: Custom { kind: Other, error: "…" }`. Every failing CLI path shares
+/// that boundary, so the rendering belongs here rather than at each call site.
+pub(crate) fn write_process_failure(err: &mut dyn Write, error: &std::io::Error) {
+    // The message is all the operator can act on, and every failure this
+    // boundary sees already carries one. Writing to a closed stderr cannot be
+    // reported anywhere, so it is deliberately ignored.
+    let _ = writeln!(err, "error: {error}");
+}
+
+/// Turn what [`dispatch`] returned into the status the process exits with,
+/// reporting a failure on the way out.
+///
+/// Keeping this separate from `main` is what makes both arms testable: `main`
+/// then holds only the real argv and stdio it binds.
+pub(crate) fn process_outcome(result: std::io::Result<ExitCode>, err: &mut dyn Write) -> ExitCode {
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            write_process_failure(err, &error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -608,8 +637,9 @@ mod tests {
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
-        Action, LauncherPolicyError, LauncherPolicyInputs, execute_self_update_with, exit_code,
-        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
+        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, execute_self_update_with,
+        exit_code, process_outcome, validate_launcher_policy_inputs, write_client_error,
+        write_daemon_outcome,
     };
 
     struct BrokenWriter;
@@ -1109,6 +1139,40 @@ mod tests {
             String::from_utf8(unknown).unwrap(),
             "replacement [unavailable]: exact daemon build identity is unavailable; the current daemon remains running\n"
         );
+    }
+
+    /// The message the failing path wrote is what reaches the terminal. The
+    /// `io::Error` carrying it — its `Debug` spelling, its `ErrorKind`, the
+    /// escaping `Debug` adds — must not appear.
+    #[test]
+    fn a_process_failure_renders_as_its_message_and_not_as_a_rust_value() {
+        let mut err = Vec::new();
+        let code = process_outcome(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "refusing to stop the daemon: the daemon still owns 1 Agent runtime(s)",
+            )),
+            &mut err,
+        );
+        let rendered = String::from_utf8(err).unwrap();
+        assert_eq!(
+            rendered,
+            "error: refusing to stop the daemon: the daemon still owns 1 Agent runtime(s)\n"
+        );
+        assert!(!rendered.contains("Custom"), "{rendered}");
+        assert!(!rendered.contains("WouldBlock"), "{rendered}");
+        assert!(!rendered.contains('\\'), "{rendered}");
+        assert_eq!(format!("{code:?}"), format!("{:?}", ExitCode::FAILURE));
+    }
+
+    /// A successful dispatch keeps the exit code it chose and writes nothing to
+    /// stderr, so a command that reports a refusal itself is not reported twice.
+    #[test]
+    fn a_successful_outcome_keeps_its_exit_code_and_stays_quiet() {
+        let mut err = Vec::new();
+        let code = process_outcome(Ok(exit_code(3)), &mut err);
+        assert!(err.is_empty());
+        assert_eq!(format!("{code:?}"), format!("{:?}", exit_code(3)));
     }
 
     /// Bootstrap contention renders as busy-and-retryable, not as an absent
