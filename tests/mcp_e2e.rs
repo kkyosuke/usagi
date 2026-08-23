@@ -880,10 +880,10 @@ fn assert_shipping_role_argv(
     local_llm: bool,
 ) {
     let role = RoleId::new(role_id).unwrap();
-    let expected = usagi_core::domain::agent::prompt::session_system_prompt_with_role(
-        false,
+    let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
+        usagi_core::domain::agent::prompt::PromptScope::Session,
+        Some(shipping_tool_families(local_llm)),
         Some((&role, instructions)),
-        local_llm,
     );
     let system_prompt = if capture.runtime == "claude" {
         let positions = capture
@@ -961,8 +961,23 @@ fn assert_shipping_role_argv(
     }
 }
 
+/// The families a shipping launch gets: this harness leaves Issue and Memory at
+/// their default (enabled) in both settings layers, so only the delegation server
+/// varies with the local-LLM setting.
+fn shipping_tool_families(local_llm: bool) -> usagi_core::domain::agent::prompt::McpToolFamilies {
+    usagi_core::domain::agent::prompt::McpToolFamilies {
+        issue: true,
+        memory: true,
+        local_llm,
+    }
+}
+
 fn assert_shipping_legacy_argv(capture: &FixtureArgv) {
-    let expected = usagi_core::domain::agent::prompt::session_system_prompt(false, false);
+    let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
+        usagi_core::domain::agent::prompt::PromptScope::Session,
+        Some(shipping_tool_families(false)),
+        None,
+    );
     let assignments = capture
         .arguments
         .iter()
