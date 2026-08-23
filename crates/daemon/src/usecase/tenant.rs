@@ -24,6 +24,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use chrono::{DateTime, Utc};
 use usagi_core::domain::id::WorkspaceId;
 use usagi_core::infrastructure::daemon::{WorkspaceFence, WorkspaceFenceOutcome};
 use usagi_core::infrastructure::workspace_state;
@@ -162,8 +163,17 @@ impl From<AdoptError> for io::Error {
 /// The fence is deliberately *not* here: it is not `Sync`, and a tenant handle
 /// travels between connection threads. The registry holds the fence instead, so
 /// dropping the registry entry — and only that — gives the workspace back.
+///
+/// The identity is shared rather than copied, so the registry can see whether
+/// anything outside it still holds this workspace. That count is what keeps a
+/// retirement from taking a workspace a connection is still serving.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tenant<R> {
+    shared: std::sync::Arc<TenantIdentity<R>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TenantIdentity<R> {
     root: PathBuf,
     state_dir: PathBuf,
     workspace_id: WorkspaceId,
@@ -174,25 +184,35 @@ impl<R> Tenant<R> {
     /// The canonical workspace root this tenant owns.
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.root
+        &self.shared.root
     }
 
     /// The state subtree holding this workspace's lifecycle document.
     #[must_use]
     pub fn state_dir(&self) -> &Path {
-        &self.state_dir
+        &self.shared.state_dir
     }
 
     /// The durable workspace identity, as requests fence on it.
     #[must_use]
     pub fn workspace_id(&self) -> WorkspaceId {
-        self.workspace_id
+        self.shared.workspace_id
     }
 
     /// The lifecycle runtime that serves this workspace.
     #[must_use]
     pub fn runtime(&self) -> &R {
-        &self.runtime
+        &self.shared.runtime
+    }
+
+    /// Whether anything outside the registry still holds this workspace.
+    ///
+    /// The registry keeps one handle per adopted workspace; every connection or
+    /// worker that resolved it holds another. Read under the registry's lock,
+    /// this distinguishes "nobody is serving this workspace" from "somebody
+    /// might send the next request on it".
+    fn referenced_elsewhere(&self) -> bool {
+        std::sync::Arc::strong_count(&self.shared) > 1
     }
 }
 
@@ -205,6 +225,20 @@ pub struct TenantRegistry<F, O: TenantRuntimeOpener> {
     held: Mutex<BTreeMap<PathBuf, Held<O::Runtime>>>,
 }
 
+/// Observes whether a workspace still has work only its owner can serve.
+///
+/// Retirement asks this before giving a workspace back: a live PTY child, an
+/// Agent runtime, a teardown still to run, or a session mid-creation all mean
+/// the daemon must keep the workspace, however long the client has been away.
+pub trait WorkspaceActivity<R> {
+    /// Whether `tenant` still has work of its own.
+    ///
+    /// An observation that cannot be made answers `true`: keeping a workspace
+    /// costs a fence, while releasing one that is still working would hand its
+    /// worktrees to a second owner.
+    fn has_work(&self, tenant: &Tenant<R>) -> bool;
+}
+
 /// A tenant together with the fence that keeps it.
 ///
 /// The fence is never read after it is stored: holding it *is* what it does, and
@@ -215,6 +249,10 @@ struct Held<R> {
     /// process's lifetime.
     #[cfg_attr(not(test), allow(dead_code, reason = "holding it is its only job"))]
     fence: Option<Box<dyn WorkspaceFence + Send>>,
+    /// When this workspace was first observed with nothing left to do. Cleared
+    /// as soon as it has work again, so the idle period a retirement waits for
+    /// is continuous rather than cumulative.
+    idle_since: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -287,8 +325,8 @@ where
     pub fn owner_of(&self, path: &Path) -> Option<Tenant<O::Runtime>> {
         self.with_held(|held| {
             held.values()
-                .filter(|entry| path.starts_with(&entry.tenant.root))
-                .max_by_key(|entry| entry.tenant.root.components().count())
+                .filter(|entry| path.starts_with(entry.tenant.root()))
+                .max_by_key(|entry| entry.tenant.root().components().count())
                 .map(|entry| entry.tenant.clone())
         })
     }
@@ -299,7 +337,7 @@ where
     pub fn by_workspace_id(&self, workspace_id: WorkspaceId) -> Option<Tenant<O::Runtime>> {
         self.with_held(|held| {
             held.values()
-                .find(|entry| entry.tenant.workspace_id == workspace_id)
+                .find(|entry| entry.tenant.workspace_id() == workspace_id)
                 .map(|entry| entry.tenant.clone())
         })
     }
@@ -325,6 +363,47 @@ where
         self.lock().remove(workspace_root).is_some()
     }
 
+    /// Give back every workspace that has had nothing to do for `idle_for`.
+    ///
+    /// Returns the roots that were released, for the caller to log. A workspace
+    /// is released only when all four of these hold, and the last two are
+    /// re-checked on every sweep rather than trusted from an earlier one:
+    ///
+    /// * it is not the workspace `serve` fenced for this process — that fence
+    ///   belongs to the process, so retiring the tenant would drop the runtime
+    ///   without giving the workspace back;
+    /// * nothing outside the registry still holds it;
+    /// * [`WorkspaceActivity`] reports no work of its own;
+    /// * it has been in that state continuously for `idle_for`.
+    pub fn retire_idle(
+        &self,
+        activity: &dyn WorkspaceActivity<O::Runtime>,
+        now: DateTime<Utc>,
+        idle_for: chrono::Duration,
+    ) -> Vec<PathBuf> {
+        let mut held = self.lock();
+        let mut retired = Vec::new();
+        for (root, entry) in held.iter_mut() {
+            // The initial tenant's fence is the process's, so releasing the
+            // registry entry would not release the workspace. It stays.
+            let idle = entry.fence.is_some()
+                && !entry.tenant.referenced_elsewhere()
+                && !activity.has_work(&entry.tenant);
+            if idle {
+                let since = *entry.idle_since.get_or_insert(now);
+                if now.signed_duration_since(since) >= idle_for {
+                    retired.push(root.clone());
+                }
+            } else {
+                entry.idle_since = None;
+            }
+        }
+        for root in &retired {
+            held.remove(root);
+        }
+        retired
+    }
+
     /// Open the workspace's state and record it as held.
     fn register(
         &self,
@@ -338,10 +417,12 @@ where
             .open(workspace_root, state.dir())
             .map_err(|error| AdoptError::Storage(error.to_string()))?;
         let tenant = Tenant {
-            root: workspace_root.to_path_buf(),
-            state_dir: state.dir().to_path_buf(),
-            workspace_id: opened.workspace_id,
-            runtime: opened.runtime,
+            shared: std::sync::Arc::new(TenantIdentity {
+                root: workspace_root.to_path_buf(),
+                state_dir: state.dir().to_path_buf(),
+                workspace_id: opened.workspace_id,
+                runtime: opened.runtime,
+            }),
         };
         let mut held = self.lock();
         // The limit is charged here, under the same lock that inserts, so two
@@ -354,6 +435,7 @@ where
             Held {
                 tenant: tenant.clone(),
                 fence,
+                idle_since: None,
             },
         );
         Ok(tenant)
@@ -697,6 +779,83 @@ mod tests {
         // unadopted workspace has no owner.
         assert_eq!(registry.owner_of(Path::new("/workspace/one-2")), None);
         assert_eq!(registry.owner_of(Path::new("/elsewhere")), None);
+    }
+
+    /// A retirement gives a workspace back only when nothing is left that could
+    /// need it: no live work, no holder, and a continuous idle period. Each of
+    /// those is checked on every sweep, so a workspace that becomes busy again
+    /// restarts the clock instead of being released on an old observation.
+    #[test]
+    fn retirement_waits_for_a_continuous_idle_period_with_no_work_and_no_holder() {
+        struct Busy(std::cell::Cell<bool>);
+        impl WorkspaceActivity<String> for Busy {
+            fn has_work(&self, _: &Tenant<String>) -> bool {
+                self.0.get()
+            }
+        }
+
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let live = std::sync::Arc::new(AtomicUsize::new(0));
+        let registry = TenantRegistry::new(
+            daemon.path().to_path_buf(),
+            FakeFences {
+                outcome: WorkspaceFenceOutcome::Acquired,
+                live: std::sync::Arc::clone(&live),
+                failure: None,
+            },
+            FakeOpener {
+                fail: Cell::new(false),
+            },
+            8,
+        );
+        let start = DateTime::parse_from_rfc3339("2026-08-24T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let idle_for = chrono::Duration::minutes(10);
+        let activity = Busy(std::cell::Cell::new(false));
+
+        // The initial tenant is never retired: its fence belongs to `serve`, so
+        // releasing the entry would drop the runtime without giving the
+        // workspace back.
+        let initial = registry
+            .adopt_initial(Path::new("/workspace/initial"))
+            .unwrap();
+        let adopted = registry.adopt(Path::new("/workspace/one")).unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+
+        // A held handle keeps the workspace, however long it has been quiet.
+        assert!(
+            registry
+                .retire_idle(&activity, start + chrono::Duration::hours(1), idle_for)
+                .is_empty()
+        );
+        drop(adopted);
+
+        // Work of its own keeps it too, and restarts the idle clock.
+        activity.0.set(true);
+        assert!(registry.retire_idle(&activity, start, idle_for).is_empty());
+        activity.0.set(false);
+        assert!(registry.retire_idle(&activity, start, idle_for).is_empty());
+        activity.0.set(true);
+        assert!(
+            registry
+                .retire_idle(&activity, start + idle_for, idle_for)
+                .is_empty(),
+            "work must restart the idle period"
+        );
+        activity.0.set(false);
+        assert!(
+            registry
+                .retire_idle(&activity, start + idle_for, idle_for)
+                .is_empty()
+        );
+
+        // Only a continuous idle period of the full length releases it, and the
+        // fence goes back with it.
+        let retired = registry.retire_idle(&activity, start + idle_for * 2, idle_for);
+        assert_eq!(retired, vec![PathBuf::from("/workspace/one")]);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.adopted(), vec![initial]);
     }
 
     #[test]

@@ -606,10 +606,28 @@ daemon process（machine あたり 1 つ）
 | 起動 | 起動時 cwd の workspace を **initial tenant** として登録する。fence は `serve` が既に取得しているので取り直さない（同じ process が同じ node へ 2 本目の `flock` を試すと拒否される） |
 | adopt | client が `selected` で申告した workspace を、その handshake の中で adopt する。canonical 化 → workspace fence 取得 → state subtree 解決 → lifecycle document open → 登録の順で、`serve` の取得順と同じである |
 | 拒否 | fence を別 process が持つ、root が解決できない、tenant 上限（既定 32）に達した場合は **その workspace だけ**を typed refusal にする。保持中の tenant の接続は影響を受けない |
+| retire | 何もすることが無い状態が 10 分続いた workspace を返す（[遊休 workspace の retire](#遊休-workspace-の-retire)） |
 | 停止 | shutdown は全 tenant を閉じ、fence を返す |
 
 adopt は client の handshake の中で走るため、fence の待ち時間は起動時（departing owner を待つ 2 秒）より短い
 200 ms に固定する。待ち続けると pre-handshake deadline に当たり、拒否ではなく切断として観測されてしまう。
+
+#### 遊休 workspace の retire
+
+adopt した workspace を保持し続けると、一度開いただけの workspace の fence を daemon が一日中握ることになり、
+別 mode の daemon がその workspace を取れない。30 秒ごとの sweep が、次の 4 つがすべて成り立つ workspace を返す。
+
+| 条件 | 理由 |
+|---|---|
+| `serve` が fence した起動 workspace ではない | その fence は process のものなので、tenant を落としても workspace は返らない |
+| registry の外に保持者が居ない | 接続中の client が次の request を送れる workspace は返さない |
+| 自分の仕事が無い | 稼働中の generic terminal・Agent runtime、`creating` / `initializing` / `deleting` の session、未決着の operation のいずれも無い（`failed` の行は人を待つものなので保持理由にしない） |
+| その状態が 10 分続いた | 離れて戻るたびに fence を churn させない |
+
+観測できないものは **仕事がある**として扱う。runtime の lock が取れない、lifecycle document が読めない場合に
+返してしまうと、まだ動いている worktree を 2 人目の owner に渡すことになる。保持を続ける代償は fence 1 つで済む。
+
+返した workspace は次に選ばれたときに adopt し直される。retire は durable state を消さない（state subtree は残る）。
 
 **workspace ごとに 1 つ**の資源（lifecycle document、fence）は tenant が持ち、**daemon ごとに 1 つ**の資源
 （PTY registry、Agent runtime とその provisioner、teardown worker、PR inventory）は request が名指す

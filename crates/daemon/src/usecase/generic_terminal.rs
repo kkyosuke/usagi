@@ -614,6 +614,19 @@ impl GenericTerminalCoordinator {
             records: self.records.values().cloned().collect(),
         }
     }
+    /// Whether this workspace still has a generic terminal that is running.
+    ///
+    /// Unlike [`Self::inventory`], the question is about the whole workspace
+    /// rather than one scope inside it: a retirement gives back the workspace,
+    /// so any live child anywhere in it must keep it.
+    #[must_use]
+    pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
+        self.records.values().any(|record| {
+            record.terminal.workspace_id == workspace
+                && matches!(record.state, TerminalRuntimeState::Running)
+        })
+    }
+
     /// Lists only terminals in the exact requested durable scope. Each entry is
     /// tagged `Terminal` and marked `live` only while the current daemon
     /// generation still owns a running PTY, so a restoring client attaches to
