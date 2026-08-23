@@ -8,7 +8,7 @@ dependson: []
 related: [329, 378, 406, 673]
 parent: 671
 created_at: 2026-08-13T22:36:36.042890+00:00
-updated_at: 2026-08-13T22:36:36.042890+00:00
+updated_at: 2026-08-23T23:22:34.965949+00:00
 ---
 
 ## Finding（P1 resource / durability）
@@ -42,3 +42,15 @@ updated_at: 2026-08-13T22:36:36.042890+00:00
 - `crates/core/src/infrastructure/store/user_decision.rs`
 - `crates/cli/src/mcp/tools/session.rs::UserDecisionRequest`
 - `src/runtime/daemon.rs::dispatch_user_decision`
+
+## 2026-08-24 時点の進捗（v3.0.0 リリースレビュー）
+
+- [x] terminal decision の retention（`TERMINAL_RETENTION` = 256、古い順に破棄）。
+      pending と、未 ACK の outbox event が参照する record は GC しない。
+- [x] pending 数の hard cap（`PENDING_LIMIT` = 128、workspace ごと）。飽和時は既存を
+      silent eviction せず `UserDecisionError::PendingLimitReached` で新規要求を
+      effect zero に拒否し、IPC は `ResourceExhausted` として返す。
+- [ ] field byte / option count / serialized byte の hard cap — **未対応**
+- [ ] idempotency key の expiry / tombstone contract — **未対応**
+- [ ] mutation / pending query / expiry sweep が毎回 rewrite/scan しない store layout
+      — **未対応**（上限により cost は bounded になったが layout は変えていない）

@@ -8,7 +8,7 @@ dependson: []
 related: [321, 323, 402, 518, 526]
 parent: 671
 created_at: 2026-08-13T22:32:31.381136+00:00
-updated_at: 2026-08-13T22:32:31.381136+00:00
+updated_at: 2026-08-23T23:22:34.965949+00:00
 ---
 
 ## Finding（P1 resource / durability）
@@ -39,3 +39,20 @@ production `agent_inbox` は全件 load 後に `since` / `unread_only` を filte
 - `crates/core/src/infrastructure/store/dispatch.rs::{mutate_registry,append_inbox,inbox,mark_inbox_read}`
 - `src/runtime/daemon.rs::dispatch_agent_tool` の `AgentInbox`
 - `crates/cli/src/mcp/tools/session.rs::AgentInbox`
+
+## 2026-08-24 時点の進捗（v3.0.0 リリースレビュー）
+
+O(N²) の成長そのものを止める retention を入れた。
+
+- [x] registry の finished run に `RUN_RETENTION`（256）の上限。live（`Preparing` /
+      `Running`）は年齢によらず保持し、binding / admission は所属 run に追従する。
+      Agent は履歴ではなく `upsert_agent_by_runtime_model` が再利用する記録なので
+      eviction 対象にしない（外すと relaunch のたびに `AgentId` が変わる）。
+- [x] caller inbox の read message に `INBOX_READ_RETENTION`（256）の上限。unread は
+      read より常に優先して保持し、`INBOX_HARD_LIMIT`（4096）超過時だけ最古の unread を
+      落として error log に記録する（silent loss にしない）。append 1 回の cost が
+      履歴総量に比例しなくなり、累積 O(N²) が O(N) になった。
+- [ ] `agent_inbox` の bounded page limit / stable cursor / 明示 ACK — **未対応**。
+      retention とは別の API 変更で、この issue に残るスコープはこれである。
+- [ ] 全履歴 rewrite を避ける crash-safe append/index/compaction（上限付き rewrite で
+      cost は bounded になったが、append そのものは依然 rewrite である）
