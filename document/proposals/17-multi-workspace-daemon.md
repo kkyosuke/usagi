@@ -192,13 +192,15 @@ TUI の [workspace の離脱と終了](../03-tui.md#workspace-の離脱と終了
 
 ## 段階と issue 分割
 
-| 段階 | issue | 内容 | 独立して出荷できるか |
+| 段階 | issue | 内容 | 状態 |
 |---|---|---|---|
-| 1 | #708 | `sessions.json` を `w/<digest>/` の tenant 文書へ分離し、legacy layout から一方向 migration する。tenant は 1 つのままで挙動不変 | 可 |
-| 2 | #709 | tenant registry と `FileWorkspaceFence` の多重保持、on-demand adopt と graceful な retire。IPC からはまだ initial tenant だけを使う | 可 |
-| 3 | #710 | handshake admission の tenant 解決（`selected` は完全一致、`bound` は最長一致、未 adopt は adopt）、tenant 上限、`daemon status` の tenant 一覧 | 可（ここで CLI / MCP が別 workspace から使える） |
-| 4 | #711 | TUI: Open / Recent からの切り替えを refusal ではなく open にする。実 PTY E2E。正本（[05-daemon.md](../05-daemon.md) / [04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md)）の畳み込み | 可（利用者に見える価値が出る） |
-| 5 | #712 | 遊休 tenant の retire と `usagi daemon retire <path>` | 可 |
+| 1 | #708 | `sessions.json` を `w/<digest>/` の tenant 文書へ分離し、legacy layout から一方向 migration する | 実装済み |
+| 2 | #709 | tenant registry と `FileWorkspaceFence` の多重保持、on-demand adopt と retire | 実装済み |
+| 3a | #713 | workspace 束縛の component（scope resolver・Agent provisioner・terminal profile・teardown・PR refresh・startup 再照合）を registry 経由にする | 実装済み |
+| 3b | #710 | handshake admission の tenant 解決（`selected` は adopt、`bound` は最長一致、`unbound` は起動 workspace）、adopt 時の fence patience | 実装済み |
+| 4 | #711 | TUI: Open / Recent からの切り替えが refusal ではなく open になることを実 PTY E2E で固定し、正本（[05-daemon.md](../05-daemon.md) / [04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md)）へ畳み込む | 実装済み |
+| 5 | #712 | 遊休 tenant の retire と `usagi daemon retire <path>` | 未実装 |
+| 6 | #714 | `usagi daemon status` に保持中 tenant の一覧を出す（read-only な IPC が要る） | 未実装 |
 
 ## test 戦略
 
