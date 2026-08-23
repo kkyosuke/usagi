@@ -48,14 +48,20 @@ fn a_hostile_git_environment_cannot_redirect_a_session_worktree_effect() {
     let toplevel = ok(&git, &target, &["rev-parse", "--show-toplevel"]);
     assert_eq!(Path::new(toplevel.stdout.trim()), target);
 
-    // The injected config is gone: with GIT_CONFIG_COUNT honoured this lookup
-    // would succeed and hand git a hooks directory the caller chose.
+    // The injected config is gone: with the inherited GIT_CONFIG_COUNT honoured
+    // this lookup would hand git the hooks directory the caller chose. What it
+    // reports instead is the confinement policy's own value, which is a
+    // directory containing no hook at all.
     let hooks = git
         .run(&target, &["config", "--get", "core.hooksPath"])
         .expect("git config");
     assert!(
-        !hooks.success && hooks.stdout.trim().is_empty(),
+        hooks.success && hooks.stdout.trim() == "/dev/null",
         "config injection survived: {hooks:?}"
+    );
+    assert!(
+        !hooks.stdout.contains("hostile-hooks"),
+        "the caller's hooks directory survived: {hooks:?}"
     );
 
     // create: a repository workspace root becomes a worktree of that repository.

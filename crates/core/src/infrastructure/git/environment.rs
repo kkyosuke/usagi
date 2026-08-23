@@ -27,14 +27,56 @@ use std::process::Command;
 /// runs, and `GIT_TRACE*` names a file git writes.
 pub const INHERITED_GIT_VARIABLES: &[&str] = &["GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"];
 
+/// The configuration a confined git subprocess is forced to run with, as
+/// `(key, value)` pairs injected at the highest precedence git has.
+///
+/// Dropping the inherited `GIT_*` namespace scopes the command to a repository;
+/// it does not stop *that repository* from naming programs for git to run. A
+/// checkout runs the repository's `post-checkout` hook, an enumeration runs its
+/// `core.fsmonitor`, and a diff runs its pager — all with the privileges of the
+/// usagi process, for repositories the operator only asked to open. These are
+/// the keys that turn those hooks off.
+///
+/// The system and global config are deliberately *not* suppressed here. A
+/// product-owned clone of a private repository needs the operator's credential
+/// helper and SSH configuration, and a repository-local arbitrary command is a
+/// different thing from the transport the operator configured for themselves.
+/// The read-only git handed to a root Agent is confined further, because that
+/// one has no reason to reach a remote at all.
+///
+/// This does not cover a checkout filter: `filter.<driver>.smudge` is selected
+/// by a tracked `.gitattributes` under a driver name the repository chooses, so
+/// no fixed key list disables it. Materialising a worktree without running
+/// filter processes is tracked separately (issue #675).
+pub const CONFINED_GIT_CONFIG: &[(&str, &str)] = &[
+    // A repository-supplied file-system monitor is a command git runs on every
+    // enumeration, including the `git ls-files` behind issue numbering.
+    ("core.fsmonitor", "false"),
+    // `/dev/null` is a directory that contains no hook, so every hook git looks
+    // for — `post-checkout` on `git worktree add` above all — is absent.
+    ("core.hooksPath", "/dev/null"),
+    // Recursing into submodules multiplies every one of these surfaces by the
+    // submodules' own configuration.
+    ("submodule.recurse", "false"),
+    // Output is read by this process, never by a person at a terminal, so a
+    // configured pager is only a program the repository gets to run.
+    ("core.pager", "cat"),
+];
+
 /// The values every confined git subprocess is given, whatever the parent held.
 ///
 /// `LC_ALL` pins git's messages to the C locale because callers branch on them
 /// (`git worktree remove` reporting "is not a working tree" is a no-op, not a
 /// failure). `GIT_TERMINAL_PROMPT` refuses credential prompts: a daemon has no
 /// terminal to answer one on, so a prompt would hang a session operation instead
-/// of failing it. Configured credential helpers still run.
-pub const CONFINED_GIT_VALUES: &[(&str, &str)] = &[("GIT_TERMINAL_PROMPT", "0"), ("LC_ALL", "C")];
+/// of failing it. Configured credential helpers still run. `GIT_OPTIONAL_LOCKS`
+/// keeps a read-only query from taking the index lock, so an observation of a
+/// workspace cannot contend with the operator's own git.
+pub const CONFINED_GIT_VALUES: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("LC_ALL", "C"),
+    ("GIT_OPTIONAL_LOCKS", "0"),
+];
 
 /// Whether an inherited variable named `name` must be dropped before running
 /// git: everything in the `GIT_*` namespace except [`INHERITED_GIT_VARIABLES`].
@@ -61,6 +103,15 @@ fn confine(command: &mut Command, inherited: &[OsString]) {
     for (name, value) in CONFINED_GIT_VALUES {
         command.env(name, value);
     }
+    // `GIT_CONFIG_COUNT` and its numbered pairs outrank every config file git
+    // would otherwise read, including the repository's own. The count is derived
+    // from the list so the two can never disagree, and it is written after the
+    // removals above so an inherited injection cannot survive underneath it.
+    command.env("GIT_CONFIG_COUNT", CONFINED_GIT_CONFIG.len().to_string());
+    for (index, (key, value)) in CONFINED_GIT_CONFIG.iter().enumerate() {
+        command.env(format!("GIT_CONFIG_KEY_{index}"), key);
+        command.env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
 }
 
 /// A `git` command scoped to `repo`, with the environment confined to it.
@@ -80,8 +131,8 @@ pub fn confined_git_command(repo: &Path) -> Command {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFINED_GIT_VALUES, INHERITED_GIT_VARIABLES, confine, confined_git_command,
-        is_confined_variable,
+        CONFINED_GIT_CONFIG, CONFINED_GIT_VALUES, INHERITED_GIT_VARIABLES, confine,
+        confined_git_command, is_confined_variable,
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
@@ -164,12 +215,21 @@ mod tests {
         confine(&mut command, &inherited);
 
         let envs = envs(&command);
-        for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG_COUNT"] {
+        for name in ["GIT_DIR", "GIT_WORK_TREE"] {
             assert!(
                 envs.contains(&(name.to_owned(), None)),
                 "{name} was not removed: {envs:?}"
             );
         }
+        // An inherited `GIT_CONFIG_COUNT` is not merely removed: it is replaced
+        // by this policy's own count, so the injected keys are what git reads.
+        assert!(
+            envs.contains(&(
+                "GIT_CONFIG_COUNT".to_owned(),
+                Some(CONFINED_GIT_CONFIG.len().to_string())
+            )),
+            "the injected config count did not replace the inherited one: {envs:?}"
+        );
         // The inherited transport variable and everything outside the namespace
         // are left to the parent environment, so they carry no entry at all.
         for name in ["GIT_SSH_COMMAND", "PATH"] {
@@ -184,6 +244,69 @@ mod tests {
                 "{name} was not injected: {envs:?}"
             );
         }
+    }
+
+    /// The keys that stop a repository from naming a program for git to run are
+    /// part of the policy, not of any one call site. Losing one of them silently
+    /// re-enables an executable helper on every product-owned git call.
+    #[test]
+    fn the_confined_configuration_disables_every_repository_supplied_helper() {
+        let injected: Vec<&str> = CONFINED_GIT_CONFIG.iter().map(|(key, _)| *key).collect();
+        for key in [
+            "core.hooksPath",
+            "core.fsmonitor",
+            "submodule.recurse",
+            "core.pager",
+        ] {
+            assert!(injected.contains(&key), "{key} is no longer confined");
+        }
+        assert_eq!(
+            CONFINED_GIT_CONFIG
+                .iter()
+                .find(|(key, _)| *key == "core.hooksPath")
+                .map(|(_, value)| *value),
+            Some("/dev/null"),
+        );
+        // The operator's own transport stays reachable: a private clone needs
+        // the credential helper and SSH configuration they set for themselves.
+        for key in ["credential.helper", "core.sshCommand"] {
+            assert!(!injected.contains(&key), "{key} must not be confined");
+        }
+    }
+
+    /// Git reads `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` for `n` below
+    /// `GIT_CONFIG_COUNT`. A count that does not match the pairs makes git fail
+    /// the invocation outright, so the two are pinned together here.
+    #[test]
+    fn the_injected_configuration_is_numbered_contiguously_from_zero() {
+        let mut command = Command::new("git");
+        confine(&mut command, &[]);
+        let envs = envs(&command);
+        let value_of = |name: &str| {
+            envs.iter()
+                .find(|(entry, _)| entry == name)
+                .and_then(|(_, value)| value.clone())
+        };
+
+        assert_eq!(
+            value_of("GIT_CONFIG_COUNT"),
+            Some(CONFINED_GIT_CONFIG.len().to_string())
+        );
+        for (index, (key, value)) in CONFINED_GIT_CONFIG.iter().enumerate() {
+            assert_eq!(
+                value_of(&format!("GIT_CONFIG_KEY_{index}")).as_deref(),
+                Some(*key)
+            );
+            assert_eq!(
+                value_of(&format!("GIT_CONFIG_VALUE_{index}")).as_deref(),
+                Some(*value)
+            );
+        }
+        assert_eq!(
+            value_of(&format!("GIT_CONFIG_KEY_{}", CONFINED_GIT_CONFIG.len())),
+            None,
+            "a pair past the count would be ignored, and one missing below it fails the command"
+        );
     }
 
     #[test]
