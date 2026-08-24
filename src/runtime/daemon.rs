@@ -4684,7 +4684,7 @@ fn start_ipc_accept_loop(
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                        Some("dispatch_tool") => dispatch_dispatch_tool(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
+                                        Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, wait: DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation } }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
                                             let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
@@ -4870,11 +4870,16 @@ impl Drop for ShutdownOnIpcWorkerExit {
     }
 }
 
+struct DispatchToolContext<'a> {
+    agent: &'a SharedAgentRuntime,
+    bound: &'a ConnectionWorkspace,
+    pr_inventory: &'a SharedPrInventory,
+    decisions: &'a UserDecisionStore,
+    wait: DecisionWaitContext<'a>,
+}
+
 fn dispatch_dispatch_tool(
-    agent: &SharedAgentRuntime,
-    bound: &ConnectionWorkspace,
-    decisions: &UserDecisionStore,
-    wait: DecisionWaitContext<'_>,
+    context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -4897,9 +4902,24 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::AgentInbox
         )
     }) {
-        dispatch_agent_tool(agent, bound, request_id, body, hello)
+        dispatch_agent_tool(
+            context.agent,
+            context.bound,
+            context.pr_inventory,
+            request_id,
+            body,
+            hello,
+        )
     } else {
-        dispatch_user_decision(agent, bound, decisions, wait, request_id, body, hello)
+        dispatch_user_decision(
+            context.agent,
+            context.bound,
+            context.decisions,
+            context.wait,
+            request_id,
+            body,
+            hello,
+        )
     }
 }
 
@@ -4907,6 +4927,7 @@ fn dispatch_dispatch_tool(
 fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
+    pr_inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -5239,16 +5260,25 @@ fn dispatch_agent_tool(
                     .map_or(input.summary.clone(), |error| {
                         format!("{}: {error}", input.summary)
                     });
-                let delivered = runtime.report_from_mcp(
+                let delivery = runtime.report_from_mcp(
                     &credential.credential,
                     input.run_id,
                     kind,
                     summary,
                     input.result,
                 )?;
+                drop(runtime);
+                let reported_pr = delivery
+                    .committed
+                    .as_ref()
+                    .filter(|message| message.kind == InboxKind::Completed)
+                    .and_then(|message| message.result.as_ref())
+                    .and_then(|result| result.pr.as_deref());
+                project_reported_pr(pr_inventory, delivery.worker.session_id, reported_pr)
+                    .inspect_err(|_| ErrorLog::record("reported PR projection failed"))?;
                 Ok((
                     ResponseOutcome::Ok,
-                    serde_json::json!({"delivered_to": delivered}),
+                    serde_json::json!({"delivered_to": delivery.delivered_to}),
                 ))
             }
             DispatchToolAction::AgentInbox => {
@@ -5284,6 +5314,24 @@ fn dispatch_agent_tool(
             serde_json::Value::Null,
         ),
     }
+}
+
+fn project_reported_pr(
+    inventory: &SharedPrInventory,
+    session: Option<SessionId>,
+    candidate: Option<&str>,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    let (Some(session), Some(candidate)) = (session, candidate) else {
+        return Ok(());
+    };
+    inventory
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR inventory is unavailable"))?
+        .observe_reported(session, candidate)
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR projection is unavailable"))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -14938,6 +14986,91 @@ mod tests {
                 .store(self.inventory.try_lock().is_ok(), Ordering::Release);
             Ok("{\"title\":\"production\",\"state\":\"MERGED\",\"headRefOid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}".into())
         }
+    }
+
+    #[test]
+    fn structured_pr_report_enters_the_worker_session_inventory_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Active,
+        ))));
+
+        project_reported_pr(&inventory, Some(session), Some("#1")).unwrap();
+        project_reported_pr(&inventory, None, Some("https://github.com/o/r/pull/1")).unwrap();
+        assert!(
+            inventory
+                .lock()
+                .unwrap()
+                .snapshot(session)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+
+        project_reported_pr(
+            &inventory,
+            Some(session),
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap();
+        project_reported_pr(
+            &inventory,
+            Some(session),
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap();
+
+        let snapshot = inventory.lock().unwrap().snapshot(session).unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(
+            snapshot.entries[0].identity.as_url(),
+            "https://github.com/o/r/pull/1"
+        );
+        assert!(snapshot.entries[0].auto_open);
+    }
+
+    #[test]
+    fn structured_pr_projection_can_retry_after_a_fenced_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let refused = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Draining,
+        ))));
+
+        let error = project_reported_pr(
+            &refused,
+            Some(session),
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            usagi_core::infrastructure::ipc::ErrorCode::Unavailable
+        );
+
+        let active = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Active,
+        ))));
+        project_reported_pr(
+            &active,
+            Some(session),
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap();
+        assert_eq!(
+            active
+                .lock()
+                .unwrap()
+                .snapshot(session)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
     }
 
     #[test]
