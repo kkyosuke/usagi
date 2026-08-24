@@ -369,7 +369,10 @@ ANSI span の reset 後にも dim を再適用するため、Git の色 span が
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
 選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。`+ new session`
-行では削除しない。`Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
+行では削除しない。TUI の force は削除全体に効き、未コミットの変更を持つ worktree だけでなく、基点へ
+マージされていない session ブランチも破棄する（`git branch -d` ではなく `-D`）。したがって `X` は、
+worktree の撤去だけが済んでブランチ削除で `failed` に落ちた session も 1 回で片付けられる。`x` は
+両方とも安全側で、未マージのブランチが残っていれば削除は `failed` になる。`Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
 [workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
 待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
@@ -763,9 +766,10 @@ sidebar は daemon snapshot の `available` session に加えて、名前を占�
 既存 pane tab が残っている場合だけ Enter で Closeup を開ける。これは Agent へ `Ctrl-D` を送り global slot を解放する
 回収経路であり、session の scope や checkout を再び使用可能にはしない。各行の可否は snapshot の lifecycle
 から client 側で導出する（`SessionLifecycle::capabilities` が正本）。ただし delete stage の `failed` 行を Enter で選択した場合は
-既存 pane より先に「強制削除しますか？」の Yes/No modal を開く。Yes だけが同じ stable session identity の
+既存 pane より先に「強制削除しますか？」の Yes/No modal を開く。Yes は同じ stable session identity の
 worktree 強制削除と未マージ branch の破棄を許可した remove を送信し、No / Esc は何も削除せず閉じる。
-通常の `X` / `--force` は従来どおり worktree だけを強制し、未マージ branch は保護する。`deleting` session も表示し、削除中の行
+`X` と Closeup の `close -f` は同じ force を確認なしで送るため、この modal は Enter 経路に確認を足すもので
+あって branch 破棄の唯一の入口ではない。未マージ branch を保護したまま削除するのは `x` である。`deleting` session も表示し、削除中の行
 （Danger の `✂` と wave）として描く。daemon は remove を受理した時点で応答し、worktree の撤去は daemon 所有の
 worker が続けるため（[5. daemon の session teardown worker](05-daemon.md#session-teardown-worker)）、この行は
 撤去が終わるまで（巨大な `target/` では分オーダー）残り、完了で消える。`deleting` は使用不可かつ削除不可
@@ -955,7 +959,8 @@ window title 引数）を argv として実行する。URL を shell command に
 PR が Merged へ遷移した session は短時間の celebration state を持ち、その間 Garden が表示中なら当該 plot のうさぎが
 `PR merged!` と一度だけ喜ぶ。reduced motion では点滅を止める。
 Closeup の `close [-f|--force]` は、選択中 session の削除を Overview と同じ daemon session-command port へ
-直接依頼し、`-f` と `--force` は同値である。target、未知 flag、重複 flag は安全に拒否する。
+直接依頼し、`-f` と `--force` は同値である。force の意味は `X` と同じで、dirty な worktree と未マージの
+session ブランチの両方を破棄する。target、未知 flag、重複 flag は安全に拒否する。
 
 `session remove -s [--force]`（`--select` も同義）は、現在選択中の row を即時削除せず、中央の
 session checklist を開く。`↑`/`↓` または `j`/`k` で cursor を移動し、Space で複数 row を選び、Enter で

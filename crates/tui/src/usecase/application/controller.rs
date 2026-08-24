@@ -3989,7 +3989,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
-        // Switch の `x` / `X` removes only the cursor's session.  Keep this
+        // Switch の `x` / `X` removes only the cursor's session.  `X` forces the
+        // whole removal — a dirty worktree *and* an unmerged branch.  Keep this
         // unavailable while an overlay owns input, and never turn the workspace
         // root or the new-session row into a deletion target.
         AppKey::Char('x' | 'X')
@@ -4038,6 +4039,12 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
 
 /// Request removal for Switch's selected session and leave the cursor on the
 /// preceding row while the presentation keeps the target as a loading skeleton.
+///
+/// `force` is the whole forced removal, not just the dirty-worktree half: it
+/// also discards an unmerged session branch. Splitting the two would leave `X`
+/// unable to finish a removal whose worktree is already gone and whose branch
+/// is the only thing Git still refuses to drop, which is exactly the state a
+/// failed delete parks the session in.
 fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
@@ -4047,7 +4054,7 @@ fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
         workspace: state.workspace,
         session,
         force,
-        force_delete_branch: false,
+        force_delete_branch: force,
     }]
 }
 
@@ -4630,11 +4637,13 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
         closeup::Command::Close { arguments } => {
             if let Some(force) = parse_close_force(&arguments) {
+                // One meaning of "force" across every TUI removal: `-f` drops a
+                // dirty worktree *and* an unmerged branch, exactly like `X`.
                 Some(Effect::RemoveSession {
                     workspace: state.workspace,
                     session: active_session,
                     force,
-                    force_delete_branch: false,
+                    force_delete_branch: force,
                 })
             } else {
                 state.notice = Some(Notice::new("invalid close arguments"));
@@ -7297,7 +7306,9 @@ mod tests {
                 workspace,
                 session: second,
                 force: true,
-                force_delete_branch: false,
+                // `X` is the whole forced removal: it also discards an unmerged
+                // branch, so a delete that only Git's safe `-d` blocks finishes.
+                force_delete_branch: true,
             }]
         );
         assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
@@ -7365,6 +7376,40 @@ mod tests {
                 force_delete_branch: false,
             }]
         );
+    }
+
+    // The state a failed delete parks a session in — worktree already gone, the
+    // unmerged branch the only thing left — is finishable from Switch with one
+    // key. `X` carries `force_delete_branch`, so `git branch -D` runs and the
+    // retry stops landing on the same `-d` refusal.
+    #[test]
+    fn shift_x_finishes_a_delete_that_only_an_unmerged_branch_still_blocks() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: Some(FailureStage::Delete),
+                    failure_summary: Some("safe detail".to_owned()),
+                },
+            )]))),
+        );
+
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('X'))),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+            }]
+        );
+        // The key acts directly: it never routes through the Enter confirmation.
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.force_remove_confirmation(), None);
     }
 
     #[test]
@@ -7832,7 +7877,7 @@ mod tests {
                 workspace,
                 session,
                 force: true,
-                force_delete_branch: false,
+                force_delete_branch: true,
             }]
         );
 
