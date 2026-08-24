@@ -53,7 +53,18 @@ instructions = "要求を分解し、session の結果を統合する。"
 summary = "実装と検証を行う"
 scopes = ["session"]
 instructions = "依頼された変更を実装し、リスクに応じたテストを実行する。"
+
+[roles.manager]
+summary = "大きいタスクを分解・統合する"
+scopes = ["session"]
+instructions = "タスクを Executor へ委譲し、各結果を検証・統合して直近 caller へ報告する。"
 ```
+
+role は組織上の責務を prompt として与える。Director が小さいタスクを session role の Executor へ直接 dispatch
+する場合は 2 層、大きいタスクを Manager role へ dispatch し、その Manager が Executor を dispatch する場合は
+3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Executor → Manager → Director と
+一段ずつ返る。role 自体は authorization ではないため、role 名だけで委譲権限を強制しない。durable supervisor run
+として実行するタスクでは、深さ・dispatch 数・並列数を supervisor の `ExecutionPolicy` が制限する。
 
 reader は future version、不正な role ID、空の `scopes`、未知 scope、16 KiB を超える instruction、NUL、対応 scope を許可しない
 default を拒否する。workspace catalog の権威は target session branch ではなく daemon に登録された workspace root である。

@@ -6745,16 +6745,24 @@ fn dispatch_session_action(
         }
         SessionAction::Complete => {
             let message = string("message")?;
+            let credential = string("_caller_credential")?;
             let scope = caller_scope()?;
-            let report = format!("Session {} completed:\n\n{message}", scope.session_id);
             let delivery = agent
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .prompt(scope.workspace_id, None, &report, PromptMode::Auto)
+                .report_from_mcp(
+                    credential,
+                    None,
+                    usagi_core::domain::agent::InboxKind::Completed,
+                    message.to_owned(),
+                    None,
+                )
                 .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
-            reply(
-                serde_json::json!({"session_id": scope.session_id, "reported_to": ":root", "delivered_to": delivery.delivered_to}),
-            )
+            reply(serde_json::json!({
+                "session_id": scope.session_id,
+                "reported_to": delivery.delivered_to,
+                "delivered_to": "inbox"
+            }))
         }
         SessionAction::Pr => {
             let name = string("name")?;

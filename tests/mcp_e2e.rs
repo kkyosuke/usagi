@@ -280,7 +280,7 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"brief-worker","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"brief triaged"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_complete","arguments":{"message":"brief triaged"}}}' \
   | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
     );
