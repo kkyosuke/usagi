@@ -59,8 +59,10 @@ client request や IPC payload から model を受け取らない。
 
 | 設定 | Claude / Codex の MCP 配線 | system prompt |
 |---|---|---|
-| `enabled = false`（既定） | 既存の `usagi` だけ。`usagi-llm` の server 名・command・argv を一切載せない | scope 別 instruction だけ。delegation instruction を合成しない |
-| `enabled = true` | `usagi` の直後に `usagi-llm` を追加し、同じ usagi binary を `llm-mcp --model <model>` で起動する | scope 別 instruction の後ろに `local_llm_ask` への delegation instruction を合成する |
+| `enabled = false`（既定） | 既存の `usagi` だけ。`usagi-llm` の server 名・command・argv を一切載せない | `<tools>` に `- local_llm_ask:` 行を載せない |
+| `enabled = true` | `usagi` の直後に `usagi-llm` を追加し、同じ usagi binary を `llm-mcp --model <model>` で起動する | `<tools>` に `- local_llm_ask:` の delegation 行を 1 行載せる |
+
+合成順・fragment の構造・省略条件は [10. session role#prompt 合成](10-session-roles.md#prompt-合成) が正本である。
 
 `model` は `qwen2.5-coder:7b` / `qwen2.5-coder:3b` / `qwen2.5-coder:1.5b` /
 `qwen2.5:7b` の closed allowlist である。Global 設定ファイルを手編集して allowlist 外の値を置いても、
@@ -149,6 +151,10 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 設定変更を反映するには MCP client の再接続または server の再起動が必要である。設定の保存先と継承規則は
 [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)を正本とする。Global または Workspace の
 設定が読み取れない場合は、既定の有効値へ黙って戻さず MCP serve loop の開始前に失敗する。
+
+daemon が Agent を起動するときは、この同じ 2 層を同じ規則で解決して system prompt の `<tools>` fragment を組む。
+registry に載らない系統を prompt が述べることはなく、設定が読めなければ launch も同じく失敗する
+（正本は [10. session role#`<tools>` fragment](10-session-roles.md#tools-fragment)）。
 
 | tool | 実挙動 |
 |---|---|
@@ -326,4 +332,8 @@ resource のレジストリと応答 `Value` の組み立ては純関数（`crat
 
 ガイドは `tools/list` に載る実在の tool 名だけを使い、daemon を権威とする orchestration の
 経路と制約を説明する。durable effect の無い tool を手順には含めない。agent 起動プロンプトへ
-大きな説明文を注入せず、必要な導線はこの resource で発見させる。
+大きな説明文を注入せず、`<tools>` fragment はこの URI への 1 行のポインタだけを持つ
+（[10. session role#`<tools>` fragment](10-session-roles.md#tools-fragment)）。
+
+ガイド本文は availability で出し分けない静的テキストで、無効な系統の手順が残る。読み手が取り違えないよう、
+「無効な系統は `tools/list` に現れず、掲載されていない tool は使わない」という不変条件をガイド自身が前提モデルに書く。

@@ -173,6 +173,12 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     /// this owner's records and journals. The composition root drives it
     /// periodically so a daemon whose terminals are idle still ages its finals
     /// out of the budget.
+    /// Whether this workspace still has a generic terminal that is running.
+    #[must_use]
+    pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
+        self.coordinator.has_running_in_workspace(workspace)
+    }
+
     pub fn collect_retention_garbage(&mut self) -> usize
     where
         S: TerminalStore,
@@ -2036,6 +2042,11 @@ mod tests {
         assert_eq!(live[0].kind, TerminalKind::Terminal);
         assert!(live[0].live);
 
+        // The workspace-wide question a retirement asks: this workspace has a
+        // running child, another workspace does not.
+        assert!(runtime.has_running_in_workspace(workspace));
+        assert!(!runtime.has_running_in_workspace(WorkspaceId::new()));
+
         // A different scope (foreign session) sees nothing.
         let foreign = TerminalLaunchScope {
             workspace_id: workspace,
@@ -2052,6 +2063,8 @@ mod tests {
         let exited = TerminalOwner::inventory(&runtime, &scope);
         assert_eq!(exited.len(), 1);
         assert!(!exited[0].live);
+        // An exited child no longer keeps its workspace.
+        assert!(!runtime.has_running_in_workspace(workspace));
 
         // The exited terminal now appears as a completed tombstone (#525) with
         // its exit status; a foreign scope still sees none.

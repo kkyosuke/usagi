@@ -569,6 +569,30 @@ impl SessionRuntime {
         self.root_worktree_id
     }
 
+    /// Whether this workspace still has durable work only its owner can finish.
+    ///
+    /// A session mid-creation or mid-teardown, and an operation this daemon
+    /// accepted but has not settled, both outlive the client that asked for
+    /// them. Giving the workspace back while either is open would leave the work
+    /// to a daemon that never accepted it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::Storage`] when the durable state cannot be
+    /// read.
+    pub fn has_unfinished_work(&self) -> Result<bool, SessionRuntimeError> {
+        let state = self.state()?;
+        Ok(state.sessions.iter().any(|session| {
+            !matches!(
+                session.lifecycle,
+                usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            )
+        }) || state
+            .operations
+            .iter()
+            .any(|operation| !operation.status.terminal()))
+    }
+
     /// Returns the durable workspace identity this runtime bound.
     ///
     /// A daemon that owns several workspaces routes a fenced request to the
@@ -2824,10 +2848,14 @@ mod tests {
     #[test]
     fn create_lists_overview_and_removes_a_durable_session() {
         let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        // An empty workspace has nothing only its owner can finish, so it may be
+        // given back; a session mid-teardown is exactly such work.
+        assert!(!runtime.has_unfinished_work().unwrap());
         let created = runtime
             .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
             .unwrap();
         assert_eq!(created.body["sessions"].as_array().unwrap().len(), 1);
+        assert!(!runtime.has_unfinished_work().unwrap());
         let list = runtime
             .handle(SessionAction::List, "read", &json!({}))
             .unwrap();
@@ -4499,6 +4527,10 @@ instructions = "code"
         assert_eq!(reply.body["sessions"][0]["lifecycle"], "deleting");
         assert!(session_root.exists());
         assert!(signal.wait(std::time::Duration::from_millis(1)));
+
+        // A row in a transient state is work only this daemon can finish, so the
+        // workspace it belongs to must not be given back while it is there.
+        assert!(runtime.lock().unwrap().has_unfinished_work().unwrap());
 
         // The pending teardown is derived from that durable state alone.
         let pending = runtime.lock().unwrap().pending_teardowns().unwrap();

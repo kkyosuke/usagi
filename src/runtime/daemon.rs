@@ -21,7 +21,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::prompt::session_system_prompt_with_role;
+use usagi_core::domain::agent::prompt::{McpToolFamilies, PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -42,6 +42,7 @@ use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
+use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::infrastructure::workspace_state;
@@ -532,21 +533,22 @@ impl CodexProvisioner for RootCodexProvisioner {
         let role =
             effective_role_instruction(&self.workspaces, &self.data_home, &workspace_root, context)
                 .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
-        let local_llm_model = context
+        let tools = context
             .inject_mcp
-            .then(|| configured_local_llm_model(&self.data_home))
-            .flatten();
-        let mut arguments = context
-            .inject_mcp
-            .then(|| codex_integration_arguments(&self.mcp_command, local_llm_model.as_deref()))
+            .then(|| configured_mcp_tools(&self.data_home, &workspace_root))
+            .transpose()
+            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        let mut arguments = tools
+            .as_ref()
+            .map(|tools| codex_integration_arguments(&self.mcp_command, tools.model()))
             .transpose()
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
         arguments.extend(codex_system_prompt_arguments(
             mode,
+            tools.as_ref().map(ConfiguredMcpTools::families),
             role.as_ref()
                 .map(|(id, instructions)| (id, instructions.as_str())),
-            local_llm_model.is_some(),
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
@@ -791,13 +793,14 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         let role =
             effective_role_instruction(&self.workspaces, &self.data_home, &workspace_root, context)
                 .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
-        let local_llm_model = context
+        let tools = context
             .inject_mcp
-            .then(|| configured_local_llm_model(&self.data_home))
-            .flatten();
-        let mut arguments = context
-            .inject_mcp
-            .then(|| claude_mcp_arguments(&self.mcp_command, local_llm_model.as_deref()))
+            .then(|| configured_mcp_tools(&self.data_home, &workspace_root))
+            .transpose()
+            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
+        let mut arguments = tools
+            .as_ref()
+            .map(|tools| claude_mcp_arguments(&self.mcp_command, tools.model()))
             .transpose()
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
@@ -807,9 +810,9 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         );
         arguments.extend(claude_system_prompt_arguments(
             mode,
+            tools.as_ref().map(ConfiguredMcpTools::families),
             role.as_ref()
                 .map(|(id, instructions)| (id, instructions.as_str())),
-            local_llm_model.is_some(),
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| ClaudeProvisionFailure::MaterializationFailed)?;
@@ -1258,14 +1261,18 @@ fn claude_settings_arguments(usagi: &Path) -> Result<Vec<String>, ()> {
 /// hook command payload, this never crosses a shell or JSON boundary.
 fn claude_system_prompt_arguments(
     mode: SandboxMode,
+    mcp: Option<McpToolFamilies>,
     role: Option<(&usagi_core::domain::role::RoleId, &str)>,
-    local_llm_delegation: bool,
 ) -> Vec<String> {
-    claude_prompt_arguments(session_system_prompt_with_role(
-        mode == SandboxMode::Root,
-        role,
-        local_llm_delegation,
-    ))
+    claude_prompt_arguments(launch_system_prompt(prompt_scope(mode), mcp, role))
+}
+
+/// The prompt boundary a sandbox mode launches into.
+const fn prompt_scope(mode: SandboxMode) -> PromptScope {
+    match mode {
+        SandboxMode::Root => PromptScope::Root,
+        SandboxMode::Session => PromptScope::Session,
+    }
 }
 
 fn claude_prompt_arguments(prompt: String) -> Vec<String> {
@@ -1396,14 +1403,10 @@ fn codex_integration_arguments(
 /// Both argv elements stay ephemeral and precede the durable product argv.
 fn codex_system_prompt_arguments(
     mode: SandboxMode,
+    mcp: Option<McpToolFamilies>,
     role: Option<(&usagi_core::domain::role::RoleId, &str)>,
-    local_llm_delegation: bool,
 ) -> Vec<String> {
-    codex_developer_instructions_arguments(&session_system_prompt_with_role(
-        mode == SandboxMode::Root,
-        role,
-        local_llm_delegation,
-    ))
+    codex_developer_instructions_arguments(&launch_system_prompt(prompt_scope(mode), mcp, role))
 }
 
 fn codex_developer_instructions_arguments(prompt: &str) -> Vec<String> {
@@ -1448,26 +1451,72 @@ fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result
     Ok(claude_product_mcp_arguments(command, local_llm_model))
 }
 
-/// Read the daemon-owned global setting at provision time. An unreadable file
-/// fails closed to disabled; a hand-edited model has already been sanitized by
+/// What the MCP server this launch injects will expose: the tool families it
+/// registers and the local-LLM model it wires beside itself.
+///
+/// The local-LLM model is held as the single `Option`, so "the delegation server
+/// is wired" and "a model was chosen" cannot disagree.
+struct ConfiguredMcpTools {
+    issue: bool,
+    memory: bool,
+    local_llm_model: Option<String>,
+}
+
+impl ConfiguredMcpTools {
+    /// The families the injected server registers, as the prompt describes them.
+    fn families(&self) -> McpToolFamilies {
+        McpToolFamilies {
+            issue: self.issue,
+            memory: self.memory,
+            local_llm: self.local_llm_model.is_some(),
+        }
+    }
+
+    fn model(&self) -> Option<&str> {
+        self.local_llm_model.as_deref()
+    }
+}
+
+/// Resolve the effective MCP tool configuration for one launch.
+///
+/// Two authorities, each the one the MCP server itself uses. Issue and memory
+/// availability is the Global baseline overlaid with the *registered* workspace's
+/// `.usagi/settings.json` — the same two layers `usagi mcp` resolves — and that
+/// file lives only in the registered root, never in a session worktree. The
+/// local-LLM model stays Global-only, which `with_local` preserves by not owning
+/// it. A hand-edited model has already been sanitized by
 /// [`Storage::load_settings`].
 ///
 /// Global settings live in the *selected* directory — that is where
 /// `Storage::open_default` and the daemon's own [`UserEnvironment`] write them —
 /// so this reads the same file those writers own, not the mode-neutral base.
-fn configured_local_llm_model(data_home: &paths::DataHome) -> Option<String> {
-    match Storage::new(data_home.selected()).load_settings() {
-        Ok(settings) => settings
-            .local_llm
-            .enabled
-            .then_some(settings.local_llm.model),
-        Err(error) => {
-            ErrorLog::record(&format!(
-                "could not read global settings for local LLM: {error}"
-            ));
-            None
-        }
-    }
+///
+/// Unreadable settings fail the launch, exactly as they fail `usagi mcp` before
+/// its serve loop starts. Falling back to the defaults here would launch an agent
+/// whose prompt advertises tools its own MCP server could not register.
+fn configured_mcp_tools(
+    data_home: &paths::DataHome,
+    workspace_root: &Path,
+) -> Result<ConfiguredMcpTools, ()> {
+    let resolve = || -> anyhow::Result<ConfiguredMcpTools> {
+        let global = Storage::new(data_home.selected()).load_settings()?;
+        let local = WorkspaceSettingsStore::new(workspace_root).load()?;
+        let effective = global.with_local(&local);
+        Ok(ConfiguredMcpTools {
+            issue: effective.issue_enabled,
+            memory: effective.memory_enabled,
+            local_llm_model: effective
+                .local_llm
+                .enabled
+                .then_some(effective.local_llm.model),
+        })
+    };
+    resolve().map_err(|error| {
+        ErrorLog::record(&format!(
+            "could not resolve MCP tool settings for {}: {error}",
+            workspace_root.display()
+        ));
+    })
 }
 
 /// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
@@ -2942,7 +2991,7 @@ fn spawn_ipc_server(
         tenants: Arc::clone(&tenants),
         initial: initial.root().to_path_buf(),
     });
-    let workspaces: Workspaces = tenants;
+    let workspaces: Workspaces = tenants.clone();
     // The inventory is a whole-snapshot document, so exactly one generation may
     // write it. This process is the active one; a draining generation's projector
     // is refused the document rather than merged with it (#562).
@@ -3081,6 +3130,16 @@ fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?;
     background_workers.push(teardown_worker);
+    // Workspaces adopted for a client that has gone away are given back, so a
+    // daemon that served many of them over a day does not still own them all.
+    background_workers.push(start_tenant_retire_worker(
+        Arc::clone(&tenants),
+        DaemonWorkspaceActivity {
+            terminal: Arc::clone(&terminal),
+            agent: Arc::clone(&agent),
+        },
+        Arc::clone(&shutdown),
+    )?);
     // Before any client can observe them: roll back the sessions a delegation
     // created and then died before dispatching into.
     let compensated = reconcile_orphan_delegations(
@@ -3523,6 +3582,95 @@ where
 /// launcher dies abnormally; this worker makes the daemon reap itself as soon as
 /// it stops being the authority for its data directory (see
 /// [`usagi_daemon::usecase::custody`]).
+/// How often idle workspaces are looked at.
+const TENANT_RETIRE_TICK: Duration = Duration::from_secs(30);
+
+/// How long a workspace must have nothing to do before it is given back.
+///
+/// Long enough that leaving a workspace and coming back does not churn the
+/// fence; short enough that a workspace opened once in the morning is not still
+/// owned in the afternoon, blocking a development-mode daemon from taking it.
+const TENANT_IDLE_RETIREMENT: Duration = Duration::from_mins(10);
+
+/// What this daemon can see of a workspace's remaining work.
+///
+/// Every observation fails closed: a runtime whose lock cannot be taken, or a
+/// lifecycle document that cannot be read, keeps the workspace. Keeping one
+/// costs a fence; releasing one that is still working would hand its worktrees
+/// to a second owner.
+struct DaemonWorkspaceActivity {
+    terminal: SharedTerminalRuntime,
+    agent: SharedAgentRuntime,
+}
+
+impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
+    for DaemonWorkspaceActivity
+{
+    fn has_work(
+        &self,
+        tenant: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+    ) -> bool {
+        let workspace = tenant.workspace_id();
+        let running_terminal = self.terminal.lock().map_or(true, |terminal| {
+            terminal.has_running_in_workspace(workspace)
+        });
+        let running_agent = self
+            .agent
+            .lock()
+            .map_or(true, |agent| agent.has_running_agent(workspace));
+        let unfinished = tenant.runtime().lock().map_or(true, |runtime| {
+            runtime.has_unfinished_work().unwrap_or(true)
+        });
+        running_terminal || running_agent || unfinished
+    }
+}
+
+fn start_tenant_retire_worker(
+    tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
+    activity: DaemonWorkspaceActivity,
+    shutdown: Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_tenant_retire_worker(
+        tenants,
+        activity,
+        shutdown,
+        TENANT_RETIRE_TICK,
+        TENANT_IDLE_RETIREMENT,
+    )
+}
+
+fn spawn_tenant_retire_worker<A>(
+    tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
+    activity: A,
+    shutdown: Arc<ShutdownRequest>,
+    tick: Duration,
+    idle_for: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    A: usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime> + Send + 'static,
+{
+    let idle_for = chrono::Duration::from_std(idle_for)
+        .map_err(|_| std::io::Error::other("tenant idle period is out of range"))?;
+    std::thread::Builder::new()
+        .name("usagi-daemon-tenants".to_string())
+        .spawn(move || {
+            let worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::TenantRetirement);
+            while !shutdown.is_requested() {
+                for root in tenants.retire_idle(&activity, chrono::Utc::now(), idle_for) {
+                    ErrorLog::record(&format!(
+                        "daemon released the idle workspace {}",
+                        root.display()
+                    ));
+                }
+                if shutdown.wait_for_tick(tick) {
+                    break;
+                }
+            }
+            worker_health.finish_planned();
+        })
+}
+
 fn start_custody_worker(
     probe: FsCustodyProbe,
     owner: DaemonRecord,
@@ -12765,6 +12913,158 @@ mod tests {
         );
     }
 
+    /// The real activity observer over a fixture data directory.
+    fn daemon_activity(
+        data: &Path,
+        root: &Path,
+        generation: usagi_core::domain::id::DaemonGeneration,
+        tenants: &Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
+    ) -> DaemonWorkspaceActivity {
+        let children = Arc::new(SpawnedChildren::default());
+        let metrics = Arc::new(TerminalPipelineMetrics::default());
+        DaemonWorkspaceActivity {
+            terminal: new_terminal_runtime(
+                data,
+                generation,
+                root.to_path_buf(),
+                DaemonPty::new(Arc::clone(&metrics), Arc::clone(&children)).0,
+                Arc::clone(tenants) as Workspaces,
+                Arc::new(UserEnvironment::new(data.to_path_buf(), OpCli)),
+                usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
+                &children,
+                false,
+            )
+            .unwrap(),
+            agent: open_agent_runtime(
+                data,
+                generation,
+                Arc::clone(tenants) as Workspaces,
+                AgentPty::new(terminal_environment(), metrics, Arc::clone(&children)).0,
+                std::env::current_exe().unwrap(),
+                Arc::new(UserEnvironment::new(data.to_path_buf(), OpCli)),
+                usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention::new(),
+                AgentConcurrencyGauge::default(),
+                &children,
+                false,
+            )
+            .unwrap(),
+        }
+    }
+
+    /// A workspace with nothing left to do is given back, and one with work is
+    /// not. The observation fails closed on every side: a runtime that cannot be
+    /// read keeps its workspace, because keeping one costs a fence while
+    /// releasing a working one hands its worktrees to a second owner.
+    #[test]
+    fn an_idle_workspace_is_released_and_a_working_one_is_kept() {
+        use usagi_daemon::usecase::tenant::WorkspaceActivity;
+
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let data = temporary.path().join("data");
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        for directory in [&data, &first, &second] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let daemon_dir = data.join("daemon");
+        ensure_private_dir_all(&daemon_dir).unwrap();
+        let first_root = paths::canonical_workspace_root(&first).unwrap();
+        let second_root = paths::canonical_workspace_root(&second).unwrap();
+        let generation = usagi_core::domain::id::DaemonGeneration::new();
+        let tenants = Arc::new(TenantRegistry::new(
+            daemon_dir,
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            SystemTenantOpener {
+                data_home: data.clone(),
+                generation,
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+        let initial = tenants.adopt_initial(&first_root).unwrap();
+        let adopted = tenants.adopt(&second_root).unwrap();
+
+        // A fresh workspace has no runtime and no unfinished lifecycle work, so
+        // the real observer reports it idle; a session mid-creation does not.
+        let activity = daemon_activity(&data, &first_root, generation, &tenants);
+        assert!(!activity.has_work(&adopted));
+
+        // A handle held outside the registry keeps the workspace whatever the
+        // observation says, so the sweep only sees it once the handle is gone.
+        let now = chrono::Utc::now();
+        let idle_for = chrono::Duration::zero();
+        assert!(tenants.retire_idle(&activity, now, idle_for).is_empty());
+        drop(adopted);
+
+        // The worker gives it back and leaves the startup workspace alone.
+        let shutdown = Arc::new(ShutdownRequest::new());
+        spawn_tenant_retire_worker(
+            Arc::clone(&tenants),
+            activity,
+            Arc::clone(&shutdown),
+            Duration::from_millis(5),
+            Duration::ZERO,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tenants.adopted().len() > 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the idle workspace was not released"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            tenants
+                .adopted()
+                .iter()
+                .map(|tenant| tenant.root().to_path_buf())
+                .collect::<Vec<_>>(),
+            vec![initial.root().to_path_buf()]
+        );
+        shutdown.request();
+    }
+
+    /// An observation that cannot be made keeps the workspace.
+    #[test]
+    fn an_unreadable_runtime_keeps_its_workspace() {
+        use usagi_daemon::usecase::tenant::WorkspaceActivity;
+
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let data = temporary.path().join("data");
+        let workspace = temporary.path().join("workspace");
+        for directory in [&data, &workspace] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        ensure_private_dir_all(&data.join("daemon")).unwrap();
+        let generation = usagi_core::domain::id::DaemonGeneration::new();
+        let root = paths::canonical_workspace_root(&workspace).unwrap();
+        let tenants = Arc::new(TenantRegistry::new(
+            data.join("daemon"),
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            SystemTenantOpener {
+                data_home: data.clone(),
+                generation,
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+        let tenant = tenants.adopt_initial(&root).unwrap();
+        let activity = daemon_activity(&data, &root, generation, &tenants);
+        assert!(!activity.has_work(&tenant));
+
+        // A lifecycle runtime whose lock is poisoned cannot be read, so the
+        // workspace is kept rather than released on an unknown state.
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tenant.runtime().lock().unwrap();
+            panic!("a reader panicked while holding the lifecycle runtime");
+        }));
+        assert!(poisoned.is_err());
+        assert!(activity.has_work(&tenant));
+    }
+
     #[test]
     fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
         use usagi_core::infrastructure::ipc::WorkspaceResolver;
@@ -15807,10 +16107,22 @@ mod tests {
         use usagi_core::domain::settings::{LocalLlm, Settings};
 
         let base = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
         // Production selects the base itself, so its settings file is the base's.
         let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
         let storage = Storage::new(data_home.selected());
-        assert_eq!(configured_local_llm_model(&data_home), None);
+        let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
+        assert_eq!(tools.model(), None);
+        // Both stores default to enabled, so a workspace with no files gets both
+        // families and no delegation server.
+        assert_eq!(
+            tools.families(),
+            McpToolFamilies {
+                issue: true,
+                memory: true,
+                local_llm: false,
+            }
+        );
 
         storage
             .save_settings(&Settings {
@@ -15821,23 +16133,54 @@ mod tests {
                 ..Settings::default()
             })
             .unwrap();
+        let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
         assert_eq!(
-            configured_local_llm_model(&data_home).as_deref(),
+            tools.model(),
             Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
         );
+        assert!(tools.families().local_llm);
+    }
+
+    #[test]
+    fn tool_families_follow_the_registered_workspace_and_fail_closed_when_unreadable() {
+        use usagi_core::domain::settings::LocalSettings;
+
+        let base = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
+        let store = WorkspaceSettingsStore::new(workspace.path());
+
+        // The workspace layer decides, exactly as it does for `usagi mcp`.
+        store
+            .save(&LocalSettings {
+                issue_enabled: Some(false),
+                ..LocalSettings::default()
+            })
+            .unwrap();
+        assert_eq!(
+            configured_mcp_tools(&data_home, workspace.path())
+                .unwrap()
+                .families(),
+            McpToolFamilies {
+                issue: false,
+                memory: true,
+                local_llm: false,
+            }
+        );
+
+        // A prompt that advertised tools the MCP server cannot register would be
+        // worse than no launch, so an unreadable layer fails the provision.
+        std::fs::write(store.path(), "{ not json").unwrap();
+        assert!(configured_mcp_tools(&data_home, workspace.path()).is_err());
     }
 
     #[test]
     fn system_prompt_arguments_follow_scope_once_and_stay_parseable() {
-        use usagi_core::domain::agent::prompt::{
-            local_llm_delegation_prompt, root_prompt, session_worktree_prompt,
-        };
+        use usagi_core::domain::agent::prompt::{launch_system_prompt, scope_prompt};
 
-        for (mode, expected) in [
-            (SandboxMode::Root, root_prompt()),
-            (SandboxMode::Session, session_worktree_prompt()),
-        ] {
-            let claude = claude_system_prompt_arguments(mode, None, false);
+        for mode in [SandboxMode::Root, SandboxMode::Session] {
+            let expected = scope_prompt(prompt_scope(mode));
+            let claude = claude_system_prompt_arguments(mode, None, None);
             assert_eq!(claude, ["--append-system-prompt", expected]);
             assert_eq!(
                 claude
@@ -15847,7 +16190,7 @@ mod tests {
                 1
             );
 
-            let codex = codex_system_prompt_arguments(mode, None, false);
+            let codex = codex_system_prompt_arguments(mode, None, None);
             assert_eq!(codex[0], "-c");
             assert_eq!(
                 codex
@@ -15863,23 +16206,31 @@ mod tests {
         // A later resolve (including a resume replacement) regenerates from
         // its current scope instead of retaining the previous provision.
         assert_ne!(
-            claude_system_prompt_arguments(SandboxMode::Root, None, false),
-            claude_system_prompt_arguments(SandboxMode::Session, None, false)
+            claude_system_prompt_arguments(SandboxMode::Root, None, None),
+            claude_system_prompt_arguments(SandboxMode::Session, None, None)
         );
         assert_ne!(
-            codex_system_prompt_arguments(SandboxMode::Root, None, false),
-            codex_system_prompt_arguments(SandboxMode::Session, None, false)
+            codex_system_prompt_arguments(SandboxMode::Root, None, None),
+            codex_system_prompt_arguments(SandboxMode::Session, None, None)
         );
 
-        let claude = claude_system_prompt_arguments(SandboxMode::Session, None, true);
-        assert!(claude[1].contains(local_llm_delegation_prompt()));
-        let codex = codex_system_prompt_arguments(SandboxMode::Session, None, true);
+        // The families the injected server registers reach both products through
+        // the one composition, so neither adapter can describe a different set.
+        let families = McpToolFamilies {
+            issue: false,
+            memory: true,
+            local_llm: true,
+        };
+        let expected = launch_system_prompt(PromptScope::Session, Some(families), None);
+        assert_eq!(
+            claude_system_prompt_arguments(SandboxMode::Session, Some(families), None),
+            ["--append-system-prompt", &expected]
+        );
+        let codex = codex_system_prompt_arguments(SandboxMode::Session, Some(families), None);
         let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
-        assert!(
-            parsed["developer_instructions"]
-                .as_str()
-                .unwrap()
-                .contains(local_llm_delegation_prompt())
+        assert_eq!(
+            parsed["developer_instructions"].as_str(),
+            Some(expected.as_str())
         );
     }
 
@@ -15887,17 +16238,14 @@ mod tests {
     fn role_instruction_is_injected_once_for_claude_and_codex_without_entering_user_prompt() {
         let role = usagi_core::domain::role::RoleId::new("reviewer").unwrap();
         let instructions = "Review correctness and tests.";
-        let claude = claude_system_prompt_arguments(
-            SandboxMode::Session,
-            Some((&role, instructions)),
-            false,
-        );
+        let claude =
+            claude_system_prompt_arguments(SandboxMode::Session, None, Some((&role, instructions)));
         assert_eq!(claude[0], "--append-system-prompt");
         assert_eq!(claude[1].matches("<role id=\"reviewer\">").count(), 1);
         assert_eq!(claude[1].matches(instructions).count(), 1);
 
         let codex =
-            codex_system_prompt_arguments(SandboxMode::Session, Some((&role, instructions)), false);
+            codex_system_prompt_arguments(SandboxMode::Session, None, Some((&role, instructions)));
         let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
         let prompt = parsed["developer_instructions"].as_str().unwrap();
         assert_eq!(prompt.matches("<role id=\"reviewer\">").count(), 1);
@@ -15977,7 +16325,7 @@ instructions = "{instructions}"
         codex_arguments.extend(codex_system_prompt_arguments(
             SandboxMode::Session,
             None,
-            false,
+            None,
         ));
         codex_arguments.extend(["resume".to_owned(), "provider-session".to_owned()]);
         let codex = SpawnProvision::new([], codex_arguments);
@@ -16004,10 +16352,11 @@ instructions = "{instructions}"
             1
         );
 
-        let prompt = usagi_core::domain::agent::prompt::session_system_prompt(false, false);
+        let prompt =
+            usagi_core::domain::agent::prompt::scope_prompt(PromptScope::Session).to_owned();
         let mut claude = SpawnProvision::new(
             [],
-            claude_system_prompt_arguments(SandboxMode::Session, None, false),
+            claude_system_prompt_arguments(SandboxMode::Session, None, None),
         );
         claude.set_sandbox_launcher(SandboxLauncher {
             program: "/opt/usagi/bin/usagi".to_owned(),
@@ -16254,7 +16603,9 @@ instructions = "{instructions}"
                 })
                 .unwrap();
             assert_eq!(
-                configured_local_llm_model(&data_home).as_deref(),
+                configured_mcp_tools(&data_home, home.path())
+                    .unwrap()
+                    .model(),
                 Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
             );
 

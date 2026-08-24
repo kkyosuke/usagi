@@ -12,6 +12,7 @@ filesystem sandbox、MCP authorization、session lifecycle の権限ではない
 - [割り当てと入口](#割り当てと入口)
 - [daemon 検証](#daemon-検証)
 - [prompt 合成](#prompt-合成)
+  - [`<tools>` fragment](#tools-fragment)
 - [safe projection と非永続データ](#safe-projection-と非永続データ)
 - [互換性](#互換性)
 
@@ -85,16 +86,52 @@ process launch だけに反映される。
 
 ## prompt 合成
 
-prompt は次の順で一度だけ合成する。
+本節が Agent launch の system prompt 合成の正本である。prompt は次の 3 fragment を、この順で一度だけ合成する。
 
 ```text
 code-defined scope safety prompt
+<tools>injected MCP server が登録する tool 系統</tools>
 <role id="...">effective instructions</role>
-code-defined optional local-LLM suffix
 ```
 
-scope safety prompt は role で置換できない。Claude adapter は合成済み文字列を単一 `--append-system-prompt` 値、Codex / Sakana AI
+| fragment | 決めるもの | 省略される条件 |
+|---|---|---|
+| scope safety prompt | root / session worktree の境界 | 省略しない |
+| `<tools>` | 配線済み MCP server が公開する tool 系統 | MCP を配線しない launch |
+| `<role>` | effective role instruction | role 未割り当て |
+
+順序は層の可変性で決まる。scope safety prompt は role で置換できない。`<tools>` は launch 時点の環境の事実で、
+role より前に置くため role instruction で絞り込める。scope safety prompt は tool 名を 1 つも書かないので、
+tool 系統の可用性は `<tools>` だけが述べる。
+
+Claude adapter は合成済み文字列を単一 `--append-system-prompt` 値、Codex / Sakana AI
 adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral provision に渡す。initial user prompt へ連結しない。
+
+### `<tools>` fragment
+
+`<tools>` は 1 系統 1 行で、有効な系統だけを列挙する。無効な系統は「無い」とも書かず行そのものを落とす。
+tool 名と引数を列挙せず、`tools/list` のスキーマが正本であることと、手順が resource
+`usagi://guides/orchestration` にあることだけを述べる（正本は [7. MCP サーバ#tool 面](07-mcp.md#tool-面)）。
+
+各行は launch scope に依存せず真である文にする。行が述べるのは「どこで何が受理されるか」で、
+「この agent が何をしてよいか」ではない。例えば issue の書き込みは session worktree でだけ受理されるので、
+session では許可、root では拒否として同じ 1 行が両方で真になる。scope 別の variant を作らない。
+
+| 行 | 条件 |
+|---|---|
+| `- session:` | MCP を配線する launch では常に載る（session 系統は無効化できない） |
+| `- issue:` | effective `issue_enabled` |
+| `- memory:` | effective `memory_enabled` |
+| `- local_llm_ask:` | Global `local_llm.enabled` |
+
+`issue_enabled` / `memory_enabled` の effective 値は、Global 設定に **daemon に登録された workspace root** の
+`.usagi/settings.json` を重ねて解決する。`usagi mcp` が tool registry を組む解決と同一で、これが同一である必要がある:
+prompt が述べる系統と `tools/list` が登録する系統は同じ設定から出る。session worktree は `.usagi/settings.json` を
+持たない（git 追跡外）ため、worktree を権威にすると workspace の上書きが消える。`local_llm` は Global だけが権威である
+（正本は [7. MCP サーバ#daemon Agent への local LLM 配線](07-mcp.md#daemon-agent-への-local-llm-配線)）。
+
+設定が読めない場合は既定値へ倒さず launch を拒否し、error log に記録する。`usagi mcp` が serve loop の開始前に
+失敗するのと同じ規則である。既定へ倒すと、自身の MCP server が登録できない tool 系統を prompt が述べた Agent が起動する。
 
 ## safe projection と非永続データ
 
