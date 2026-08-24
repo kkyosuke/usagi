@@ -11,6 +11,9 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
   ブランチに乗り、PR 経由で基点ブランチへ反映される。
 - **root/coordinator は git 追跡ファイルを直接書かない**。実装や backlog の変更は対象 session
   の worktree で行う。
+- **issue / memory の tool 系統は workspace 設定で無効化できる**。無効な系統は `tools/list` に
+  現れず、名前を直接呼んでも実行されない。このガイドは有効な場合の手順を書いているので、
+  掲載されていない tool は使わない。
 
 ## 接続済みの操作
 
