@@ -5171,7 +5171,7 @@ fn dispatch_agent_tool(
                 let session_id = session_id_by_name(&snapshot, &input.name).ok_or_else(|| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                 })?;
-                let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
                 let session_metadata = snapshot
                     .get("sessions")
                     .and_then(serde_json::Value::as_array)
@@ -5211,7 +5211,7 @@ fn dispatch_agent_tool(
                     .map_err(|_| {
                         ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent status")
                     })?;
-                let agents = store.agents().map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
                 Ok((ResponseOutcome::Ok, serde_json::json!({"agents": agents})))
             }
             DispatchToolAction::AgentGet => {
@@ -5219,7 +5219,7 @@ fn dispatch_agent_tool(
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_get payload")
                 })?;
                 let item = store
-                    .agent(input.agent_id)
+                    .agent_in_workspace(workspace, input.agent_id)
                     .map_err(|_| {
                         ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable")
                     })?
@@ -6007,7 +6007,7 @@ fn dispatch_user_decision(
                 // safe and is the intended response.
                 UserDecisionDispatchError::Decision(UserDecisionError::PendingLimitReached) => (
                     ErrorCode::ResourceExhausted,
-                    "this workspace already holds the maximum number of unanswered decisions; \
+                    "the unanswered decision backlog is full for this workspace or daemon; \
                      answer some before asking another",
                 ),
                 UserDecisionDispatchError::Cancelled => {
@@ -6625,6 +6625,14 @@ fn dispatch_session_action(
             .map_err(|_| SessionRuntimeError::Storage)?
             .session_id(name)
     };
+    let bound_workspace = || {
+        bound
+            .sessions()
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?
+            .workspace_id()
+            .map_err(|_| SessionRuntimeError::Storage)
+    };
 
     match action {
         SessionAction::ResumeAgent => {
@@ -6725,10 +6733,11 @@ fn dispatch_session_action(
                 "live" => PromptMode::Live,
                 _ => return Err(SessionRuntimeError::InvalidRequest),
             };
+            let workspace = bound_workspace()?;
             let delivery = agent
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .prompt(target, prompt, mode)
+                .prompt(workspace, target, prompt, mode)
                 .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
             reply(
                 serde_json::json!({"name": name, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
@@ -6741,7 +6750,7 @@ fn dispatch_session_action(
             let delivery = agent
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .prompt(None, &report, PromptMode::Auto)
+                .prompt(scope.workspace_id, None, &report, PromptMode::Auto)
                 .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
             reply(
                 serde_json::json!({"session_id": scope.session_id, "reported_to": ":root", "delivered_to": delivery.delivered_to}),
@@ -6908,10 +6917,11 @@ fn dispatch_session_action(
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_id(&name)?;
+            let workspace = bound_workspace()?;
             let delivery = agent
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .prompt(Some(id), &prompt, PromptMode::Queue)
+                .prompt(workspace, Some(id), &prompt, PromptMode::Queue)
                 .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
             reply(
                 serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),

@@ -246,7 +246,10 @@ fn production_session_prompt_is_durable_and_status_observes_the_session() {
     assert_eq!(delivered["queued"], true);
 
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
-    assert!(dispatch.contains("continue the task"));
+    let workspace_dispatch =
+        fs::read_to_string(mcp.data_dir().join("daemon/dispatch-workspaces.json")).unwrap();
+    assert!(!dispatch.contains("continue the task"));
+    assert!(workspace_dispatch.contains("continue the task"));
     let status = tool_text(&mcp.tool("session_status", &json!({})));
     let target = status["sessions"]
         .as_array()

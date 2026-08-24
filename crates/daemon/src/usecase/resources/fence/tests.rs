@@ -39,6 +39,7 @@ fn a_draining_generation_defers_its_only_deferrable_writer_and_is_refused_the_re
     for writer in [
         SharedWriter::SupervisorState,
         SharedWriter::SessionLifecycle,
+        SharedWriter::WorkspaceDispatchRegistry,
     ] {
         assert_eq!(
             shared_write_verdict(writer, GenerationRole::Draining),
@@ -52,7 +53,7 @@ fn a_draining_generation_defers_its_only_deferrable_writer_and_is_refused_the_re
         assert_eq!(
             shared_write_verdict(writer, GenerationRole::Draining),
             WriteVerdict::Allowed,
-            "an append under a cross-process lock cannot lose an update"
+            "a locked multi-writer reducer cannot lose an update"
         );
     }
 }
@@ -64,7 +65,8 @@ fn the_inventory_names_every_writer_that_needs_the_fence() {
         vec![
             SharedWriter::PrInventory,
             SharedWriter::SupervisorState,
-            SharedWriter::SessionLifecycle
+            SharedWriter::SessionLifecycle,
+            SharedWriter::WorkspaceDispatchRegistry
         ]
     );
     assert_eq!(
