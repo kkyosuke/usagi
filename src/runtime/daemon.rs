@@ -6757,7 +6757,7 @@ fn dispatch_session_action(
                 .get_mut("sessions")
                 .and_then(serde_json::Value::as_array_mut)
             {
-                for item in items {
+                for item in items.iter_mut() {
                     if let Some(id) = item
                         .get("session_id")
                         .cloned()
@@ -6775,7 +6775,12 @@ fn dispatch_session_action(
                         let parent_session = bindings
                             .iter()
                             .filter(|binding| binding.worker.session_id == Some(id))
-                            .filter(|binding| binding.caller.agent_id != binding.worker.agent_id)
+                            // Multiple agents may hand work off inside one session, but
+                            // that does not create a new organizational level. Only a
+                            // cross-session dispatch owns a parent/child relationship.
+                            .filter(|binding| {
+                                binding.caller.session_id != binding.worker.session_id
+                            })
                             .max_by_key(|binding| {
                                 runs.iter()
                                     .find(|run| run.run_id == binding.run_id)
@@ -6784,6 +6789,61 @@ fn dispatch_session_action(
                             .and_then(|binding| binding.caller.session_id);
                         item["parent_session_id"] = serde_json::json!(parent_session);
                     }
+                }
+                let names = items
+                    .iter()
+                    .filter_map(|item| {
+                        Some((
+                            serde_json::from_value(item.get("session_id")?.clone()).ok()?,
+                            item.get("name")?.as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect::<BTreeMap<SessionId, String>>();
+                let parents = items
+                    .iter()
+                    .filter_map(|item| {
+                        let id = serde_json::from_value(item.get("session_id")?.clone()).ok()?;
+                        let parent = item
+                            .get("parent_session_id")
+                            .filter(|value| !value.is_null())
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok());
+                        Some((id, parent))
+                    })
+                    .collect::<BTreeMap<SessionId, Option<SessionId>>>();
+                for item in items {
+                    let Some(id) = item
+                        .get("session_id")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                    else {
+                        continue;
+                    };
+                    let parent = parents.get(&id).copied().flatten();
+                    item["parent_session_name"] =
+                        serde_json::json!(parent.and_then(|id| names.get(&id)));
+                    let mut lineage = Vec::new();
+                    let mut cursor = Some(id);
+                    let mut seen = BTreeSet::new();
+                    while let Some(member) = cursor
+                        && seen.insert(member)
+                    {
+                        lineage.push(member);
+                        cursor = parents
+                            .get(&member)
+                            .copied()
+                            .flatten()
+                            .filter(|parent| names.contains_key(parent));
+                    }
+                    lineage.reverse();
+                    item["organization_depth"] = serde_json::json!(lineage.len());
+                    let mut path = vec!["Director".to_owned()];
+                    path.extend(
+                        lineage
+                            .iter()
+                            .filter_map(|member| names.get(member).cloned()),
+                    );
+                    item["organization_path"] = serde_json::json!(path);
                 }
             }
             Ok(status)

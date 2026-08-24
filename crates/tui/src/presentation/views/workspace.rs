@@ -8,7 +8,7 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -135,6 +135,12 @@ pub struct ProjectedSession {
     pub failure_summary: Option<String>,
     /// Safe display-only role ID from the daemon projection.
     pub role_id: Option<String>,
+    /// Immediate organizational parent. `None` means a direct report to the
+    /// Director (or a legacy session outside the role catalog).
+    pub parent_session_id: Option<SessionId>,
+    /// Display depth below the Director. Legacy sessions without role metadata
+    /// use zero so their established flat label stays unchanged.
+    pub organization_depth: usize,
 }
 
 /// Nerd Font pull-request glyph shared with v1's right-aligned sidebar badge.
@@ -177,8 +183,45 @@ impl ProjectedSession {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         }
     }
+}
+
+fn organization_label(session: &ProjectedSession) -> String {
+    if session.organization_depth == 0 {
+        return session.label.clone();
+    }
+    format!(
+        "{}└─ {}",
+        "  ".repeat(session.organization_depth.saturating_sub(1)),
+        session.label
+    )
+}
+
+fn role_badge(session: &ProjectedSession) -> String {
+    session
+        .role_id
+        .as_ref()
+        .map(|role| format!(" [{}]", widgets::clip_to_width(role, 12)))
+        .unwrap_or_default()
+}
+
+fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, &str>) -> String {
+    let role = session
+        .role_id
+        .as_deref()
+        .map(|role| format!("[{role}] "))
+        .unwrap_or_default();
+    let lineage = session
+        .parent_session_id
+        .and_then(|parent| names.get(&parent))
+        .map_or_else(
+            || session.label.clone(),
+            |parent| format!("{parent} › {}", session.label),
+        );
+    format!("{role}{lineage}")
 }
 
 pub(crate) fn pr_summary(prs: &[PrLink]) -> Option<String> {
@@ -370,6 +413,22 @@ impl HomeProjection {
                     .get(id)
                     .and_then(|projection| projection.role_id.as_ref())
                     .map(ToString::to_string);
+                if let Some(role) = state.session_roles().get(id) {
+                    session.parent_session_id = role.parent_session_id;
+                    session.organization_depth = 1;
+                    let mut parent = role.parent_session_id;
+                    let mut seen = BTreeSet::from([*id]);
+                    while let Some(parent_id) = parent
+                        && state.sessions().contains(&parent_id)
+                        && seen.insert(parent_id)
+                    {
+                        session.organization_depth += 1;
+                        parent = state
+                            .session_roles()
+                            .get(&parent_id)
+                            .and_then(|projection| projection.parent_session_id);
+                    }
+                }
                 Some(session)
             })
             .collect::<Vec<_>>();
@@ -418,11 +477,15 @@ impl HomeProjection {
         let garden_sessions = (state.overlay()
             == Some(crate::usecase::application::controller::Overlay::Garden))
         .then(|| {
+            let names = sessions
+                .iter()
+                .map(|session| (session.id, session.label.as_str()))
+                .collect::<BTreeMap<_, _>>();
             sessions
                 .iter()
                 .map(|session| widgets::garden::GardenSession {
                     id: session.id,
-                    label: session.label.clone(),
+                    label: garden_session_label(session, &names),
                     lifecycle: session.lifecycle,
                     selected: state.selected() == Selection::Target(Target::Session(session.id)),
                     failure_summary: session.failure_summary.clone(),
@@ -2239,7 +2302,11 @@ fn home_failed_row_lines(
     } else {
         width.saturating_sub(9)
     };
-    let clipped = widgets::clip_to_width(&session.label, label_width);
+    let badge = role_badge(session);
+    let clipped = widgets::clip_to_width(
+        &organization_label(session),
+        label_width.saturating_sub(widgets::display_width(&badge)),
+    );
     let label = if selected {
         Role::Danger.style().bold().paint(&clipped)
     } else {
@@ -2247,7 +2314,7 @@ fn home_failed_row_lines(
     };
     let marker = home_row_marker(row, selected, current);
     if session.failure_stage == Some(FailureStage::Delete) {
-        let first = widgets::pad_to_width(&format!("{marker} {label}"), width);
+        let first = widgets::pad_to_width(&format!("{marker} {label}{badge}"), width);
         let detail = format!(
             "{} remove failed",
             home_session_continuation_marker(selected, current)
@@ -2259,7 +2326,7 @@ fn home_failed_row_lines(
         ];
     }
     let tag = Role::Danger.style().dim().paint("failed");
-    let first = widgets::pad_to_width(&format!("{marker} {label}  {tag}"), width);
+    let first = widgets::pad_to_width(&format!("{marker} {label}{badge}  {tag}"), width);
     let reason = session
         .failure_summary
         .as_deref()
@@ -2326,10 +2393,14 @@ fn home_row_lines_at(
             speed: 4,
         };
         let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
-        let label = widgets::shimmer_text_with(&session.label, frame, wave);
+        let badge = role_badge(session);
+        let label = widgets::shimmer_text_with(&organization_label(session), frame, wave);
         return vec![
             widgets::pad_to_width(
-                &format!("  {} {}", Role::Danger.style().bold().paint("✂"), label),
+                &format!(
+                    "  {} {label}{badge}",
+                    Role::Danger.style().bold().paint("✂")
+                ),
                 width,
             ),
             String::new(),
@@ -2345,19 +2416,21 @@ fn home_row_lines_at(
         return home_failed_row_lines(session, row, width, selected, current_marker);
     }
     let marker = home_row_marker(row, selected, current_marker);
+    let badge = session.map(role_badge).unwrap_or_default();
+    let owned_label = session.map(organization_label);
     let label = if session.is_some() {
-        widgets::clip_to_width(label, width.saturating_sub(6))
+        widgets::clip_to_width(
+            owned_label.as_deref().unwrap_or(label),
+            width
+                .saturating_sub(6)
+                .saturating_sub(widgets::display_width(&badge)),
+        )
     } else {
         label.to_string()
     };
     let label = home_row_label(row, &label, selected, current, home.mode);
     let first = if let Some(session) = session {
         let note = if session.has_notes { "✎" } else { "·" };
-        let badge = session
-            .role_id
-            .as_ref()
-            .map(|role| format!(" [{}]", widgets::clip_to_width(role, 12)))
-            .unwrap_or_default();
         widgets::pad_to_width(
             &format!(
                 "{marker} {label}{badge}  {}",
@@ -2954,6 +3027,8 @@ mod tests {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         }
     }
 
@@ -3182,6 +3257,57 @@ mod tests {
                 home_row_height(Selection::Target(Target::Session(session)))
             );
         }
+    }
+
+    #[test]
+    fn sidebar_and_garden_show_the_same_company_hierarchy_and_roles() {
+        let workspace = WorkspaceId::new();
+        let manager = SessionId::new();
+        let coder = SessionId::new();
+        let mut state = AppState::home(workspace, vec![manager, coder]);
+        let mut manager_row = projected_session(manager, "planning", "/work/planning");
+        manager_row.role_id = Some("manager".to_owned());
+        manager_row.organization_depth = 1;
+        let mut coder_row = projected_session(coder, "api", "/work/api");
+        coder_row.role_id = Some("coder".to_owned());
+        coder_row.parent_session_id = Some(manager);
+        coder_row.organization_depth = 2;
+        let rows = [manager_row, coder_row];
+
+        let sidebar = HomeProjection::from_ordered_state(&state, "atlas", Arc::from(rows.to_vec()));
+        let manager_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &sidebar,
+            Selection::Target(Target::Session(manager)),
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        let coder_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &sidebar,
+            Selection::Target(Target::Session(coder)),
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        let manager_line = strip(&manager_lines[0]);
+        let coder_line = strip(&coder_lines[0]);
+        assert!(
+            manager_line.contains("└─ planning [manager]"),
+            "{manager_line:?}"
+        );
+        assert!(coder_line.contains("  └─ api [coder]"), "{coder_line:?}");
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let garden = HomeProjection::from_ordered_state(&state, "atlas", Arc::from(rows));
+        let garden = garden.garden_sessions.as_ref().expect("garden projection");
+        assert_eq!(garden[0].label, "[manager] planning");
+        assert_eq!(garden[1].label, "[coder] planning › api");
     }
 
     /// sidebar の agent 行と Garden の plot は同じ束を読む。片方だけが inventory を

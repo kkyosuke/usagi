@@ -3512,6 +3512,12 @@ fn projection_build_counts() -> (usize, usize) {
 fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<ProjectedSession> {
     #[cfg(test)]
     SESSION_PROJECTION_BUILDS.set(SESSION_PROJECTION_BUILDS.get() + 1);
+    let known_sessions = ui
+        .workspace
+        .session_ids()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     ui.workspace
         .sessions()
         .iter()
@@ -3541,6 +3547,23 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 .get(id)
                 .and_then(|role| role.role_id.as_ref())
                 .map(ToString::to_string);
+            if let Some(role) = ui.workspace.session_roles().get(id) {
+                projected.parent_session_id = role.parent_session_id;
+                projected.organization_depth = 1;
+                let mut parent = role.parent_session_id;
+                let mut seen = BTreeSet::from([*id]);
+                while let Some(parent_id) = parent
+                    && known_sessions.contains(&parent_id)
+                    && seen.insert(parent_id)
+                {
+                    projected.organization_depth += 1;
+                    parent = ui
+                        .workspace
+                        .session_roles()
+                        .get(&parent_id)
+                        .and_then(|projection| projection.parent_session_id);
+                }
+            }
             if let Some(prs) = state.session_prs(*id) {
                 projected.pr_summary = crate::presentation::views::workspace::pr_summary(prs);
             }
@@ -8465,7 +8488,7 @@ mod tests {
             ..template.clone()
         })
         .collect();
-        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids);
+        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids.clone());
         let role = |parent_session_id, agent_status| {
             crate::usecase::application::controller::SessionRoleProjection {
                 role_id: None,
@@ -8508,6 +8531,25 @@ mod tests {
                 (1, "orphan (executor)", "ready"),
             ]
         );
+
+        let state =
+            crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
+        let projected = super::project_controller_sessions(&ui, &state);
+        assert_eq!(
+            projected
+                .iter()
+                .map(|session| (session.label.as_str(), session.organization_depth))
+                .collect::<Vec<_>>(),
+            vec![
+                ("manager", 1),
+                ("worker", 2),
+                ("stopped", 3),
+                ("running", 1),
+                ("failed", 2),
+                ("orphan", 1),
+            ]
+        );
+        assert_eq!(projected[1].parent_session_id, Some(director_child));
     }
 
     #[test]
@@ -10221,6 +10263,8 @@ mod tests {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
@@ -10352,6 +10396,8 @@ mod tests {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         }];
         let frame = render_controller_frame(
             20,

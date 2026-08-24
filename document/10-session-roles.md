@@ -42,7 +42,7 @@ version = 1
 
 [defaults]
 root = "director"
-session = "coder"
+session = "manager"
 
 [roles.director]
 summary = "全体方針を決める"
@@ -78,6 +78,10 @@ role は組織上の責務を prompt として与える。Director が小さい�
 一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
 `max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
+
+会社テンプレートでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
+`manager` とする。Director/Managerが実行者を委譲するときは `role = "coder"` を明示し、既定値に依存しない。
+sidebar は各session名の横に `[manager]` / `[coder]` と階層インデントを常時表示し、Garden は `[role] parent › session` の nameplate と session 内の Agent を表すうさぎを表示する。Director drawerはrootのDirectorを含む親子ツリーを表示する。
 
 `session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
 したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
@@ -167,7 +171,7 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 
 ## safe projection と非永続データ
 
-`session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。
+`session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて `parent_session_id` / `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、同一 session 内の Agent handoff は階層を増やさない。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
 TUI は `role_id` / `role_summary` と dispatch binding 由来の `parent_session_id` / `agent_status` を stable session identity keyed の controller projection として保持し、
