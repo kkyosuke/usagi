@@ -130,6 +130,18 @@ pub struct AgentAdmission {
     pub semantic_digest: Option<String>,
 }
 
+/// Outcome of an authenticated worker report.
+///
+/// `accepted` distinguishes the first fenced delivery from an idempotent retry.
+/// Projection consumers may react only to the former, so a duplicate report
+/// cannot introduce a different artifact after the inbox result was committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportDelivery {
+    pub delivered_to: CallerRef,
+    pub worker: WorkerRef,
+    pub accepted: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptMode {
     Auto,
@@ -2234,9 +2246,9 @@ impl AgentRuntime {
         kind: InboxKind,
         summary: String,
         result: Option<usagi_core::domain::agent::StructuredResult>,
-    ) -> Result<(), ProtocolError> {
+    ) -> Result<bool, ProtocolError> {
         if self.coordinator.require_outcome_owner(runtime).is_err() {
-            return Ok(());
+            return Ok(false);
         }
         let record = self
             .coordinator
@@ -2245,14 +2257,14 @@ impl AgentRuntime {
         if !record.operation.fences(candidate)
             || !matches!(kind, InboxKind::Completed | InboxKind::Failed)
         {
-            return Ok(());
+            return Ok(false);
         }
         let Some(binding) = self
             .dispatch
             .binding(candidate.operation_id)
             .map_err(map_dispatch_storage_error)?
         else {
-            return Ok(());
+            return Ok(false);
         };
         let inbox = self
             .dispatch
@@ -2262,7 +2274,7 @@ impl AgentRuntime {
             .iter()
             .any(|message| message.run_id == candidate.operation_id)
         {
-            return Ok(());
+            return Ok(false);
         }
         self.dispatch
             .append_inbox(
@@ -2294,7 +2306,7 @@ impl AgentRuntime {
         self.dispatch
             .transition_agent(binding.worker.agent_id, agent_status, None)
             .map_err(map_dispatch_storage_error)?;
-        Ok(())
+        Ok(true)
     }
 
     /// Authenticates and delivers a completion report from a provisioned MCP
@@ -2307,7 +2319,7 @@ impl AgentRuntime {
         kind: InboxKind,
         summary: String,
         result: Option<usagi_core::domain::agent::StructuredResult>,
-    ) -> Result<CallerRef, ProtocolError> {
+    ) -> Result<ReportDelivery, ProtocolError> {
         let caller = self
             .mcp_callers
             .get(credential)
@@ -2331,8 +2343,13 @@ impl AgentRuntime {
             .map_err(map_dispatch_storage_error)?
             .ok_or_else(dispatch_binding_unavailable)?;
         let delivered_to = binding.caller.clone();
-        self.report(&caller.runtime, &fence, kind, summary, result)?;
-        Ok(delivered_to)
+        let worker = binding.worker;
+        let accepted = self.report(&caller.runtime, &fence, kind, summary, result)?;
+        Ok(ReportDelivery {
+            delivered_to,
+            worker,
+            accepted,
+        })
     }
 
     fn dispatch_terminal(
@@ -6357,19 +6374,19 @@ mod tests {
             commits: vec!["abc".into()],
             ..Default::default()
         };
-        assert_eq!(
-            runtime
-                .report_from_mcp(
-                    &credential,
-                    None,
-                    InboxKind::Completed,
-                    "done".into(),
-                    Some(result.clone()),
-                )
-                .unwrap(),
-            caller
-        );
-        runtime
+        let delivery = runtime
+            .report_from_mcp(
+                &credential,
+                None,
+                InboxKind::Completed,
+                "done".into(),
+                Some(result.clone()),
+            )
+            .unwrap();
+        assert_eq!(delivery.delivered_to, caller);
+        assert_eq!(delivery.worker.session_id, Some(session));
+        assert!(delivery.accepted);
+        let duplicate = runtime
             .report_from_mcp(
                 &credential,
                 None,
@@ -6378,6 +6395,7 @@ mod tests {
                 None,
             )
             .unwrap();
+        assert!(!duplicate.accepted);
         runtime.exit(&admission.terminal, 0).unwrap();
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);

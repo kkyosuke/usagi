@@ -834,8 +834,15 @@ inventory の `live: false` と typed safe error で非 live を明示する。
 
 ## PR 検出の投影
 
-committed PTY output から PR identity を検出する経路の正本はこの節である。検出結果を remote と突き合わせる
-cadence は [PR refresh scheduler](#pr-refresh-scheduler) が正本で、別の関心事である。
+committed PTY output、または受理済み `agent_complete.result.pr` の canonical GitHub PR URL から PR identity を
+検出する経路の正本はこの節である。検出結果を remote と突き合わせる cadence は
+[PR refresh scheduler](#pr-refresh-scheduler) が正本で、別の関心事である。
+
+structured completion の `pr` は caller inbox への最初の fenced delivery が成功した場合だけ、worker の stable
+`SessionId` に対応する inventory へ投影する。明示的な artifact field なので自動表示候補として扱う。duplicate / late
+report、`agent_fail`、session を持たない root worker、canonical URL へ変換できない短縮参照や不正値は inventory を
+変更しない。inbox delivery は成果報告の authority、PR inventory は補助 projection であるため、projection の保存失敗は
+完了報告を失敗へ巻き戻さず error log に記録する。
 
 **検出は output の受理と同じ critical section では行わない**。PTY observer が runtime lock 内で行うのは journal への
 commit だけで、lock を解放した後に同じ bytes を bounded queue へ submit する。scan と durable write は専用の
@@ -846,6 +853,7 @@ projection worker が所有する。したがって runtime lock の保持時間
 | journal への commit | PTY observer | runtime lock | なし |
 | queue への submit | PTY observer | projection queue のみ | なし |
 | scan と inventory 更新 | projection worker | inventory lock | 変化時だけ atomic write |
+| structured completion の inventory 更新 | `agent_complete` handler | inbox commit 後に inventory lock | canonical URL の初回受理時だけ atomic write |
 
 ### 増分検出と carry
 
@@ -884,8 +892,9 @@ terminal output・terminal identity・session identity は含まない。
 
 ## PR refresh scheduler
 
-PR refresh/freshness 契約の正本はこの節である。daemon は committed terminal output から検出した canonical
-GitHub PR URL を `pr-inventory.json` に保存し、単一の低優先度 worker が 250 ms ごとに schedule を進める。
+PR refresh/freshness 契約の正本はこの節である。daemon は committed terminal output または structured completion
+から検出した canonical GitHub PR URL を `pr-inventory.json` に保存し、単一の低優先度 worker が 250 ms ごとに
+schedule を進める。
 同じ URL が複数 chunk または複数 session から登録されても scheduler は identity 単位で coalesce し、1 tick
 につき最大 2 identity を canonical URL 順に claim し、2 request を並行実行する。remote provider は shell を介さない固定 argv の
 `gh pr view <canonical-url> --json title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock

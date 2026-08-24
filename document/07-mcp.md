@@ -208,8 +208,11 @@ daemon を停止・crash させても teardown は失われない。次の daemo
 
 dispatch 系は credential から caller と current run を復元する。`session_dispatch` は session を作成または再利用し、
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の
-`agent_complete` / `agent_fail` は保存済み binding の caller inbox だけへ配送され、`agent_inbox` は
-認証済み caller 自身の inbox だけを返す。payload の caller 名や cwd から identity を補完しない。
+`agent_complete` / `agent_fail` は保存済み binding の caller inbox へ配送され、`agent_inbox` は認証済み caller 自身の
+inbox だけを返す。最初に受理された `agent_complete.result.pr` が canonical GitHub PR URL の場合は、同じ binding の
+worker `SessionId` に daemon-owned PR inventory も更新し、TUI の sidebar / PR modal が通常の revision 付き snapshot
+から観測する。短縮参照と不正値は inbox には保持するが inventory へ推測して補完せず、duplicate / late report と
+`agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
 session 作成系は optional role selector を受け取る。`session_create` / `session_delegate_issue` /
 `session_delegate_brief` は top-level `role`、`session_dispatch` は `session.role` を使う。daemon が current catalog と

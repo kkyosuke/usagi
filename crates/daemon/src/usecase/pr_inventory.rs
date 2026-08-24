@@ -513,6 +513,27 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         self.discover(session, identities)
     }
 
+    /// Projects one PR URL supplied in a successful structured worker report.
+    ///
+    /// Unlike prose found in terminal output, this field is explicit artifact
+    /// intent, so a canonical URL is eligible for auto-open. Short references
+    /// and malformed values remain in the caller inbox but cannot enter the
+    /// repository-qualified PR inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the durable inventory port's read or write error.
+    pub fn observe_reported(
+        &mut self,
+        session: SessionId,
+        candidate: &str,
+    ) -> Result<bool, P::Error> {
+        let Some(identity) = canonicalize(candidate.trim()) else {
+            return Ok(false);
+        };
+        self.discover(session, vec![(identity, true)])
+    }
+
     /// Forgets the carry for `terminal` because bytes between the carry and the
     /// next chunk were dropped.
     ///
@@ -1503,6 +1524,29 @@ mod tests {
         let dismissed = projector.snapshot(session).unwrap();
         assert!(dismissed.revision > revision);
         assert_eq!(dismissed.entries[1].state, PrState::Dismissed);
+    }
+
+    #[test]
+    fn structured_report_projects_only_a_canonical_url_as_auto_open() {
+        let session = SessionId::new();
+        let mut projector = OutputPrProjector::new(Store::default());
+
+        assert!(!projector.observe_reported(session, "#42").unwrap());
+        assert!(!projector.observe_reported(session, "not a PR").unwrap());
+        assert!(
+            projector
+                .observe_reported(session, " https://github.com/o/r/pull/42 ")
+                .unwrap()
+        );
+        assert!(
+            !projector
+                .observe_reported(session, "https://github.com/o/r/pull/42")
+                .unwrap()
+        );
+
+        let snapshot = projector.snapshot(session).unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert!(snapshot.entries[0].auto_open);
     }
 
     #[test]
