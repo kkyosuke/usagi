@@ -302,6 +302,8 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
             footer_hint,
         ));
         return rows;
+    } else if let Some(detail) = &projection.interrupted_detail {
+        rows.push(Style::new().dim().paint(detail));
     } else if !projection.organization.is_empty() {
         rows.push(Role::Accent.style().bold().paint("Organization"));
         for member in &projection.organization {
@@ -335,8 +337,6 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
             };
             rows.push(Style::new().dim().paint(detail));
         }
-    } else if let Some(detail) = &projection.interrupted_detail {
-        rows.push(Style::new().dim().paint(detail));
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
