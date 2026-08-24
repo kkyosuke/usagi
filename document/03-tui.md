@@ -444,8 +444,8 @@ root scope（`session_id: None`）の Agent へ指示を出し、session を作�
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
 （[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
 
-Home header の右端には Nerd Font の robot glyph を使う `[ 󰚩 director ]` button を表示し、drawer title も
-`󰚩 director` とする。glyph は既存の CPU / memory / mode icon と同じく直接描画し、対応しない font や狭幅でも
+Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
+`♛ Director` とする。glyph は直接描画し、狭幅でも
 Unicode display width による clip と hit-test を維持する。workspace breadcrumb、mode toggle、
 pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
 そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
