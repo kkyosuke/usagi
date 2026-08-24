@@ -167,20 +167,31 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 | 申告 | 解決 |
 |---|---|
 | `selected` | canonical 化した root を **adopt する**（すでに保持していればそれを使う）。adopt できない workspace はこの接続だけを拒否する |
-| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない場合、その path 自身が git repository ならそれを adopt する。そうでなければ拒否する（**上位ディレクトリは探索しない**。明示的に開く経路は下記のとおり制限しない） |
+| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。保持していない場合は、この data directory が**かつて開いた** workspace（state subtree の `root.json`）の最長一致を探して adopt する。それも無く、かつ **その path 自身が git repository** ならそれを adopt する。どれにも当たらない path は拒否する（**上位ディレクトリは探索しない**） |
 | `unbound` | workspace resource を扱わないので、起動時の workspace を答える |
 | 欠落 | 起動時の workspace を答え、下の fence が拒否する |
 
-`bound` が adopt するのは「その path 自身が repository である」場合だけで、**上位ディレクトリは探索しない**。
-`bound` は「開く対象」ではなく「動いている場所」の申告なので、上へ辿ると *たまたま上にあった* repository を開いて
-しまう。`$HOME` に dotfiles repository を置く構成は珍しくなく、上位探索を許すと `usagi session create` を home 配下の
-ただの directory で実行しただけで `$HOME` に fence を取り、`~/.usagi/sessions/<name>` を dotfiles の worktree として
-作り、dotfiles に branch を切ることになる。repository に**立っている**ことは、どの workspace を指しているかの
-明確な表明である。その下のどこかに居ることは、そうではない。
+`bound` の miss は 2 段で解決する。前段は「**存在する** workspace を探す」で、後段は「workspace を**作る**」なので、
+必ずこの順に試す。
 
-いったん adopt されれば、その配下はすべて最長一致で同じ workspace に解決される（この制限が触るのは「新しい
-workspace を開いてよいか」だけである）。session worktree（`<root>/.usagi/sessions/<name>`）は自身の `.git` を持つが
-workspace ではないので、adopt 対象としては常に除外する。それが存在する時点でその workspace は adopt 済みである。
+1. **かつて開いた workspace**（state subtree の `root.json`）の最長一致。ここに当たれば、その workspace は
+   一度開かれている以上「利用者が指した」ものである。tenant から idle で退いた workspace
+   （[5. daemon#tenant registry](05-daemon.md#tenant-registry)）が、そこで動いている CLI / MCP client を
+   拒否し始めるのを防ぐのがこの段である。
+2. **申告された path 自身が git repository** である場合だけ、新しく開く。新しく clone した repository を、
+   先に TUI で開かずに CLI / MCP から使い始められるのはこの段である。
+
+後段が**上位ディレクトリを探索しない**のは意図である。`bound` は「開く対象」ではなく「動いている場所」の申告
+なので、上へ辿ると *たまたま上にあった* repository を開いてしまう。`$HOME` に dotfiles repository を置く構成は
+珍しくなく、上位探索を許すと `usagi session create` を home 配下のただの directory で実行しただけで `$HOME` に
+fence を取り、`~/.usagi/sessions/<name>` を dotfiles の worktree として作り、dotfiles に branch を切ることになる。
+repository に**立っている**ことは、どの workspace を指しているかの明確な表明である。その下のどこかに居ることは、
+そうではない。
+
+いったん adopt されれば、その配下はすべて最長一致で同じ workspace に解決される（この 2 段が触るのは「保持して
+いない workspace をどう解決するか」だけである）。session worktree（`<root>/.usagi/sessions/<name>`）は自身の
+`.git` を持つが workspace ではないので、後段の対象としては常に除外する。それが存在する時点でその workspace は
+前段で解決できる。
 
 この制限は **`bound` による暗黙の adopt にだけ**掛かる。「repository でなければ workspace になれない」という規則では
 ない。`usagi open <path>` と TUI の Open / New は `selected` を申告する明示的な操作であり、対象が repository か

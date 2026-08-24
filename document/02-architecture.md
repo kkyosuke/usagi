@@ -663,9 +663,10 @@ negotiation capability、terminal authorization、lifecycle capability とは別
 `program` と `argv` を持つ。environment は名前の allowlist だけを durable に扱い、値・secret・
 adapter private config は含めない。
 
-system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。選択軸は
-`LaunchScope.session_id` の有無と trusted local LLM 設定だけであり、`session_id` が無い launch は main
-チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の本文を使う。
+system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。`LaunchScope.session_id`
+が無い launch は main チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の
+境界本文を使う。fragment の種類・合成順・省略条件は
+[10. session role#prompt 合成](10-session-roles.md#prompt-合成) が正本で、ここでは重複させない。
 `SystemPrompt` は `McpWiring` と同じ必須 agent capability として fail-closed に検証する一方、選択・合成した
 system prompt 本文は ephemeral な adapter materialization であり、`LaunchRequest`、`LaunchPlan`、
 `DurableLaunchSnapshot` には保存しない（設計判断は issue #592）。
@@ -958,7 +959,7 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
 | 論理境界（`PreToolUse` フック） | session の worktree 外書き込みと root の repository mutation | `--settings` の `PreToolUse` → `usagi guard-workspace`（両 mode） |
 | hard boundary（OS sandbox） | 許可 root 外への**すべての**書き込み | `usagi claude-sandbox --mode <mode> --writable-root … -- claude …` |
 
-- **system prompt**: `usagi-core` の `domain::agent::prompt` が持つ scope 別本文を、非 durable な
+- **system prompt**: `usagi-core` の `domain::agent::prompt` が合成した本文を、非 durable な
   `SpawnProvision` の `--append-system-prompt` に 1 つの argv 値として載せる。本文は shell / JSON
   escaping を介さず、`LaunchPlan` / `DurableLaunchSnapshot` に保存しない。
 - **起動 argv**: 子プロセスは product ではなく launcher（`usagi` バイナリ）で、
@@ -1069,7 +1070,7 @@ allowlist が丸ごと使えなくなるためである。Linux の `bwrap` は 
 動かす shell の `> /dev/stdout` や `> /dev/fd/1` が `Operation not permitted` になる。そこで path は
 `(subpath "/dev")` のまま、許可する操作を `file-write-data` だけに絞る。`/dev` への node 作成・削除・
 属性変更は deny のまま残る。
-Codex と Codex 互換の sakana.ai は同じ scope 別 system prompt を TOML basic string として escape し、
+Codex と Codex 互換の sakana.ai は同じ合成済み system prompt を TOML basic string として escape し、
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 root 起動は daemon-owned OS sandbox launcher で checkout を read-only にする。外側 launcher がある場合、Codex

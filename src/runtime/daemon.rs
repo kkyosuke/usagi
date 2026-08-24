@@ -1746,6 +1746,10 @@ fn effective_role_instruction(
 /// the answer's source moves from one fixed root to the tenant registry.
 struct TenantWorkspaces {
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
+    /// Where this data directory keeps the state subtree of every workspace it
+    /// has opened. A bound client inside one of them is resolved against that
+    /// record even when the workspace is no longer held.
+    daemon_dir: PathBuf,
     /// The workspace this process started in. A client that names no workspace
     /// touches no workspace resource, so it is admitted against this one.
     initial: PathBuf,
@@ -1853,21 +1857,41 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
             // removed. Ancestor matching is a spelling comparison, so an
             // unresolvable path is compared as declared rather than refused.
             Some(ClientWorkspace::Bound { root }) => {
-                let root =
+                let declared =
                     paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
-                if let Some(owner) = self.tenants.owner_of(&root) {
+                if let Some(owner) = self.tenants.owner_of(&declared) {
                     return Ok(paths::wire_workspace_root(owner.root()));
                 }
-                let opening = adoptable_workspace_root(&root).ok_or_else(|| {
-                    usagi_core::infrastructure::ipc::workspace_refusal_serving(
-                        &format!(
-                            "{} is not a workspace this daemon has open; run this from a \
-                             repository root to open it, or open it explicitly with `usagi open`",
-                            paths::wire_workspace_root(&root)
-                        ),
-                        &self.served(),
-                    )
-                })?;
+                // Two ways a bound client may still name a workspace, tried in
+                // this order because the first is a workspace that exists and the
+                // second creates one.
+                //
+                // 1. A workspace this data directory has opened before records
+                //    its canonical root in its state subtree, so a client inside
+                //    it resolves even while the workspace is not held. Without
+                //    this, a workspace that idled out of tenancy would refuse the
+                //    very CLI and MCP clients running in it (#1537).
+                // 2. Otherwise the caller may be standing *at* a repository this
+                //    daemon has never seen. Opening that is what lets a CLI or
+                //    MCP client start working in a fresh clone without opening it
+                //    in the TUI first — and only the path itself is ever
+                //    considered, never an ancestor ([`adoptable_workspace_root`]).
+                let opening = workspace_state::owner(&self.daemon_dir, &declared)
+                    .ok()
+                    .flatten()
+                    .map(|known| known.root().to_path_buf())
+                    .or_else(|| adoptable_workspace_root(&declared))
+                    .ok_or_else(|| {
+                        usagi_core::infrastructure::ipc::workspace_refusal_serving(
+                            &format!(
+                                "this daemon has not opened {}; run this from a repository root \
+                                 to open it, or open it explicitly with `usagi open {}`",
+                                paths::wire_workspace_root(&declared),
+                                paths::wire_workspace_root(&declared)
+                            ),
+                            &self.served(),
+                        )
+                    })?;
                 self.tenants.adopt(&opening).map_err(|error| {
                     usagi_core::infrastructure::ipc::workspace_refusal_serving(
                         &error.to_string(),
@@ -2993,6 +3017,7 @@ fn spawn_ipc_server(
     // rather than capturing the workspace this process started in.
     let resolver = Arc::new(TenantWorkspaces {
         tenants: Arc::clone(&tenants),
+        daemon_dir: data_dir.join("daemon"),
         initial: initial.root().to_path_buf(),
     });
     let workspaces: Workspaces = tenants.clone();
@@ -3087,7 +3112,7 @@ fn spawn_ipc_server(
         &children,
         hydrate_retained,
     )?;
-    reconcile_removed_session_agents(&workspaces, &agent)?;
+    reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
         && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
@@ -3125,7 +3150,7 @@ fn spawn_ipc_server(
     )?);
     background_workers.push(start_pr_refresh_worker(
         Arc::clone(&pr_inventory),
-        Arc::clone(&workspaces),
+        data_dir.join("daemon"),
         Arc::clone(&shutdown),
     )?);
     let (teardown, teardown_worker) = start_session_teardown_worker(
@@ -3220,23 +3245,16 @@ fn spawn_ipc_server(
 /// older daemon. This startup pass repairs the historical state where session
 /// teardown removed the lifecycle row without closing its Agent owner.
 fn reconcile_removed_session_agents(
-    workspaces: &Workspaces,
+    daemon_dir: &Path,
     agent: &SharedAgentRuntime,
 ) -> std::io::Result<usize> {
-    // The Agent runtime is daemon-wide while sessions belong to workspaces, so
-    // what is still owned is the union over every workspace this daemon holds.
-    // Reconciling against one workspace would close the Agents of the others.
-    let mut retained = std::collections::BTreeSet::new();
-    for tenant in workspaces.all() {
-        retained.extend(
-            tenant
-                .runtime()
-                .lock()
-                .map_err(|_| std::io::Error::other("session owner is unavailable"))?
-                .session_ids()
-                .map_err(|error| std::io::Error::other(error.safe_message()))?,
-        );
-    }
+    // The Agent runtime is daemon-wide while sessions belong to workspaces, and
+    // its records outlive both a workspace's tenancy and the daemon itself. What
+    // is still owned is therefore every session this data directory knows, not
+    // the sessions of the workspaces adopted so far: at startup only one is, so
+    // reconciling against that would close every other workspace's Agents.
+    let retained = known_sessions(daemon_dir)
+        .ok_or_else(|| std::io::Error::other("workspace lifecycle state is unavailable"))?;
     let mut agent = agent
         .lock()
         .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
@@ -3362,12 +3380,12 @@ fn bind_ipc_listener(
 /// progress while `gh` is slow.
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
-    workspaces: Workspaces,
+    daemon_dir: PathBuf,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_pr_refresh_worker(
         pr_inventory,
-        Some(workspaces),
+        Some(daemon_dir),
         shutdown,
         GhProcess,
         ProductionRefreshClock {
@@ -3377,21 +3395,46 @@ fn start_pr_refresh_worker(
     )
 }
 
-/// Every managed session this daemon still owns, across all its workspaces.
+/// Every managed session this data directory knows about, across every
+/// workspace it has adopted — including the ones no longer held.
 ///
-/// `None` when a workspace cannot be read: pruning on a partial view would
-/// discard records the unreadable workspace still owns.
-fn retained_sessions(workspaces: &Workspaces) -> Option<std::collections::BTreeSet<SessionId>> {
-    let mut retained = std::collections::BTreeSet::new();
-    for tenant in workspaces.all() {
-        retained.extend(tenant.runtime().lock().ok()?.session_ids().ok()?);
+/// The daemon-wide registries (PR inventory, Agent runtime) are keyed by session
+/// alone, so what they may keep cannot be the sessions of the workspaces this
+/// daemon *currently* holds: a workspace given back by
+/// [retirement](usagi_daemon::usecase::tenant::TenantRegistry::retire_idle) still
+/// owns its sessions, and pruning against a set that lost them would delete the
+/// user's own records for a workspace that is merely closed.
+///
+/// The durable lifecycle documents are therefore the authority, and they are
+/// read directly: a workspace that is not adopted has no runtime to ask.
+///
+/// `None` when any of them cannot be read: pruning on a partial view is exactly
+/// the deletion this guards against.
+fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<SessionId>> {
+    let mut known = std::collections::BTreeSet::new();
+    for state in usagi_core::infrastructure::workspace_state::adopted(daemon_dir).ok()? {
+        let Some(lifecycle) =
+            usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(state.dir())
+                .load()
+                .ok()?
+        else {
+            // A subtree whose root is recorded but whose document is not written
+            // yet owns no sessions.
+            continue;
+        };
+        known.extend(
+            lifecycle
+                .sessions
+                .into_iter()
+                .map(|session| session.session_id),
+        );
     }
-    Some(retained)
+    Some(known)
 }
 
 fn spawn_pr_refresh_worker<R, C>(
     pr_inventory: SharedPrInventory,
-    workspaces: Option<Workspaces>,
+    daemon_dir: Option<PathBuf>,
     shutdown: Arc<ShutdownRequest>,
     runner: R,
     clock: C,
@@ -3415,10 +3458,10 @@ where
             while !shutdown.is_requested() {
                 // The inventory is daemon-wide while sessions belong to
                 // workspaces, so what it may keep is the union over every
-                // workspace this daemon holds. Pruning against one of them
-                // would drop the others' pull requests.
-                if let Some(workspaces) = &workspaces
-                    && let Some(retained) = retained_sessions(workspaces)
+                // workspace this data directory knows — not just the ones held
+                // right now, or a closed workspace would lose its records.
+                if let Some(daemon_dir) = &daemon_dir
+                    && let Some(retained) = known_sessions(daemon_dir)
                     && let Ok(mut projector) = pr_inventory.lock()
                     && projector.retain_sessions(&retained).is_err()
                 {
@@ -3612,9 +3655,9 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
 {
     fn has_work(
         &self,
-        tenant: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
+        workspace: usagi_core::domain::id::WorkspaceId,
+        runtime: &SharedSessionRuntime,
     ) -> bool {
-        let workspace = tenant.workspace_id();
         let running_terminal = self.terminal.lock().map_or(true, |terminal| {
             terminal.has_running_in_workspace(workspace)
         });
@@ -3622,7 +3665,7 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
             .agent
             .lock()
             .map_or(true, |agent| agent.has_running_agent(workspace));
-        let unfinished = tenant.runtime().lock().map_or(true, |runtime| {
+        let unfinished = runtime.lock().map_or(true, |runtime| {
             runtime.has_unfinished_work().unwrap_or(true)
         });
         running_terminal || running_agent || unfinished
@@ -12860,7 +12903,7 @@ mod tests {
         let daemon_dir = data.join("daemon");
         let held_root = paths::canonical_workspace_root(&held).unwrap();
         let tenants = Arc::new(TenantRegistry::new(
-            daemon_dir,
+            daemon_dir.clone(),
             FileWorkspaceFences {
                 pid: std::process::id(),
             },
@@ -12873,6 +12916,7 @@ mod tests {
         tenants.adopt_initial(&held_root).unwrap();
         let resolver = TenantWorkspaces {
             tenants: Arc::clone(&tenants),
+            daemon_dir,
             initial: held_root.clone(),
         };
         let wire = |root: &Path| paths::wire_workspace_root(root);
@@ -12992,6 +13036,77 @@ mod tests {
         }
     }
 
+    /// The daemon-wide registries are keyed by session alone, so what they may
+    /// keep is every session this *data directory* knows — not the sessions of
+    /// the workspaces held right now. A workspace given back by retirement still
+    /// owns its sessions, and pruning against a set that lost them would delete
+    /// the user's own PR records for a workspace that is merely closed.
+    #[test]
+    fn a_closed_workspace_still_counts_as_owning_its_sessions() {
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let data = temporary.path().join("data");
+        let workspace = temporary.path().join("workspace");
+        for directory in [&data, &workspace] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let daemon_dir = data.join("daemon");
+        ensure_private_dir_all(&daemon_dir).unwrap();
+        let root = paths::canonical_workspace_root(&workspace).unwrap();
+        let generation = usagi_core::domain::id::DaemonGeneration::new();
+        let tenants = Arc::new(TenantRegistry::new(
+            daemon_dir.clone(),
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            SystemTenantOpener {
+                data_home: data.clone(),
+                generation,
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+
+        // Nothing opened yet: no session is known, and the empty answer is a
+        // fact rather than a read failure.
+        assert_eq!(
+            known_sessions(&daemon_dir),
+            Some(std::collections::BTreeSet::new())
+        );
+
+        let tenant = tenants.adopt_initial(&root).unwrap();
+        let session = {
+            let mut runtime = tenant.runtime().lock().unwrap();
+            let created = runtime
+                .handle(
+                    usagi_core::usecase::client::SessionAction::Create,
+                    &usagi_core::domain::id::OperationId::new().to_string(),
+                    &serde_json::json!({"name": "kept"}),
+                )
+                .unwrap();
+            serde_json::from_value::<SessionId>(created.body["sessions"][0]["session_id"].clone())
+                .unwrap()
+        };
+        assert!(known_sessions(&daemon_dir).unwrap().contains(&session));
+
+        // Giving the workspace back does not un-own its sessions: the lifecycle
+        // document is still there, and it is the authority.
+        drop(tenant);
+        assert!(tenants.retire(&root));
+        assert!(tenants.adopted().is_empty());
+        assert!(known_sessions(&daemon_dir).unwrap().contains(&session));
+
+        // A subtree that cannot be read is not "no sessions": pruning on a
+        // partial view is exactly the deletion this guards against.
+        std::fs::write(
+            daemon_dir
+                .join(paths::WORKSPACE_STATE_DIR)
+                .join(paths::workspace_state_digest(&root))
+                .join("sessions.json"),
+            "not json",
+        )
+        .unwrap();
+        assert_eq!(known_sessions(&daemon_dir), None);
+    }
+
     /// A workspace with nothing left to do is given back, and one with work is
     /// not. The observation fails closed on every side: a runtime that cannot be
     /// read keeps its workspace, because keeping one costs a fence while
@@ -13029,7 +13144,7 @@ mod tests {
         // A fresh workspace has no runtime and no unfinished lifecycle work, so
         // the real observer reports it idle; a session mid-creation does not.
         let activity = daemon_activity(&data, &first_root, generation, &tenants);
-        assert!(!activity.has_work(&adopted));
+        assert!(!activity.has_work(adopted.workspace_id(), adopted.runtime()));
 
         // A handle held outside the registry keeps the workspace whatever the
         // observation says, so the sweep only sees it once the handle is gone.
@@ -13094,7 +13209,7 @@ mod tests {
         ));
         let tenant = tenants.adopt_initial(&root).unwrap();
         let activity = daemon_activity(&data, &root, generation, &tenants);
-        assert!(!activity.has_work(&tenant));
+        assert!(!activity.has_work(tenant.workspace_id(), tenant.runtime()));
 
         // A lifecycle runtime whose lock is poisoned cannot be read, so the
         // workspace is kept rather than released on an unknown state.
@@ -13103,10 +13218,11 @@ mod tests {
             panic!("a reader panicked while holding the lifecycle runtime");
         }));
         assert!(poisoned.is_err());
-        assert!(activity.has_work(&tenant));
+        assert!(activity.has_work(tenant.workspace_id(), tenant.runtime()));
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Every declaration and refusal in one flow.
     fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
         use usagi_core::infrastructure::ipc::WorkspaceResolver;
 
@@ -13136,6 +13252,7 @@ mod tests {
         let workspaces: Workspaces = tenants.clone();
         let resolver = TenantWorkspaces {
             tenants: Arc::clone(&tenants),
+            daemon_dir: daemon_dir.clone(),
             initial: first_root.clone(),
         };
         let wire = |root: &Path| paths::wire_workspace_root(root);
@@ -13187,6 +13304,21 @@ mod tests {
             &refusal
         ));
         assert_eq!(tenants.adopted().len(), 2);
+
+        // A workspace this data directory has opened before keeps answering for
+        // the clients inside it, even once it has been given back: its state
+        // subtree records the root, so the resolution adopts it again. Without
+        // this, a workspace that idled out of tenancy would refuse the very CLI
+        // and MCP clients running in it.
+        assert!(tenants.retire(&second_root));
+        let inside = ClientWorkspace::Bound {
+            root: wire(&second_root.join("nested")),
+        };
+        assert_eq!(resolver.resolve(Some(&inside)).unwrap(), wire(&second_root));
+        assert!(
+            tenants.tenant(&second_root).is_some(),
+            "resolving a known workspace adopts it again"
+        );
 
         // The connection binds the workspace its handshake settled on.
         for (declared, expected) in [

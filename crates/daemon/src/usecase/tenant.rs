@@ -231,12 +231,17 @@ pub struct TenantRegistry<F, O: TenantRuntimeOpener> {
 /// Agent runtime, a teardown still to run, or a session mid-creation all mean
 /// the daemon must keep the workspace, however long the client has been away.
 pub trait WorkspaceActivity<R> {
-    /// Whether `tenant` still has work of its own.
+    /// Whether the workspace with this identity still has work of its own.
     ///
     /// An observation that cannot be made answers `true`: keeping a workspace
     /// costs a fence, while releasing one that is still working would hand its
     /// worktrees to a second owner.
-    fn has_work(&self, tenant: &Tenant<R>) -> bool;
+    ///
+    /// The identity and the runtime are passed separately, rather than the
+    /// tenant handle, so an observation cannot hold a reference to the tenant it
+    /// is reporting on — that reference is itself a reason to keep the
+    /// workspace.
+    fn has_work(&self, workspace: WorkspaceId, runtime: &R) -> bool;
 }
 
 /// A tenant together with the fence that keeps it.
@@ -381,15 +386,45 @@ where
         now: DateTime<Utc>,
         idle_for: chrono::Duration,
     ) -> Vec<PathBuf> {
+        // The candidates, chosen under the lock. The tenant handle is never
+        // cloned here: a clone would itself be an outside reference and hide the
+        // very condition this reads. The initial tenant is excluded because its
+        // fence is the process's — releasing the entry would drop the runtime
+        // without giving the workspace back.
+        let candidates = {
+            let held = self.lock();
+            held.iter()
+                .filter(|(_, entry)| entry.fence.is_some() && !entry.tenant.referenced_elsewhere())
+                .map(|(root, entry)| {
+                    (
+                        root.clone(),
+                        entry.tenant.workspace_id(),
+                        entry.tenant.runtime().clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // Observed with the lock released. `has_work` reaches the daemon-wide
+        // runtimes, and a request already inside one of those takes *its* lock
+        // before resolving a workspace through this registry. Holding the
+        // registry lock across the observation would invert that order, and the
+        // two threads would wait on each other for the life of the process.
+        let idle = candidates
+            .into_iter()
+            .filter(|(_, workspace, runtime)| !activity.has_work(*workspace, runtime))
+            .map(|(root, _, _)| root)
+            .collect::<std::collections::BTreeSet<_>>();
+        // Committed under the lock, re-reading everything that could have
+        // changed while it was released: a workspace adopted, referenced, or
+        // given work again in that window must not be retired on a stale
+        // observation.
         let mut held = self.lock();
         let mut retired = Vec::new();
         for (root, entry) in held.iter_mut() {
-            // The initial tenant's fence is the process's, so releasing the
-            // registry entry would not release the workspace. It stays.
-            let idle = entry.fence.is_some()
-                && !entry.tenant.referenced_elsewhere()
-                && !activity.has_work(&entry.tenant);
-            if idle {
+            let still_idle = idle.contains(root)
+                && entry.fence.is_some()
+                && !entry.tenant.referenced_elsewhere();
+            if still_idle {
                 let since = *entry.idle_since.get_or_insert(now);
                 if now.signed_duration_since(since) >= idle_for {
                     retired.push(root.clone());
@@ -439,6 +474,15 @@ where
             },
         );
         Ok(tenant)
+    }
+
+    /// Whether the registry lock is free right now.
+    ///
+    /// Used only by the regression test that pins the observation in
+    /// [`Self::retire_idle`] outside the lock.
+    #[cfg(test)]
+    fn is_unlocked(&self) -> bool {
+        self.held.try_lock().is_ok()
     }
 
     fn with_held<T>(&self, read: impl FnOnce(&BTreeMap<PathBuf, Held<O::Runtime>>) -> T) -> T {
@@ -789,7 +833,7 @@ mod tests {
     fn retirement_waits_for_a_continuous_idle_period_with_no_work_and_no_holder() {
         struct Busy(std::cell::Cell<bool>);
         impl WorkspaceActivity<String> for Busy {
-            fn has_work(&self, _: &Tenant<String>) -> bool {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
                 self.0.get()
             }
         }
@@ -856,6 +900,72 @@ mod tests {
         assert_eq!(retired, vec![PathBuf::from("/workspace/one")]);
         assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(registry.adopted(), vec![initial]);
+    }
+
+    /// The observation must not run under the registry lock.
+    ///
+    /// `has_work` reaches the daemon-wide PTY and Agent runtimes, and a request
+    /// already inside one of those takes *its* lock and then resolves a
+    /// workspace through this registry. If a retirement held the registry lock
+    /// while observing, the two orders would invert and both threads would wait
+    /// on each other for the life of the process — every workspace's client
+    /// frozen, with no recovery but a restart.
+    #[test]
+    fn the_activity_observation_does_not_hold_the_registry_lock() {
+        struct Observer {
+            registry:
+                std::cell::RefCell<Option<std::rc::Weak<TenantRegistry<FakeFences, FakeOpener>>>>,
+            observed: Cell<usize>,
+            unlocked: Cell<bool>,
+        }
+        impl WorkspaceActivity<String> for Observer {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                let registry = self
+                    .registry
+                    .borrow()
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                    .expect("the registry outlives the observation");
+                self.observed.set(self.observed.get() + 1);
+                // Reading the registry is exactly what the real observation does
+                // transitively, through a runtime that resolves workspaces.
+                self.unlocked
+                    .set(self.unlocked.get() && registry.is_unlocked());
+                false
+            }
+        }
+
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        // `Rc` rather than `Arc`: the fake opener is single-threaded, and the
+        // observation this pins happens on the caller's thread.
+        let registry = std::rc::Rc::new(TenantRegistry::new(
+            daemon.path().to_path_buf(),
+            FakeFences {
+                outcome: WorkspaceFenceOutcome::Acquired,
+                live: std::sync::Arc::new(AtomicUsize::new(0)),
+                failure: None,
+            },
+            FakeOpener {
+                fail: Cell::new(false),
+            },
+            8,
+        ));
+        let observer = Observer {
+            registry: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&registry))),
+            observed: Cell::new(0),
+            unlocked: Cell::new(true),
+        };
+        registry.adopt(Path::new("/workspace/one")).unwrap();
+        registry.adopt(Path::new("/workspace/two")).unwrap();
+
+        let retired = registry.retire_idle(&observer, Utc::now(), chrono::Duration::zero());
+
+        assert_eq!(observer.observed.get(), 2, "every candidate is observed");
+        assert!(
+            observer.unlocked.get(),
+            "the registry lock must be free while a workspace is observed"
+        );
+        assert_eq!(retired.len(), 2);
     }
 
     #[test]
