@@ -8431,21 +8431,40 @@ mod tests {
     fn director_organization_projects_statuses_hierarchy_and_orphans() {
         use usagi_core::domain::agent::AgentStatus;
 
+        let mut empty_state = state("empty");
+        empty_state.sessions.clear();
+        let empty_ui = WorkspaceUi::new(
+            WorkspaceView::with_runtime_ids(ws("empty"), empty_state, Vec::new()),
+            Box::new(UnavailableSessionCommandPort),
+        );
+        assert!(director_organization(&empty_ui).is_empty());
+
         let director_child = SessionId::new();
         let manager_child = SessionId::new();
         let stopped_child = SessionId::new();
+        let running_child = SessionId::new();
+        let failed_child = SessionId::new();
         let orphan = SessionId::new();
-        let ids = vec![director_child, manager_child, stopped_child, orphan];
+        let ids = vec![
+            director_child,
+            manager_child,
+            stopped_child,
+            running_child,
+            failed_child,
+            orphan,
+        ];
         let mut workspace_state = state("demo");
         let template = workspace_state.sessions[0].clone();
-        workspace_state.sessions = ["manager", "worker", "stopped", "orphan"]
-            .into_iter()
-            .map(|name| SessionRecord {
-                name: name.into(),
-                root: PathBuf::from(format!("/tmp/demo/{name}")),
-                ..template.clone()
-            })
-            .collect();
+        workspace_state.sessions = [
+            "manager", "worker", "stopped", "running", "failed", "orphan",
+        ]
+        .into_iter()
+        .map(|name| SessionRecord {
+            name: name.into(),
+            root: PathBuf::from(format!("/tmp/demo/{name}")),
+            ..template.clone()
+        })
+        .collect();
         let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids);
         let role = |parent_session_id, agent_status| {
             crate::usecase::application::controller::SessionRoleProjection {
@@ -8465,6 +8484,11 @@ mod tests {
                 stopped_child,
                 role(Some(manager_child), Some(AgentStatus::Exited)),
             ),
+            (running_child, role(None, Some(AgentStatus::Running))),
+            (
+                failed_child,
+                role(Some(running_child), Some(AgentStatus::Failed)),
+            ),
             (orphan, role(Some(SessionId::new()), None)),
         ]));
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
@@ -8479,6 +8503,8 @@ mod tests {
                 (1, "manager (executor)", "starting"),
                 (2, "worker (executor)", "waiting"),
                 (3, "stopped (executor)", "stopped"),
+                (1, "running (executor)", "running"),
+                (2, "failed (executor)", "failed"),
                 (1, "orphan (executor)", "ready"),
             ]
         );
