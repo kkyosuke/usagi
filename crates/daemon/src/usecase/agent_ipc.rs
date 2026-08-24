@@ -1056,12 +1056,11 @@ impl AgentRuntime {
     /// is alive would hand its worktrees to a second owner.
     #[must_use]
     pub fn has_running_agent(&self, workspace: WorkspaceId) -> bool {
+        use crate::usecase::terminal::TerminalRuntimeState;
+
         self.coordinator.snapshot().records.iter().any(|record| {
             record.runtime.terminal.workspace_id == workspace
-                && matches!(
-                    record.state,
-                    crate::usecase::terminal::TerminalRuntimeState::Running
-                )
+                && matches!(record.state, TerminalRuntimeState::Running)
         })
     }
 

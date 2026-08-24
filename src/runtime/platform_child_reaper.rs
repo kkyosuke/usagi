@@ -177,7 +177,10 @@ mod tests {
             ));
             spawn(&reaper, &mut command);
         }
-        wait_until(Duration::from_secs(5), || {
+        // The bound covers a loaded machine: this waits for a full capacity of
+        // real shell helpers to register, and the instrumented coverage run
+        // spawns them an order of magnitude slower than a plain test run.
+        wait_until(Duration::from_secs(30), || {
             reaper.tracked() == Some(MAX_TRACKED_CHILDREN)
         });
 

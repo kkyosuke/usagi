@@ -972,25 +972,6 @@ impl SessionRuntime {
         Err(SessionRuntimeError::UnknownSession)
     }
 
-    /// Returns every durable managed-session identity, including sessions
-    /// currently deleting or failed. Agent startup reconciliation uses this
-    /// set to distinguish a retained teardown target from an Agent whose
-    /// session record has already disappeared.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the lifecycle state cannot be read.
-    pub fn session_ids(
-        &self,
-    ) -> Result<std::collections::BTreeSet<SessionId>, SessionRuntimeError> {
-        Ok(self
-            .state()?
-            .sessions
-            .into_iter()
-            .map(|session| session.session_id)
-            .collect())
-    }
-
     /// # Errors
     ///
     /// Returns an error when the durable lifecycle state cannot be read.

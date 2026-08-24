@@ -167,7 +167,7 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 | 申告 | 解決 |
 |---|---|
 | `selected` | canonical 化した root を **adopt する**（すでに保持していればそれを使う）。adopt できない workspace はこの接続だけを拒否する |
-| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない path は拒否する（directory だけでは workspace root を名指せないため、adopt はしない） |
+| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。保持していない場合は、この data directory が**かつて開いた** workspace（state subtree の `root.json`）の最長一致を探して adopt する。どちらにも無い path は拒否する（directory だけでは workspace root を名指せないので、一度も開いていない directory は claim しない） |
 | `unbound` | workspace resource を扱わないので、起動時の workspace を答える |
 | 欠落 | 起動時の workspace を答え、下の fence が拒否する |
 

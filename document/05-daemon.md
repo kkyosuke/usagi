@@ -627,7 +627,20 @@ adopt した workspace を保持し続けると、一度開いただけの works
 観測できないものは **仕事がある**として扱う。runtime の lock が取れない、lifecycle document が読めない場合に
 返してしまうと、まだ動いている worktree を 2 人目の owner に渡すことになる。保持を続ける代償は fence 1 つで済む。
 
-返した workspace は次に選ばれたときに adopt し直される。retire は durable state を消さない（state subtree は残る）。
+返した workspace は次に選ばれたときに adopt し直される。retire は durable state を消さない（state subtree は残る）ため、
+その workspace で動く CLI / MCP client（`bound` 申告）も、[workspace fence](04-ipc.md#workspace-fence) の解決が
+state subtree から root を引き当てて adopt し直すので、開き直さずにそのまま使える。
+
+**観測は registry の lock を持たずに行う**。live runtime の確認は PTY / Agent runtime の lock を取るが、request 経路は
+逆順（runtime の lock → scope 解決 → registry）で進むため、registry の lock を持ったまま観測すると 2 つの順序が
+交差して process 全体が停止する。sweep は「候補の選定（lock 内）→ 観測（lock 外）→ 確定（lock 内で再確認）」の
+3 相で行い、確定時に参照数と fence を読み直す。
+
+**daemon 全体で 1 つしかない registry の prune は、保持中の workspace ではなく「この data directory が知っている
+workspace すべて」で判定する**。PR inventory と Agent runtime の記録は session だけを key にしており、workspace の
+tenancy より長く生きる。retire で保持集合が縮んだことを「session が消えた」と読むと、閉じただけの workspace の
+記録（利用者が付けた pin / dismiss を含む）を消してしまう。判定材料は各 state subtree の lifecycle document で、
+1 つでも読めなければ prune しない。
 
 **workspace ごとに 1 つ**の資源（lifecycle document、fence）は tenant が持ち、**daemon ごとに 1 つ**の資源
 （PTY registry、Agent runtime とその provisioner、teardown worker、PR inventory）は request が名指す
