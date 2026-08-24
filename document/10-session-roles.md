@@ -82,6 +82,9 @@ durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` 
 `session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
 したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
+いずれかの role に `delegation` block がある会社モードでは、credential のない `session_delegate_issue` を拒否する。
+`max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
+同じ session の利用数と絶対深度を引き継ぐ。
 
 reader は future version、不正な role ID、空の `scopes`、未知 scope、16 KiB を超える instruction、NUL、対応 scope を許可しない
 default を拒否する。workspace catalog の権威は target session branch ではなく daemon に登録された workspace root である。

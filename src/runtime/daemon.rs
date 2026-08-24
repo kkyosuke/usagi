@@ -5141,7 +5141,7 @@ fn dispatch_agent_tool(
                 authorize_delegation(
                     bound,
                     agent,
-                    &caller,
+                    Some(&caller),
                     Some(&serde_json::json!(requested_role)),
                 )
                 .map_err(|error| {
@@ -6962,9 +6962,7 @@ fn dispatch_session_action(
                         .ok_or(SessionRuntimeError::ScopeUnavailable)
                 })
                 .transpose()?;
-            if let Some(caller) = caller.as_ref() {
-                authorize_delegation(bound, agent, caller, payload.get("role"))?;
-            }
+            authorize_delegation(bound, agent, caller.as_ref(), payload.get("role"))?;
             let (name, prompt) = {
                 let number = payload
                     .get("number")
@@ -7113,11 +7111,9 @@ fn new_agent_selector(
 fn authorize_delegation(
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,
-    caller: &usagi_core::domain::agent::CallerRef,
+    caller: Option<&usagi_core::domain::agent::CallerRef>,
     requested_role: Option<&serde_json::Value>,
 ) -> Result<(), SessionRuntimeError> {
-    use std::collections::BTreeSet;
-    use usagi_core::domain::agent::RunStatus;
     use usagi_core::domain::role::{RoleId, RoleScope};
 
     let requested = requested_role
@@ -7131,6 +7127,18 @@ fn authorize_delegation(
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?;
     let catalog = sessions.effective_role_catalog()?;
+    let Some(caller) = caller else {
+        if catalog
+            .roles
+            .values()
+            .any(|definition| definition.delegation.is_some())
+        {
+            return Err(SessionRuntimeError::InvalidRole(
+                "authenticated caller is required by the delegation policy".into(),
+            ));
+        }
+        return Ok(());
+    };
     let parent_role = match caller.session_id {
         Some(id) => sessions.session_role(id)?,
         None => catalog
@@ -7164,38 +7172,18 @@ fn authorize_delegation(
 
     let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
     let store = runtime.dispatch_store();
-    let bindings = store.bindings().map_err(|_| SessionRuntimeError::Storage)?;
-    let runs = store.runs().map_err(|_| SessionRuntimeError::Storage)?;
-    let active_children = bindings
-        .iter()
-        .filter(|binding| binding.caller == *caller)
-        .filter(|binding| {
-            runs.iter().any(|run| {
-                run.run_id == binding.run_id
-                    && matches!(run.status, RunStatus::Preparing | RunStatus::Running)
-            })
-        })
-        .count();
-    if active_children >= policy.max_concurrency {
+    let usage = store
+        .delegation_usage(caller)
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    if usage >= policy.max_concurrency {
         return Err(SessionRuntimeError::InvalidRole(format!(
             "delegation concurrency limit ({}) reached",
             policy.max_concurrency
         )));
     }
-    let mut depth = 0usize;
-    let mut cursor = caller.agent_id;
-    let mut seen = BTreeSet::new();
-    while seen.insert(cursor) {
-        let Some(parent) = bindings
-            .iter()
-            .rev()
-            .find(|binding| binding.worker.agent_id == cursor && binding.caller.agent_id != cursor)
-        else {
-            break;
-        };
-        depth = depth.saturating_add(1);
-        cursor = parent.caller.agent_id;
-    }
+    let depth = store
+        .delegation_depth(caller)
+        .map_err(|_| SessionRuntimeError::Storage)?;
     if depth.saturating_add(1) > policy.max_depth {
         return Err(SessionRuntimeError::InvalidRole(format!(
             "delegation depth limit ({}) reached",
@@ -7268,7 +7256,7 @@ fn delegate_brief(
             .ok_or(SessionRuntimeError::Storage)?;
         (workspace, caller, sessions.repository_root().to_path_buf())
     };
-    authorize_delegation(bound, agent, &caller, payload.get("role"))?;
+    authorize_delegation(bound, agent, Some(&caller), payload.get("role"))?;
     // Machine-local runtime/model policy belongs to the workspace root and is
     // not copied into managed worktrees. Decide every read-only refusal here;
     // `dispatch` still re-reads the same trusted root and stays the authority.

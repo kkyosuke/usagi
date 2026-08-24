@@ -6,7 +6,7 @@
 //! expose a partial delivery and concurrent daemon commands cannot lose one
 //! another's updates.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -620,6 +620,93 @@ impl DispatchStore {
             .agent_workspaces
             .get(&agent_id)
             .copied())
+    }
+
+    /// Counts active and durably queued child delegations for one organization
+    /// member. The member is identified by session lineage rather than by a
+    /// replaceable runtime/model Agent incarnation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either durable registry cannot be read.
+    pub fn delegation_usage(&self, caller: &CallerRef) -> Result<usize> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let workspace_registry = self.load_workspace_registry()?;
+        let workspace_id = workspace_registry
+            .agent_workspaces
+            .get(&caller.agent_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
+        let registry = self.load_registry()?;
+        let active = registry
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.caller.session_id == caller.session_id
+                    && binding.worker.session_id != caller.session_id
+                    && workspace_registry
+                        .agent_workspaces
+                        .get(&binding.worker.agent_id)
+                        == Some(&workspace_id)
+            })
+            .filter(|binding| {
+                registry.runs.iter().any(|run| {
+                    run.run_id == binding.run_id
+                        && matches!(run.status, RunStatus::Preparing | RunStatus::Running)
+                })
+            })
+            .count();
+        let queued = workspace_registry
+            .prompts
+            .iter()
+            .filter(|prompt| {
+                prompt.workspace_id == workspace_id
+                    && prompt.session_id != caller.session_id
+                    && prompt
+                        .caller
+                        .as_ref()
+                        .is_some_and(|queued| queued.session_id == caller.session_id)
+            })
+            .count();
+        Ok(active.saturating_add(queued))
+    }
+
+    /// Resolves the absolute delegation depth of an organization member from
+    /// durable session parentage. Runtime/model replacement does not reset it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either durable registry cannot be read or the
+    /// caller no longer has workspace ownership.
+    pub fn delegation_depth(&self, caller: &CallerRef) -> Result<usize> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let workspace_registry = self.load_workspace_registry()?;
+        let workspace_id = workspace_registry
+            .agent_workspaces
+            .get(&caller.agent_id)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
+        let registry = self.load_registry()?;
+        let mut depth = 0usize;
+        let mut cursor = caller.session_id;
+        let mut seen = BTreeSet::new();
+        while let Some(session_id) = cursor
+            && seen.insert(session_id)
+        {
+            let Some(parent) = registry.bindings.iter().rev().find(|binding| {
+                workspace_registry
+                    .agent_workspaces
+                    .get(&binding.worker.agent_id)
+                    == Some(&workspace_id)
+                    && binding.worker.session_id == Some(session_id)
+                    && binding.caller.session_id != binding.worker.session_id
+            }) else {
+                break;
+            };
+            depth = depth.saturating_add(1);
+            cursor = parent.caller.session_id;
+        }
+        Ok(depth)
     }
 
     /// # Errors
@@ -1257,6 +1344,142 @@ mod tests {
                 .caller,
             Some(caller)
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One durable graph proves queue, active-run, replacement, and ancestry joins together.
+    fn delegation_usage_counts_queued_and_active_children_by_session_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let manager_session = SessionId::new();
+        let original_manager = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(manager_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("first").unwrap(),
+            )
+            .unwrap();
+        let replacement_manager = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(manager_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("second").unwrap(),
+            )
+            .unwrap();
+        let active_session = SessionId::new();
+        let active_worker = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(active_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("worker").unwrap(),
+            )
+            .unwrap();
+        let active_run = OperationId::new();
+        store
+            .upsert_run(DispatchRun {
+                run_id: active_run,
+                agent_id: active_worker.agent_id,
+                prompt: "active".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let director = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                None,
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("director").unwrap(),
+            )
+            .unwrap();
+        let manager_run = OperationId::new();
+        store
+            .upsert_binding(DispatchBinding {
+                run_id: manager_run,
+                caller: CallerRef {
+                    session_id: None,
+                    agent_id: director.agent_id,
+                },
+                worker: WorkerRef {
+                    session_id: Some(manager_session),
+                    agent_id: original_manager.agent_id,
+                },
+            })
+            .unwrap();
+        store
+            .upsert_binding(DispatchBinding {
+                run_id: active_run,
+                caller: CallerRef {
+                    session_id: Some(manager_session),
+                    agent_id: original_manager.agent_id,
+                },
+                worker: WorkerRef {
+                    session_id: Some(active_session),
+                    agent_id: active_worker.agent_id,
+                },
+            })
+            .unwrap();
+        store
+            .queue_delegated_prompt(
+                workspace,
+                Some(SessionId::new()),
+                "queued".into(),
+                now(),
+                CallerRef {
+                    session_id: Some(manager_session),
+                    agent_id: original_manager.agent_id,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .delegation_usage(&CallerRef {
+                    session_id: Some(manager_session),
+                    agent_id: replacement_manager.agent_id,
+                })
+                .unwrap(),
+            2,
+            "a replacement Manager inherits both active and queued usage"
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(manager_session),
+                    agent_id: replacement_manager.agent_id,
+                })
+                .unwrap(),
+            1,
+            "a replacement Manager retains its session's parent depth"
+        );
+        let isolated = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(SessionId::new()),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("isolated").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: isolated.session_id,
+                    agent_id: isolated.agent_id,
+                })
+                .unwrap(),
+            0
+        );
+        let unknown = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        assert!(store.delegation_usage(&unknown).is_err());
+        assert!(store.delegation_depth(&unknown).is_err());
     }
 
     #[test]
