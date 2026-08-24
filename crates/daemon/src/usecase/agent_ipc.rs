@@ -2321,24 +2321,15 @@ impl AgentRuntime {
             InboxKind::Failed => (RunStatus::Failed, AgentStatus::Failed),
             InboxKind::NoReport => return Ok(()),
         };
-        let run = self
-            .dispatch
-            .run(binding.run_id)
+        self.dispatch
+            .reconcile_report_outcome(
+                binding.run_id,
+                binding.worker.agent_id,
+                run_status,
+                agent_status,
+                Utc::now(),
+            )
             .map_err(map_dispatch_storage_error)?;
-        if run.is_some_and(|run| run.status != run_status) {
-            self.dispatch
-                .transition_run(binding.run_id, run_status, Some(Utc::now()))
-                .map_err(map_dispatch_storage_error)?;
-        }
-        let agent = self
-            .dispatch
-            .agent(binding.worker.agent_id)
-            .map_err(map_dispatch_storage_error)?;
-        if agent.is_some_and(|agent| agent.status != agent_status || agent.current_run.is_some()) {
-            self.dispatch
-                .transition_agent(binding.worker.agent_id, agent_status, None)
-                .map_err(map_dispatch_storage_error)?;
-        }
         Ok(())
     }
 
@@ -6558,11 +6549,49 @@ mod tests {
             AgentStatus::Idle,
             "the retry payload cannot reverse the committed outcome"
         );
+
+        let successor_operation = OperationId::new();
+        let successor = runtime
+            .dispatch(
+                &successor_operation.to_string(),
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let successor_binding = runtime
+            .dispatch_store()
+            .binding(successor_operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            successor_binding.worker.agent_id, completed_binding.worker.agent_id,
+            "the runtime/model selector reuses the same stable Agent"
+        );
+        let late_duplicate = runtime
+            .report_from_mcp(
+                &credential,
+                None,
+                InboxKind::Completed,
+                "late duplicate".into(),
+                None,
+            )
+            .unwrap();
+        assert!(!late_duplicate.accepted);
+        let preserved = runtime
+            .dispatch_store()
+            .agent(successor_binding.worker.agent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.status, AgentStatus::Running);
+        assert_eq!(preserved.current_run, Some(successor_operation));
+
         runtime.exit(&admission.terminal, 0).unwrap();
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::Completed);
         assert_eq!(inbox[0].result, Some(result));
+        runtime.exit(&successor.terminal, 0).unwrap();
 
         let failed_operation = OperationId::new();
         let failed = runtime
