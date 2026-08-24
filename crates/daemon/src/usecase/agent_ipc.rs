@@ -6474,18 +6474,40 @@ mod tests {
                 .and_then(|message| message.result.as_ref()),
             Some(&result)
         );
-        let replacement = usagi_core::domain::agent::StructuredResult {
-            pr: Some("https://github.com/o/r/pull/2".into()),
-            ..Default::default()
-        };
-        // Model a crash or storage failure after the inbox append committed but
-        // before either registry transition became durable.
         let completed_run = OperationId::parse(&operation).unwrap();
         let completed_binding = runtime
             .dispatch_store()
             .binding(completed_run)
             .unwrap()
             .unwrap();
+        let completed_at = runtime
+            .dispatch_store()
+            .run(completed_run)
+            .unwrap()
+            .unwrap()
+            .ended_at;
+        runtime
+            .reconcile_report_status(&completed_binding, InboxKind::Completed)
+            .unwrap();
+        runtime
+            .reconcile_report_status(&completed_binding, InboxKind::NoReport)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .run(completed_run)
+                .unwrap()
+                .unwrap()
+                .ended_at,
+            completed_at,
+            "an already converged retry must preserve its completion time"
+        );
+        let replacement = usagi_core::domain::agent::StructuredResult {
+            pr: Some("https://github.com/o/r/pull/2".into()),
+            ..Default::default()
+        };
+        // Model a crash or storage failure after the inbox append committed but
+        // before either registry transition became durable.
         runtime
             .dispatch_store()
             .transition_run(completed_run, RunStatus::Running, None)
