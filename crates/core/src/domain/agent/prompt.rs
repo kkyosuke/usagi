@@ -16,6 +16,7 @@
 //! family is described in exactly one place, and a role can narrow the tools it
 //! is told about because it is composed after them.
 
+use crate::domain::agent::mcp_tools::McpToolFamilies;
 use crate::domain::role::RoleId;
 
 /// Which checkout a launch runs in.
@@ -25,22 +26,6 @@ pub enum PromptScope {
     Root,
     /// An agent isolated in a managed session worktree.
     Session,
-}
-
-/// The tool families the injected usagi MCP server exposes to one launch.
-///
-/// Callers pass this as `Option`: `None` means no MCP server is wired, so no
-/// tool is described at all. A disabled family is never mentioned — neither as
-/// available nor as missing — because the registry that omits it is the same
-/// authority this value is read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct McpToolFamilies {
-    /// The `issue_*` family (and `session_delegate_issue`) is registered.
-    pub issue: bool,
-    /// The `memory_*` family is registered.
-    pub memory: bool,
-    /// The trusted local-LLM server is wired next to the usagi server.
-    pub local_llm: bool,
 }
 
 const ROOT_SCOPE: &str = "<context>\nあなたは usagi が管理するワークスペースの root ディレクトリ（統括環境）で起動されています。\n</context>\n<instructions>\n受け取った指示をもとに、どのようなタスクを各セッションに実行させるべきかを判別してください。\n</instructions>";

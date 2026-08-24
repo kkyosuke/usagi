@@ -16,36 +16,10 @@ pub mod supervisor;
 use std::collections::HashSet;
 use std::fmt;
 
-use usagi_core::domain::settings::Settings;
+use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
 
 use super::tool::{CallerPolicy, Tool, ToolDescriptor, ToolRoute, validate_schema_definition};
-
-/// MCP tool families enabled for one server lifetime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolAvailability {
-    issue: bool,
-    memory: bool,
-}
-
-impl ToolAvailability {
-    #[must_use]
-    pub const fn new(issue: bool, memory: bool) -> Self {
-        Self { issue, memory }
-    }
-}
-
-impl Default for ToolAvailability {
-    fn default() -> Self {
-        Self::new(true, true)
-    }
-}
-
-impl From<&Settings> for ToolAvailability {
-    fn from(settings: &Settings) -> Self {
-        Self::new(settings.issue_enabled, settings.memory_enabled)
-    }
-}
 
 /// 公開する全 MCP tool のレジストリ（issue / memory / session を連結）。
 ///
@@ -54,27 +28,32 @@ impl From<&Settings> for ToolAvailability {
 /// Panics before the MCP serve loop starts when descriptor validation fails.
 #[must_use]
 pub fn registry() -> Vec<ToolDescriptor> {
-    registry_with_availability(ToolAvailability::default())
+    registry_with_families(McpToolFamilies::all())
 }
 
 /// Build the MCP registry after removing tool families disabled by effective settings.
+///
+/// `families` is the shared rule's answer for this server lifetime
+/// (`McpToolFamilies::from_settings`), so the registry and the Agent launch
+/// prompt cannot describe different families. `families.local_llm` is a separate
+/// server, so it never adds or removes a descriptor here.
 ///
 /// # Panics
 ///
 /// Panics before the MCP serve loop starts when descriptor validation fails.
 #[must_use]
-pub fn registry_with_availability(availability: ToolAvailability) -> Vec<ToolDescriptor> {
+pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> {
     let mut tools = Vec::new();
-    if availability.issue {
+    if families.issue {
         tools.extend(issue::tools());
     }
-    if availability.memory {
+    if families.memory {
         tools.extend(memory::tools());
     }
     tools.extend(
         session::tools()
             .into_iter()
-            .filter(|tool| availability.issue || tool.name() != "session_delegate_issue"),
+            .filter(|tool| families.issue || tool.name() != "session_delegate_issue"),
     );
     tools.extend(supervisor::tools());
     let descriptors = tools.into_iter().map(descriptor).collect::<Vec<_>>();
@@ -231,9 +210,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ToolAvailability, descriptor, registry, registry_with_availability, validate_registry,
-    };
+    use super::{McpToolFamilies, descriptor, registry, registry_with_families, validate_registry};
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use usagi_core::usecase::client::SessionAction;
 
@@ -358,17 +335,10 @@ mod tests {
 
     #[test]
     fn registry_filters_issue_and_memory_families_independently() {
-        let settings = usagi_core::domain::settings::Settings {
-            issue_enabled: false,
-            memory_enabled: true,
-            ..usagi_core::domain::settings::Settings::default()
-        };
-        assert_eq!(
-            ToolAvailability::from(&settings),
-            ToolAvailability::new(false, true)
-        );
-
-        let without_issue = registry_with_availability(ToolAvailability::new(false, true));
+        let without_issue = registry_with_families(McpToolFamilies {
+            issue: false,
+            ..McpToolFamilies::all()
+        });
         assert!(
             without_issue
                 .iter()
@@ -381,7 +351,10 @@ mod tests {
                 .any(|tool| tool.name() == "memory_search")
         );
 
-        let without_memory = registry_with_availability(ToolAvailability::new(true, false));
+        let without_memory = registry_with_families(McpToolFamilies {
+            memory: false,
+            ..McpToolFamilies::all()
+        });
         assert!(
             without_memory
                 .iter()
@@ -398,7 +371,11 @@ mod tests {
                 .any(|tool| tool.name() == "session_delegate_issue")
         );
 
-        let neither = registry_with_availability(ToolAvailability::new(false, false));
+        let neither = registry_with_families(McpToolFamilies {
+            issue: false,
+            memory: false,
+            local_llm: false,
+        });
         assert_eq!(neither.len(), 38);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }

@@ -1005,8 +1005,10 @@ fn assert_shipping_role_argv(
 /// The families a shipping launch gets: this harness leaves Issue and Memory at
 /// their default (enabled) in both settings layers, so only the delegation server
 /// varies with the local-LLM setting.
-fn shipping_tool_families(local_llm: bool) -> usagi_core::domain::agent::prompt::McpToolFamilies {
-    usagi_core::domain::agent::prompt::McpToolFamilies {
+fn shipping_tool_families(
+    local_llm: bool,
+) -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
+    usagi_core::domain::agent::mcp_tools::McpToolFamilies {
         issue: true,
         memory: true,
         local_llm,

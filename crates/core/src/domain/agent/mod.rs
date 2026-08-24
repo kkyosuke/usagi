@@ -4,6 +4,7 @@
 //! launch it. It deliberately does not describe a CLI syntax, shell escaping,
 //! PTY/IO, secrets, or provisioning. Those are adapter responsibilities.
 
+pub mod mcp_tools;
 pub mod prompt;
 
 use std::{collections::BTreeSet, fmt, path::PathBuf};

@@ -595,7 +595,7 @@ v1 から機能を再実装するときの置き場所の指針。
 | 実装 | 置き場所 |
 |---|---|
 | `Workspace` / `Settings` / `Issue` などのエンティティ、および画面が並べて見せる読み取り値（`WorkspaceOverview` = workspace＋各カウント、`UniteOverview` = 合併した workspace 群の合計、welcome 画面の recent 一覧が持つ `Recent` = そのどちらか） | `crates/core/src/domain/` |
-| agent の static profile、product-neutral capability、immutable launch request / plan / durable snapshot | `crates/core/src/domain/agent/`。CLI 文法・shell rendering・PTY・secret・provisioning は置かない |
+| agent の static profile、product-neutral capability、immutable launch request / plan / durable snapshot、injected MCP wiring が公開する tool 系統、system prompt 本文 | `crates/core/src/domain/agent/`。CLI 文法・shell rendering・PTY・secret・provisioning は置かない |
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
 | workspace の登録・touch・recent overview 構築、セッション作成・設定解決など両面が使うロジック | `crates/core/src/usecase/` |
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
@@ -636,7 +636,9 @@ negotiation capability、terminal authorization、lifecycle capability とは別
 `program` と `argv` を持つ。environment は名前の allowlist だけを durable に扱い、値・secret・
 adapter private config は含めない。
 
-system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。`LaunchScope.session_id`
+injected MCP wiring が公開する tool 系統は `usagi-core` の `domain::agent::mcp_tools` が持つ 1 つの規則で
+effective 設定から決まり、MCP server の registry と launch prompt の両方がそれを読む（読む設定を選ぶのは
+呼び出し側の責務である）。system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。`LaunchScope.session_id`
 が無い launch は main チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の
 境界本文を使う。fragment の種類・合成順・省略条件は
 [10. session role#prompt 合成](10-session-roles.md#prompt-合成) が正本で、ここでは重複させない。
