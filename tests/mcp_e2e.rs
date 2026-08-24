@@ -168,6 +168,12 @@ instructions = "ROLE_SECRET_REVIEWER_INSTRUCTION"
         .unwrap();
     assert_eq!(defaulted["role_id"], "coder");
     assert_eq!(defaulted["role_summary"], "Implement changes");
+    assert!(defaulted["parent_session_name"].is_null());
+    assert_eq!(defaulted["organization_depth"], 1);
+    assert_eq!(
+        defaulted["organization_path"],
+        json!(["Director", "role-default"])
+    );
     let review = list["sessions"]
         .as_array()
         .unwrap()
@@ -1561,6 +1567,19 @@ printf '%s\n%s\n%s\n' \
     let session = tool_text(&mcp.tool("session_get", &json!({"name":"mcp-worker"})));
     assert_eq!(session["role_id"], "coder");
     assert_eq!(session["role_summary"], "Dispatch coder");
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let worker = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "mcp-worker")
+        .unwrap();
+    assert_eq!(worker["parent_session_name"], "mcp-caller");
+    assert_eq!(worker["organization_depth"], 2);
+    assert_eq!(
+        worker["organization_path"],
+        json!(["Director", "mcp-caller", "mcp-worker"])
+    );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let message = loop {

@@ -3332,6 +3332,8 @@ mod tests {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         };
         let frame = runtime.render(
             20,

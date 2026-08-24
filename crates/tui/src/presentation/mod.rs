@@ -3512,6 +3512,12 @@ fn projection_build_counts() -> (usize, usize) {
 fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<ProjectedSession> {
     #[cfg(test)]
     SESSION_PROJECTION_BUILDS.set(SESSION_PROJECTION_BUILDS.get() + 1);
+    let known_sessions = ui
+        .workspace
+        .session_ids()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     ui.workspace
         .sessions()
         .iter()
@@ -3541,6 +3547,23 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 .get(id)
                 .and_then(|role| role.role_id.as_ref())
                 .map(ToString::to_string);
+            if let Some(role) = ui.workspace.session_roles().get(id) {
+                projected.parent_session_id = role.parent_session_id;
+                projected.organization_depth = 1;
+                let mut parent = role.parent_session_id;
+                let mut seen = BTreeSet::from([*id]);
+                while let Some(parent_id) = parent
+                    && known_sessions.contains(&parent_id)
+                    && seen.insert(parent_id)
+                {
+                    projected.organization_depth += 1;
+                    parent = ui
+                        .workspace
+                        .session_roles()
+                        .get(&parent_id)
+                        .and_then(|projection| projection.parent_session_id);
+                }
+            }
             if let Some(prs) = state.session_prs(*id) {
                 projected.pr_summary = crate::presentation::views::workspace::pr_summary(prs);
             }
@@ -3893,10 +3916,13 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
         .iter()
         .zip(ui.workspace.sessions())
     {
-        let role_name = roles
+        let role_identity = roles
             .get(session_id)
             .and_then(|role| role.role_id.as_ref())
-            .map_or("executor", usagi_core::domain::role::RoleId::as_str);
+            .map_or_else(
+                || "• Executor".to_owned(),
+                |role| views::workspace::role_identity(role.as_str()),
+            );
         let status = match roles.get(session_id).and_then(|role| role.agent_status) {
             Some(usagi_core::domain::agent::AgentStatus::Starting) => "starting",
             Some(usagi_core::domain::agent::AgentStatus::Running) => "running",
@@ -3907,7 +3933,7 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
         };
         let row = DirectorOrganizationRow {
             depth: 0,
-            label: format!("{} ({role_name})", session.name),
+            label: format!("{role_identity} · {}", session.name),
             status: status.to_owned(),
         };
         members.push((
@@ -3923,7 +3949,7 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
     }
     let mut rows = vec![DirectorOrganizationRow {
         depth: 0,
-        label: "Director".into(),
+        label: format!("{} Director", director_drawer::DIRECTOR_ICON),
         status: "active".into(),
     }];
     let mut emitted = std::collections::BTreeSet::new();
@@ -5281,7 +5307,7 @@ fn drain_controller_host_actions(
                 if matches!(request.target, Target::Root(_)) {
                     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
                         Notice::new(format!(
-                            "{} director accepts Agent conversations only",
+                            "{} Director accepts Agent conversations only",
                             director_drawer::DIRECTOR_ICON
                         )),
                     )));
@@ -8404,13 +8430,27 @@ mod tests {
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         // The projected sidebar row carries the Failed lifecycle and its reason.
-        let state =
+        let mut state =
             crate::usecase::application::controller::AppState::home(workspace, vec![session]);
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            crate::usecase::application::controller::AppEvent::Backend(
+                crate::usecase::application::controller::BackendEvent::PullRequestsLoaded {
+                    target: Target::Session(session),
+                    revision: 1,
+                    prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                        1545,
+                        "https://example.test/pull/1545",
+                    )],
+                },
+            ),
+        );
         let rows = super::project_controller_sessions(&ui, &state);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lifecycle, SessionLifecycle::Failed);
         assert_eq!(rows[0].failure_summary.as_deref(), Some("create failed"));
         assert!(!rows[0].removing);
+        assert!(rows[0].pr_summary.is_some());
 
         // The reducer receives the lifecycle so it can gate attach by capability.
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
@@ -8465,7 +8505,7 @@ mod tests {
             ..template.clone()
         })
         .collect();
-        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids);
+        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids.clone());
         let role = |parent_session_id, agent_status| {
             crate::usecase::application::controller::SessionRoleProjection {
                 role_id: None,
@@ -8474,7 +8514,7 @@ mod tests {
                 agent_status,
             }
         };
-        view.set_session_roles(BTreeMap::from([
+        let mut roles = BTreeMap::from([
             (director_child, role(None, Some(AgentStatus::Starting))),
             (
                 manager_child,
@@ -8489,8 +8529,13 @@ mod tests {
                 failed_child,
                 role(Some(running_child), Some(AgentStatus::Failed)),
             ),
-            (orphan, role(Some(SessionId::new()), None)),
-        ]));
+            // A corrupt self-cycle is emitted as a root-level orphan and must
+            // not increase projection depth or loop forever.
+            (orphan, role(Some(orphan), None)),
+        ]);
+        roles.get_mut(&director_child).unwrap().role_id =
+            Some(usagi_core::domain::role::RoleId::new("manager").expect("valid company role"));
+        view.set_session_roles(roles);
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         let rows = director_organization(&ui);
@@ -8499,15 +8544,34 @@ mod tests {
                 .map(|row| (row.depth, row.label.as_str(), row.status.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (0, "Director", "active"),
-                (1, "manager (executor)", "starting"),
-                (2, "worker (executor)", "waiting"),
-                (3, "stopped (executor)", "stopped"),
-                (1, "running (executor)", "running"),
-                (2, "failed (executor)", "failed"),
-                (1, "orphan (executor)", "ready"),
+                (0, "♛ Director", "active"),
+                (1, "◆ Manager · manager", "starting"),
+                (2, "• Executor · worker", "waiting"),
+                (3, "• Executor · stopped", "stopped"),
+                (1, "• Executor · running", "running"),
+                (2, "• Executor · failed", "failed"),
+                (1, "• Executor · orphan", "ready"),
             ]
         );
+
+        let state =
+            crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
+        let projected = super::project_controller_sessions(&ui, &state);
+        assert_eq!(
+            projected
+                .iter()
+                .map(|session| (session.label.as_str(), session.organization_depth))
+                .collect::<Vec<_>>(),
+            vec![
+                ("manager", 1),
+                ("worker", 2),
+                ("stopped", 3),
+                ("running", 1),
+                ("failed", 2),
+                ("orphan", 1),
+            ]
+        );
+        assert_eq!(projected[1].parent_session_id, Some(director_child));
     }
 
     #[test]
@@ -10221,6 +10285,8 @@ mod tests {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         };
         let sessions = std::slice::from_ref(&projected);
         let git = std::collections::BTreeMap::new();
@@ -10352,6 +10418,8 @@ mod tests {
             failure_stage: None,
             failure_summary: None,
             role_id: None,
+            parent_session_id: None,
+            organization_depth: 0,
         }];
         let frame = render_controller_frame(
             20,
@@ -14898,7 +14966,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("󰚩 director accepts Agent conversations only")
+            Some("♛ Director accepts Agent conversations only")
         );
 
         ui.pane_completion_sender
@@ -23587,7 +23655,7 @@ mod tests {
     fn has_director_drawer(frames: &[Vec<String>]) -> bool {
         frames.iter().any(|frame| {
             let text = frame.join("\n");
-            text.contains("󰚩 director")
+            text.contains("♛ Director")
                 && (text.contains("No conversations yet") || text.contains("Organization"))
                 && text.contains("[ New ]")
         })

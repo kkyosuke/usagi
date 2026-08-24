@@ -1831,7 +1831,7 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
 
     // 指示モードで root Agent（claude）を起動する。
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, baseline, "󰚩 director");
+    wait_for_screen_since(&captured, baseline, "♛ Director");
     click_director_new(&mut master);
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
@@ -2206,7 +2206,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, first_baseline, "󰚩 director");
+    wait_for_screen_since(&captured, first_baseline, "♛ Director");
     click_director_new(&mut master);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
@@ -3112,7 +3112,7 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     send(&mut master, b"\x11");
     thread::sleep(Duration::from_millis(200));
     let narrow = screen_since(&captured, baseline).unwrap_or_default();
-    assert!(narrow.contains("󰚩 director"), "{narrow}");
+    assert!(narrow.contains("♛ Director"), "{narrow}");
     assert!(!narrow.contains("Leave this workspace?"), "{narrow}");
 
     send(&mut master, b"\x1b");
@@ -3221,7 +3221,7 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
 
     // The root conversation is restored into the drawer and owns its input.
     toggle_director_with_key(&mut master);
-    wait_for_screen_since(&captured, baseline, "󰚩 director");
+    wait_for_screen_since(&captured, baseline, "♛ Director");
     wait_for_screen_since(&captured, baseline, "claude-ready-unique:");
 
     // Fill the 16-row drawer viewport well past its retained window.
