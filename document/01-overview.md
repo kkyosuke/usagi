@@ -57,13 +57,15 @@ v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)�
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、安全な handoff の前提が欠ける場合だけ拒否する。`--force` は live PTY を明示的に破棄する cold transition（[planned replacement](05-daemon.md#planned-replacement)） |
 | `usagi daemon` | daemon を前景で serve する（通常は `start` が起動する内部経路） |
 | `usagi mcp` | daemon へ接続し（停止中は自動起動）、接続後は stdin の EOF まで stdio JSON-RPC server を実行する。daemon に接続できなければ server を開始せず failure status で終了する（[MCP の起動と経路](07-mcp.md#起動と経路)） |
-
-`usagi session ...` と `usagi mcp` は、daemon が停止していれば起動し、稼働中の daemon が
-その repository をまだ開いていなければ **その repository を adopt させてから**接続する
-（[4. IPC#workspace fence](04-ipc.md#workspace-fence)）。したがって新しい repository を CLI や MCP から
-使い始めるのに、先に TUI で開いておく必要はない。git repository の外で実行した場合だけ、
-workspace を名指していないものとして拒否する。
 | `usagi <不正な引数>` | [process argv contract](02-architecture.md#process-argv-contract) に従い、clap の利用方法エラーとして拒否する |
+
+`usagi session ...` と `usagi mcp` は、daemon が停止していれば起動する。稼働中の daemon が
+その repository をまだ開いていない場合は、**repository root で実行したときに限り**その repository を
+adopt させてから接続する（[4. IPC#workspace fence](04-ipc.md#workspace-fence)）。したがって新しい repository を
+CLI や MCP から使い始めるのに、先に TUI で開いておく必要はない。repository root 以外で実行した場合は、
+どの workspace を指しているかが定まらないものとして拒否し、repository root で実行するか `usagi open` で明示的に
+開くよう案内する（`usagi open` は repository でない directory も開ける）。adopt 済みになった後は、その配下の
+どこで実行しても同じ workspace に解決される。
 
 Welcome 画面は対話的に動く。合成ルートが端末を raw mode + 代替スクリーンにして、TUI 面の
 純粋な制御ループ（`presentation::run`）へ注入した端末（`Terminal` ポート）でキー入力を処理する。

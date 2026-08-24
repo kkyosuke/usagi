@@ -247,7 +247,7 @@ service 登録は macOS（LaunchAgent）と Linux（systemd user unit。systemd 
 停止のまま残す）。Linux でログアウトをまたいで常駐させるには `loginctl enable-linger` が別途必要である。
 詳細は [service supervision](document/05-daemon.md#service-supervision) を参照する。
 登録しない場合も、TUI・`usagi mcp`・`usagi session ...` の接続時に daemon は自動起動し、まだ開いていない
-リポジトリはその接続で開く（先に TUI で開いておく必要はない）。全コマンドの現在の動作は
+リポジトリも、そのリポジトリの root で実行すればその接続で開く（先に TUI で開いておく必要はない）。全コマンドの現在の動作は
 [実装状態の一覧](document/01-overview.md#現在の実装状態)を参照する。
 
 ## アーキテクチャ

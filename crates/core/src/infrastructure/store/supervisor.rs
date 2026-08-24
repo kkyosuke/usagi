@@ -108,6 +108,14 @@ impl SupervisorStore {
     /// Returns an error when the state directory cannot be listed or an
     /// aggregate cannot be read.
     pub fn prune_finished_runs(&self) -> Result<usize> {
+        // Counting snapshots is a directory listing; deciding from `runs()`
+        // would read and replay every aggregate on every single run start,
+        // trading the unbounded listing this bound exists to fix for an
+        // unbounded start. Below the bound there is nothing to remove whatever
+        // those aggregates say, so the expensive read is not reached.
+        if self.snapshot_count()? <= RUN_RETENTION {
+            return Ok(0);
+        }
         let mut finished: Vec<(DateTime<Utc>, SupervisorRunId)> = self
             .runs()?
             .into_iter()
@@ -145,6 +153,27 @@ impl SupervisorStore {
         }
         Ok(removed)
     }
+    /// How many run snapshots the state directory holds, without reading any of
+    /// them. A missing directory holds none.
+    fn snapshot_count(&self) -> Result<usize> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error).context("failed to list supervisor runs"),
+        };
+        let mut count = 0;
+        for entry in entries {
+            if entry?
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(SNAPSHOT_SUFFIX))
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Loads and reconstructs a run, replaying complete events not yet reflected
     /// by the snapshot.
     ///
@@ -770,6 +799,27 @@ mod tests {
         let error = refused.expect_err("a prune that could delete nothing reported success");
         assert!(
             format!("{error:#}").contains("failed to remove"),
+            "{error:#}"
+        );
+    }
+
+    /// Pruning runs on every start, including the very first one, and is best
+    /// effort there — so an absent directory is "nothing to remove", while a
+    /// directory that cannot be listed is a failure the caller may report.
+    #[test]
+    fn pruning_tolerates_an_absent_directory_and_reports_an_unlistable_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        assert!(!store.dir.exists());
+        assert_eq!(store.prune_finished_runs().unwrap(), 0);
+
+        // A regular file where the state directory belongs cannot be listed.
+        fs::write(&store.dir, b"not a directory").unwrap();
+        let error = store
+            .prune_finished_runs()
+            .expect_err("an unlistable state directory reported success");
+        assert!(
+            format!("{error:#}").contains("failed to list supervisor runs"),
             "{error:#}"
         );
     }

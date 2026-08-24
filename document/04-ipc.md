@@ -167,17 +167,25 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 | 申告 | 解決 |
 |---|---|
 | `selected` | canonical 化した root を **adopt する**（すでに保持していればそれを使う）。adopt できない workspace はこの接続だけを拒否する |
-| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない場合は、その path を含む**最も近い git repository** を workspace root として adopt する。repository が無ければ拒否する |
+| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。どれにも属さない場合、その path 自身が git repository ならそれを adopt する。そうでなければ拒否する（**上位ディレクトリは探索しない**。明示的に開く経路は下記のとおり制限しない） |
 | `unbound` | workspace resource を扱わないので、起動時の workspace を答える |
 | 欠落 | 起動時の workspace を答え、下の fence が拒否する |
 
-`bound` が adopt する対象を「その path を含む最も近い git repository」に限るのは、`bound` が「開く対象」ではなく
-「動いている場所」の申告だからである。申告された directory をそのまま adopt すると、client がたまたま立っていた
-downloads folder が workspace になってしまう。usagi の session は git worktree なので、**repository でない path は
-そもそも workspace を名指していない**。この境界により、CLI と MCP の client も TUI と同じように新しい repository を
-開けるようになり、かつ repository の外では従来どおり拒否される。session worktree（`<root>/.usagi/sessions/<name>`）は
-自身の `.git` を持つが、それは workspace ではなくその workspace の worktree なので、探索は読み飛ばして親の
-repository へ遡る。
+`bound` が adopt するのは「その path 自身が repository である」場合だけで、**上位ディレクトリは探索しない**。
+`bound` は「開く対象」ではなく「動いている場所」の申告なので、上へ辿ると *たまたま上にあった* repository を開いて
+しまう。`$HOME` に dotfiles repository を置く構成は珍しくなく、上位探索を許すと `usagi session create` を home 配下の
+ただの directory で実行しただけで `$HOME` に fence を取り、`~/.usagi/sessions/<name>` を dotfiles の worktree として
+作り、dotfiles に branch を切ることになる。repository に**立っている**ことは、どの workspace を指しているかの
+明確な表明である。その下のどこかに居ることは、そうではない。
+
+いったん adopt されれば、その配下はすべて最長一致で同じ workspace に解決される（この制限が触るのは「新しい
+workspace を開いてよいか」だけである）。session worktree（`<root>/.usagi/sessions/<name>`）は自身の `.git` を持つが
+workspace ではないので、adopt 対象としては常に除外する。それが存在する時点でその workspace は adopt 済みである。
+
+この制限は **`bound` による暗黙の adopt にだけ**掛かる。「repository でなければ workspace になれない」という規則では
+ない。`usagi open <path>` と TUI の Open / New は `selected` を申告する明示的な操作であり、対象が repository か
+どうかを問わない。daemon が起動時 cwd を initial tenant にする経路も同じく制限しない。制限の根拠は
+「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
 
 `selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。

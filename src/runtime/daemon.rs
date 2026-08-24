@@ -1779,23 +1779,26 @@ impl TenantWorkspaces {
     }
 }
 
-/// The workspace root enclosing `path`: the nearest ancestor that is a git
-/// repository, skipping the session worktrees usagi itself creates.
+/// `path` itself, when it is a git repository the caller is standing at.
 ///
-/// This is what makes a bound directory adoptable without adopting *any*
-/// directory a caller happened to stand in. A usagi workspace is a git
-/// repository — a session is a worktree of one — so a path with no repository
-/// above it names no workspace, and running `usagi session create` in a
-/// downloads folder still refuses.
+/// This is the only shape of bound declaration a daemon will *open* a workspace
+/// for. Deliberately no walk up the ancestors: the nearest enclosing repository
+/// is not the same thing as the workspace the caller meant. A dotfiles
+/// repository at `$HOME` is an ordinary setup, and searching upwards would make
+/// `usagi session create` in any plain directory below it fence `$HOME`, create
+/// `~/.usagi/sessions/<name>` as a worktree of the caller's dotfiles, and open a
+/// branch in them. Standing *at* a repository is an unambiguous statement about
+/// which workspace is meant; standing anywhere underneath one is not.
 ///
-/// A session worktree carries its own `.git` file, so it would otherwise answer
-/// as its own workspace. Those are skipped: a client inside
-/// `<root>/.usagi/sessions/<name>` belongs to `<root>`.
-fn enclosing_workspace_root(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .filter(|candidate| !is_session_worktree_path(candidate))
-        .find(|candidate| candidate.join(".git").exists())
-        .map(Path::to_path_buf)
+/// A subdirectory still resolves to its workspace once that workspace is
+/// adopted — that is [`TenantRegistry::owner_of`], and it is unaffected by this.
+/// What this decides is only whether a *new* workspace may be opened.
+///
+/// A session worktree carries its own `.git` file and would otherwise answer as
+/// its own workspace. It is not one: it belongs to the workspace that created
+/// it, which must already be adopted for the worktree to exist.
+fn adoptable_workspace_root(path: &Path) -> Option<PathBuf> {
+    (!is_session_worktree_path(path) && path.join(".git").exists()).then(|| path.to_path_buf())
 }
 
 /// Whether `path` is at or below a `\.usagi/sessions/<name>` worktree.
@@ -1841,9 +1844,9 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
             // A miss is not the end: a CLI or MCP client is as entitled to open a
             // workspace as the TUI is, and refusing here is what forced an
             // operator to open every new repository in the TUI once before their
-            // CLI would work in it. Adoption is still not "whatever directory the
-            // caller stood in" — only the git repository enclosing it, which is
-            // the only thing a usagi session can be a worktree of.
+            // CLI would work in it. What may be opened is narrow on purpose —
+            // only a repository the caller is standing *at*, never one merely
+            // above them ([`adoptable_workspace_root`]).
             //
             // The declared path need not exist: an Agent hook or a session tool
             // names a worktree path that its own teardown may already have
@@ -1855,22 +1858,23 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                 if let Some(owner) = self.tenants.owner_of(&root) {
                     return Ok(paths::wire_workspace_root(owner.root()));
                 }
-                let enclosing = enclosing_workspace_root(&root).ok_or_else(|| {
+                let opening = adoptable_workspace_root(&root).ok_or_else(|| {
                     usagi_core::infrastructure::ipc::workspace_refusal_serving(
                         &format!(
-                            "{} is not inside a git repository, so it names no usagi workspace",
+                            "{} is not a workspace this daemon has open; run this from a \
+                             repository root to open it, or open it explicitly with `usagi open`",
                             paths::wire_workspace_root(&root)
                         ),
                         &self.served(),
                     )
                 })?;
-                self.tenants.adopt(&enclosing).map_err(|error| {
+                self.tenants.adopt(&opening).map_err(|error| {
                     usagi_core::infrastructure::ipc::workspace_refusal_serving(
                         &error.to_string(),
                         &self.served(),
                     )
                 })?;
-                Ok(paths::wire_workspace_root(&enclosing))
+                Ok(paths::wire_workspace_root(&opening))
             }
         }
     }
@@ -10061,12 +10065,22 @@ impl BrokerOutcome {
 fn handle_bootstrap_broker_request(
     request: u8,
     launch: impl FnOnce() -> std::io::Result<()>,
+    daemon_live: impl FnOnce() -> bool,
 ) -> BrokerOutcome {
     match request {
         BROKER_PING => BrokerOutcome::served(true),
         BROKER_START => BrokerOutcome::served(launch().is_ok()),
         // Retiring is acknowledged before it happens: the peer asked for the
         // endpoint to go away, so its disappearance is the success case.
+        //
+        // A reachable daemon vetoes it. Both senders decide to retire from
+        // outside this loop — `usagi daemon stop` after it stopped the daemon,
+        // the idle watch after it found none — and in between either decision
+        // and this point a `BROKER_START` can have put one back. Retiring then
+        // would leave a live daemon with no broker to outlive it, which is the
+        // one state the broker exists to prevent. Re-reading the endpoint here
+        // is the only place both senders pass through.
+        BROKER_STOP if daemon_live() => BrokerOutcome::served(false),
         BROKER_STOP => BrokerOutcome::RETIRE,
         _ => BrokerOutcome::served(false),
     }
@@ -10240,9 +10254,11 @@ fn serve_bootstrap_broker(
         // A peer that reached this point is using the broker, so the idle clock
         // restarts even for a request that is refused.
         activity.touch();
-        let outcome = handle_bootstrap_broker_request(request[0], || {
-            launch_broker_daemon(&exe, &workspace, data_dir)
-        });
+        let outcome = handle_bootstrap_broker_request(
+            request[0],
+            || launch_broker_daemon(&exe, &workspace, data_dir),
+            || usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok(),
+        );
         let _ = stream.write_all(&[if outcome.accepted { BROKER_OK } else { b'E' }]);
         if outcome.retire {
             break;
@@ -12861,9 +12877,7 @@ mod tests {
         };
         let wire = |root: &Path| paths::wire_workspace_root(root);
 
-        // A bound client in a directory with no repository above it is refused:
-        // a usagi session is a git worktree, so such a path names no workspace.
-        // Nothing is adopted for it.
+        // Standing in a plain directory opens nothing.
         let outside = tempfile::tempdir_in("/tmp").unwrap();
         let refusal = resolver
             .resolve(Some(&ClientWorkspace::Bound {
@@ -12874,43 +12888,70 @@ mod tests {
             &refusal
         ));
         assert!(
-            refusal.message.contains("not inside a git repository"),
-            "{refusal:?}"
+            refusal.message.contains("run this from a repository root"),
+            "the refusal gives the caller no next step: {refusal:?}"
         );
-        // The refusal names what this daemon really holds. Claiming one root
-        // while holding two, or naming the very root that was just refused, is
-        // what made this message unreadable.
+        assert!(
+            refusal.message.contains("usagi open"),
+            "the refusal omits the way to open a directory that is not a repository: {refusal:?}"
+        );
+        // The refusal names what this daemon really holds, not the root it just
+        // refused — naming that one is what made the message contradict itself.
         assert!(refusal.message.contains(&wire(&held_root)), "{refusal:?}");
         assert_eq!(tenants.adopted().len(), 1);
 
-        // A CLI or MCP client is as entitled to open a workspace as the TUI is.
-        // Running inside a repository this daemon has never seen adopts that
-        // repository — from its root, from a subdirectory, and from a session
-        // worktree, all of which resolve to the repository root itself.
-        let third = temporary.path().join("third");
-        std::fs::create_dir_all(third.join(".git")).unwrap();
-        std::fs::create_dir_all(third.join("crates/core")).unwrap();
-        let third_root = paths::canonical_workspace_root(&third).unwrap();
-        for candidate in [
-            third_root.clone(),
-            third_root.join("crates/core"),
-            third_root.join(".usagi/sessions/worker"),
+        // Standing *at* a repository this daemon has never seen opens it. That
+        // is the whole of what a bound declaration may open.
+        let project = temporary.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join("crates/core")).unwrap();
+        std::fs::create_dir_all(project.join(".usagi/sessions/worker/.git")).unwrap();
+        let project_root = paths::canonical_workspace_root(&project).unwrap();
+
+        // Below it, nothing is opened. A dotfiles repository at `$HOME` is an
+        // ordinary setup, so searching upwards would let `usagi session create`
+        // in any plain directory under it fence `$HOME` and open a branch in the
+        // caller's dotfiles. Standing at a repository says which workspace is
+        // meant; standing anywhere underneath one does not.
+        for below in [
+            project_root.join("crates/core"),
+            project_root.join(".usagi/sessions/worker"),
+        ] {
+            let refusal = resolver
+                .resolve(Some(&ClientWorkspace::Bound { root: wire(&below) }))
+                .unwrap_err();
+            assert!(
+                usagi_core::infrastructure::ipc::is_workspace_mismatch(&refusal),
+                "{below:?} opened a workspace from below its root"
+            );
+        }
+        assert_eq!(tenants.adopted().len(), 1);
+
+        assert_eq!(
+            resolver
+                .resolve(Some(&ClientWorkspace::Bound {
+                    root: wire(&project_root),
+                }))
+                .unwrap(),
+            wire(&project_root)
+        );
+        assert_eq!(tenants.adopted().len(), 2);
+
+        // Once it is open, everything below it resolves to it again — that is
+        // ancestor matching, which this narrowing does not touch.
+        for below in [
+            project_root.join("crates/core"),
+            project_root.join(".usagi/sessions/worker"),
         ] {
             assert_eq!(
                 resolver
-                    .resolve(Some(&ClientWorkspace::Bound {
-                        root: wire(&candidate),
-                    }))
+                    .resolve(Some(&ClientWorkspace::Bound { root: wire(&below) }))
                     .unwrap(),
-                wire(&third_root),
-                "{candidate:?} did not resolve to its repository root"
+                wire(&project_root),
+                "{below:?} did not resolve to the workspace that owns it"
             );
         }
-        assert_eq!(
-            tenants.adopted().len(),
-            2,
-            "the three spellings adopted more than the one repository they name"
-        );
+        assert_eq!(tenants.adopted().len(), 2);
     }
 
     /// The real activity observer over a fixture data directory.
@@ -16636,10 +16677,14 @@ instructions = "{instructions}"
     fn bootstrap_broker_accepts_only_ping_start_and_stop() {
         let launches = std::cell::Cell::new(0_u8);
         let count = |request| {
-            handle_bootstrap_broker_request(request, || {
-                launches.set(launches.get() + 1);
-                Ok(())
-            })
+            handle_bootstrap_broker_request(
+                request,
+                || {
+                    launches.set(launches.get() + 1);
+                    Ok(())
+                },
+                || false,
+            )
         };
 
         assert_eq!(count(BROKER_PING), BrokerOutcome::served(true));
@@ -16651,14 +16696,24 @@ instructions = "{instructions}"
         assert_eq!(count(b'Z'), BrokerOutcome::served(false));
         assert_eq!(launches.get(), 1);
         assert_eq!(
-            handle_bootstrap_broker_request(BROKER_START, || Err(std::io::Error::other(
-                "launch refused"
-            ))),
+            handle_bootstrap_broker_request(
+                BROKER_START,
+                || Err(std::io::Error::other("launch refused")),
+                || false,
+            ),
             BrokerOutcome::served(false)
         );
         // Stop is the one request that ends the loop, and it starts no daemon.
         assert_eq!(count(BROKER_STOP), BrokerOutcome::RETIRE);
         assert_eq!(launches.get(), 1);
+
+        // A daemon that came back between the decision to retire and this point
+        // vetoes it: retiring would leave it with no broker to outlive it, which
+        // is the one state the broker exists to prevent.
+        assert_eq!(
+            handle_bootstrap_broker_request(BROKER_STOP, || Ok(()), || true),
+            BrokerOutcome::served(false)
+        );
     }
 
     /// The broker exists so that a sandboxed client can cold-start a daemon it
