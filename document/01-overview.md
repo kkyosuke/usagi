@@ -113,7 +113,8 @@ Esc、Ctrl-C、Ctrl-D、Ctrl-Q を含む leader 以外のキー入力をすべ�
 Closeup action モーダルを前面に出す。
 
 Switch で session 行を選択しているとき、`x` は `session remove`、`Shift`+`x`（`X`）は
-`session remove -f` を実行する。root と `+ new session` 行では削除しない。
+`session remove -f` を実行する。`-f` は dirty な worktree と未マージの session ブランチの両方を破棄する
+（詳細は [3. TUI](03-tui.md#home-と-target)）。root と `+ new session` 行では削除しない。
 
 `:` はどちらの mode からも Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
