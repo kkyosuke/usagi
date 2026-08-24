@@ -1084,6 +1084,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_workspace_ownership_cannot_be_reassigned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, _) = ids();
+        let agent = agent(session, agent_id);
+        store
+            .upsert_agent(WorkspaceId::new(), agent.clone())
+            .unwrap();
+        assert!(
+            store
+                .upsert_agent(WorkspaceId::new(), agent)
+                .unwrap_err()
+                .to_string()
+                .contains("ownership cannot be reassigned")
+        );
+    }
+
+    #[test]
     fn prompt_queue_replaces_peeks_and_consumes_per_session() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -1180,6 +1198,88 @@ mod tests {
         );
         assert!(store.queued_prompt(workspace, None).unwrap().is_none());
         assert_eq!(store.load_registry().unwrap().prompts.len(), 1);
+
+        let replacement_session = SessionId::new();
+        store
+            .mutate_registry(|registry| {
+                registry.prompts.push(QueuedPrompt {
+                    session_id: Some(replacement_session),
+                    prompt: "superseded legacy work".into(),
+                    queued_at: now(),
+                });
+            })
+            .unwrap();
+        store
+            .queue_prompt(
+                workspace,
+                Some(replacement_session),
+                "new scoped work".into(),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(store.load_registry().unwrap().prompts.len(), 1);
+
+        // Emulate an old predecessor restoring its same-session slot after the
+        // scoped prompt was queued. Consumption removes both copies so a later
+        // launch cannot reveal the superseded prompt.
+        store
+            .mutate_registry(|registry| {
+                registry.prompts.push(QueuedPrompt {
+                    session_id: Some(replacement_session),
+                    prompt: "late legacy work".into(),
+                    queued_at: now(),
+                });
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .consume_prompt(workspace, Some(replacement_session))
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "new scoped work"
+        );
+        assert_eq!(store.load_registry().unwrap().prompts.len(), 1);
+        assert!(
+            store
+                .consume_prompt(workspace, Some(SessionId::new()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn scoped_prompt_write_failures_are_reported_without_consuming_the_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        json_file::fail_next_atomic_write(
+            &store.workspace_registry_path(),
+            json_file::AtomicWriteStage::Write,
+        );
+        assert!(
+            store
+                .queue_prompt(workspace, None, "not queued".into(), now())
+                .is_err()
+        );
+        assert!(store.queued_prompt(workspace, None).unwrap().is_none());
+
+        store
+            .queue_prompt(workspace, None, "still queued".into(), now())
+            .unwrap();
+        json_file::fail_next_atomic_write(
+            &store.workspace_registry_path(),
+            json_file::AtomicWriteStage::Rename,
+        );
+        assert!(store.consume_prompt(workspace, None).is_err());
+        assert_eq!(
+            store
+                .queued_prompt(workspace, None)
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "still queued"
+        );
     }
 
     #[test]
