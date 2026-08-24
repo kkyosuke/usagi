@@ -3633,6 +3633,7 @@ mod tests {
                 label: "root conversation".to_owned(),
                 selected: true,
             }],
+            organization: Vec::new(),
             terminal_view: Some(TerminalViewProjection {
                 rows: vec!["director agent output".to_owned()],
                 row_offset: 0,
@@ -4013,6 +4014,8 @@ mod tests {
                 SessionRoleProjection {
                     role_id: Some(RoleId::new("reviewer").unwrap()),
                     role_summary: None,
+                    parent_session_id: None,
+                    agent_status: None,
                 },
             )]))),
         );

@@ -88,6 +88,33 @@ pub struct RoleDefinition {
     pub summary: String,
     pub scopes: BTreeSet<RoleScope>,
     pub instructions: String,
+    /// Optional daemon-enforced delegation authority. Absence preserves the
+    /// version-1 catalog's legacy behavior; once present every limit is
+    /// enforced before a session or worker is created.
+    #[serde(default)]
+    pub delegation: Option<DelegationPolicy>,
+}
+
+/// Authority a role may exercise over child sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationPolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub child_roles: BTreeSet<RoleId>,
+    #[serde(default = "default_max_delegation_depth")]
+    pub max_depth: usize,
+    #[serde(default = "default_max_delegation_concurrency")]
+    pub max_concurrency: usize,
+}
+
+const fn default_max_delegation_depth() -> usize {
+    8
+}
+
+const fn default_max_delegation_concurrency() -> usize {
+    4
 }
 
 /// Optional defaults supplied by one catalog layer.
@@ -216,6 +243,7 @@ mod tests {
                 summary: "code".into(),
                 scopes: BTreeSet::from([RoleScope::Session]),
                 instructions: "implement".into(),
+                delegation: None,
             },
         );
         assert_eq!(
@@ -246,5 +274,55 @@ mod tests {
                 .to_string()
                 .contains("Root scope")
         );
+    }
+
+    #[test]
+    fn delegation_policy_is_explicit_and_bounded() {
+        let definition: RoleDefinition = toml::from_str(
+            r#"
+summary = "Manage"
+scopes = ["session"]
+instructions = "delegate"
+[delegation]
+enabled = true
+child_roles = ["executor"]
+max_depth = 3
+max_concurrency = 2
+"#,
+        )
+        .unwrap();
+        let policy = definition.delegation.unwrap();
+        assert!(policy.enabled);
+        assert!(
+            policy
+                .child_roles
+                .contains(&RoleId::new("executor").unwrap())
+        );
+        assert_eq!(policy.max_depth, 3);
+        assert_eq!(policy.max_concurrency, 2);
+
+        let legacy: RoleDefinition = toml::from_str(
+            "summary = \"Work\"\nscopes = [\"session\"]\ninstructions = \"execute\"\n",
+        )
+        .unwrap();
+        assert!(legacy.delegation.is_none());
+    }
+
+    #[test]
+    fn delegation_policy_uses_safe_defaults_when_limits_are_omitted() {
+        let definition: RoleDefinition = toml::from_str(
+            r#"
+summary = "Manage"
+scopes = ["session"]
+instructions = "delegate"
+[delegation]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let policy = definition.delegation.unwrap();
+        assert_eq!(policy.max_depth, 8);
+        assert_eq!(policy.max_concurrency, 4);
     }
 }

@@ -308,7 +308,7 @@ impl Tool for SessionPrompt {
     }
 }
 
-/// `session_complete` — 親（または root）へ完了を報告する（セッション内限定）。
+/// `session_complete` — dispatch 元の直近 caller へ完了を報告する（セッション内限定）。
 pub struct SessionComplete;
 
 impl Tool for SessionComplete {
@@ -316,7 +316,7 @@ impl Tool for SessionComplete {
         "session_complete"
     }
     fn description(&self) -> &'static str {
-        "自セッションの作業完了を親（または root）へ報告するときに使う。message 必須。自セッション内からのみ呼べる。"
+        "dispatch された自セッションの作業完了を、保存済み binding が示す直近 caller の durable inbox へ報告するときに使う。message 必須。宛先を推測せず、自セッション内からのみ呼べる。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#

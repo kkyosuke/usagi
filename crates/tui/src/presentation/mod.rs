@@ -46,6 +46,7 @@ use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::director_drawer::{
     self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+    DirectorOrganizationRow,
 };
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
@@ -3833,6 +3834,7 @@ fn director_drawer_projection(
     };
     DirectorDrawerProjection {
         conversations,
+        organization: director_organization(ui),
         terminal_view,
         interrupted_detail,
         feedback,
@@ -3863,6 +3865,79 @@ fn director_drawer_projection(
             }
         },
     }
+}
+
+fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
+    fn append_children(
+        parent: Option<SessionId>,
+        depth: usize,
+        members: &[(SessionId, Option<SessionId>, DirectorOrganizationRow)],
+        emitted: &mut std::collections::BTreeSet<SessionId>,
+        rows: &mut Vec<DirectorOrganizationRow>,
+    ) {
+        for (id, member_parent, row) in members {
+            if *member_parent == parent && emitted.insert(*id) {
+                let mut row = row.clone();
+                row.depth = depth;
+                rows.push(row);
+                append_children(Some(*id), depth.saturating_add(1), members, emitted, rows);
+            }
+        }
+    }
+
+    let roles = ui.workspace.session_roles();
+    let mut members = Vec::new();
+    for (session_id, session) in ui
+        .workspace
+        .session_ids()
+        .iter()
+        .zip(ui.workspace.sessions())
+    {
+        let role_name = roles
+            .get(session_id)
+            .and_then(|role| role.role_id.as_ref())
+            .map_or("executor", usagi_core::domain::role::RoleId::as_str);
+        let status = match roles.get(session_id).and_then(|role| role.agent_status) {
+            Some(usagi_core::domain::agent::AgentStatus::Starting) => "starting",
+            Some(usagi_core::domain::agent::AgentStatus::Running) => "running",
+            Some(usagi_core::domain::agent::AgentStatus::Idle) => "waiting",
+            Some(usagi_core::domain::agent::AgentStatus::Exited) => "stopped",
+            Some(usagi_core::domain::agent::AgentStatus::Failed) => "failed",
+            None => "ready",
+        };
+        let row = DirectorOrganizationRow {
+            depth: 0,
+            label: format!("{} ({role_name})", session.name),
+            status: status.to_owned(),
+        };
+        members.push((
+            *session_id,
+            roles
+                .get(session_id)
+                .and_then(|role| role.parent_session_id),
+            row,
+        ));
+    }
+    if members.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = vec![DirectorOrganizationRow {
+        depth: 0,
+        label: "Director".into(),
+        status: "active".into(),
+    }];
+    let mut emitted = std::collections::BTreeSet::new();
+    append_children(None, 1, &members, &mut emitted, &mut rows);
+    // Corrupt or retention-truncated parentage is still visible, but never
+    // allowed to form an unbounded/cyclic presentation walk.
+    for (id, _, row) in members {
+        if emitted.insert(id) {
+            let mut row = row;
+            row.depth = 1;
+            rows.push(row);
+        }
+    }
+    rows
 }
 
 /// Run the per-frame foreground-terminal sweep: poll the one attached selection,
@@ -7108,14 +7183,14 @@ mod tests {
         WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken,
         WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
         WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, drain_session_completions, foreground_terminal_geometry,
-        forward_live_terminal_input, garden_click_at, handle_terminal_pointer, home_frame_material,
-        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, poll_and_project_terminals,
-        projection_build_counts, render_controller_frame, render_home_material,
-        render_home_snapshot, reset_projection_build_counts, restore_open_panes,
-        retarget_director_chords, route_workspace_input_before_reducer, run as run_from_start,
-        run_screen_graph_with_backend, run_with_settings,
+        copy_terminal_selection, director_organization, drain_session_completions,
+        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at,
+        handle_terminal_pointer, home_frame_material, intercept_live_terminal_control,
+        is_user_activity, key_to_terminal_bytes, new_project_notice, play_startup_splash,
+        poll_and_project_terminals, projection_build_counts, render_controller_frame,
+        render_home_material, render_home_snapshot, reset_projection_build_counts,
+        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -8322,6 +8397,8 @@ mod tests {
         let role = crate::usecase::application::controller::SessionRoleProjection {
             role_id: None,
             role_summary: Some("Reviewer".into()),
+            parent_session_id: None,
+            agent_status: None,
         };
         view.set_session_roles(BTreeMap::from([(session, role.clone())]));
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
@@ -8347,6 +8424,89 @@ mod tests {
                 .get(&session)
                 .map(|projection| projection.lifecycle),
             Some(SessionLifecycle::Failed),
+        );
+    }
+
+    #[test]
+    fn director_organization_projects_statuses_hierarchy_and_orphans() {
+        use usagi_core::domain::agent::AgentStatus;
+
+        let mut empty_state = state("empty");
+        empty_state.sessions.clear();
+        let empty_ui = WorkspaceUi::new(
+            WorkspaceView::with_runtime_ids(ws("empty"), empty_state, Vec::new()),
+            Box::new(UnavailableSessionCommandPort),
+        );
+        assert!(director_organization(&empty_ui).is_empty());
+
+        let director_child = SessionId::new();
+        let manager_child = SessionId::new();
+        let stopped_child = SessionId::new();
+        let running_child = SessionId::new();
+        let failed_child = SessionId::new();
+        let orphan = SessionId::new();
+        let ids = vec![
+            director_child,
+            manager_child,
+            stopped_child,
+            running_child,
+            failed_child,
+            orphan,
+        ];
+        let mut workspace_state = state("demo");
+        let template = workspace_state.sessions[0].clone();
+        workspace_state.sessions = [
+            "manager", "worker", "stopped", "running", "failed", "orphan",
+        ]
+        .into_iter()
+        .map(|name| SessionRecord {
+            name: name.into(),
+            root: PathBuf::from(format!("/tmp/demo/{name}")),
+            ..template.clone()
+        })
+        .collect();
+        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids);
+        let role = |parent_session_id, agent_status| {
+            crate::usecase::application::controller::SessionRoleProjection {
+                role_id: None,
+                role_summary: None,
+                parent_session_id,
+                agent_status,
+            }
+        };
+        view.set_session_roles(BTreeMap::from([
+            (director_child, role(None, Some(AgentStatus::Starting))),
+            (
+                manager_child,
+                role(Some(director_child), Some(AgentStatus::Idle)),
+            ),
+            (
+                stopped_child,
+                role(Some(manager_child), Some(AgentStatus::Exited)),
+            ),
+            (running_child, role(None, Some(AgentStatus::Running))),
+            (
+                failed_child,
+                role(Some(running_child), Some(AgentStatus::Failed)),
+            ),
+            (orphan, role(Some(SessionId::new()), None)),
+        ]));
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        let rows = director_organization(&ui);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.depth, row.label.as_str(), row.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "Director", "active"),
+                (1, "manager (executor)", "starting"),
+                (2, "worker (executor)", "waiting"),
+                (3, "stopped (executor)", "stopped"),
+                (1, "running (executor)", "running"),
+                (2, "failed (executor)", "failed"),
+                (1, "orphan (executor)", "ready"),
+            ]
         );
     }
 
@@ -23428,7 +23588,7 @@ mod tests {
         frames.iter().any(|frame| {
             let text = frame.join("\n");
             text.contains("󰚩 director")
-                && text.contains("No conversations yet")
+                && (text.contains("No conversations yet") || text.contains("Organization"))
                 && text.contains("[ New ]")
         })
     }

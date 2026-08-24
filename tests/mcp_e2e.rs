@@ -280,7 +280,7 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"brief-worker","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"brief triaged"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_complete","arguments":{"message":"brief triaged"}}}' \
   | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
     );
@@ -865,6 +865,101 @@ fn production_delegate_issue_assigns_the_selected_role_without_persisting_instru
     assert_eq!(delegated["role_summary"], "Implement an issue");
     let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
     assert!(!dispatch.contains("ISSUE_ROLE_SECRET"));
+}
+
+#[test]
+fn production_delegate_issue_requires_an_authenticated_caller_in_company_mode() {
+    let mut mcp = McpHarness::start();
+    fs::write(
+        mcp.workspace().join(".usagi/roles.toml"),
+        r#"version = 1
+[roles.coder]
+summary = "Implement"
+scopes = ["session"]
+instructions = "code"
+[roles.coder.delegation]
+enabled = false
+"#,
+    )
+    .unwrap();
+
+    let response = mcp.tool(
+        "session_delegate_issue",
+        &json!({"number":1, "name":"must-not-exist", "role":"coder"}),
+    );
+
+    assert_eq!(response["error"]["code"], -32603);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("authenticated caller is required by the delegation policy")
+    );
+    assert!(
+        !mcp.workspace()
+            .join(".usagi/sessions/must-not-exist")
+            .exists()
+    );
+}
+
+#[test]
+fn production_delegate_issue_counts_queued_children_against_concurrency() {
+    let mut mcp = McpHarness::start();
+    fs::write(
+        mcp.workspace().join(".usagi/roles.toml"),
+        r#"version = 1
+[defaults]
+session = "manager"
+[roles.manager]
+summary = "Manage"
+scopes = ["session"]
+instructions = "delegate"
+[roles.manager.delegation]
+enabled = true
+child_roles = ["coder"]
+max_depth = 2
+max_concurrency = 1
+[roles.coder]
+summary = "Implement"
+scopes = ["session"]
+instructions = "code"
+[roles.coder.delegation]
+enabled = false
+"#,
+    )
+    .unwrap();
+    let issues = mcp.workspace().join(".usagi/issues");
+    fs::create_dir_all(&issues).unwrap();
+    for number in [1, 2] {
+        fs::write(
+            issues.join(format!("{number:03}-queued.md")),
+            format!(
+                "---\nnumber: {number}\ntitle: Queued {number}\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-08-25T00:00:00+00:00\nupdated_at: 2026-08-25T00:00:00+00:00\n---\n\nImplement it.\n"
+            ),
+        )
+        .unwrap();
+    }
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
+
+    let first = mcp.tool(
+        "session_delegate_issue",
+        &json!({"number":1, "name":"queued-one", "role":"coder"}),
+    );
+    assert!(first.get("error").is_none(), "{first}");
+    let second = mcp.tool(
+        "session_delegate_issue",
+        &json!({"number":2, "name":"queued-two", "role":"coder"}),
+    );
+
+    assert_eq!(second["error"]["code"], -32603);
+    assert!(
+        second["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("delegation concurrency limit (1) reached")
+    );
+    assert!(!mcp.workspace().join(".usagi/sessions/queued-two").exists());
 }
 
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {

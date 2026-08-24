@@ -436,6 +436,10 @@ Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択�
 
 ## 指示モード（Director mode）
 
+選択中の Director terminal がないとき、drawer は role projection から Organization tree を表示する。root Director の下に
+Manager、さらに Executor をインデントし、各行には `active` / `waiting` / `stopped` / `ready` の安全な状態だけを表示する。
+provider 固有 ID、prompt、inbox 本文は表示しない。
+
 root scope（`session_id: None`）の Agent へ指示を出し、session を作らせる面を**指示モード**（英語 / identifier は
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
 （[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。

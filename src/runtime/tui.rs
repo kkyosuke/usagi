@@ -3090,11 +3090,27 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
                     .get("role_summary")
                     .and_then(serde_json::Value::as_str)
                     .map(ToOwned::to_owned);
+                let parent_session_id = item
+                    .get("parent_session_id")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| "daemon organization parent is invalid".to_owned())?;
+                let agent_status = item
+                    .get("agent_status")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| "daemon organization status is invalid".to_owned())?;
                 Ok((
                     session_id,
                     SessionRoleProjection {
                         role_id,
                         role_summary,
+                        parent_session_id,
+                        agent_status,
                     },
                 ))
             })
@@ -6789,11 +6805,12 @@ mod tests {
         managed.lifecycle = SessionLifecycle::Available;
         managed.role_id = Some(usagi_core::domain::role::RoleId::new("coder").unwrap());
         let session_id = managed.session_id;
+        let parent_session_id = SessionId::new();
         let mut managed_value = serde_json::to_value(managed).unwrap();
-        managed_value
-            .as_object_mut()
-            .unwrap()
-            .insert("role_summary".to_owned(), json!("Writes code"));
+        let managed_object = managed_value.as_object_mut().unwrap();
+        managed_object.insert("role_summary".to_owned(), json!("Writes code"));
+        managed_object.insert("parent_session_id".to_owned(), json!(parent_session_id));
+        managed_object.insert("agent_status".to_owned(), json!("running"));
         let parsed = lifecycle_snapshot(&json!({
             "revision": 1,
             "workspace_id": WorkspaceId::new(),
@@ -6805,6 +6822,11 @@ mod tests {
         let role = &parsed.session_roles[&session_id];
         assert_eq!(role.role_id.as_ref().unwrap().as_str(), "coder");
         assert_eq!(role.role_summary.as_deref(), Some("Writes code"));
+        assert_eq!(role.parent_session_id, Some(parent_session_id));
+        assert_eq!(
+            role.agent_status,
+            Some(usagi_core::domain::agent::AgentStatus::Running)
+        );
     }
 
     #[test]

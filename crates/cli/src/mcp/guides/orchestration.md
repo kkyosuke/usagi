@@ -25,7 +25,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | daemon-owned PR inventory と merged 集約を返す |
-| 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し root coordinator へ報告する |
+| 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | daemon が worktree を破棄し、lifecycle store を更新する |
 | legacy state の検査・採用 | `session_recover_legacy` | 既定は検査だけを行い、`apply: true` のときだけ daemon lifecycle state へ採用する |
@@ -80,6 +80,26 @@ credential を必要とする。手動で
 成功応答には durable `run_id`、`agent_id`、daemon-owned `terminal` が入る。既存 worker を再利用する場合は
 `agent` を `{"id":"<agent_id>"}` にする。
 
+## 階層的に委譲する
+
+dispatch された worker も authenticated caller なので、さらに `session_delegate_brief` または
+`session_dispatch` を呼び出せる。これにより Director → Manager → Executor の階層を同じ仕組みで作る。
+親子関係は session 名や role 名から推測せず、dispatch ごとに daemon が保存する `DispatchBinding` を権威にする。
+
+```text
+Director
+├─ Executor                         小さいタスク
+└─ Manager                          大きいタスク
+   ├─ Executor
+   └─ Executor
+```
+
+下向きの指示は各 caller が子 worker を dispatch し、上向きの報告は子が `agent_complete` / `agent_fail`
+（互換の `session_complete` でも成功報告のみ可）を呼ぶ。報告先は常に immediate caller である。
+Executor の報告は Manager の inbox に入り、Manager が検証・統合してから自身の caller へ一度だけ報告する。
+worker は宛先 ID や `:root` を指定しない。親から dispatch されず単独で launch された Agent は self-binding を持つため、
+存在しない親を root として補完せず、自身の inbox が報告先になる。
+
 ## worker を観測する
 
 `session_get {"name":"issue-123"}` は session 内の agent と現在または最後の task を返す。
@@ -88,7 +108,8 @@ run 履歴を返す。これらは daemon の dispatch store を読み、MCP ser
 
 ## 完了または失敗を報告する
 
-worker は終了前に `agent_complete` または `agent_fail` を呼ぶ。宛先は指定しない。daemon が credential の
+worker は終了前に `agent_complete` または `agent_fail` を呼ぶ。成功の自由文報告だけが必要な既存 caller は
+`session_complete` も使える。宛先は指定しない。daemon が credential の
 current run と dispatch 時の binding を照合し、元 caller の inbox へ一度だけ配送する。
 
 ```json
