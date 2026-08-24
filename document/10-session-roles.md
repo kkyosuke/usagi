@@ -50,15 +50,15 @@ scopes = ["root"]
 instructions = "要求を分解し、session の結果を統合する。"
 [roles.director.delegation]
 enabled = true
-child_roles = ["manager", "coder"]
+child_roles = ["manager", "worker"]
 max_depth = 2
 max_concurrency = 4
 
-[roles.coder]
+[roles.worker]
 summary = "実装と検証を行う"
 scopes = ["session"]
 instructions = "依頼された変更を実装し、リスクに応じたテストを実行する。"
-[roles.coder.delegation]
+[roles.worker.delegation]
 enabled = false
 
 [roles.manager]
@@ -67,7 +67,7 @@ scopes = ["session"]
 instructions = "タスクを Executor へ委譲し、各結果を検証・統合して直近 caller へ報告する。"
 [roles.manager.delegation]
 enabled = true
-child_roles = ["coder"]
+child_roles = ["worker"]
 max_depth = 2
 max_concurrency = 4
 ```
@@ -80,8 +80,8 @@ role は組織上の責務を prompt として与える。Director が小さい�
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
 会社テンプレートでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
-`manager` とする。Director/Managerが実行者を委譲するときは `role = "coder"` を明示し、既定値に依存しない。
-sidebar は各session名の横に `[manager]` / `[coder]` と階層インデントを常時表示し、Garden は `[role] parent › session` の nameplate と session 内の Agent を表すうさぎを表示する。Director drawerはrootのDirectorを含む親子ツリーを表示する。
+`manager` とする。Director/Managerが実行者を委譲するときは `role = "worker"` を明示し、既定値に依存しない。
+sidebar は各session名の横に `◆ Manager` / `● Worker` と階層インデントを常時表示し、Garden は `role-icon Role · parent › session` の nameplate と session 内の Agent を表すうさぎを表示する。Director drawerは `♛ Director` をrootとする親子ツリーを表示する。
 
 `session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
 したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。

@@ -20,7 +20,7 @@ const MIN_BACKGROUND_WIDTH: usize = 24;
 ///
 /// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
 /// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
-pub const DIRECTOR_ICON: char = '\u{f06a9}';
+pub const DIRECTOR_ICON: char = '♛';
 /// Rows of drawer chrome the New picker's candidate rows never get: the Home
 /// header row above the drawer, the panel's two borders and two vertical padding
 /// rows, the conversation selector, its separator, and the footer hint.
@@ -230,7 +230,7 @@ pub fn render_over(
     let title = Role::Accent
         .style()
         .bold()
-        .paint(&format!("{DIRECTOR_ICON} director"));
+        .paint(&format!("{DIRECTOR_ICON} Director"));
     let panel = modal::boxed(&title, inner_width, &body);
 
     // The panel is `drawer.height` rows and is anchored at `drawer.top`, so it
@@ -504,7 +504,7 @@ mod tests {
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains(&format!("{DIRECTOR_ICON} director")));
+        assert!(text.contains(&format!("{DIRECTOR_ICON} Director")));
         assert!(text.contains("Conversation  [No conversations]"));
         assert!(text.contains("[ New ]"));
         assert!(text.contains("No conversations yet"));

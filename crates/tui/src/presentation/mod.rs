@@ -3916,10 +3916,13 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
         .iter()
         .zip(ui.workspace.sessions())
     {
-        let role_name = roles
+        let role_identity = roles
             .get(session_id)
             .and_then(|role| role.role_id.as_ref())
-            .map_or("executor", usagi_core::domain::role::RoleId::as_str);
+            .map_or_else(
+                || "• Executor".to_owned(),
+                |role| views::workspace::role_identity(role.as_str()),
+            );
         let status = match roles.get(session_id).and_then(|role| role.agent_status) {
             Some(usagi_core::domain::agent::AgentStatus::Starting) => "starting",
             Some(usagi_core::domain::agent::AgentStatus::Running) => "running",
@@ -3930,7 +3933,7 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
         };
         let row = DirectorOrganizationRow {
             depth: 0,
-            label: format!("{} ({role_name})", session.name),
+            label: format!("{role_identity} · {}", session.name),
             status: status.to_owned(),
         };
         members.push((
@@ -3946,7 +3949,7 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
     }
     let mut rows = vec![DirectorOrganizationRow {
         depth: 0,
-        label: "Director".into(),
+        label: format!("{} Director", director_drawer::DIRECTOR_ICON),
         status: "active".into(),
     }];
     let mut emitted = std::collections::BTreeSet::new();
@@ -5304,7 +5307,7 @@ fn drain_controller_host_actions(
                 if matches!(request.target, Target::Root(_)) {
                     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
                         Notice::new(format!(
-                            "{} director accepts Agent conversations only",
+                            "{} Director accepts Agent conversations only",
                             director_drawer::DIRECTOR_ICON
                         )),
                     )));
@@ -8511,7 +8514,7 @@ mod tests {
                 agent_status,
             }
         };
-        view.set_session_roles(BTreeMap::from([
+        let mut roles = BTreeMap::from([
             (director_child, role(None, Some(AgentStatus::Starting))),
             (
                 manager_child,
@@ -8529,7 +8532,10 @@ mod tests {
             // A corrupt self-cycle is emitted as a root-level orphan and must
             // not increase projection depth or loop forever.
             (orphan, role(Some(orphan), None)),
-        ]));
+        ]);
+        roles.get_mut(&director_child).unwrap().role_id =
+            Some(usagi_core::domain::role::RoleId::new("manager").expect("valid company role"));
+        view.set_session_roles(roles);
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         let rows = director_organization(&ui);
@@ -8538,13 +8544,13 @@ mod tests {
                 .map(|row| (row.depth, row.label.as_str(), row.status.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (0, "Director", "active"),
-                (1, "manager (executor)", "starting"),
-                (2, "worker (executor)", "waiting"),
-                (3, "stopped (executor)", "stopped"),
-                (1, "running (executor)", "running"),
-                (2, "failed (executor)", "failed"),
-                (1, "orphan (executor)", "ready"),
+                (0, "♛ Director", "active"),
+                (1, "◆ Manager · manager", "starting"),
+                (2, "• Executor · worker", "waiting"),
+                (3, "• Executor · stopped", "stopped"),
+                (1, "• Executor · running", "running"),
+                (2, "• Executor · failed", "failed"),
+                (1, "• Executor · orphan", "ready"),
             ]
         );
 
@@ -14960,7 +14966,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("󰚩 director accepts Agent conversations only")
+            Some("♛ Director accepts Agent conversations only")
         );
 
         ui.pane_completion_sender
@@ -23649,7 +23655,7 @@ mod tests {
     fn has_director_drawer(frames: &[Vec<String>]) -> bool {
         frames.iter().any(|frame| {
             let text = frame.join("\n");
-            text.contains("󰚩 director")
+            text.contains("♛ Director")
                 && (text.contains("No conversations yet") || text.contains("Organization"))
                 && text.contains("[ New ]")
         })

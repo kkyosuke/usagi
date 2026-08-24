@@ -73,7 +73,7 @@ credential を必要とする。手動で
 無ければ作成する。新規 worker の runtime/model は `tools/list` の schema に列挙された組だけを使う。
 
 ```json
-{"name":"session_dispatch","arguments":{"session":{"name":"issue-123","role":"coder"},
+{"name":"session_dispatch","arguments":{"session":{"name":"issue-123","role":"worker"},
  "agent":{"runtime":"codex","model":"gpt-5"},"prompt":"issue #123 を実装する"}}
 ```
 

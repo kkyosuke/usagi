@@ -657,7 +657,7 @@ material にかかわらず必ず描き直す。
 Home sidebar は `session* → + new session` の順序と stable session identity を保つ。作成 action は
 1 行、各 session は固定 3 行（1 行目 まとめ / 2 行目 変更履歴 / 3 行目 Agent）で描画する。`main` 行・root divider・`Sessions` 見出しは表示しない。session が
 0 件なら `+ new session` が唯一の selectable row となる。作成中の skeleton は `+ new session` の直前に置く。session の 1 行目は cursor / active marker、表示名、常に幅を
-予約する note icon に加え、daemon projection に assignment がある場合だけ `[role-id]` badge を描く。Director の直下は `└─`、その子孫は深さに応じた字下げを表示名の前へ置く。badge と階層は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
+予約する note icon に加え、daemon projection に assignment がある場合だけ `◆ Manager` / `● Worker`（独自roleは `• role-id`）を描く。Director の直下は `└─`、その子孫は深さに応じた字下げを表示名の前へ置く。role icon と階層は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
 
 2 行目は daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`
@@ -843,7 +843,7 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新�
 
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `[role-id] parent › session`（直下の session は `[role-id] session`）として役割と直接の親を表示する。session の lifecycle は nameplate と区画の pose、Agent
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。会社roleの iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 

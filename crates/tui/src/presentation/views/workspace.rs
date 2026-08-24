@@ -200,11 +200,20 @@ fn organization_label(session: &ProjectedSession) -> String {
     )
 }
 
+pub(crate) fn role_identity(role: &str) -> String {
+    match role {
+        "director" => format!("{DIRECTOR_ICON} Director"),
+        "manager" => "◆ Manager".to_owned(),
+        "worker" => "● Worker".to_owned(),
+        custom => format!("• {}", widgets::clip_to_width(custom, 12)),
+    }
+}
+
 fn role_badge(session: &ProjectedSession) -> String {
     session
         .role_id
         .as_ref()
-        .map(|role| format!(" [{}]", widgets::clip_to_width(role, 12)))
+        .map(|role| format!("  {}", role_identity(role)))
         .unwrap_or_default()
 }
 
@@ -212,7 +221,7 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
     let role = session
         .role_id
         .as_deref()
-        .map(|role| format!("[{role}] "))
+        .map(|role| format!("{} · ", role_identity(role)))
         .unwrap_or_default();
     let lineage = session
         .parent_session_id
@@ -1260,11 +1269,11 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .style()
             .bold()
             .reverse()
-            .paint(&format!("[ {DIRECTOR_ICON} director ]"))
+            .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     } else {
         Style::new()
             .dim()
-            .paint(&format!("[ {DIRECTOR_ICON} director ]"))
+            .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
     let notice = (!home.unread_decision_ids.is_empty())
         .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
@@ -2830,8 +2839,8 @@ mod tests {
         home_header_action_at, home_header_layout, home_left_pane, home_row_height,
         home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
         pane_tab_label, pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
-        right_pane_tab_at, short_id, sidebar_agent_line, sidebar_metadata, sidecar_labels,
-        terminal_point_at, with_footer_gap,
+        right_pane_tab_at, role_identity, short_id, sidebar_agent_line, sidebar_metadata,
+        sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -3261,18 +3270,19 @@ mod tests {
 
     #[test]
     fn sidebar_and_garden_show_the_same_company_hierarchy_and_roles() {
+        assert_eq!(role_identity("director"), "♛ Director");
         let workspace = WorkspaceId::new();
         let manager = SessionId::new();
-        let coder = SessionId::new();
-        let mut state = AppState::home(workspace, vec![manager, coder]);
+        let worker = SessionId::new();
+        let mut state = AppState::home(workspace, vec![manager, worker]);
         let mut manager_row = projected_session(manager, "planning", "/work/planning");
         manager_row.role_id = Some("manager".to_owned());
         manager_row.organization_depth = 1;
-        let mut coder_row = projected_session(coder, "api", "/work/api");
-        coder_row.role_id = Some("coder".to_owned());
-        coder_row.parent_session_id = Some(manager);
-        coder_row.organization_depth = 2;
-        let rows = [manager_row, coder_row];
+        let mut worker_row = projected_session(worker, "api", "/work/api");
+        worker_row.role_id = Some("worker".to_owned());
+        worker_row.parent_session_id = Some(manager);
+        worker_row.organization_depth = 2;
+        let rows = [manager_row, worker_row];
 
         let sidebar = HomeProjection::from_ordered_state(&state, "atlas", Arc::from(rows.to_vec()));
         let manager_lines = home_row_lines_at(
@@ -3283,21 +3293,24 @@ mod tests {
             PR_RESERVE_WIDTH,
             now(),
         );
-        let coder_lines = home_row_lines_at(
+        let worker_lines = home_row_lines_at(
             LEFT_WIDTH,
             &sidebar,
-            Selection::Target(Target::Session(coder)),
+            Selection::Target(Target::Session(worker)),
             SidebarDiffColumns::default(),
             PR_RESERVE_WIDTH,
             now(),
         );
         let manager_line = strip(&manager_lines[0]);
-        let coder_line = strip(&coder_lines[0]);
+        let worker_line = strip(&worker_lines[0]);
         assert!(
-            manager_line.contains("└─ planning [manager]"),
+            manager_line.contains("└─ planning  ◆ Manager"),
             "{manager_line:?}"
         );
-        assert!(coder_line.contains("  └─ api [coder]"), "{coder_line:?}");
+        assert!(
+            worker_line.contains("  └─ api  ● Worker"),
+            "{worker_line:?}"
+        );
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         let _ = update(
@@ -3306,8 +3319,8 @@ mod tests {
         );
         let garden = HomeProjection::from_ordered_state(&state, "atlas", Arc::from(rows));
         let garden = garden.garden_sessions.as_ref().expect("garden projection");
-        assert_eq!(garden[0].label, "[manager] planning");
-        assert_eq!(garden[1].label, "[coder] planning › api");
+        assert_eq!(garden[0].label, "◆ Manager · planning");
+        assert_eq!(garden[1].label, "● Worker · planning › api");
     }
 
     /// sidebar の agent 行と Garden の plot は同じ束を読む。片方だけが inventory を
@@ -3623,12 +3636,12 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         let dim_button = Style::new()
             .dim()
-            .paint(&format!("[ {DIRECTOR_ICON} director ]"));
+            .paint(&format!("[ {DIRECTOR_ICON} Director ]"));
         let accent_button = Role::Accent
             .style()
             .bold()
             .reverse()
-            .paint(&format!("[ {DIRECTOR_ICON} director ]"));
+            .paint(&format!("[ {DIRECTOR_ICON} Director ]"));
 
         let mut closed = HomeProjection::from_state(&state, "atlas", Path::new("/work"), &[]);
         assert!(home_header_layout(80, &closed).line.ends_with(&dim_button));
@@ -3695,7 +3708,7 @@ mod tests {
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
-        assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} director")));
+        assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} Director")));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -4128,7 +4141,7 @@ mod tests {
         assert!(frame.contains("failed"));
         // Failed rows deliberately keep their lifecycle-specific rendering;
         // badges never turn them into an attachable ordinary row.
-        assert!(!frame.contains("[reviewer]"));
+        assert!(!frame.contains("• reviewer"));
 
         let child_id = SessionId::new();
         let mut available = projected_session(session_id, "alpha", "/work/alpha");
@@ -4150,7 +4163,7 @@ mod tests {
                 (
                     child_id,
                     SessionRoleProjection {
-                        role_id: Some(RoleId::new("coder").unwrap()),
+                        role_id: Some(RoleId::new("worker").unwrap()),
                         role_summary: None,
                         parent_session_id: Some(session_id),
                         agent_status: None,
@@ -4164,8 +4177,8 @@ mod tests {
             Path::new("/work"),
             &[available, child],
         ));
-        assert!(frame.contains("└─ alpha [reviewer]"));
-        assert!(frame.contains("  └─ beta [coder]"));
+        assert!(frame.contains("└─ alpha  • reviewer"));
+        assert!(frame.contains("  └─ beta  ● Worker"));
     }
 
     #[test]
