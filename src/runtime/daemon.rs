@@ -21,7 +21,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
-use usagi_core::domain::agent::prompt::{McpToolFamilies, PromptScope, launch_system_prompt};
+use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
+use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
@@ -546,7 +547,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             .unwrap_or_default();
         arguments.extend(codex_system_prompt_arguments(
             mode,
-            tools.as_ref().map(ConfiguredMcpTools::families),
+            tools.as_ref().map(|tools| tools.families),
             role.as_ref()
                 .map(|(id, instructions)| (id, instructions.as_str())),
         ));
@@ -810,7 +811,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         );
         arguments.extend(claude_system_prompt_arguments(
             mode,
-            tools.as_ref().map(ConfiguredMcpTools::families),
+            tools.as_ref().map(|tools| tools.families),
             role.as_ref()
                 .map(|(id, instructions)| (id, instructions.as_str())),
         ));
@@ -1453,25 +1454,14 @@ fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result
 
 /// What the MCP server this launch injects will expose: the tool families it
 /// registers and the local-LLM model it wires beside itself.
-///
-/// The local-LLM model is held as the single `Option`, so "the delegation server
-/// is wired" and "a model was chosen" cannot disagree.
 struct ConfiguredMcpTools {
-    issue: bool,
-    memory: bool,
+    families: McpToolFamilies,
     local_llm_model: Option<String>,
 }
 
 impl ConfiguredMcpTools {
-    /// The families the injected server registers, as the prompt describes them.
-    fn families(&self) -> McpToolFamilies {
-        McpToolFamilies {
-            issue: self.issue,
-            memory: self.memory,
-            local_llm: self.local_llm_model.is_some(),
-        }
-    }
-
+    /// The model as the MCP wiring needs it. `Some` exactly when
+    /// `families.local_llm` is set, because both come from one accessor.
     fn model(&self) -> Option<&str> {
         self.local_llm_model.as_deref()
     }
@@ -1479,17 +1469,17 @@ impl ConfiguredMcpTools {
 
 /// Resolve the effective MCP tool configuration for one launch.
 ///
-/// Two authorities, each the one the MCP server itself uses. Issue and memory
-/// availability is the Global baseline overlaid with the *registered* workspace's
-/// `.usagi/settings.json` — the same two layers `usagi mcp` resolves — and that
-/// file lives only in the registered root, never in a session worktree. The
-/// local-LLM model stays Global-only, which `with_local` preserves by not owning
-/// it. A hand-edited model has already been sanitized by
-/// [`Storage::load_settings`].
+/// This reads the settings; the rule that turns them into families lives in
+/// `usagi-core` and is the same one `usagi mcp` builds its registry from, so the
+/// prompt and `tools/list` cannot disagree.
 ///
-/// Global settings live in the *selected* directory — that is where
-/// `Storage::open_default` and the daemon's own [`UserEnvironment`] write them —
-/// so this reads the same file those writers own, not the mode-neutral base.
+/// What stays here is *which* configuration to read. The Global baseline is
+/// overlaid with the **registered** workspace's `.usagi/settings.json`, because
+/// that file is git-ignored and therefore exists only in the registered root,
+/// never in a session worktree. Global settings live in the *selected* directory
+/// — that is where `Storage::open_default` and the daemon's own
+/// [`UserEnvironment`] write them — so this reads the same file those writers
+/// own, not the mode-neutral base.
 ///
 /// Unreadable settings fail the launch, exactly as they fail `usagi mcp` before
 /// its serve loop starts. Falling back to the defaults here would launch an agent
@@ -1503,12 +1493,8 @@ fn configured_mcp_tools(
         let local = WorkspaceSettingsStore::new(workspace_root).load()?;
         let effective = global.with_local(&local);
         Ok(ConfiguredMcpTools {
-            issue: effective.issue_enabled,
-            memory: effective.memory_enabled,
-            local_llm_model: effective
-                .local_llm
-                .enabled
-                .then_some(effective.local_llm.model),
+            families: McpToolFamilies::from_settings(&effective),
+            local_llm_model: effective.wired_local_llm_model().map(str::to_owned),
         })
     };
     resolve().map_err(|error| {
@@ -16289,7 +16275,7 @@ mod tests {
         // Both stores default to enabled, so a workspace with no files gets both
         // families and no delegation server.
         assert_eq!(
-            tools.families(),
+            tools.families,
             McpToolFamilies {
                 issue: true,
                 memory: true,
@@ -16311,7 +16297,7 @@ mod tests {
             tools.model(),
             Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
         );
-        assert!(tools.families().local_llm);
+        assert!(tools.families.local_llm);
     }
 
     #[test]
@@ -16333,7 +16319,7 @@ mod tests {
         assert_eq!(
             configured_mcp_tools(&data_home, workspace.path())
                 .unwrap()
-                .families(),
+                .families,
             McpToolFamilies {
                 issue: false,
                 memory: true,

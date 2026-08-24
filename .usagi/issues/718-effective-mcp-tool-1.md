@@ -1,13 +1,13 @@
 ---
 number: 718
 title: effective MCP tool 系統の解決を 1 か所に統合する
-status: todo
+status: done
 priority: medium
 labels: []
 dependson: []
 related: [715]
 created_at: 2026-08-24T00:15:58.687629+00:00
-updated_at: 2026-08-24T00:15:58.687629+00:00
+updated_at: 2026-08-24T00:31:21.868029+00:00
 ---
 
 ## 背景

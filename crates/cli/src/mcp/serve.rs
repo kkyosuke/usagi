@@ -12,6 +12,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -24,7 +25,6 @@ use super::runtime_model::{
     ExecutableLocator, PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
 };
 use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
-use super::tools::ToolAvailability;
 use super::{resources, tools};
 
 /// サーバが話せる MCP プロトコルバージョン。先頭が優先版である。
@@ -64,7 +64,7 @@ enum ServerState {
 #[derive(Clone, Copy)]
 struct ServerCapabilities<'a> {
     runtime_models: &'a RuntimeModelSnapshot,
-    tools: ToolAvailability,
+    tools: McpToolFamilies,
     caller_credential: Option<&'a str>,
 }
 
@@ -112,17 +112,11 @@ pub fn serve_with_client(
     let local = WorkspaceSettingsStore::new(&workspace_root)
         .load()
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let availability = ToolAvailability::from(&global.with_local(&local));
+    let families = McpToolFamilies::from_settings(&global.with_local(&local));
     let locator = PathExecutableLocator;
     let snapshot = runtime_model_snapshot(&workspace_root, &locator);
     serve_with_client_and_features_and_caller(
-        input,
-        out,
-        version,
-        client,
-        &snapshot,
-        availability,
-        None,
+        input, out, version, client, &snapshot, families, None,
     )
 }
 
@@ -151,7 +145,7 @@ pub fn serve_with_client_and_caller(
     let local = WorkspaceSettingsStore::new(&workspace_root)
         .load()
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let availability = ToolAvailability::from(&global.with_local(&local));
+    let families = McpToolFamilies::from_settings(&global.with_local(&local));
     let snapshot = runtime_model_snapshot(&workspace_root, &PathExecutableLocator);
     serve_with_client_and_features_and_caller(
         input,
@@ -159,7 +153,7 @@ pub fn serve_with_client_and_caller(
         version,
         client,
         &snapshot,
-        availability,
+        families,
         Some(caller_credential),
     )
 }
@@ -184,7 +178,7 @@ pub fn serve_with_client_and_snapshot(
         version,
         client,
         snapshot,
-        ToolAvailability::default(),
+        McpToolFamilies::all(),
     )
 }
 
@@ -202,17 +196,9 @@ pub fn serve_with_client_and_features(
     version: &str,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
-    availability: ToolAvailability,
+    families: McpToolFamilies,
 ) -> io::Result<()> {
-    serve_with_client_and_features_and_caller(
-        input,
-        out,
-        version,
-        client,
-        snapshot,
-        availability,
-        None,
-    )
+    serve_with_client_and_features_and_caller(input, out, version, client, snapshot, families, None)
 }
 
 fn serve_with_client_and_features_and_caller(
@@ -221,16 +207,16 @@ fn serve_with_client_and_features_and_caller(
     version: &str,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
-    availability: ToolAvailability,
+    families: McpToolFamilies,
     caller_credential: Option<&str>,
 ) -> io::Result<()> {
     // Fail before accepting input if metadata, route, schema, or capability drifted.
-    drop(tools::registry_with_availability(availability));
+    drop(tools::registry_with_families(families));
     let mut buf = Vec::with_capacity(MAX_STDIO_MESSAGE_BYTES + 1);
     let mut state = ServerState::AwaitingInitialize;
     let capabilities = ServerCapabilities {
         runtime_models: snapshot,
-        tools: availability,
+        tools: families,
         caller_credential,
     };
     loop {
@@ -294,7 +280,7 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
         &mut unavailable,
         ServerCapabilities {
             runtime_models: &RuntimeModelSnapshot::default(),
-            tools: ToolAvailability::default(),
+            tools: McpToolFamilies::all(),
             caller_credential: None,
         },
         &mut state,
@@ -460,8 +446,8 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
 }
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
-fn tools_list_result(snapshot: &RuntimeModelSnapshot, availability: ToolAvailability) -> Value {
-    let tools: Vec<Value> = tools::registry_with_availability(availability)
+fn tools_list_result(snapshot: &RuntimeModelSnapshot, families: McpToolFamilies) -> Value {
+    let tools: Vec<Value> = tools::registry_with_families(families)
         .iter()
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
@@ -489,7 +475,7 @@ fn tools_call(
     params: Option<&Value>,
     client: &mut dyn DaemonClient,
     snapshot: &RuntimeModelSnapshot,
-    availability: ToolAvailability,
+    families: McpToolFamilies,
     caller_credential: Option<&str>,
 ) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
@@ -509,7 +495,7 @@ fn tools_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let registry = tools::registry_with_availability(availability);
+    let registry = tools::registry_with_families(families);
     let Some(descriptor) = registry.iter().find(|descriptor| descriptor.name() == name) else {
         return protocol::error(
             id,
@@ -805,11 +791,12 @@ mod tests {
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
     };
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
-    use crate::mcp::tools::{ToolAvailability, registry};
+    use crate::mcp::tools::registry;
     use serde_json::Value;
     use std::io::{BufReader, Cursor, ErrorKind, Write};
     use std::path::PathBuf;
     use tempfile::tempdir;
+    use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
@@ -931,7 +918,7 @@ mod tests {
                 &mut client,
                 ServerCapabilities {
                     runtime_models: &RuntimeModelSnapshot::default(),
-                    tools: ToolAvailability::default(),
+                    tools: McpToolFamilies::all(),
                     caller_credential: None,
                 },
                 &mut state,
@@ -1075,7 +1062,11 @@ mod tests {
             "9.9.9",
             &mut client,
             &RuntimeModelSnapshot::default(),
-            ToolAvailability::new(false, false),
+            McpToolFamilies {
+                issue: false,
+                memory: false,
+                local_llm: false,
+            },
         )
         .unwrap();
 

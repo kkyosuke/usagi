@@ -458,6 +458,19 @@ impl Settings {
         self
     }
 
+    /// The trusted local-LLM model this configuration wires, or `None` when the
+    /// delegation server is not wired at all.
+    ///
+    /// Reading the flag and the model through one accessor keeps "the server is
+    /// wired" and "a model was chosen" from disagreeing. The value is already
+    /// sanitized to the closed allowlist by `Storage::load_settings`.
+    #[must_use]
+    pub fn wired_local_llm_model(&self) -> Option<&str> {
+        self.local_llm
+            .enabled
+            .then_some(self.local_llm.model.as_str())
+    }
+
     /// The bindings usable for injection, with invalid names and blank values
     /// dropped.
     pub fn env_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
