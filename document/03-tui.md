@@ -843,7 +843,7 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新�
 
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。会社roleの iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 

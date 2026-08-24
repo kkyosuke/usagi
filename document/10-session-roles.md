@@ -37,6 +37,8 @@ role を変える場合は別 session を作成する。
 両ファイルは `version = 1` を持つ。workspace の同一 role ID は global 定義を field 単位で混ぜず、定義全体を置換する。
 default は `workspace → global → 未指定` の順で解決する。両ファイルが無い場合は role 無しの互換モードとなる。
 
+次は Director → Manager → Worker で構成する階層型チームの設定例である。
+
 ```toml
 version = 1
 
@@ -79,14 +81,14 @@ role は組織上の責務を prompt として与える。Director が小さい�
 `max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
-会社テンプレートでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
+階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
 `manager` とする。Director/Managerが実行者を委譲するときは `role = "worker"` を明示し、既定値に依存しない。
 sidebar は各session名の横に `◆ Manager` / `● Worker` と階層インデントを常時表示し、Garden は `role-icon Role · parent › session` の nameplate と session 内の Agent を表すうさぎを表示する。Director drawerは `♛ Director` をrootとする親子ツリーを表示する。
 
 `session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
 したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
-いずれかの role に `delegation` block がある会社モードでは、credential のない `session_delegate_issue` を拒否する。
+いずれかの role に `delegation` block がある階層型チームモードでは、credential のない `session_delegate_issue` を拒否する。
 `max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
 同じ session の利用数と絶対深度を引き継ぐ。
 
