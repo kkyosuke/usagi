@@ -1605,6 +1605,10 @@ struct WorkspaceUi {
     /// observation. It never projects from an inventory cached before a later
     /// pane admission.
     agent_observation_requested: bool,
+    /// An Agent terminal exit changes daemon inventory. Unlike a display-only
+    /// observation request, this must schedule one follow-up when an older
+    /// restore snapshot is already in flight.
+    agent_exit_observation_requested: bool,
 }
 
 struct AgentTabIntentContext {
@@ -1662,21 +1666,28 @@ const RESTORE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4)
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RestoreRetryState {
     in_flight: bool,
+    followup: RestoreFollowup,
     failures: u32,
     next_retry_at: Option<std::time::Duration>,
     notice_emitted: bool,
-    reconnect_pending: bool,
     last_reconnect_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreFollowup {
+    None,
+    ChangedObservation,
+    Reconnected,
 }
 
 impl RestoreRetryState {
     fn new() -> Self {
         Self {
             in_flight: false,
+            followup: RestoreFollowup::None,
             failures: 0,
             next_retry_at: Some(std::time::Duration::ZERO),
             notice_emitted: false,
-            reconnect_pending: false,
             last_reconnect_epoch: 0,
         }
     }
@@ -1699,12 +1710,24 @@ impl RestoreRetryState {
         }
     }
 
+    /// Request a snapshot after daemon inventory changed. A snapshot already in
+    /// flight may predate that change, so remember one coalesced follow-up.
+    fn request_changed_observation(&mut self, now: std::time::Duration) {
+        if self.in_flight {
+            if self.followup == RestoreFollowup::None {
+                self.followup = RestoreFollowup::ChangedObservation;
+            }
+        } else if self.next_retry_at.is_none() {
+            self.next_retry_at = Some(now);
+        }
+    }
+
     /// Complete one bounded worker job. Returns whether this outage epoch needs
     /// its one coalesced user notice.
     fn complete(&mut self, now: std::time::Duration, outcome: RestoreJobOutcome) -> bool {
         self.in_flight = false;
-        if self.reconnect_pending {
-            self.reconnect_pending = false;
+        let followup = std::mem::replace(&mut self.followup, RestoreFollowup::None);
+        if followup == RestoreFollowup::Reconnected {
             self.failures = 0;
             self.next_retry_at = Some(now);
             self.notice_emitted = false;
@@ -1713,7 +1736,8 @@ impl RestoreRetryState {
         match outcome {
             RestoreJobOutcome::Applied | RestoreJobOutcome::IntentFailed(_) => {
                 self.failures = 0;
-                self.next_retry_at = None;
+                self.next_retry_at =
+                    (followup == RestoreFollowup::ChangedObservation).then_some(now);
                 self.notice_emitted = false;
                 return false;
             }
@@ -1755,7 +1779,7 @@ impl RestoreRetryState {
         self.failures = 0;
         self.notice_emitted = false;
         if self.in_flight {
-            self.reconnect_pending = true;
+            self.followup = RestoreFollowup::Reconnected;
         } else {
             self.next_retry_at = Some(now);
         }
@@ -1973,6 +1997,7 @@ impl WorkspaceUi {
             terminal_size: (0, 0),
             agent_tab_intent: None,
             agent_observation_requested: false,
+            agent_exit_observation_requested: false,
         }
     }
 
@@ -2296,6 +2321,14 @@ impl WorkspaceUi {
 
     fn take_agent_observation_request(&mut self) -> bool {
         std::mem::take(&mut self.agent_observation_requested)
+    }
+
+    fn request_agent_exit_observation(&mut self) {
+        self.agent_exit_observation_requested = true;
+    }
+
+    fn take_agent_exit_observation_request(&mut self) -> bool {
+        std::mem::take(&mut self.agent_exit_observation_requested)
     }
 
     fn agent_inventory(&self) -> Option<&AgentInventory> {
@@ -3867,9 +3900,19 @@ fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
         .into_iter()
         .chain(ui.sync_background_terminals(&background))
         .collect::<Vec<_>>();
+    let agent_exited = exited
+        .iter()
+        .any(|terminal| runtime.is_agent_terminal(terminal));
     for terminal in exited {
         let _ = runtime.exit_pane(shell_target_for_terminal(&terminal), terminal.clone());
         ui.close_terminal(&terminal);
+    }
+    if agent_exited {
+        // The tab disappears immediately, but sidebar/Garden membership reads
+        // the last coherent Agent inventory. Wake the dedicated restore lane so
+        // a terminated Agent is removed there without waiting for an unrelated
+        // session lifecycle change to trigger another observation.
+        ui.request_agent_exit_observation();
     }
 }
 
@@ -5640,6 +5683,9 @@ fn drive_workspace_controller(
         );
         if ui.take_agent_observation_request() {
             restore_retry.request_observation(restore_clock.elapsed());
+        }
+        if ui.take_agent_exit_observation_request() {
+            restore_retry.request_changed_observation(restore_clock.elapsed());
         }
         drain_session_completions(&mut ui);
         drain_session_refresh(
@@ -12883,6 +12929,10 @@ mod tests {
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
+        assert!(
+            ui.take_agent_exit_observation_request(),
+            "an Agent exit must refresh sidebar and Garden membership immediately"
+        );
     }
 
     /// What the shell asked of the daemon for each pane, so a test can assert
@@ -13032,6 +13082,10 @@ mod tests {
             "the foreground selection keeps streaming"
         );
         assert!(runtime.state().has_live_pane());
+        assert!(
+            ui.take_agent_exit_observation_request(),
+            "a background Agent exit must wake the coherent inventory lane"
+        );
         // The closed tab stops being watched on the next frame.
         close_exited_panes(&mut ui, &mut runtime);
         assert_eq!(
@@ -15563,9 +15617,9 @@ mod tests {
         let mut retry = super::RestoreRetryState::new();
         assert!(retry.begin_if_due(std::time::Duration::ZERO));
         retry.reconnected(1, now);
-        assert!(retry.reconnect_pending);
+        assert_eq!(retry.followup, super::RestoreFollowup::Reconnected);
         assert!(!retry.complete(now, super::RestoreJobOutcome::Applied));
-        assert!(!retry.reconnect_pending);
+        assert_eq!(retry.followup, super::RestoreFollowup::None);
         assert_eq!(retry.failures, 0);
         assert_eq!(retry.next_retry_at, Some(now));
         assert!(retry.begin_if_due(now));
@@ -16024,6 +16078,27 @@ mod tests {
             super::RestoreJobOutcome::Applied
         ));
         assert!(!in_flight.begin_if_due(std::time::Duration::from_secs(1)));
+
+        let mut changed_idle = super::RestoreRetryState::new();
+        assert!(changed_idle.begin_if_due(std::time::Duration::ZERO));
+        assert!(
+            !changed_idle.complete(std::time::Duration::ZERO, super::RestoreJobOutcome::Applied)
+        );
+        changed_idle.request_changed_observation(std::time::Duration::from_millis(1));
+        assert!(changed_idle.begin_if_due(std::time::Duration::from_millis(1)));
+
+        let mut changed_in_flight = super::RestoreRetryState::new();
+        assert!(changed_in_flight.begin_if_due(std::time::Duration::ZERO));
+        changed_in_flight.request_changed_observation(std::time::Duration::from_millis(1));
+        assert!(!changed_in_flight.complete(
+            std::time::Duration::from_millis(1),
+            super::RestoreJobOutcome::Applied
+        ));
+        assert!(
+            changed_in_flight.begin_if_due(std::time::Duration::from_millis(1)),
+            "an in-flight snapshot may predate an Agent exit and needs one follow-up"
+        );
+        assert!(!changed_in_flight.begin_if_due(std::time::Duration::from_millis(1)));
     }
 
     #[test]

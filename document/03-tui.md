@@ -1654,6 +1654,8 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 - **タイミング**: 初回 frame を paint した後、UI event loop と別の daemon connection で
   [`terminal inventory`](04-ipc.md#generic-terminal-request) / `agent_inventory` / `terminal inventory` の順に取得する。
   前後の terminal snapshot が同一で、live Agent が両 inventory で一対一に対応する全量 observation だけを適用する。
+  foreground poll または background inventory が Agent terminal の終了を検知した場合は、この dedicated restore lane を
+  即座に wake し、session lifecycle の次回変更を待たずに sidebar・Garden・tab strip の membership を再観測する。
   transport・partial・不整合は controller 所有の capped exponential backoff で再試行し、初回 frame・キー入力・animation を
   待たせない。失敗時は last valid intent を空 snapshot で上書きせず、generic tab だけを部分適用せず、local spawn もしない。
   成功後も dedicated restore port を保持する。restore socket の passive EOF を検知し、current endpoint が再び接続可能になった
