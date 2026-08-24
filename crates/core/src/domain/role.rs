@@ -307,4 +307,22 @@ max_concurrency = 2
         .unwrap();
         assert!(legacy.delegation.is_none());
     }
+
+    #[test]
+    fn delegation_policy_uses_safe_defaults_when_limits_are_omitted() {
+        let definition: RoleDefinition = toml::from_str(
+            r#"
+summary = "Manage"
+scopes = ["session"]
+instructions = "delegate"
+[delegation]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let policy = definition.delegation.unwrap();
+        assert_eq!(policy.max_depth, 8);
+        assert_eq!(policy.max_concurrency, 4);
+    }
 }

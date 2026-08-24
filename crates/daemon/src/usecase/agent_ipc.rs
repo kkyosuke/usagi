@@ -6405,9 +6405,19 @@ mod tests {
         let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
+        let parent_session = SessionId::new();
+        let parent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("manager").unwrap(),
+            )
+            .unwrap();
         let caller = CallerRef {
-            session_id: Some(SessionId::new()),
-            agent_id: usagi_core::domain::id::AgentId::new(),
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
         };
         let operation = OperationId::new().to_string();
         let dispatch = DispatchIntent {
@@ -6493,6 +6503,13 @@ mod tests {
         assert_eq!(delivery.delivered_to, caller);
         assert_eq!(delivery.worker.session_id, Some(session));
         assert!(delivery.accepted);
+        let wake = runtime
+            .dispatch_store()
+            .queued_prompt(workspace, Some(parent_session))
+            .unwrap()
+            .expect("a stopped manager must receive a durable wake prompt");
+        assert!(wake.prompt.contains("A child report is ready"));
+        assert!(wake.prompt.contains("done"));
         assert_eq!(
             delivery
                 .committed

@@ -3404,6 +3404,18 @@ instructions = "direct"
     }
 
     #[test]
+    fn effective_role_catalog_rejects_a_malformed_catalog() {
+        let (tmp, runtime) = runtime(FakeGit::ok());
+        std::fs::write(tmp.path().join(".usagi/roles.toml"), "version = 99\n").unwrap();
+
+        assert!(matches!(
+            runtime.effective_role_catalog(),
+            Err(SessionRuntimeError::InvalidRole(message))
+                if message == "effective role catalog is invalid"
+        ));
+    }
+
+    #[test]
     fn worktree_failure_detail_is_single_line_bounded_and_nonempty() {
         assert_eq!(
             worktree_failure_detail("git worktree add failed: fatal: first\nsecond"),

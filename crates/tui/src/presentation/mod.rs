@@ -7183,14 +7183,14 @@ mod tests {
         WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken,
         WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
         WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, drain_session_completions, foreground_terminal_geometry,
-        forward_live_terminal_input, garden_click_at, handle_terminal_pointer, home_frame_material,
-        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, poll_and_project_terminals,
-        projection_build_counts, render_controller_frame, render_home_material,
-        render_home_snapshot, reset_projection_build_counts, restore_open_panes,
-        retarget_director_chords, route_workspace_input_before_reducer, run as run_from_start,
-        run_screen_graph_with_backend, run_with_settings,
+        copy_terminal_selection, director_organization, drain_session_completions,
+        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at,
+        handle_terminal_pointer, home_frame_material, intercept_live_terminal_control,
+        is_user_activity, key_to_terminal_bytes, new_project_notice, play_startup_splash,
+        poll_and_project_terminals, projection_build_counts, render_controller_frame,
+        render_home_material, render_home_snapshot, reset_projection_build_counts,
+        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -8424,6 +8424,63 @@ mod tests {
                 .get(&session)
                 .map(|projection| projection.lifecycle),
             Some(SessionLifecycle::Failed),
+        );
+    }
+
+    #[test]
+    fn director_organization_projects_statuses_hierarchy_and_orphans() {
+        use usagi_core::domain::agent::AgentStatus;
+
+        let director_child = SessionId::new();
+        let manager_child = SessionId::new();
+        let stopped_child = SessionId::new();
+        let orphan = SessionId::new();
+        let ids = vec![director_child, manager_child, stopped_child, orphan];
+        let mut workspace_state = state("demo");
+        let template = workspace_state.sessions[0].clone();
+        workspace_state.sessions = ["manager", "worker", "stopped", "orphan"]
+            .into_iter()
+            .map(|name| SessionRecord {
+                name: name.into(),
+                root: PathBuf::from(format!("/tmp/demo/{name}")),
+                ..template.clone()
+            })
+            .collect();
+        let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids);
+        let role = |parent_session_id, agent_status| {
+            crate::usecase::application::controller::SessionRoleProjection {
+                role_id: None,
+                role_summary: None,
+                parent_session_id,
+                agent_status,
+            }
+        };
+        view.set_session_roles(BTreeMap::from([
+            (director_child, role(None, Some(AgentStatus::Starting))),
+            (
+                manager_child,
+                role(Some(director_child), Some(AgentStatus::Idle)),
+            ),
+            (
+                stopped_child,
+                role(Some(manager_child), Some(AgentStatus::Exited)),
+            ),
+            (orphan, role(Some(SessionId::new()), None)),
+        ]));
+        let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+
+        let rows = director_organization(&ui);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.depth, row.label.as_str(), row.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "Director", "active"),
+                (1, "manager (executor)", "starting"),
+                (2, "worker (executor)", "waiting"),
+                (3, "stopped (executor)", "stopped"),
+                (1, "orphan (executor)", "ready"),
+            ]
         );
     }
 
