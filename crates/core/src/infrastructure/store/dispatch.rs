@@ -15,7 +15,7 @@ use crate::domain::agent::{
     Agent, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun, InboxMessage,
     ModelSelector, RunStatus,
 };
-use crate::domain::id::{AgentId, OperationId, SessionId};
+use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const REGISTRY_FILE: &str = "dispatch.json";
@@ -53,6 +53,14 @@ fn session_segment(session_id: Option<SessionId>) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Registry {
     agents: Vec<Agent>,
+    /// Workspace ownership for every Agent incarnation.
+    ///
+    /// This is separate from the public `Agent` vocabulary so upgrading an
+    /// existing dispatch registry does not change its wire representation.
+    /// Legacy registries have no entries and claim an Agent the first time that
+    /// exact session/runtime/model tuple is launched from a fenced workspace.
+    #[serde(default)]
+    agent_workspaces: std::collections::BTreeMap<AgentId, WorkspaceId>,
     runs: Vec<DispatchRun>,
     bindings: Vec<DispatchBinding>,
     #[serde(default)]
@@ -221,6 +229,10 @@ impl Registry {
 /// One prompt waiting for the next Agent launch in a durable session scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedPrompt {
+    /// Workspace that owns this prompt. `None` is a legacy record written before
+    /// the daemon could serve more than one workspace.
+    #[serde(default)]
+    pub workspace_id: Option<WorkspaceId>,
     pub session_id: Option<SessionId>,
     pub prompt: String,
     pub queued_at: DateTime<Utc>,
@@ -252,21 +264,33 @@ impl DispatchStore {
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn queue_prompt(
         &self,
+        workspace_id: WorkspaceId,
         session_id: Option<SessionId>,
         prompt: String,
         queued_at: DateTime<Utc>,
     ) -> Result<QueuedPrompt> {
         self.mutate_registry(|registry| {
             let queued = QueuedPrompt {
+                workspace_id: Some(workspace_id),
                 session_id,
                 prompt,
                 queued_at,
             };
-            if let Some(existing) = registry
+            let existing = registry
                 .prompts
-                .iter_mut()
-                .find(|item| item.session_id == session_id)
-            {
+                .iter()
+                .position(|item| {
+                    item.workspace_id == Some(workspace_id) && item.session_id == session_id
+                })
+                // A new explicit prompt safely supersedes the one legacy slot;
+                // merely launching an Agent never claims that ambiguous record.
+                .or_else(|| {
+                    registry.prompts.iter().position(|item| {
+                        item.workspace_id.is_none() && item.session_id == session_id
+                    })
+                });
+            if let Some(index) = existing {
+                let existing = &mut registry.prompts[index];
                 *existing = queued.clone();
             } else {
                 registry.prompts.push(queued.clone());
@@ -280,12 +304,16 @@ impl DispatchStore {
     /// # Errors
     ///
     /// Returns an error when the registry cannot be read.
-    pub fn queued_prompt(&self, session_id: Option<SessionId>) -> Result<Option<QueuedPrompt>> {
+    pub fn queued_prompt(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: Option<SessionId>,
+    ) -> Result<Option<QueuedPrompt>> {
         Ok(self
             .load_registry()?
             .prompts
             .into_iter()
-            .find(|item| item.session_id == session_id))
+            .find(|item| item.workspace_id == Some(workspace_id) && item.session_id == session_id))
     }
 
     /// Removes a prompt only after its matching Agent launch succeeded.
@@ -293,12 +321,18 @@ impl DispatchStore {
     /// # Errors
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
-    pub fn consume_prompt(&self, session_id: Option<SessionId>) -> Result<Option<QueuedPrompt>> {
+    pub fn consume_prompt(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: Option<SessionId>,
+    ) -> Result<Option<QueuedPrompt>> {
         self.mutate_registry(|registry| {
             registry
                 .prompts
                 .iter()
-                .position(|item| item.session_id == session_id)
+                .position(|item| {
+                    item.workspace_id == Some(workspace_id) && item.session_id == session_id
+                })
                 .map(|index| registry.prompts.remove(index))
         })
     }
@@ -316,7 +350,7 @@ impl DispatchStore {
     /// # Errors
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
-    pub fn upsert_agent(&self, agent: Agent) -> Result<Agent> {
+    pub fn upsert_agent(&self, workspace_id: WorkspaceId, agent: Agent) -> Result<Agent> {
         self.mutate_registry(|registry| {
             if let Some(existing) = registry
                 .agents
@@ -327,6 +361,9 @@ impl DispatchStore {
             } else {
                 registry.agents.push(agent.clone());
             }
+            registry
+                .agent_workspaces
+                .insert(agent.agent_id, workspace_id);
             agent
         })
     }
@@ -338,15 +375,33 @@ impl DispatchStore {
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_agent_by_runtime_model(
         &self,
+        workspace_id: WorkspaceId,
         session_id: Option<SessionId>,
         runtime: AgentProfileId,
         model: ModelSelector,
     ) -> Result<Agent> {
         self.mutate_registry(|registry| {
-            if let Some(agent) = registry.agents.iter().find(|agent| {
+            let matches = |agent: &Agent| {
                 agent.session_id == session_id && agent.runtime == runtime && agent.model == model
-            }) {
-                return agent.clone();
+            };
+            let existing = registry
+                .agents
+                .iter()
+                .position(|agent| {
+                    matches(agent)
+                        && registry.agent_workspaces.get(&agent.agent_id) == Some(&workspace_id)
+                })
+                .or_else(|| {
+                    registry.agents.iter().position(|agent| {
+                        matches(agent) && !registry.agent_workspaces.contains_key(&agent.agent_id)
+                    })
+                });
+            if let Some(index) = existing {
+                let agent = registry.agents[index].clone();
+                registry
+                    .agent_workspaces
+                    .insert(agent.agent_id, workspace_id);
+                return agent;
             }
             let agent = Agent {
                 agent_id: AgentId::new(),
@@ -357,8 +412,45 @@ impl DispatchStore {
                 current_run: None,
             };
             registry.agents.push(agent.clone());
+            registry
+                .agent_workspaces
+                .insert(agent.agent_id, workspace_id);
             agent
         })
+    }
+
+    /// Reads an Agent only when it belongs to `workspace_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
+    pub fn agent_in_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+        agent_id: AgentId,
+    ) -> Result<Option<Agent>> {
+        let registry = self.load_registry()?;
+        if registry.agent_workspaces.get(&agent_id) != Some(&workspace_id) {
+            return Ok(None);
+        }
+        Ok(registry
+            .agents
+            .into_iter()
+            .find(|agent| agent.agent_id == agent_id))
+    }
+
+    /// Every Agent owned by `workspace_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
+    pub fn agents_in_workspace(&self, workspace_id: WorkspaceId) -> Result<Vec<Agent>> {
+        let registry = self.load_registry()?;
+        Ok(registry
+            .agents
+            .into_iter()
+            .filter(|agent| registry.agent_workspaces.get(&agent.agent_id) == Some(&workspace_id))
+            .collect())
     }
 
     /// # Errors
@@ -770,19 +862,21 @@ mod tests {
     fn registry_upserts_and_transitions_dispatch_entities() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
         let (session, agent_id, caller) = ids();
         let first = agent(session, agent_id);
-        assert_eq!(store.upsert_agent(first.clone()).unwrap(), first);
+        assert_eq!(store.upsert_agent(workspace, first.clone()).unwrap(), first);
         let replacement = Agent {
             status: AgentStatus::Exited,
             ..first.clone()
         };
         assert_eq!(
-            store.upsert_agent(replacement.clone()).unwrap(),
+            store.upsert_agent(workspace, replacement.clone()).unwrap(),
             replacement
         );
         let reused = store
             .upsert_agent_by_runtime_model(
+                workspace,
                 Some(session),
                 first.runtime.clone(),
                 first.model.clone(),
@@ -791,6 +885,7 @@ mod tests {
         assert_eq!(reused.agent_id, agent_id);
         let created = store
             .upsert_agent_by_runtime_model(
+                workspace,
                 Some(session),
                 AgentProfileId::new("claude").unwrap(),
                 first.model.clone(),
@@ -865,25 +960,60 @@ mod tests {
     fn prompt_queue_replaces_peeks_and_consumes_per_session() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let other_workspace = WorkspaceId::new();
         let session = SessionId::new();
         store
-            .queue_prompt(Some(session), "first".into(), now())
+            .queue_prompt(workspace, Some(session), "first".into(), now())
             .unwrap();
         store
-            .queue_prompt(Some(session), "second".into(), now())
+            .queue_prompt(workspace, Some(session), "second".into(), now())
             .unwrap();
-        store.queue_prompt(None, "root".into(), now()).unwrap();
+        store
+            .queue_prompt(workspace, None, "root".into(), now())
+            .unwrap();
+        store
+            .queue_prompt(other_workspace, None, "other root".into(), now())
+            .unwrap();
         assert_eq!(
-            store.queued_prompt(Some(session)).unwrap().unwrap().prompt,
+            store
+                .queued_prompt(workspace, Some(session))
+                .unwrap()
+                .unwrap()
+                .prompt,
             "second"
         );
         assert_eq!(
-            store.consume_prompt(Some(session)).unwrap().unwrap().prompt,
+            store
+                .consume_prompt(workspace, Some(session))
+                .unwrap()
+                .unwrap()
+                .prompt,
             "second"
         );
-        assert!(store.queued_prompt(Some(session)).unwrap().is_none());
-        assert_eq!(store.consume_prompt(None).unwrap().unwrap().prompt, "root");
-        assert!(store.consume_prompt(None).unwrap().is_none());
+        assert!(
+            store
+                .queued_prompt(workspace, Some(session))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .consume_prompt(workspace, None)
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "root"
+        );
+        assert_eq!(
+            store
+                .consume_prompt(other_workspace, None)
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "other root"
+        );
+        assert!(store.consume_prompt(workspace, None).unwrap().is_none());
     }
 
     #[test]
@@ -1080,16 +1210,37 @@ mod tests {
         // same runtime/model, and is reused on the next resolve.
         let runtime = AgentProfileId::new("codex").unwrap();
         let model = ModelSelector::new("gpt-5").unwrap();
+        let workspace = WorkspaceId::new();
+        let other_workspace = WorkspaceId::new();
         let root_agent = store
-            .upsert_agent_by_runtime_model(None, runtime.clone(), model.clone())
+            .upsert_agent_by_runtime_model(workspace, None, runtime.clone(), model.clone())
             .unwrap();
         assert_eq!(root_agent.session_id, None);
         assert_eq!(
             store
-                .upsert_agent_by_runtime_model(None, runtime, model)
+                .upsert_agent_by_runtime_model(workspace, None, runtime.clone(), model.clone())
                 .unwrap()
                 .agent_id,
             root_agent.agent_id
+        );
+        let other_root = store
+            .upsert_agent_by_runtime_model(other_workspace, None, runtime, model)
+            .unwrap();
+        assert_ne!(other_root.agent_id, root_agent.agent_id);
+        assert_eq!(
+            store
+                .agents_in_workspace(workspace)
+                .unwrap()
+                .into_iter()
+                .map(|agent| agent.agent_id)
+                .collect::<Vec<_>>(),
+            vec![root_agent.agent_id]
+        );
+        assert!(
+            store
+                .agent_in_workspace(workspace, other_root.agent_id)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -1108,7 +1259,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
         let (session, agent_id, _) = ids();
-        store.upsert_agent(agent(session, agent_id)).unwrap();
+        store
+            .upsert_agent(WorkspaceId::new(), agent(session, agent_id))
+            .unwrap();
 
         // Two operations still in flight, recorded before the flood.
         let mut live = Vec::new();

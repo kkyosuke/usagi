@@ -38,6 +38,12 @@ const TERMINAL_RETENTION: usize = 256;
 /// others of the ability to ask a question.
 const PENDING_LIMIT: usize = 128;
 
+/// Hard ceiling across the daemon-wide document.
+///
+/// Workspaces may be retired and newly adopted without bound over the daemon's
+/// lifetime, so a per-workspace ceiling alone does not bound this shared file.
+const GLOBAL_PENDING_LIMIT: usize = PENDING_LIMIT * 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionResolvedEvent {
     pub decision_id: UserDecisionId,
@@ -180,6 +186,14 @@ impl UserDecisionStore {
             }
             // Admission is charged before the record exists, so a refusal
             // leaves the store byte-for-byte as it was.
+            let all_pending = state
+                .decisions
+                .iter()
+                .filter(|item| item.status == UserDecisionStatus::Pending)
+                .count();
+            if all_pending >= GLOBAL_PENDING_LIMIT {
+                return Err(UserDecisionError::PendingLimitReached);
+            }
             let pending = state
                 .decisions
                 .iter()
@@ -744,5 +758,23 @@ mod tests {
         // busy workspace cannot stop the others from asking anything.
         let other = WorkspaceId::new();
         assert!(store.create(distinct(other)).unwrap().is_ok());
+    }
+
+    #[test]
+    fn pending_decisions_are_also_bounded_across_all_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        for workspace in [WorkspaceId::new(), WorkspaceId::new()] {
+            for _ in 0..PENDING_LIMIT {
+                store.create(distinct(workspace)).unwrap().unwrap();
+            }
+        }
+
+        let before = std::fs::read(store.path()).unwrap();
+        assert_eq!(
+            store.create(distinct(WorkspaceId::new())).unwrap(),
+            Err(UserDecisionError::PendingLimitReached)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
     }
 }

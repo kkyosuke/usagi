@@ -429,7 +429,7 @@ impl AgentRuntime {
             DispatchAgentIntent::New { runtime, .. } => runtime.clone(),
             DispatchAgentIntent::Existing { agent_id } => {
                 self.dispatch
-                    .agent(*agent_id)
+                    .agent_in_workspace(intent.workspace, *agent_id)
                     .map_err(map_dispatch_storage_error)?
                     .ok_or_else(dispatch_agent_not_found)?
                     .runtime
@@ -923,6 +923,7 @@ impl AgentRuntime {
     /// Sends to a running Agent PTY or records a durable next-launch prompt.
     pub fn prompt(
         &mut self,
+        workspace: WorkspaceId,
         session: Option<SessionId>,
         prompt: &str,
         mode: PromptMode,
@@ -939,7 +940,8 @@ impl AgentRuntime {
             .records
             .into_iter()
             .find(|record| {
-                record.runtime.session_id == session
+                record.runtime.terminal.workspace_id == workspace
+                    && record.runtime.session_id == session
                     && record.state == super::runtime::RuntimeState::Running
             });
         if matches!(mode, PromptMode::Live) && live.is_none() {
@@ -969,7 +971,7 @@ impl AgentRuntime {
             });
         }
         self.dispatch
-            .queue_prompt(session, prompt.to_owned(), Utc::now())
+            .queue_prompt(workspace, session, prompt.to_owned(), Utc::now())
             .map_err(map_dispatch_storage_error)?;
         Ok(PromptDelivery {
             delivered_to: "queue",
@@ -1460,12 +1462,17 @@ impl AgentRuntime {
         let worker = match &intent.agent {
             DispatchAgentIntent::Existing { agent_id } => self
                 .dispatch
-                .agent(*agent_id)
+                .agent_in_workspace(intent.workspace, *agent_id)
                 .map_err(map_dispatch_storage_error)?
                 .ok_or_else(dispatch_agent_not_found)?,
             DispatchAgentIntent::New { runtime, model } => self
                 .dispatch
-                .upsert_agent_by_runtime_model(Some(session), runtime.clone(), model.clone())
+                .upsert_agent_by_runtime_model(
+                    intent.workspace,
+                    Some(session),
+                    runtime.clone(),
+                    model.clone(),
+                )
                 .map_err(map_dispatch_storage_error)?,
         };
         if worker.session_id != Some(session) {
@@ -1818,6 +1825,7 @@ impl AgentRuntime {
         let mut worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
+                target.workspace_id,
                 target.session_id,
                 profile_id,
                 source.launch.request.model.clone().unwrap_or_else(|| {
@@ -1970,7 +1978,7 @@ impl AgentRuntime {
         };
         let queued = self
             .dispatch
-            .queued_prompt(intent.session)
+            .queued_prompt(intent.workspace, intent.session)
             .map_err(map_dispatch_storage_error)?;
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
@@ -1997,6 +2005,7 @@ impl AgentRuntime {
         let mut worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
+                intent.workspace,
                 intent.session,
                 profile_id.clone(),
                 ModelSelector::new("default").expect("literal model selector is canonical"),
@@ -2036,7 +2045,7 @@ impl AgentRuntime {
             .map_err(map_dispatch_storage_error)?;
         if queued.is_some() {
             self.dispatch
-                .consume_prompt(intent.session)
+                .consume_prompt(intent.workspace, intent.session)
                 .map_err(map_dispatch_storage_error)?;
         }
         self.mcp_callers.insert(
@@ -3738,6 +3747,7 @@ mod tests {
         let existing = runtime
             .dispatch
             .upsert_agent_by_runtime_model(
+                dispatch.workspace,
                 None,
                 AgentProfileId::new("claude").unwrap(),
                 ModelSelector::new("test").unwrap(),
@@ -5529,30 +5539,31 @@ mod tests {
     fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
         let mut runtime = runtime();
         let launch_intent = intent(None);
+        let workspace = launch_intent.workspace;
         let session = launch_intent.session.unwrap();
         assert_eq!(runtime.session_phase(session), AgentPhase::Absent);
         assert_eq!(
             runtime
-                .prompt(Some(session), "  ", PromptMode::Auto)
+                .prompt(workspace, Some(session), "  ", PromptMode::Auto)
                 .unwrap_err()
                 .code,
             ErrorCode::InvalidArgument
         );
         assert_eq!(
             runtime
-                .prompt(Some(session), "now", PromptMode::Live)
+                .prompt(workspace, Some(session), "now", PromptMode::Live)
                 .unwrap_err()
                 .code,
             ErrorCode::Unavailable
         );
         let queued = runtime
-            .prompt(Some(session), "queued work", PromptMode::Auto)
+            .prompt(workspace, Some(session), "queued work", PromptMode::Auto)
             .unwrap();
         assert_eq!(queued.delivered_to, "queue");
         assert!(
             runtime
                 .dispatch
-                .queued_prompt(Some(session))
+                .queued_prompt(workspace, Some(session))
                 .unwrap()
                 .is_some()
         );
@@ -5569,7 +5580,7 @@ mod tests {
         assert!(
             runtime
                 .dispatch
-                .queued_prompt(Some(session))
+                .queued_prompt(workspace, Some(session))
                 .unwrap()
                 .is_none()
         );
@@ -5577,7 +5588,7 @@ mod tests {
         assert_eq!(runtime.caller_session(&credential), Some(session));
 
         let live = runtime
-            .prompt(Some(session), "follow up", PromptMode::Auto)
+            .prompt(workspace, Some(session), "follow up", PromptMode::Auto)
             .unwrap();
         assert_eq!(live.delivered_to, "live");
         assert_eq!(pty(&runtime).writes, b"follow up\n");
@@ -5591,7 +5602,7 @@ mod tests {
         );
         assert!(
             runtime
-                .prompt(Some(session), "later", PromptMode::Queue)
+                .prompt(workspace, Some(session), "later", PromptMode::Queue)
                 .is_err()
         );
         pty_mut(&mut runtime).write_failure = true;
@@ -5604,13 +5615,51 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .prompt(Some(session), "fails", PromptMode::Live)
+                .prompt(workspace, Some(session), "fails", PromptMode::Live)
                 .unwrap_err()
                 .code,
             ErrorCode::Unavailable
         );
-        assert!(runtime.prompt(None, "now", PromptMode::Live).is_err());
-        assert!(runtime.prompt(None, "  ", PromptMode::Auto).is_err());
+        assert!(
+            runtime
+                .prompt(workspace, None, "now", PromptMode::Live)
+                .is_err()
+        );
+        assert!(
+            runtime
+                .prompt(workspace, None, "  ", PromptMode::Auto)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn root_prompt_selects_the_agent_in_its_exact_workspace() {
+        let mut runtime = runtime();
+        let first = root_intent(None);
+        let second = root_intent(None);
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &first,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &second,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+
+        runtime
+            .prompt(second.workspace, None, "workspace two", PromptMode::Live)
+            .unwrap();
+        assert_eq!(
+            pty(&runtime).selected.as_ref().unwrap().workspace_id,
+            second.workspace
+        );
+        assert_eq!(pty(&runtime).writes, b"workspace two\n");
     }
 
     #[test]
@@ -7751,6 +7800,7 @@ mod tests {
         let foreign = runtime
             .dispatch
             .upsert_agent_by_runtime_model(
+                unknown.workspace,
                 Some(foreign_session),
                 AgentProfileId::new("claude").unwrap(),
                 ModelSelector::new("test").unwrap(),
@@ -7783,16 +7833,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dispatch_dir = temp.path().join("dispatch");
         let session = SessionId::new();
+        let workspace = WorkspaceId::new();
         let durable = DispatchStore::new(&dispatch_dir);
         let worker = durable
             .upsert_agent_by_runtime_model(
+                workspace,
                 Some(session),
                 AgentProfileId::new("claude").unwrap(),
                 ModelSelector::new("test").unwrap(),
             )
             .unwrap();
         let intent = DispatchIntent {
-            workspace: WorkspaceId::new(),
+            workspace,
             session_name: "worker".into(),
             caller: CallerRef {
                 session_id: Some(SessionId::new()),
@@ -7861,6 +7913,7 @@ mod tests {
         let legacy = DispatchStore::new(&legacy_dir);
         let worker = legacy
             .upsert_agent_by_runtime_model(
+                workspace,
                 Some(session),
                 AgentProfileId::new("claude").unwrap(),
                 ModelSelector::new("test").unwrap(),

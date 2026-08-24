@@ -166,7 +166,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_create` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
-| `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、次回 Agent launch 用の durable queue または live Agent PTY へ配送する |
+| `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、handshake で fence した workspace と optional session が一致する次回 Agent launch 用 durable queue または live Agent PTY へ配送する |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
@@ -174,7 +174,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
-| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、daemon-owned worker PTY と dispatch store/inbox を操作する |
+| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
 `user_decision_request` の同期応答待ちは decision ごとの process-local 通知へ登録し、resolve / cancel / expire の

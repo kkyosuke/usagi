@@ -602,7 +602,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `runtime-migration.json` | durable atomic JSON | legacy store から shard への一方向 migration の記録。schema、移行した generation、adopt 件数、証明不能だった件数を持つ（[legacy record の adoption](#legacy-record-の-adoption)） |
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
-| `dispatch.json` | durable atomic JSON | dispatchable agent、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
+| `dispatch.json` | durable atomic JSON | dispatchable agent、workspace ownership、workspace/session ごとの prompt queue、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
 
 #### durable store の retention
@@ -615,17 +615,20 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 |---|---|---|
 | `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
 | inbox | 既読 256 件。総数の上限は 4096 | 未読の報告。未読が上限を超えたときだけ最古の未読を落とし、error log に記録する（silent loss にしない） |
-| `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件まで | pending の decision と、未 ACK の outbox event が参照する record |
+| `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
 | `supervisor-runs/` | 終了済み run 128 件（snapshot / journal / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run |
 
-未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、上限に達した workspace では**既存を捨てずに
-新しい要求を拒否する**。拒否は `resource_exhausted` で、durable state を一切変更しないため、人が backlog を消化した
-あとの retry が安全である。
+未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
+場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
+pending が 1 つの共有文書を無制限に増やすことを防ぐ。拒否は `resource_exhausted` で、durable state を一切変更しない
+ため、人が backlog を消化したあとの retry が安全である。
 
 ### tenant registry
 
 daemon は起動した workspace だけでなく、**client が選んだ workspace を adopt して同時に serve する**。保持している
 workspace 1 件（tenant）は「canonical root・`WorkspaceId`・保持中の workspace fence・lifecycle runtime」の組である。
+同じ未保持 root への複数 handshake は miss・fence・runtime open・register を 1 transaction として直列化し、同じ daemon
+が先に取った fence を後続 handshake が「別 owner」と誤認しない。後続は登録済み tenant をそのまま再利用する。
 
 ```text
 daemon process（machine あたり 1 つ）
@@ -670,8 +673,9 @@ state subtree から root を引き当てて adopt し直すので、開き直�
 3 相で行い、確定時に参照数と fence を読み直す。
 
 **daemon 全体で 1 つしかない registry の prune は、保持中の workspace ではなく「この data directory が知っている
-workspace すべて」で判定する**。PR inventory と Agent runtime の記録は session だけを key にしており、workspace の
-tenancy より長く生きる。retire で保持集合が縮んだことを「session が消えた」と読むと、閉じただけの workspace の
+workspace すべて」で判定する**。PR inventory の記録は session を key にし、Agent / dispatch inventory は workspace
+ownership を別の durable fence として持つが、どちらも workspace の tenancy より長く生きる。retire で保持集合が縮んだ
+ことを「session が消えた」と読むと、閉じただけの workspace の
 記録（利用者が付けた pin / dismiss を含む）を消してしまう。判定材料は各 state subtree の lifecycle document で、
 1 つでも読めなければ prune しない。
 

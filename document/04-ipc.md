@@ -633,7 +633,11 @@ daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent`
 
 dispatch の operation key、caller↔worker binding、runtime generation、safe outcome も restart 時に hydrate される。同じ dispatch の retry は worker を再 spawn せず、保存済み outcome を replay する。
 
-client は path、argv、queue/live mode、completion destination を指定しない。available でない session scope、agent selector の不整合、または未知 agent は safe typed error となり PTY を spawn しない。新規 agent の runtime/model は daemon が launch 直前に current workspace allowlist と current executable availability で再検証する。allowlist 外は `invalid_argument`、executable 不在は `unavailable` とし、どちらも PTY を spawn しない。
+client は path、argv、queue/live mode、completion destination を指定しない。Agent identity と query は workspace ownership を
+durable に持ち、handshake が fence した workspace の Agent だけを selector / list / get の対象にする。別 workspace の
+`agent_id`、available でない session scope、agent selector の不整合、または未知 agent は safe typed error となり PTY を
+spawn しない。新規 agent の runtime/model は daemon が launch 直前に current workspace allowlist と current executable
+availability で再検証する。allowlist 外は `invalid_argument`、executable 不在は `unavailable` とし、どちらも PTY を spawn しない。
 
 ## generic terminal request
 

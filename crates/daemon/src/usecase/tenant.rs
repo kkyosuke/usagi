@@ -19,10 +19,10 @@
 //! across two descriptors. [`TenantRegistry::adopt_initial`] registers it with
 //! the fence that is already held.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::id::WorkspaceId;
@@ -222,7 +222,31 @@ pub struct TenantRegistry<F, O: TenantRuntimeOpener> {
     fences: F,
     opener: O,
     limit: usize,
+    /// Roots currently inside the miss → fence → register transaction. Equal
+    /// roots wait for one another; unrelated workspace adoptions remain
+    /// independent.
+    adopting: Mutex<BTreeSet<PathBuf>>,
+    adoption_changed: Condvar,
     held: Mutex<BTreeMap<PathBuf, Held<O::Runtime>>>,
+}
+
+/// Releases one root's adoption lane on every return path, including panic.
+struct AdoptionPermit<'a> {
+    root: PathBuf,
+    adopting: &'a Mutex<BTreeSet<PathBuf>>,
+    changed: &'a Condvar,
+}
+
+impl Drop for AdoptionPermit<'_> {
+    fn drop(&mut self) {
+        let mut adopting = self
+            .adopting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        adopting.remove(&self.root);
+        drop(adopting);
+        self.changed.notify_all();
+    }
 }
 
 /// Observes whether a workspace still has work only its owner can serve.
@@ -279,6 +303,8 @@ where
             fences,
             opener,
             limit,
+            adopting: Mutex::new(BTreeSet::new()),
+            adoption_changed: Condvar::new(),
             held: Mutex::new(BTreeMap::new()),
         }
     }
@@ -303,6 +329,7 @@ where
     /// [`AdoptError::LimitReached`] when this daemon may hold no more, and
     /// [`AdoptError::Storage`] when the workspace's own state cannot be opened.
     pub fn adopt(&self, workspace_root: &Path) -> Result<Tenant<O::Runtime>, AdoptError> {
+        let _adoption = self.adoption_permit(workspace_root);
         if let Some(tenant) = self.tenant(workspace_root) {
             return Ok(tenant);
         }
@@ -476,6 +503,28 @@ where
         Ok(tenant)
     }
 
+    /// Enter the one adoption lane for `workspace_root` while allowing every
+    /// other root to proceed. The waiter rechecks the tenant after entering, so
+    /// the first adopter's result is reused without opening another fence.
+    fn adoption_permit(&self, workspace_root: &Path) -> AdoptionPermit<'_> {
+        let mut adopting = self
+            .adopting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while adopting.contains(workspace_root) {
+            adopting = self
+                .adoption_changed
+                .wait(adopting)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        adopting.insert(workspace_root.to_path_buf());
+        AdoptionPermit {
+            root: workspace_root.to_path_buf(),
+            adopting: &self.adopting,
+            changed: &self.adoption_changed,
+        }
+    }
+
     /// Whether the registry lock is free right now.
     ///
     /// Used only by the regression test that pins the observation in
@@ -525,7 +574,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
 
@@ -578,7 +627,7 @@ mod tests {
     /// A runtime that is just the workspace it was opened for, which is all the
     /// registry may assume about it.
     struct FakeOpener {
-        fail: Cell<bool>,
+        fail: AtomicBool,
     }
 
     impl TenantRuntimeOpener for FakeOpener {
@@ -589,7 +638,7 @@ mod tests {
             workspace_root: &Path,
             state_dir: &Path,
         ) -> io::Result<OpenedTenant<String>> {
-            if self.fail.get() {
+            if self.fail.load(Ordering::SeqCst) {
                 return Err(io::Error::other("lifecycle document is unreadable"));
             }
             assert!(state_dir.is_dir(), "the subtree is created before opening");
@@ -617,7 +666,7 @@ mod tests {
                 failure: None,
             },
             FakeOpener {
-                fail: Cell::new(false),
+                fail: AtomicBool::new(false),
             },
             limit,
         );
@@ -651,6 +700,32 @@ mod tests {
             Some(tenant)
         );
         assert_eq!(registry.by_workspace_id(WorkspaceId::new()), None);
+    }
+
+    #[test]
+    fn concurrent_first_adoptions_converge_on_one_tenant_and_fence() {
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let (registry, live) = fixture(daemon.path(), WorkspaceFenceOutcome::Acquired, 8);
+        let registry = std::sync::Arc::new(registry);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(17));
+        let mut workers = Vec::new();
+        for _ in 0..16 {
+            let registry = std::sync::Arc::clone(&registry);
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                registry.adopt(Path::new("/workspace/concurrent")).unwrap()
+            }));
+        }
+        barrier.wait();
+        let tenants = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(tenants.iter().all(|tenant| tenant == &tenants[0]));
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.adopted(), vec![tenants[0].clone()]);
     }
 
     #[test]
@@ -693,7 +768,7 @@ mod tests {
                 failure: None,
             },
             FakeOpener {
-                fail: Cell::new(false),
+                fail: AtomicBool::new(false),
             },
             8,
         );
@@ -737,7 +812,7 @@ mod tests {
                 failure: Some(io::ErrorKind::PermissionDenied),
             },
             FakeOpener {
-                fail: Cell::new(false),
+                fail: AtomicBool::new(false),
             },
             8,
         );
@@ -746,7 +821,7 @@ mod tests {
         assert_eq!(error.to_string(), "fence node is unusable");
 
         let (registry, _live) = fixture(daemon.path(), WorkspaceFenceOutcome::Acquired, 8);
-        registry.opener.fail.set(true);
+        registry.opener.fail.store(true, Ordering::SeqCst);
         assert_eq!(
             registry.adopt(Path::new("/workspace/one")).unwrap_err(),
             AdoptError::Storage("lifecycle document is unreadable".into())
@@ -848,7 +923,7 @@ mod tests {
                 failure: None,
             },
             FakeOpener {
-                fail: Cell::new(false),
+                fail: AtomicBool::new(false),
             },
             8,
         );
@@ -946,7 +1021,7 @@ mod tests {
                 failure: None,
             },
             FakeOpener {
-                fail: Cell::new(false),
+                fail: AtomicBool::new(false),
             },
             8,
         ));
