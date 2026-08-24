@@ -547,7 +547,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             .unwrap_or_default();
         arguments.extend(codex_system_prompt_arguments(
             mode,
-            tools.as_ref().map(ConfiguredMcpTools::families),
+            tools.as_ref().map(|tools| tools.families),
             role.as_ref()
                 .map(|(id, instructions)| (id, instructions.as_str())),
         ));
@@ -811,7 +811,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         );
         arguments.extend(claude_system_prompt_arguments(
             mode,
-            tools.as_ref().map(ConfiguredMcpTools::families),
+            tools.as_ref().map(|tools| tools.families),
             role.as_ref()
                 .map(|(id, instructions)| (id, instructions.as_str())),
         ));
@@ -1460,11 +1460,8 @@ struct ConfiguredMcpTools {
 }
 
 impl ConfiguredMcpTools {
-    /// The families the injected server registers, as the prompt describes them.
-    const fn families(&self) -> McpToolFamilies {
-        self.families
-    }
-
+    /// The model as the MCP wiring needs it. `Some` exactly when
+    /// `families.local_llm` is set, because both come from one accessor.
     fn model(&self) -> Option<&str> {
         self.local_llm_model.as_deref()
     }
@@ -15887,7 +15884,7 @@ mod tests {
         // Both stores default to enabled, so a workspace with no files gets both
         // families and no delegation server.
         assert_eq!(
-            tools.families(),
+            tools.families,
             McpToolFamilies {
                 issue: true,
                 memory: true,
@@ -15909,7 +15906,7 @@ mod tests {
             tools.model(),
             Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
         );
-        assert!(tools.families().local_llm);
+        assert!(tools.families.local_llm);
     }
 
     #[test]
@@ -15931,7 +15928,7 @@ mod tests {
         assert_eq!(
             configured_mcp_tools(&data_home, workspace.path())
                 .unwrap()
-                .families(),
+                .families,
             McpToolFamilies {
                 issue: false,
                 memory: true,
