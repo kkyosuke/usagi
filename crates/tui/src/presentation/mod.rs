@@ -8427,13 +8427,27 @@ mod tests {
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
         // The projected sidebar row carries the Failed lifecycle and its reason.
-        let state =
+        let mut state =
             crate::usecase::application::controller::AppState::home(workspace, vec![session]);
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            crate::usecase::application::controller::AppEvent::Backend(
+                crate::usecase::application::controller::BackendEvent::PullRequestsLoaded {
+                    target: Target::Session(session),
+                    revision: 1,
+                    prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                        1545,
+                        "https://example.test/pull/1545",
+                    )],
+                },
+            ),
+        );
         let rows = super::project_controller_sessions(&ui, &state);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].lifecycle, SessionLifecycle::Failed);
         assert_eq!(rows[0].failure_summary.as_deref(), Some("create failed"));
         assert!(!rows[0].removing);
+        assert!(rows[0].pr_summary.is_some());
 
         // The reducer receives the lifecycle so it can gate attach by capability.
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
@@ -8534,21 +8548,8 @@ mod tests {
             ]
         );
 
-        let mut state =
+        let state =
             crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
-        let _ = crate::usecase::application::controller::update(
-            &mut state,
-            crate::usecase::application::controller::AppEvent::Backend(
-                crate::usecase::application::controller::BackendEvent::PullRequestsLoaded {
-                    target: Target::Session(director_child),
-                    revision: 1,
-                    prs: vec![usagi_core::domain::pullrequest::PrLink::new(
-                        1545,
-                        "https://example.test/pull/1545",
-                    )],
-                },
-            ),
-        );
         let projected = super::project_controller_sessions(&ui, &state);
         assert_eq!(
             projected
@@ -8565,7 +8566,6 @@ mod tests {
             ]
         );
         assert_eq!(projected[1].parent_session_id, Some(director_child));
-        assert!(projected[0].pr_summary.is_some());
     }
 
     #[test]
