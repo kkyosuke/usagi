@@ -105,6 +105,10 @@ pub(crate) fn launch_and_confirm(
     launcher: &dyn DaemonLauncher,
     sleeper: &dyn Sleeper,
 ) -> io::Result<u32> {
+    // Read before launching: an entry already present belongs to an earlier
+    // failure, and reporting it as this launch's cause would send the operator
+    // after the wrong thing.
+    let before = launcher.recorded_failure();
     launcher.launch()?;
 
     for _ in 0..MAX_POLLS {
@@ -116,14 +120,38 @@ pub(crate) fn launch_and_confirm(
         sleeper.sleep();
     }
 
-    Err(io::Error::other(
-        "daemon did not register within the startup window",
-    ))
+    Err(io::Error::other(startup_timeout_message(
+        before.as_deref(),
+        launcher.recorded_failure().as_deref(),
+        launcher.failure_log_hint().as_deref(),
+    )))
+}
+
+/// What a start that never registered tells the operator.
+///
+/// The deadline itself explains nothing: every distinct cause — a socket path
+/// over the platform limit, a data directory with the wrong mode, a workspace
+/// another daemon owns — produces the same silence at this end. When the daemon
+/// recorded a reason of its own during this launch, that reason is the message;
+/// otherwise the operator is at least pointed at the log.
+fn startup_timeout_message(
+    before: Option<&str>,
+    after: Option<&str>,
+    log_hint: Option<&str>,
+) -> String {
+    let deadline = "daemon did not register within the startup window";
+    match (after, log_hint) {
+        (Some(reported), _) if after != before => {
+            format!("{deadline}; the daemon reported: {reported}")
+        }
+        (_, Some(hint)) => format!("{deadline}; no reason was recorded, see {hint}"),
+        (_, None) => deadline.to_owned(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::start;
+    use super::{start, startup_timeout_message};
     use crate::test_support::{
         FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, TestLauncher,
     };
@@ -367,6 +395,44 @@ mod tests {
                 &info(),
             )
             .is_err()
+        );
+    }
+
+    /// The deadline alone explains nothing: every distinct cause looks the same
+    /// from this end, because the launched daemon's stderr goes to `/dev/null`.
+    #[test]
+    fn a_startup_timeout_reports_what_the_daemon_recorded_for_itself() {
+        let reported = startup_timeout_message(
+            None,
+            Some("path must be shorter than SUN_LEN"),
+            Some("/home/u/.usagi/logs"),
+        );
+        assert!(reported.contains("did not register within the startup window"));
+        assert!(
+            reported.contains("path must be shorter than SUN_LEN"),
+            "{reported}"
+        );
+    }
+
+    /// An entry that was already there belongs to an earlier failure. Reporting
+    /// it would send the operator after the wrong cause, so an unchanged log is
+    /// treated as "nothing recorded" and only points at the log itself.
+    #[test]
+    fn a_startup_timeout_does_not_blame_a_failure_that_predates_the_launch() {
+        let stale = Some("a failure from yesterday");
+        let reported = startup_timeout_message(stale, stale, Some("/home/u/.usagi/logs"));
+        assert!(!reported.contains("yesterday"), "{reported}");
+        assert!(reported.contains("no reason was recorded"), "{reported}");
+        assert!(reported.contains("/home/u/.usagi/logs"), "{reported}");
+    }
+
+    /// With no log to point at — every test launcher, and any environment
+    /// without a data directory — the message stays exactly what it was.
+    #[test]
+    fn a_startup_timeout_without_a_log_reports_only_the_deadline() {
+        assert_eq!(
+            startup_timeout_message(None, None, None),
+            "daemon did not register within the startup window"
         );
     }
 }

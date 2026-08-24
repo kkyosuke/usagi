@@ -8,7 +8,7 @@ dependson: []
 related: [605, 631]
 parent: 671
 created_at: 2026-08-13T22:28:26.087856+00:00
-updated_at: 2026-08-13T22:28:26.087856+00:00
+updated_at: 2026-08-23T23:22:34.965949+00:00
 ---
 
 ## Finding（P1 security / integrity）
@@ -52,3 +52,23 @@ git ls-files ...
 git worktree add ...
 => marker created in new worktree
 ```
+
+## 2026-08-24 時点の進捗（v3.0.0 リリースレビュー）
+
+product-owned Git policy を `crates/core/src/infrastructure/git/environment.rs` の
+`CONFINED_GIT_CONFIG` に一元化し、`confined_git_command` が最高優先度の
+`GIT_CONFIG_COUNT` 系で注入するようにした。`confined_git_command` がこの workspace で
+git command を組み立てる唯一の経路なので、全 call site が同じ policy を通る。
+
+- [x] repository-local `post-checkout` が実行されない（`core.hooksPath=/dev/null`）
+- [x] repository-local `core.fsmonitor` が `git ls-files` で実行されない（`core.fsmonitor=false`）
+- [x] pager が起動しない（`core.pager=cat`）
+- [x] submodule recursion が起きない（`submodule.recurse=false`）
+- [x] optional index lock を取らない（`GIT_OPTIONAL_LOCKS=0`）
+- [x] private remote clone の transport 契約を回帰させない（system/global config は
+      意図的に残す。credential helper と SSH 設定は利用者のものを使う）
+- [ ] tracked `.gitattributes` + `filter.<driver>.smudge/process` — **未対応**。
+      driver 名を repository が任意に選べるため固定 key の上書きでは無効化できない。
+      filter process を起動しない materialization 手順、または許可済み built-in だけを
+      使う別境界が必要で、この issue に残る唯一のスコープはこれである。
+- [ ] `git worktree add` 失敗後の partial effect の compensation

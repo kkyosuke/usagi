@@ -59,6 +59,14 @@ v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)�
 | `usagi mcp` | daemon へ接続し（停止中は自動起動）、接続後は stdin の EOF まで stdio JSON-RPC server を実行する。daemon に接続できなければ server を開始せず failure status で終了する（[MCP の起動と経路](07-mcp.md#起動と経路)） |
 | `usagi <不正な引数>` | [process argv contract](02-architecture.md#process-argv-contract) に従い、clap の利用方法エラーとして拒否する |
 
+`usagi session ...` と `usagi mcp` は、daemon が停止していれば起動する。稼働中の daemon が
+その repository をまだ開いていない場合は、**repository root で実行したときに限り**その repository を
+adopt させてから接続する（[4. IPC#workspace fence](04-ipc.md#workspace-fence)）。したがって新しい repository を
+CLI や MCP から使い始めるのに、先に TUI で開いておく必要はない。repository root 以外で実行した場合は、
+どの workspace を指しているかが定まらないものとして拒否し、repository root で実行するか `usagi open` で明示的に
+開くよう案内する（`usagi open` は repository でない directory も開ける）。adopt 済みになった後は、その配下の
+どこで実行しても同じ workspace に解決される。
+
 Welcome 画面は対話的に動く。合成ルートが端末を raw mode + 代替スクリーンにして、TUI 面の
 純粋な制御ループ（`presentation::run`）へ注入した端末（`Terminal` ポート）でキー入力を処理する。
 実端末の制御（crossterm による raw mode・cursor・mouse・入力 event pump）は合成ルートだけが持ち、

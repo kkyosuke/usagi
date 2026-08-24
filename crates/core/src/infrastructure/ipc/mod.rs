@@ -450,9 +450,10 @@ pub enum ClientWorkspace {
     Bound { root: String },
     /// The client operates on the workspace `root` as a whole: the workspace a
     /// TUI was asked to open, rather than the directory the process happens to
-    /// run in. A daemon serves exactly one workspace, so this is admitted only
-    /// when `root` *is* that workspace — a subdirectory below it is a different
-    /// workspace to open, even though it is the same tree to run in.
+    /// run in. A daemon may serve several workspaces, but each connection acts
+    /// on exactly one, so this is admitted only when `root` *is* the workspace
+    /// the handshake resolved — a subdirectory below it is a different workspace
+    /// to open, even though it is the same tree to run in.
     Selected { root: String },
     /// The connection performs no workspace-scoped work. It only proves that a
     /// daemon exists (client readiness), observes daemon lifecycle identity
@@ -828,6 +829,39 @@ fn comparable_root(root: &str) -> Option<&Path> {
 #[must_use]
 pub fn workspace_refusal(reason: &str, trusted_root: &str) -> ProtocolError {
     workspace_refused(reason, trusted_root)
+}
+
+/// The workspace-fence refusal of a daemon that may hold several workspaces,
+/// naming every workspace it actually serves.
+///
+/// [`workspace_refusal`] names one root, which is right for the fence but wrong
+/// for a registry miss: a daemon serving three workspaces would claim to serve
+/// one, and a refusal to *adopt* a root would name that same refused root as the
+/// one being served — a sentence that contradicts itself. The caller passes what
+/// the registry holds, so the reader can see whether the workspace they meant is
+/// among them.
+#[must_use]
+pub fn workspace_refusal_serving(reason: &str, served: &[String]) -> ProtocolError {
+    let mut error = ProtocolError::new(
+        ErrorCode::PermissionDenied,
+        format!("{reason}; {}", describe_served(served)),
+    );
+    WORKSPACE_MISMATCH_ERROR_ID.clone_into(&mut error.error_id);
+    error
+}
+
+/// How a refusal spells the set of workspaces the daemon serves.
+fn describe_served(served: &[String]) -> String {
+    let named: Vec<&str> = served
+        .iter()
+        .map(String::as_str)
+        .filter(|root| !root.is_empty())
+        .collect();
+    match named.as_slice() {
+        [] => "this daemon serves no workspace yet".to_owned(),
+        [only] => format!("this daemon serves the workspace {only}"),
+        many => format!("this daemon serves the workspaces {}", many.join(", ")),
+    }
 }
 
 fn workspace_refused(reason: &str, trusted_root: &str) -> ProtocolError {

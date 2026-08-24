@@ -72,9 +72,19 @@ command path と model は別 server、別 override、shell command を作れな
 
 ## プロトコルとライフサイクル
 
-対応する MCP protocol version は `2025-06-18` である。クライアントは接続ごとに同じ版を
-`initialize.params.protocolVersion` へ指定する。省略や異なる版を送ると server は値を echo せず
-`Invalid params` を返す。
+server が話す MCP protocol version は `2025-06-18`（優先）・`2025-03-26`・`2024-11-05` の 3 つである。
+この server が実装するのは `initialize` / `ping` / `tools/*` / `resources/*` と `notifications/initialized`
+だけで、3 版のいずれでも同じ形をしているため、どの版を名乗るクライアントにも同じ tool 群を提供する。
+
+`initialize.params.protocolVersion` の扱いは次のとおり。MCP は「話せない版を名乗られたら話せる版を返す」ことを
+求めており、拒否は求めていない。ここで拒否すると、まだ `2024-11-05` を送るクライアントが tool を 1 つも
+使えないまま終わる。
+
+| クライアントが名乗った版 | server の応答 |
+|---|---|
+| 上記 3 版のいずれか | 同じ版を echo して初期化する |
+| 上記以外 | 優先版 `2025-06-18` を counter-offer して初期化する。続行するかはクライアントが決める |
+| 省略、または文字列でない | `Invalid params` を返し、初期化しない |
 
 接続は次の順で ready になる。`ping` を除く tool/resource request は ready になってから受理する。
 

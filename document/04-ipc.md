@@ -167,9 +167,36 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 | 申告 | 解決 |
 |---|---|
 | `selected` | canonical 化した root を **adopt する**（すでに保持していればそれを使う）。adopt できない workspace はこの接続だけを拒否する |
-| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。保持していない場合は、この data directory が**かつて開いた** workspace（state subtree の `root.json`）の最長一致を探して adopt する。どちらにも無い path は拒否する（directory だけでは workspace root を名指せないので、一度も開いていない directory は claim しない） |
+| `bound` | 保持している workspace のうち、その path を含む**最長一致**を選ぶ。保持していない場合は、この data directory が**かつて開いた** workspace（state subtree の `root.json`）の最長一致を探して adopt する。それも無く、かつ **その path 自身が git repository** ならそれを adopt する。どれにも当たらない path は拒否する（**上位ディレクトリは探索しない**） |
 | `unbound` | workspace resource を扱わないので、起動時の workspace を答える |
 | 欠落 | 起動時の workspace を答え、下の fence が拒否する |
+
+`bound` の miss は 2 段で解決する。前段は「**存在する** workspace を探す」で、後段は「workspace を**作る**」なので、
+必ずこの順に試す。
+
+1. **かつて開いた workspace**（state subtree の `root.json`）の最長一致。ここに当たれば、その workspace は
+   一度開かれている以上「利用者が指した」ものである。tenant から idle で退いた workspace
+   （[5. daemon#tenant registry](05-daemon.md#tenant-registry)）が、そこで動いている CLI / MCP client を
+   拒否し始めるのを防ぐのがこの段である。
+2. **申告された path 自身が git repository** である場合だけ、新しく開く。新しく clone した repository を、
+   先に TUI で開かずに CLI / MCP から使い始められるのはこの段である。
+
+後段が**上位ディレクトリを探索しない**のは意図である。`bound` は「開く対象」ではなく「動いている場所」の申告
+なので、上へ辿ると *たまたま上にあった* repository を開いてしまう。`$HOME` に dotfiles repository を置く構成は
+珍しくなく、上位探索を許すと `usagi session create` を home 配下のただの directory で実行しただけで `$HOME` に
+fence を取り、`~/.usagi/sessions/<name>` を dotfiles の worktree として作り、dotfiles に branch を切ることになる。
+repository に**立っている**ことは、どの workspace を指しているかの明確な表明である。その下のどこかに居ることは、
+そうではない。
+
+いったん adopt されれば、その配下はすべて最長一致で同じ workspace に解決される（この 2 段が触るのは「保持して
+いない workspace をどう解決するか」だけである）。session worktree（`<root>/.usagi/sessions/<name>`）は自身の
+`.git` を持つが workspace ではないので、後段の対象としては常に除外する。それが存在する時点でその workspace は
+前段で解決できる。
+
+この制限は **`bound` による暗黙の adopt にだけ**掛かる。「repository でなければ workspace になれない」という規則では
+ない。`usagi open <path>` と TUI の Open / New は `selected` を申告する明示的な操作であり、対象が repository か
+どうかを問わない。daemon が起動時 cwd を initial tenant にする経路も同じく制限しない。制限の根拠は
+「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
 
 `selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。
@@ -195,7 +222,9 @@ client が拒否される過程でこの daemon に workspace を adopt させ�
 選択側の正本）。
 
 拒否は `permission_denied` / `error_id = workspace-mismatch` / `retry_mode = never` / `side_effect = none` の
-typed `ProtocolError` であり、message は **serve している workspace root** を含む。client はこれを
+typed `ProtocolError` であり、message は **その daemon が serve している workspace root を過不足なく列挙する**
+（1 つも無ければその旨）。1 つに固定して名乗ると、複数 workspace を保持する daemon が実態と違うことを言い、
+adopt に失敗した root をそのまま「serve している」と名乗る自己矛盾した文になる。client はこれを
 そのまま提示し、`unavailable` へ丸めない。bootstrap はこの拒否を「到達不能」と解釈しないため、
 daemon の cold start、stale endpoint recovery、rollover、cold restart のいずれも起こさない
 （別 workspace を正当に所有している daemon を壊さないため）。readiness 待ちも即座に打ち切る。

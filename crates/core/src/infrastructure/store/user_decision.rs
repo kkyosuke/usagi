@@ -22,6 +22,22 @@ use crate::{
 
 const FILE: &str = "user-decisions.json";
 
+/// How many resolved / cancelled / expired decisions are kept.
+///
+/// Every mutation rewrites this whole document, so an unbounded history makes
+/// each decision cost more than the last, and a long-lived daemon pays that
+/// forever. Terminal records are kept only to answer a retry of the request that
+/// produced them: an idempotency key that arrives after eviction creates a fresh
+/// decision, which is the same outcome as if the retry had never been sent.
+const TERMINAL_RETENTION: usize = 256;
+
+/// How many unanswered decisions one workspace may hold at once.
+///
+/// Pending records are never evicted, so this is the bound that has to refuse
+/// rather than drop. It is per workspace so one busy workspace cannot starve the
+/// others of the ability to ask a question.
+const PENDING_LIMIT: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionResolvedEvent {
     pub decision_id: UserDecisionId,
@@ -162,6 +178,19 @@ impl UserDecisionStore {
                     Err(UserDecisionError::IdempotencyConflict)
                 };
             }
+            // Admission is charged before the record exists, so a refusal
+            // leaves the store byte-for-byte as it was.
+            let pending = state
+                .decisions
+                .iter()
+                .filter(|item| {
+                    item.owner.workspace_id == decision.owner.workspace_id
+                        && item.status == UserDecisionStatus::Pending
+                })
+                .count();
+            if pending >= PENDING_LIMIT {
+                return Err(UserDecisionError::PendingLimitReached);
+            }
             state.decisions.push(decision.clone());
             Ok(decision)
         })
@@ -228,9 +257,49 @@ impl UserDecisionStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut state = self.load()?;
         let result = f(&mut state);
+        retain_bounded(&mut state);
         json_file::write_atomic(&self.dir, &self.path(), &state)?;
         Ok(result)
     }
+}
+
+/// Drop the terminal decisions past [`TERMINAL_RETENTION`], oldest first.
+///
+/// Three classes are never dropped, because dropping them would lose state a
+/// caller is still owed:
+///
+/// - **pending** — someone is blocked waiting for the answer;
+/// - **referenced by an un-acknowledged event** — the answer has not reached its
+///   caller, and [`UserDecisionStore::get_for_event`] validates the delivery
+///   against this record;
+/// - **the newest terminal records** — a retry carrying the same idempotency key
+///   is answered from these instead of asking the person twice.
+///
+/// Running on every mutation keeps the bound a property of the document rather
+/// than of a maintenance tick that may never run.
+fn retain_bounded(state: &mut State) {
+    let referenced: Vec<UserDecisionId> =
+        state.events.iter().map(|event| event.decision_id).collect();
+    let evictable = |decision: &UserDecision| {
+        decision.status != UserDecisionStatus::Pending
+            && !referenced.contains(&decision.decision_id)
+    };
+    let evictable_count = state.decisions.iter().filter(|d| evictable(d)).count();
+    let Some(mut over) = evictable_count.checked_sub(TERMINAL_RETENTION) else {
+        return;
+    };
+    if over == 0 {
+        return;
+    }
+    // `decisions` is append-ordered, so removing from the front removes the
+    // oldest — the ones least likely to be retried.
+    state.decisions.retain(|decision| {
+        if over > 0 && evictable(decision) {
+            over -= 1;
+            return false;
+        }
+        true
+    });
 }
 fn same_request(a: &UserDecision, b: &UserDecision) -> bool {
     a.title == b.title
@@ -545,5 +614,135 @@ mod tests {
                 Err(UserDecisionError::IdempotencyConflict)
             );
         }
+    }
+
+    /// A decision for the same workspace as `item()` but with its own identity,
+    /// so a test can fill the store without tripping idempotency.
+    fn distinct(workspace: WorkspaceId) -> UserDecision {
+        let mut decision = item();
+        decision.owner.workspace_id = workspace;
+        decision.decision_id = UserDecisionId::new();
+        decision.idempotency_key = None;
+        decision
+    }
+
+    /// Every mutation rewrites the whole document, so an unbounded history makes
+    /// each decision cost more than the last for as long as the daemon lives.
+    #[test]
+    fn terminal_decisions_are_bounded_while_pending_ones_are_never_dropped() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let now = Utc::now();
+
+        let mut still_pending = Vec::new();
+        for index in 0..3 {
+            let decision = distinct(workspace);
+            store.create(decision.clone()).unwrap().unwrap();
+            let _ = index;
+            still_pending.push(decision.decision_id);
+        }
+
+        // Well past the retention bound, all of it terminal.
+        for _ in 0..(TERMINAL_RETENTION + 50) {
+            let decision = distinct(workspace);
+            let id = decision.decision_id;
+            store.create(decision).unwrap().unwrap();
+            store
+                .terminal(workspace, id, UserDecisionStatus::Cancelled, now)
+                .unwrap()
+                .unwrap();
+        }
+
+        let kept = store.load().unwrap().decisions;
+        let terminal = kept
+            .iter()
+            .filter(|d| d.status != UserDecisionStatus::Pending)
+            .count();
+        assert!(
+            terminal <= TERMINAL_RETENTION,
+            "history grew past its bound: {terminal}"
+        );
+        // A caller blocked on an answer is never evicted to make room.
+        for id in still_pending {
+            assert!(
+                kept.iter().any(|d| d.decision_id == id),
+                "a pending decision was dropped"
+            );
+        }
+    }
+
+    /// An answer that has not reached its caller yet is not history: dropping it
+    /// would make `get_for_event` refuse the delivery it is meant to validate.
+    #[test]
+    fn a_decision_with_an_unacknowledged_delivery_survives_retention() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        let now = Utc::now();
+
+        let awaited = distinct(workspace);
+        let awaited_id = awaited.decision_id;
+        store.create(awaited).unwrap().unwrap();
+        store
+            .resolve(
+                workspace,
+                awaited_id,
+                UserDecisionAnswer::Option {
+                    option_id: "a".into(),
+                },
+                now,
+            )
+            .unwrap()
+            .unwrap();
+
+        for _ in 0..(TERMINAL_RETENTION + 10) {
+            let decision = distinct(workspace);
+            let id = decision.decision_id;
+            store.create(decision).unwrap().unwrap();
+            store
+                .terminal(workspace, id, UserDecisionStatus::Cancelled, now)
+                .unwrap()
+                .unwrap();
+        }
+
+        let event = store
+            .events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.decision_id == awaited_id)
+            .expect("the delivery is still outstanding");
+        assert!(
+            store.get_for_event(&event).unwrap().is_some(),
+            "retention dropped a record an outstanding delivery validates against"
+        );
+    }
+
+    /// Pending records cannot be evicted, so saturation has to refuse the new
+    /// request. The refusal must leave the store exactly as it was.
+    #[test]
+    fn a_saturated_workspace_refuses_new_decisions_without_any_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let workspace = WorkspaceId::new();
+        for _ in 0..PENDING_LIMIT {
+            store.create(distinct(workspace)).unwrap().unwrap();
+        }
+
+        let before = std::fs::read(store.path()).unwrap();
+        assert_eq!(
+            store.create(distinct(workspace)).unwrap(),
+            Err(UserDecisionError::PendingLimitReached)
+        );
+        assert_eq!(
+            std::fs::read(store.path()).unwrap(),
+            before,
+            "a refused decision changed the durable document"
+        );
+
+        // Another workspace is unaffected: the bound is per workspace so one
+        // busy workspace cannot stop the others from asking anything.
+        let other = WorkspaceId::new();
+        assert!(store.create(distinct(other)).unwrap().is_ok());
     }
 }

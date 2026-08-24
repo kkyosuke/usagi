@@ -20,6 +20,26 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const REGISTRY_FILE: &str = "dispatch.json";
 const INBOX_DIR: &str = "inbox";
+
+/// How many finished dispatch runs the registry keeps.
+///
+/// Every mutation replaces this whole document, so history that is never dropped
+/// makes each dispatch cost more than the last: N dispatches cost O(N²) in
+/// bytes read, parsed and written, forever, on a daemon that is meant to run for
+/// weeks. Finished runs are kept only so a duplicate report or a reconnecting
+/// caller can still find the run it is talking about; past that window the run
+/// is history, and history belongs in the inbox that already recorded it.
+const RUN_RETENTION: usize = 256;
+
+/// How many already-read messages one caller's inbox keeps.
+const INBOX_READ_RETENTION: usize = 256;
+
+/// The hard ceiling on one caller's inbox, unread messages included.
+///
+/// Read messages are dropped first and this bound is never reached in ordinary
+/// use. It exists because "never drop an unread message" alone is not a bound: a
+/// caller that never reads its inbox would otherwise grow it without limit.
+const INBOX_HARD_LIMIT: usize = 4096;
 /// Reserved inbox segment for a workspace-root caller. A `SessionId` is always a
 /// lowercase UUID, so this non-UUID literal can never collide with one.
 const ROOT_INBOX_SEGMENT: &str = "workspace-root";
@@ -121,6 +141,52 @@ impl Registry {
             agent.current_run = None;
         }
         true
+    }
+
+    /// Drop the finished runs past [`RUN_RETENTION`], oldest first, along with
+    /// the bindings and admissions that existed only for them.
+    ///
+    /// Nothing live is ever dropped. A `Preparing` or `Running` run is an
+    /// operation in flight, its binding is how a report finds its caller, and its
+    /// admission is the proof that the one permitted spawn was prepared — so all
+    /// three are kept regardless of age, and the bound applies to what is left.
+    ///
+    /// Agents are deliberately not bounded here. They are not history: an
+    /// `Exited` agent is the record
+    /// [`upsert_agent_by_runtime_model`](DispatchStore::upsert_agent_by_runtime_model)
+    /// reuses so a relaunch keeps its identity, and dropping it would mint a new
+    /// `AgentId` on every restart. Their count is bounded by the sessions,
+    /// runtimes and models in play rather than by how many dispatches have run.
+    fn retain_bounded(&mut self) {
+        let terminal_run = |run: &DispatchRun| {
+            matches!(
+                run.status,
+                RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+            )
+        };
+        let terminal_count = self.runs.iter().filter(|run| terminal_run(run)).count();
+        let mut over = terminal_count.saturating_sub(RUN_RETENTION);
+        if over == 0 {
+            return;
+        }
+        // `runs` is append-ordered, so dropping from the front drops the runs
+        // least likely to be asked about again.
+        let mut dropped: Vec<OperationId> = Vec::with_capacity(over);
+        self.runs.retain(|run| {
+            if over > 0 && terminal_run(run) {
+                over -= 1;
+                dropped.push(run.run_id);
+                return false;
+            }
+            true
+        });
+        // Only what this pass orphaned is removed. A binding recorded without a
+        // run of its own was never this function's to delete — retention must
+        // not turn into a consistency rule it was not asked to enforce.
+        self.bindings
+            .retain(|binding| !dropped.contains(&binding.run_id));
+        self.admissions
+            .retain(|admission| !dropped.contains(&admission.operation_id));
     }
 
     fn reconcile_incomplete_admissions(&mut self) -> usize {
@@ -516,6 +582,10 @@ impl DispatchStore {
         let path = self.inbox_path(caller);
         let mut messages = Self::read_inbox(&path)?;
         messages.push(message);
+        // Bounding here is what turns an append from O(history) into O(bound):
+        // the whole file is rewritten each time, so without it N deliveries cost
+        // O(N²) and a long-lived caller's inbox never stops getting slower.
+        retain_bounded_inbox(&mut messages);
         Self::write_inbox(&path, &messages)
     }
 
@@ -554,6 +624,9 @@ impl DispatchStore {
             }
         }
         if changed {
+            // Marking read is what makes a message evictable, so the bound is
+            // applied on this write too and not only when one is appended.
+            retain_bounded_inbox(&mut messages);
             Self::write_inbox(&path, &messages)?;
         }
         Ok(changed)
@@ -563,6 +636,10 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let result = mutate(&mut registry);
+        // Bounding on every write makes the bound a property of the document
+        // rather than of a maintenance tick that may never run on a daemon that
+        // is restarted often.
+        registry.retain_bounded();
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(result)
     }
@@ -597,6 +674,46 @@ impl DispatchStore {
         }
         json_file::write_text_atomic(path, &text)
     }
+}
+
+/// Bound one caller's inbox with the shipped limits.
+fn retain_bounded_inbox(messages: &mut Vec<InboxMessage>) {
+    retain_inbox_within(messages, INBOX_READ_RETENTION, INBOX_HARD_LIMIT);
+}
+
+/// Bound one caller's inbox, dropping read messages before unread ones.
+///
+/// An unread message is a report its caller has not seen, so it outranks every
+/// read one however old. "Never drop unread" is not by itself a bound, though: a
+/// caller that never reads would grow its inbox forever. Past `hard_limit` the
+/// oldest unread messages go too, and the drop is recorded so the loss is
+/// inspectable rather than silent.
+///
+/// The limits are parameters so the shipped ones can stay at values a real
+/// caller never reaches while the policy itself is still exercised directly.
+/// Driving `hard_limit` through the store would mean appending thousands of
+/// messages, each of which rewrites the whole file.
+fn retain_inbox_within(messages: &mut Vec<InboxMessage>, read_retention: usize, hard_limit: usize) {
+    let read_count = messages.iter().filter(|message| message.read).count();
+    let mut over_read = read_count.saturating_sub(read_retention);
+    if over_read > 0 {
+        messages.retain(|message| {
+            if over_read > 0 && message.read {
+                over_read -= 1;
+                return false;
+            }
+            true
+        });
+    }
+    let over_hard = messages.len().saturating_sub(hard_limit);
+    if over_hard == 0 {
+        return;
+    }
+    crate::infrastructure::error_log::ErrorLog::record(&format!(
+        "dispatch inbox reached its {hard_limit} message ceiling; \
+         dropping the {over_hard} oldest unread message(s)"
+    ));
+    messages.drain(..over_hard);
 }
 
 #[cfg(test)]
@@ -982,5 +1099,223 @@ mod tests {
         let store = DispatchStore::new(tmp.path());
         fs::write(store.registry_path(), "broken").unwrap();
         assert!(store.agents().is_err());
+    }
+    /// Every registry mutation replaces the whole document, so a history that is
+    /// never dropped makes each dispatch cost more than the last — O(N²) over
+    /// the life of a daemon meant to run for weeks.
+    #[test]
+    fn finished_runs_are_bounded_while_live_ones_are_never_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, _) = ids();
+        store.upsert_agent(agent(session, agent_id)).unwrap();
+
+        // Two operations still in flight, recorded before the flood.
+        let mut live = Vec::new();
+        for status in [RunStatus::Preparing, RunStatus::Running] {
+            let run = DispatchRun {
+                run_id: OperationId::new(),
+                agent_id,
+                prompt: "live".into(),
+                started_at: now(),
+                ended_at: None,
+                status,
+            };
+            live.push(run.run_id);
+            store.upsert_run(run).unwrap();
+        }
+
+        for _ in 0..(RUN_RETENTION + 40) {
+            store
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id,
+                    prompt: "done".into(),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+
+        let registry = store.load_registry().unwrap();
+        let finished = registry
+            .runs
+            .iter()
+            .filter(|run| run.status == RunStatus::Completed)
+            .count();
+        assert!(
+            finished <= RUN_RETENTION,
+            "run history grew past its bound: {finished}"
+        );
+        for run_id in live {
+            assert!(
+                store.run(run_id).unwrap().is_some(),
+                "an in-flight run was dropped as history"
+            );
+        }
+        // The agent itself is not history: it is the record a relaunch reuses.
+        assert!(store.agent(agent_id).unwrap().is_some());
+    }
+
+    /// A binding is how a report finds its caller and an admission is the proof
+    /// that a spawn was prepared. Neither may outlive the run it belongs to, and
+    /// neither may be dropped while that run is still live.
+    #[test]
+    fn bindings_and_admissions_follow_the_runs_they_belong_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let reserved = OperationId::new();
+        store
+            .reserve_admission(
+                agent(session, agent_id),
+                DispatchRun {
+                    run_id: reserved,
+                    agent_id,
+                    prompt: "reserved".into(),
+                    started_at: now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: reserved,
+                    caller: caller.clone(),
+                    worker,
+                },
+                AgentAdmissionReservation {
+                    operation_id: reserved,
+                    semantic_key: "key".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+
+        for _ in 0..(RUN_RETENTION + 40) {
+            store
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id,
+                    prompt: "done".into(),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+
+        let registry = store.load_registry().unwrap();
+        assert!(
+            registry.bindings.iter().any(|b| b.run_id == reserved),
+            "the binding of a live run was dropped"
+        );
+        assert!(
+            registry
+                .admissions
+                .iter()
+                .any(|a| a.operation_id == reserved),
+            "the admission of a live run was dropped"
+        );
+        // Nothing is left pointing at a run this retention removed.
+        let kept: Vec<_> = registry.runs.iter().map(|run| run.run_id).collect();
+        assert!(registry.bindings.iter().all(|b| kept.contains(&b.run_id)));
+        assert!(
+            registry
+                .admissions
+                .iter()
+                .all(|a| kept.contains(&a.operation_id))
+        );
+    }
+
+    /// An append rewrites the whole inbox file, so an unbounded inbox costs
+    /// O(N²) over N deliveries. An unread report is not history, though: it is a
+    /// result its caller has not seen.
+    #[test]
+    fn a_read_inbox_is_bounded_and_unread_reports_outrank_every_read_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+
+        let awaited = OperationId::new();
+        store
+            .append_inbox(&caller, message(awaited, worker.clone()))
+            .unwrap();
+
+        for _ in 0..(INBOX_READ_RETENTION + 40) {
+            let run_id = OperationId::new();
+            store
+                .append_inbox(&caller, message(run_id, worker.clone()))
+                .unwrap();
+            store.mark_inbox_read(&caller, run_id).unwrap();
+        }
+
+        let inbox = store.inbox(&caller).unwrap();
+        let read = inbox.iter().filter(|item| item.read).count();
+        assert!(
+            read <= INBOX_READ_RETENTION,
+            "read history grew past its bound: {read}"
+        );
+        assert!(
+            inbox
+                .iter()
+                .any(|item| item.run_id == awaited && !item.read),
+            "an unread report was dropped to make room for read ones"
+        );
+        assert!(inbox.len() <= INBOX_HARD_LIMIT);
+    }
+
+    /// "Never drop unread" is not a bound on its own: a caller that never reads
+    /// would grow its inbox forever. The ceiling is the backstop, and what it
+    /// drops is recorded rather than lost silently.
+    #[test]
+    fn the_inbox_ceiling_drops_the_oldest_unread_only_after_every_read_one() {
+        let (session, agent_id, _) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let mut messages: Vec<InboxMessage> = (0..10)
+            .map(|index| {
+                let mut item = message(OperationId::new(), worker.clone());
+                item.read = index % 2 == 0;
+                item.summary = format!("m{index}");
+                item
+            })
+            .collect();
+        let oldest_unread = messages
+            .iter()
+            .find(|item| !item.read)
+            .map(|item| item.summary.clone())
+            .unwrap();
+
+        // Exactly at the ceiling nothing is dropped: the bound is "no more
+        // than", not "fewer than".
+        let mut at_ceiling = messages.clone();
+        let ceiling = at_ceiling.len();
+        retain_inbox_within(&mut at_ceiling, 100, ceiling);
+        assert_eq!(at_ceiling.len(), 10);
+
+        // Read messages go first, and only what is still over the ceiling comes
+        // out of the unread ones.
+        retain_inbox_within(&mut messages, 2, 4);
+        assert_eq!(messages.len(), 4);
+        assert!(
+            messages.iter().filter(|item| item.read).count() <= 2,
+            "read messages were kept past their retention"
+        );
+        assert!(
+            !messages.iter().any(|item| item.summary == oldest_unread),
+            "the ceiling dropped a newer unread message before the oldest"
+        );
+        // What survives is the newest of what was there.
+        assert_eq!(messages.last().unwrap().summary, "m9");
     }
 }

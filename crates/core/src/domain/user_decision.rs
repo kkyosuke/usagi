@@ -71,6 +71,14 @@ pub enum UserDecisionError {
     Terminal,
     Expired,
     IdempotencyConflict,
+    /// This daemon already holds as many unanswered decisions as it will.
+    ///
+    /// Pending decisions are the one class this store may never evict — each is
+    /// a caller blocked on an answer — so a saturated store refuses the *new*
+    /// request instead of dropping an old one. The refusal has no effect at all,
+    /// which makes it safe for the caller to retry once a person has worked
+    /// through the backlog.
+    PendingLimitReached,
 }
 
 impl UserDecision {

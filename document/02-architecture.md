@@ -448,10 +448,32 @@ session worktree adapter、issue number authority の repository resolver）は
 | 継承 | `GIT_SSH` / `GIT_SSH_COMMAND` / `GIT_SSH_VARIANT` | remote への到達手段だけを選び、local repository を差し替えられない。private repository の clone が必要とする |
 | 明示注入 | `LC_ALL=C` | 呼び出し側が Git の stderr で分岐する（`worktree remove` の "is not a working tree" は失敗でなく no-op）ため、message の locale を固定する |
 | 明示注入 | `GIT_TERMINAL_PROMPT=0` | daemon は credential prompt に答える terminal を持たない。prompt で session 操作を hang させず失敗させる。設定済みの credential helper は従来どおり動く |
+| 明示注入 | `GIT_OPTIONAL_LOCKS=0` | 観測目的の呼び出しが index lock を取り、利用者自身の git と競合することを避ける |
 
 `GIT_` 接頭辞の外は触らない。`PATH` / `HOME` / `XDG_CONFIG_HOME` は継承したままなので、利用者自身の
 git 設定は従来どおり効く。この confine が閉じるのは invocation ごとの override であり、daemon 自身の
 設定 discovery ではない。
+
+### repository が指定する helper の無効化
+
+環境変数を落としても command の scope は決まるが、**その repository 自身が「git に実行させる program」を
+指定できる**ことは閉じない。checkout は repository の `post-checkout` hook を、列挙は `core.fsmonitor` を、
+diff は pager を起動する。いずれも利用者が「開いた」だけの repository のために、usagi process の権限で走る。
+そこで `confined_git_command` は次を `GIT_CONFIG_COUNT` 系（git の最高優先度）で注入する。
+
+| key | 値 | 閉じるもの |
+|---|---|---|
+| `core.hooksPath` | `/dev/null` | hook を持たない directory を指すので、`git worktree add` の `post-checkout` を含め全 hook が不在になる |
+| `core.fsmonitor` | `false` | issue 採番の `git ls-files` を含む全列挙が repository 指定の monitor command を起動しない |
+| `submodule.recurse` | `false` | submodule 側の設定へ同じ面が増えることを避ける |
+| `core.pager` | `cat` | 出力は常にこの process が読む。設定された pager は repository が実行させる program でしかない |
+
+system / global config は**意図的に残す**。private repository の clone は利用者の credential helper と SSH 設定を
+必要とし、それは「repository が指定する任意コマンド」とは別物である。root Agent に渡す read-only git はこれに加えて
+system / global config も落とす（remote に到達する理由がないため）。
+
+`filter.<driver>.smudge` は driver 名を tracked `.gitattributes` が任意に選べるため、固定 key の上書きでは
+無効化できない。filter process を起動しない materialization は未実装で、issue #675 に残る。
 
 session の Git effect（create、mirror した tree の nested worktree、remove）は全て daemon の
 `GitRunner` 実装 1 か所を通るため、confine もそこで 1 回だけ適用する。
@@ -568,11 +590,16 @@ exit 1 とし、stdout を空に保って stderr に safe user message（該当�
 error code / `error_id`）を出す。正常な CLI、daemon lifecycle、MCP stdio の挙動は解析成功後の
 各 route が担う。
 
+route まで届かず process 境界まで上がってきた failure は、**`error: <message>` の 1 行**として
+stderr に出す。`main` は `ExitCode` を返し、`io::Result<ExitCode>` は返さない。`Result` を返すと
+Rust が `Debug` で印字するため、丁寧に書いた message が
+`Error: Custom { kind: Other, error: "…" }` と、構造体と escape 済みの引用符に包まれて出てしまう。
+変換は合成ルートの `runtime::cli::process_outcome` 1 か所が持ち、全 failure route が同じ見た目になる。
+
 ルートを bin パッケージとして維持する理由:
 
-- リリース起点はまだ v1（auto-release は `v1/Cargo.toml` の version を監視し、release.yml は
-  v1 をビルドする。[6. 開発規約#リリース](06-conventions.md#リリース) が正本）。version をルートに
-  リテラルで置き続ければ、v2 初リリース時に監視・ビルド対象をルートへ切り替えるだけでリリース機構が動く。
+- リリース起点がルート `Cargo.toml` の version である（auto-release がその変更を監視し、release.yml が
+  ルートの v2 パッケージをビルドする。[6. 開発規約#リリース](06-conventions.md#リリース) が正本）。
 - インストール・利用手順（単一バイナリ配布）が変わらない。
 
 内部クレート（`crates/*`）は `publish = false` とし、`version` を持たない
@@ -584,8 +611,8 @@ error code / `error_id`）を出す。正常な CLI、daemon lifecycle、MCP std
 |---|---|
 | coverage | `cargo llvm-cov --workspace` で crates/ 配下も計測される。計測から外す item はソースコードの `#[coverage(off)]` で明示する |
 | test / clippy | ルートで実行するとルートパッケージしか対象にならないため、`--workspace` を付ける（test.yml / lefthook / recommend-tests の fail-safe も同様） |
-| auto-release | リリース起点はまだ v1（`v1/Cargo.toml` の version を監視）。ルートにはリテラル `version` を維持しておき、v2 初リリース時に監視対象をルートへ切り替える |
-| release-build-check / release.yml | まだ v1 を対象に release ビルドする（`--manifest-path v1/Cargo.toml`）。v2 初リリース時に root bin のビルドへ切り替える |
+| auto-release | ルート `Cargo.toml` の `version` 変更を監視する。workspace 継承にせずリテラルで置くのは、この監視が `version = "..."` 行を grep するためである |
+| release-build-check / release.yml | ルートの v2 パッケージを `--features production` で release ビルドする |
 | `v1/` | `[workspace] exclude` で計測・ビルド対象外。`v1/**` を変更する push / PR は v1-test.yml が v1 のマニフェストで検証する |
 
 ## 実装の置き場所ガイド

@@ -8,7 +8,7 @@ dependson: []
 related: [325, 328, 585]
 parent: 671
 created_at: 2026-08-13T22:45:35.302573+00:00
-updated_at: 2026-08-13T22:45:35.302573+00:00
+updated_at: 2026-08-23T23:22:34.965949+00:00
 ---
 
 ## Finding（P2 resource / performance）
@@ -47,3 +47,14 @@ updated_at: 2026-08-13T22:45:35.302573+00:00
 - `crates/core/src/domain/supervisor.rs::SupervisorRun::applied_events`
 - `crates/daemon/src/usecase/supervisor_runtime.rs::RuntimeState`
 - `src/runtime/daemon.rs::dispatch_supervisor_tool`
+
+## 2026-08-24 時点の進捗（v3.0.0 リリースレビュー）
+
+- [x] terminal run の retention（`RUN_RETENTION` = 128）。`prune_finished_runs` が
+      snapshot / journal / checkpoint をまとめて削除し、live run（`Planning` /
+      `Running` / `WaitingForDecision` / `Verifying`）は年齢によらず残す。
+      新しい run の `initialize` で best-effort に走らせるため、maintenance tick に
+      依存しない。これで `supervisor_list` の cost が「起動した run の総数」ではなく
+      「保持している run 数」で頭打ちになる。
+- [ ] event journal の runtime metadata 側の bound — **未対応**
+- [ ] query 応答の byte 上限 — **未対応**（`events` は既に cursor + limit を持つ）

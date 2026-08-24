@@ -27,8 +27,16 @@ use super::runtime_model::{
 use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
 use super::{resources, tools};
 
-/// サーバが対応する MCP プロトコルバージョン。
-const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
+/// サーバが話せる MCP プロトコルバージョン。先頭が優先版である。
+///
+/// このサーバが実装するのは `initialize` / `ping` / `tools/*` / `resources/*` と
+/// `notifications/initialized` だけで、この 3 版のいずれでも同じ形をしている。
+/// 新しい版が足した機能（elicitation、structured output など）は使わないため、
+/// 古い版を名乗るクライアントにも同じ tool 群をそのまま提供できる。
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// クライアントが名乗った版を話せないときに、代わりに提案する版。
+const PREFERRED_PROTOCOL_VERSION: &str = SUPPORTED_PROTOCOL_VERSIONS[0];
 
 /// Maximum JSON payload accepted from one stdio line, excluding its trailing LF.
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -422,11 +430,16 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
     else {
         return Err("missing protocolVersion");
     };
-    if protocol_version != SUPPORTED_PROTOCOL_VERSION {
-        return Err("unsupported protocolVersion; server supports 2025-06-18");
-    }
+    // MCP は「話せない版を名乗られたら、話せる版を返す」ことを求めており、
+    // 拒否は求めていない。ここで落とすと、まだ 2024-11-05 を送るクライアントが
+    // 接続できず、tool を 1 つも使えないまま終わる。
+    let negotiated = SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .find(|supported| **supported == protocol_version)
+        .copied()
+        .unwrap_or(PREFERRED_PROTOCOL_VERSION);
     Ok(json!({
-        "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+        "protocolVersion": negotiated,
         "capabilities": { "tools": {}, "resources": {} },
         "serverInfo": { "name": "usagi", "version": version },
     }))
@@ -767,11 +780,12 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_STDIO_MESSAGE_BYTES, SUPPORTED_PROTOCOL_VERSION, ServerCapabilities, ServerState,
-        agent_selector_schema, apply_caller_policy, daemon_error_data, execute_tool, handle_line,
-        handle_line_with_client, normalize_caller_credential, read_bounded_line,
-        resolve_workspace_root, runtime_model_snapshot, serve, serve_with_client,
-        serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
+        MAX_STDIO_MESSAGE_BYTES, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
+        ServerCapabilities, ServerState, agent_selector_schema, apply_caller_policy,
+        daemon_error_data, execute_tool, handle_line, handle_line_with_client,
+        normalize_caller_credential, read_bounded_line, resolve_workspace_root,
+        runtime_model_snapshot, serve, serve_with_client, serve_with_client_and_features,
+        serve_with_client_and_snapshot, session_tool_response,
     };
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
@@ -916,7 +930,7 @@ mod tests {
 
     fn initialized_input(request: &str) -> String {
         format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{SUPPORTED_PROTOCOL_VERSION}\"}}}}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{request}"
+            "{{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{PREFERRED_PROTOCOL_VERSION}\"}}}}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{request}"
         )
     }
 
@@ -968,14 +982,43 @@ mod tests {
     }
 
     #[test]
-    fn initialize_rejects_missing_and_unsupported_protocol_versions() {
+    fn initialize_rejects_a_missing_protocol_version() {
         let missing = initialize(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#);
         assert_eq!(missing["error"]["code"], -32602);
-        let unsupported = initialize(
-            r#"{"jsonrpc":"2.0","id":"v","method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        let not_a_string = initialize(
+            r#"{"jsonrpc":"2.0","id":"v","method":"initialize","params":{"protocolVersion":7}}"#,
         );
-        assert_eq!(unsupported["id"], "v");
-        assert_eq!(unsupported["error"]["code"], -32602);
+        assert_eq!(not_a_string["id"], "v");
+        assert_eq!(not_a_string["error"]["code"], -32602);
+    }
+
+    /// MCP requires the server to answer with a version it speaks rather than
+    /// to refuse. A client pinned to an older revision must still reach the
+    /// tools, so every version this server speaks is echoed back verbatim.
+    #[test]
+    fn initialize_echoes_every_protocol_version_this_server_speaks() {
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            let accepted = initialize(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{version}"}}}}"#
+            ));
+            assert!(accepted.get("error").is_none(), "{version}: {accepted}");
+            assert_eq!(accepted["result"]["protocolVersion"], *version);
+            assert!(accepted["result"]["capabilities"]["tools"].is_object());
+        }
+    }
+
+    /// An unknown version is answered with the preferred one — the counter-offer
+    /// the protocol asks for — and the client decides whether to continue.
+    #[test]
+    fn initialize_counter_offers_its_preferred_version_for_an_unknown_one() {
+        let unknown = initialize(
+            r#"{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+        );
+        assert!(unknown.get("error").is_none(), "{unknown}");
+        assert_eq!(
+            unknown["result"]["protocolVersion"],
+            PREFERRED_PROTOCOL_VERSION
+        );
     }
 
     #[test]
@@ -1466,7 +1509,7 @@ mod tests {
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{}}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"session_list\"}}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",

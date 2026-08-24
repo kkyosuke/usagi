@@ -191,6 +191,18 @@ fn bootstrap_broker_sockets(data: &Path) -> Vec<PathBuf> {
     sockets
 }
 
+/// The broker sockets under `data`, once at least one has been bound.
+fn wait_for_broker_socket(data: &Path) -> Vec<PathBuf> {
+    for _ in 0..200 {
+        let sockets = bootstrap_broker_sockets(data);
+        if !sockets.is_empty() {
+            return sockets;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the daemon never published a bootstrap broker endpoint");
+}
+
 fn retire_bootstrap_brokers(repo: &Path, data: &Path, fixture: &Path) {
     let _ = fs::remove_dir_all(repo);
     let sockets = bootstrap_broker_sockets(data);
@@ -461,15 +473,22 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
         "{}",
         String::from_utf8_lossy(&started.stderr)
     );
-    let stopped = run(&["daemon", "stop"]);
+
+    // `daemon start` returns once the daemon has registered itself, which is
+    // before the broker it spawns has finished binding.
+    let sockets = wait_for_broker_socket(&data);
+    assert_eq!(sockets.len(), 1, "one broker for this workspace and binary");
+
+    // The daemon goes away without anyone running `usagi daemon stop`: a
+    // supervisor stop, a signal, a crash. This is the case the broker exists
+    // for, so it must still be there afterwards — a sandboxed root client
+    // cannot spawn a replacement for it.
+    signal_daemon_away(&data);
     assert!(
-        stopped.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stopped.stderr)
+        sockets[0].exists(),
+        "the broker did not outlive the daemon that started it"
     );
 
-    let sockets = bootstrap_broker_sockets(&data);
-    assert_eq!(sockets.len(), 1, "one broker for this workspace and binary");
     // One client that connects without sending a request must time out instead
     // of monopolising the broker's single accept loop forever.
     let idle = std::os::unix::net::UnixStream::connect(&sockets[0]).unwrap();
@@ -479,12 +498,11 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
     broker.read_exact(&mut reply).unwrap();
     assert_eq!(reply, [b'O']);
     drop(idle);
-    let stopped = run(&["daemon", "stop"]);
-    assert!(
-        stopped.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stopped.stderr)
-    );
+
+    // Leave the workspace daemonless again so the root-scope client below has to
+    // reach the broker rather than an endpoint that is already up.
+    signal_daemon_away(&data);
+    assert!(sockets[0].exists());
 
     let created = run_usagi_in_root(&repo, &data, &["session", "create", "brokered"]);
     if !created.status.success() && sandbox_backend_unavailable(&created) {
@@ -511,5 +529,66 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
+    // An explicit stop is the other end of the broker's life: nothing usagi owns
+    // for this workspace is left running, so the operator's `stop` really stops.
+    for socket in bootstrap_broker_sockets(&data) {
+        for _ in 0..40 {
+            if !socket.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !socket.exists(),
+            "`daemon stop` left a broker running: {}",
+            socket.display()
+        );
+    }
     retire_bootstrap_brokers(&repo, &data, &fixture);
+}
+
+/// End the running daemon the way anything other than `usagi daemon stop` does:
+/// by signalling the process named in its record and waiting for it to retire.
+///
+/// `daemon stop` deliberately also retires the bootstrap broker, so it cannot be
+/// used to reach the state this exercises — a workspace whose daemon is gone and
+/// whose broker is still there to start a replacement.
+fn signal_daemon_away(data: &Path) {
+    let record = data.join("daemon/daemon.json");
+    // A daemon the broker started registers itself a moment after the broker
+    // reports success, so the record is waited for rather than assumed.
+    let mut text = String::new();
+    for _ in 0..200 {
+        if let Ok(contents) = fs::read_to_string(&record)
+            && contents.contains("\"pid\"")
+        {
+            text = contents;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!text.is_empty(), "no daemon recorded itself to signal");
+    let pid = text
+        .split("\"pid\"")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split(|c: char| !c.is_ascii_digit())
+                .find(|s| !s.is_empty())
+        })
+        .and_then(|digits| digits.parse::<i32>().ok())
+        .expect("the daemon record names a pid");
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    for _ in 0..100 {
+        if !record.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the signalled daemon never cleared its record");
 }
