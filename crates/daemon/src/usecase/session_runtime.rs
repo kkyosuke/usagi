@@ -1278,8 +1278,9 @@ impl SessionRuntime {
         let name = session_name(payload)?;
         // A compensation is not a client request: it forces the removal and
         // branch deletion, and neither is negotiable through a payload. A
-        // requested removal normally uses Git's safe `-d` mode. Only the
-        // separately confirmed failed-delete recovery may request `-D`.
+        // requested removal uses Git's safe `-d` mode unless the client pairs
+        // `force_delete_branch` with `force`, which is what the TUI's forced
+        // removals send.
         let compensating = kind == RemoveKind::Compensating;
         let force = compensating || force(payload)?;
         let requested_force_delete_branch = force_delete_branch(payload)?;
