@@ -1,13 +1,13 @@
 ---
 number: 720
 title: fix(daemon): 完了報告の再試行で dispatch status を収束させる
-status: in-progress
+status: done
 priority: high
 labels: [v2, daemon, dispatch, correctness, retry]
 dependson: []
 related: [322, 323, 402]
 created_at: 2026-08-24T11:30:54+00:00
-updated_at: 2026-08-24T12:01:48.305497+00:00
+updated_at: 2026-08-24T12:09:23.774394+00:00
 ---
 
 ## 問題
@@ -37,4 +37,4 @@ inbox append 成功後に status 保存が失敗すると、再試行は既存 i
 - [x] inbox に `Failed` が確定済みなら、異なる再試行 request でも `Failed` / `Failed` へ収束する。
 - [x] inbox message は二重配送されず、最初の artifact が維持される。
 - [x] 旧 run の duplicate report は、同じ Agent identity を再利用する後続 run の状態を変更しない。
-- [ ] risk-based gate と PR CI の full test / coverage が green になる。
+- [x] risk-based gate と PR CI の full test / coverage が green になる。
