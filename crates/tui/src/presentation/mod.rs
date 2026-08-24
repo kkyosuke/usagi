@@ -8534,8 +8534,21 @@ mod tests {
             ]
         );
 
-        let state =
+        let mut state =
             crate::usecase::application::controller::AppState::home(WorkspaceId::new(), ids);
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            crate::usecase::application::controller::AppEvent::Backend(
+                crate::usecase::application::controller::BackendEvent::PullRequestsLoaded {
+                    target: Target::Session(director_child),
+                    revision: 1,
+                    prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                        1545,
+                        "https://example.test/pull/1545",
+                    )],
+                },
+            ),
+        );
         let projected = super::project_controller_sessions(&ui, &state);
         assert_eq!(
             projected
@@ -8552,6 +8565,7 @@ mod tests {
             ]
         );
         assert_eq!(projected[1].parent_session_id, Some(director_child));
+        assert!(projected[0].pr_summary.is_some());
     }
 
     #[test]
