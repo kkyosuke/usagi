@@ -77,12 +77,9 @@ struct MigrationRecord {
     retired: bool,
 }
 
-/// Only the field a migration needs from a legacy lifecycle document. The rest
-/// of the document is carried across untouched by the rename.
-#[derive(Debug, Deserialize)]
-struct LegacyBinding {
-    repository_root: PathBuf,
-}
+/// The field a migration keys on and rewrites. The rest of the document is
+/// carried across as it stands.
+const LEGACY_ROOT_FIELD: &str = "repository_root";
 
 /// Resolve — creating it when absent — the state subtree of `workspace_root`.
 ///
@@ -197,17 +194,17 @@ pub fn owner(daemon_dir: &Path, candidate: &Path) -> Result<Option<WorkspaceStat
 /// Move a legacy `<daemon-dir>/sessions.json` into the subtree of the workspace
 /// it names, once.
 ///
-/// The move is the whole migration: the document's bytes are unchanged, and the
-/// locator, record, and locks it sat beside belong to the daemon rather than to
-/// the workspace, so they stay where they are. Returns the subtree the document
+/// The document is carried across whole; the only field it changes is the
+/// recorded `repository_root`, which is canonicalized (see below). The locator,
+/// record, and locks it sat beside belong to the daemon rather than to the
+/// workspace, so they stay where they are. Returns the subtree the document
 /// landed in, or `None` when there is no legacy document left to move.
 ///
-/// Two processes that reach an unmigrated data directory at the same moment can
-/// both read the legacy document; the rename decides which one moves it, and the
-/// loser fails rather than proceeding on state it did not move. That is a
-/// first-start race between two clients of the same stale data directory, and it
-/// costs one retry — never a partially moved document, because the rename is
-/// atomic.
+/// The document is written to its new home *before* the legacy copy is removed,
+/// so an interrupted migration retries from the legacy position instead of
+/// losing state. Two processes that reach an unmigrated data directory at the
+/// same moment therefore converge: the second finds an authoritative document in
+/// the subtree and retires the legacy bytes instead of overwriting them.
 ///
 /// # Errors
 ///
@@ -217,29 +214,57 @@ pub fn owner(daemon_dir: &Path, candidate: &Path) -> Result<Option<WorkspaceStat
 /// workspace this daemon would otherwise adopt.
 pub fn migrate_legacy(daemon_dir: &Path) -> Result<Option<WorkspaceState>> {
     let legacy = daemon_dir.join(LEGACY_STATE_FILE);
-    let Some(binding) = json_file::read::<LegacyBinding>(&legacy)
+    let Some(mut document) = json_file::read::<serde_json::Value>(&legacy)
         .with_context(|| format!("could not read {}", legacy.display()))?
     else {
         return Ok(None);
     };
-    let state = resolve(daemon_dir, &binding.repository_root)?;
+    let recorded = document
+        .get(LEGACY_ROOT_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .with_context(|| format!("{} records no workspace", legacy.display()))?;
+    // The daemon keys everything — the subtree, the fence, the worktree paths —
+    // on the *canonical* workspace root. A legacy document may record another
+    // spelling of the same workspace: a symlinked ancestor, or the `/tmp` →
+    // `/private/tmp` firmlink on macOS. Both the destination *and the recorded
+    // field* are canonicalized, because either one left in the old spelling
+    // splits the workspace in two: the daemon fences and opens one spelling while
+    // the migrated document describes the other, and every session the document
+    // held is orphaned beside it.
+    //
+    // A root that no longer resolves keeps its recorded spelling: the workspace
+    // is gone, so there is no canonical form to prefer, and the bytes are still
+    // worth moving out of the legacy position.
+    let root = paths::canonical_workspace_root(&recorded).unwrap_or(recorded);
+    if let Some(canonical) = root.to_str() {
+        document[LEGACY_ROOT_FIELD] = serde_json::Value::String(canonical.to_owned());
+    }
+    let state = resolve(daemon_dir, &root)?;
     let target = state.dir.join(LEGACY_STATE_FILE);
     // A subtree that already holds a lifecycle document is authoritative: this
     // process must not overwrite it with an older whole-document snapshot. The
     // legacy bytes are retired beside the daemon instead, the way the runtime
     // migration retires the stores it replaced.
     let retired = target.exists();
-    let destination = if retired {
-        daemon_dir.join(LEGACY_RETIRED_FILE)
+    if retired {
+        // The subtree already holds an authoritative document; the legacy bytes
+        // are retired rather than written over it.
+        let destination = daemon_dir.join(LEGACY_RETIRED_FILE);
+        let failure = format!(
+            "could not move {} to {}",
+            legacy.display(),
+            destination.display()
+        );
+        std::fs::rename(&legacy, &destination).context(failure)?;
     } else {
-        target
-    };
-    let failure = format!(
-        "could not move {} to {}",
-        legacy.display(),
-        destination.display()
-    );
-    std::fs::rename(&legacy, &destination).context(failure)?;
+        // Written before the legacy copy is removed, so an interrupted migration
+        // is retried from the legacy position rather than losing the document.
+        let failure = format!("could not write {}", target.display());
+        json_file::write_atomic(state.dir(), &target, &document).context(failure)?;
+        let failure = format!("could not remove {}", legacy.display());
+        std::fs::remove_file(&legacy).context(failure)?;
+    }
     let record = MigrationRecord {
         schema: "usagi-lifecycle-migration-v1".into(),
         root: state.root.clone(),
@@ -468,6 +493,61 @@ mod tests {
         assert_eq!(migrate_legacy(daemon.path()).unwrap(), None);
     }
 
+    /// A legacy document may record a different spelling of the same workspace:
+    /// a symlinked ancestor, or the `/tmp` → `/private/tmp` firmlink on macOS.
+    /// The daemon keys the subtree by the canonical root, so the migration must
+    /// too — otherwise the daemon opens an empty subtree beside the migrated one
+    /// and every session the document held is silently orphaned.
+    #[test]
+    fn a_legacy_document_moves_to_the_canonical_spelling_of_its_workspace() {
+        let daemon = daemon_dir();
+        let workspace = tempfile::tempdir_in("/tmp").unwrap();
+        let real = workspace.path().join("workspace");
+        std::fs::create_dir(&real).unwrap();
+        let link = workspace.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canonical = paths::canonical_workspace_root(&real).unwrap();
+
+        // The document records the workspace through the symlink.
+        let legacy = daemon.path().join(LEGACY_STATE_FILE);
+        std::fs::write(
+            &legacy,
+            format!(
+                r#"{{"repository_root":{:?},"root_worktree_id":"8adf6382-cb49-4446-9323-560cad878712","state":{{"kept":true}}}}"#,
+                link.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+
+        let state = migrate_legacy(daemon.path()).unwrap().unwrap();
+        assert_eq!(state.root(), canonical);
+        assert_eq!(
+            state.dir(),
+            paths::workspace_state_dir(daemon.path(), &canonical, 0)
+        );
+        // The recorded root is canonical too. Leaving the old spelling in the
+        // document would split the workspace: the daemon keys its fence, subtree,
+        // and worktree paths on what the document says, so it would open an empty
+        // subtree beside this one and orphan everything the document holds.
+        let migrated: serde_json::Value = json_file::read(&state.dir().join(LEGACY_STATE_FILE))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            migrated["repository_root"].as_str(),
+            canonical.to_str(),
+            "the migrated document must describe the canonical workspace"
+        );
+        // And it is the subtree a later resolution of the same workspace finds,
+        // which is the whole point: the daemon must open the migrated document.
+        assert_eq!(resolve(daemon.path(), &canonical).unwrap(), state);
+        // Everything else in the document survives the rewrite.
+        assert_eq!(migrated["state"]["kept"], serde_json::json!(true));
+        assert_eq!(
+            migrated["root_worktree_id"].as_str(),
+            Some("8adf6382-cb49-4446-9323-560cad878712")
+        );
+    }
+
     #[test]
     fn a_legacy_document_is_retired_when_the_subtree_already_holds_one() {
         let daemon = daemon_dir();
@@ -501,6 +581,20 @@ mod tests {
         std::fs::write(daemon.path().join(LEGACY_STATE_FILE), "not json").unwrap();
         let error = migrate_legacy(daemon.path()).unwrap_err();
         assert!(format!("{error:#}").contains("sessions.json"), "{error:#}");
+
+        // A document that parses but names no workspace is the same kind of
+        // failure: it is the only thing that says which workspace this state
+        // belongs to, so guessing would attach it to the wrong one.
+        std::fs::write(
+            daemon.path().join(LEGACY_STATE_FILE),
+            r#"{"state":{"sessions":[]}}"#,
+        )
+        .unwrap();
+        let error = migrate_legacy(daemon.path()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("records no workspace"),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -1815,7 +1815,11 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                     .flatten()
                     .ok_or_else(|| {
                         usagi_core::infrastructure::ipc::workspace_refusal(
-                            "this daemon has not opened the workspace this client runs in",
+                            &format!(
+                                "this daemon has not opened {}; open it first (usagi {})",
+                                declared.display(),
+                                declared.display()
+                            ),
                             &paths::wire_workspace_root(&self.initial),
                         )
                     })?;
