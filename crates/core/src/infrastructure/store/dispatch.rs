@@ -83,6 +83,8 @@ struct WorkspacePrompt {
     session_id: Option<SessionId>,
     prompt: String,
     queued_at: DateTime<Utc>,
+    #[serde(default)]
+    caller: Option<CallerRef>,
 }
 
 impl WorkspacePrompt {
@@ -91,6 +93,7 @@ impl WorkspacePrompt {
             session_id: self.session_id,
             prompt: self.prompt,
             queued_at: self.queued_at,
+            caller: self.caller,
         }
     }
 }
@@ -258,6 +261,9 @@ pub struct QueuedPrompt {
     pub session_id: Option<SessionId>,
     pub prompt: String,
     pub queued_at: DateTime<Utc>,
+    /// Authenticated parent retained for a later ordinary Agent launch.
+    #[serde(default)]
+    pub caller: Option<CallerRef>,
 }
 
 /// File-backed durable dispatch state rooted at the daemon state directory.
@@ -295,6 +301,36 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
     ) -> Result<QueuedPrompt> {
+        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, None)
+    }
+
+    /// Queues a next-launch prompt together with its authenticated parent.
+    ///
+    /// This is the delayed-launch equivalent of an immediate dispatch binding:
+    /// the eventual worker must report to the delegator, not to itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn queue_delegated_prompt(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: Option<SessionId>,
+        prompt: String,
+        queued_at: DateTime<Utc>,
+        caller: CallerRef,
+    ) -> Result<QueuedPrompt> {
+        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, Some(caller))
+    }
+
+    fn queue_prompt_for(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: Option<SessionId>,
+        prompt: String,
+        queued_at: DateTime<Utc>,
+        caller: Option<CallerRef>,
+    ) -> Result<QueuedPrompt> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut workspace_registry = self.load_workspace_registry()?;
         let mut legacy_registry = session_id
@@ -306,6 +342,7 @@ impl DispatchStore {
             session_id,
             prompt,
             queued_at,
+            caller,
         };
         let existing = workspace_registry
             .prompts
@@ -572,6 +609,19 @@ impl DispatchStore {
             .collect())
     }
 
+    /// Resolves the workspace ownership sidecar for one daemon-owned agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ownership sidecar cannot be read.
+    pub fn workspace_for_agent(&self, agent_id: AgentId) -> Result<Option<WorkspaceId>> {
+        Ok(self
+            .load_workspace_registry()?
+            .agent_workspaces
+            .get(&agent_id)
+            .copied())
+    }
+
     /// # Errors
     ///
     /// Returns an error when the registry cannot be read.
@@ -781,6 +831,16 @@ impl DispatchStore {
             .bindings
             .into_iter()
             .find(|binding| binding.run_id == run_id))
+    }
+
+    /// Returns the retained caller-to-worker lineage used for organization
+    /// policy and read-only projections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dispatch registry cannot be read.
+    pub fn bindings(&self) -> Result<Vec<DispatchBinding>> {
+        Ok(self.load_registry()?.bindings)
     }
 
     /// Appends a report to the caller's durable inbox.
@@ -1162,6 +1222,44 @@ mod tests {
     }
 
     #[test]
+    fn delegated_prompt_retains_authenticated_parent_until_consumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        store
+            .queue_delegated_prompt(
+                workspace,
+                Some(session),
+                "delegated work".into(),
+                now(),
+                caller.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .queued_prompt(workspace, Some(session))
+                .unwrap()
+                .unwrap()
+                .caller,
+            Some(caller.clone())
+        );
+        assert_eq!(
+            store
+                .consume_prompt(workspace, Some(session))
+                .unwrap()
+                .unwrap()
+                .caller,
+            Some(caller)
+        );
+    }
+
+    #[test]
     fn legacy_session_prompt_is_delivered_but_ambiguous_root_prompt_is_quarantined() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -1172,11 +1270,13 @@ mod tests {
             session_id: Some(session),
             prompt: "session work".into(),
             queued_at: now(),
+            caller: None,
         });
         legacy.prompts.push(QueuedPrompt {
             session_id: None,
             prompt: "unknown root work".into(),
             queued_at: now(),
+            caller: None,
         });
         json_file::write_atomic(tmp.path(), &store.registry_path(), &legacy).unwrap();
 
@@ -1206,6 +1306,7 @@ mod tests {
                     session_id: Some(replacement_session),
                     prompt: "superseded legacy work".into(),
                     queued_at: now(),
+                    caller: None,
                 });
             })
             .unwrap();
@@ -1228,6 +1329,7 @@ mod tests {
                     session_id: Some(replacement_session),
                     prompt: "late legacy work".into(),
                     queued_at: now(),
+                    caller: None,
                 });
             })
             .unwrap();

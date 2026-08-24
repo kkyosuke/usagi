@@ -82,6 +82,9 @@ struct StartReservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialTask {
     pub task_id: String,
+    /// Durable manager task. Omitted children belong to the root Director task.
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,
     pub instruction: String,
@@ -137,6 +140,7 @@ impl SupervisorRuntime {
     /// # Errors
     /// Returns an error for conflicting idempotency, invalid DAGs, or durable IO failure.
     ///
+    #[allow(clippy::too_many_lines)]
     pub fn start(
         &self,
         caller: &str,
@@ -152,6 +156,10 @@ impl SupervisorRuntime {
         push_semantic_component(&mut semantic_key, &initial_tasks.len().to_string());
         for task in &initial_tasks {
             push_semantic_component(&mut semantic_key, &task.task_id);
+            push_semantic_component(
+                &mut semantic_key,
+                task.parent_task_id.as_deref().unwrap_or("root"),
+            );
             push_semantic_component(&mut semantic_key, &task.dependencies.len().to_string());
             for dependency in &task.dependencies {
                 push_semantic_component(&mut semantic_key, dependency);
@@ -198,7 +206,14 @@ impl SupervisorRuntime {
             now,
             SupervisorEventSource::Admission,
             SupervisorEventKind::AddTask {
-                task: task_node(&run, root_id, BTreeSet::new(), root_task, "none".into()),
+                task: task_node(
+                    &run,
+                    root_id,
+                    None,
+                    BTreeSet::new(),
+                    root_task,
+                    "none".into(),
+                ),
             },
         )?;
         let mut pending = initial_tasks;
@@ -211,7 +226,11 @@ impl SupervisorRuntime {
                     .iter()
                     .map(|value| TaskId::new(value.clone()))
                     .collect::<Result<BTreeSet<_>, _>>()?;
-                if dependencies.iter().all(|id| run.tasks.contains_key(id)) {
+                let parent =
+                    TaskId::new(task.parent_task_id.clone().unwrap_or_else(|| "root".into()))?;
+                if dependencies.iter().all(|id| run.tasks.contains_key(id))
+                    && run.tasks.contains_key(&parent)
+                {
                     let task_id = TaskId::new(task.task_id)?;
                     run = self.apply(
                         &run,
@@ -221,6 +240,7 @@ impl SupervisorRuntime {
                             task: task_node(
                                 &run,
                                 task_id,
+                                Some(parent),
                                 dependencies,
                                 task.instruction,
                                 task.required_artifact_contract,
@@ -581,6 +601,7 @@ impl SupervisorRuntime {
 fn task_node(
     run: &SupervisorRun,
     task_id: TaskId,
+    parent_task_id: Option<TaskId>,
     dependencies: BTreeSet<TaskId>,
     instruction: String,
     required_artifact_contract: String,
@@ -589,7 +610,7 @@ fn task_node(
         instruction_digest: format!("task:{}", task_id.0),
         task_id,
         supervisor_run_id: run.supervisor_run_id,
-        parent_task_id: None,
+        parent_task_id,
         dependencies,
         instruction_body: instruction,
         required_artifact_contract,
@@ -789,6 +810,7 @@ mod tests {
                         "root".into(),
                         vec![InitialTask {
                             task_id: "child".into(),
+                            parent_task_id: None,
                             dependencies: vec!["root".into()],
                             instruction: "child".into(),
                             required_artifact_contract: "none".into(),
@@ -1179,6 +1201,7 @@ mod tests {
         let runtime = SupervisorRuntime::new(temp.path());
         let initial = vec![InitialTask {
             task_id: "child".into(),
+            parent_task_id: None,
             dependencies: vec!["root".into()],
             instruction: "secret child instruction".into(),
             required_artifact_contract: "none".into(),
@@ -1195,6 +1218,15 @@ mod tests {
             .unwrap();
         assert_eq!(started.state, SupervisorRunState::Running);
         assert_eq!(started.tasks.len(), 2);
+        assert_eq!(
+            started
+                .tasks
+                .iter()
+                .find(|task| task.task_id.0 == "child")
+                .and_then(|task| task.parent_task_id.as_ref())
+                .map(|task| task.0.as_str()),
+            Some("root")
+        );
         assert_eq!(
             runtime
                 .start(
@@ -1339,6 +1371,7 @@ mod tests {
                 "root".into(),
                 vec![InitialTask {
                     task_id: "child".into(),
+                    parent_task_id: None,
                     dependencies: vec!["missing".into()],
                     instruction: "child".into(),
                     required_artifact_contract: "none".into(),

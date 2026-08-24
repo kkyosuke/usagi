@@ -48,23 +48,40 @@ session = "coder"
 summary = "全体方針を決める"
 scopes = ["root"]
 instructions = "要求を分解し、session の結果を統合する。"
+[roles.director.delegation]
+enabled = true
+child_roles = ["manager", "coder"]
+max_depth = 2
+max_concurrency = 4
 
 [roles.coder]
 summary = "実装と検証を行う"
 scopes = ["session"]
 instructions = "依頼された変更を実装し、リスクに応じたテストを実行する。"
+[roles.coder.delegation]
+enabled = false
 
 [roles.manager]
 summary = "大きいタスクを分解・統合する"
 scopes = ["session"]
 instructions = "タスクを Executor へ委譲し、各結果を検証・統合して直近 caller へ報告する。"
+[roles.manager.delegation]
+enabled = true
+child_roles = ["coder"]
+max_depth = 2
+max_concurrency = 4
 ```
 
 role は組織上の責務を prompt として与える。Director が小さいタスクを session role の Executor へ直接 dispatch
 する場合は 2 層、大きいタスクを Manager role へ dispatch し、その Manager が Executor を dispatch する場合は
 3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Executor → Manager → Director と
-一段ずつ返る。role 自体は authorization ではないため、role 名だけで委譲権限を強制しない。durable supervisor run
-として実行するタスクでは、深さ・dispatch 数・並列数を supervisor の `ExecutionPolicy` が制限する。
+一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
+`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
+durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
+
+`session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
+したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
+子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
 
 reader は future version、不正な role ID、空の `scopes`、未知 scope、16 KiB を超える instruction、NUL、対応 scope を許可しない
 default を拒否する。workspace catalog の権威は target session branch ではなく daemon に登録された workspace root である。
@@ -150,7 +167,7 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 `session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
-TUI は `role_id` / `role_summary` を stable session identity keyed の controller projection として保持し、
+TUI は `role_id` / `role_summary` と dispatch binding 由来の `parent_session_id` / `agent_status` を stable session identity keyed の controller projection として保持し、
 legacy `SessionRecord` や `state.json` へコピーしない。sidebar は role ID だけを badge 表示し、role metadata を
 attach / remove などの lifecycle capability 判定には使わない。
 

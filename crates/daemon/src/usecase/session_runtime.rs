@@ -561,6 +561,18 @@ impl SessionRuntime {
         &self.repo_root
     }
 
+    /// Loads the current effective role policy at an admission boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-role error when either catalog layer cannot be parsed.
+    pub fn effective_role_catalog(&self) -> Result<EffectiveRoleCatalog, SessionRuntimeError> {
+        usagi_core::infrastructure::role_catalog::load_effective(&self.data_home, &self.repo_root)
+            .map_err(|_| {
+                SessionRuntimeError::InvalidRole("effective role catalog is invalid".into())
+            })
+    }
+
     /// Returns the durable workspace-root checkout identity. It is a real,
     /// persisted incarnation (never derived from a name or path), so a
     /// workspace-root terminal/agent is fenced exactly like a session one.

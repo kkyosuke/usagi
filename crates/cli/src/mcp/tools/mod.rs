@@ -91,7 +91,7 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "session_todo_remove" => (SessionRoute(Session::TodoRemove), SessionCredential),
         "session_decision_list" => (SessionRoute(Session::DecisionList), SessionCredential),
         "session_decision_log" => (SessionRoute(Session::DecisionLog), SessionCredential),
-        "session_delegate_issue" => (SessionRoute(Session::DelegateIssue), Public),
+        "session_delegate_issue" => (SessionRoute(Session::DelegateIssue), SessionCredential),
         "session_delegate_brief" => (SessionRoute(Session::DelegateBrief), SessionCredential),
         "session_dispatch" => (DispatchRoute(Dispatch::Dispatch), AgentCredential),
         "session_get" => (DispatchRoute(Dispatch::SessionGet), AgentCredential),

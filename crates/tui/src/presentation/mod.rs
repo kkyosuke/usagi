@@ -46,6 +46,7 @@ use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::create_session_error_modal;
 use crate::presentation::views::director_drawer::{
     self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+    DirectorOrganizationRow,
 };
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
@@ -3833,6 +3834,7 @@ fn director_drawer_projection(
     };
     DirectorDrawerProjection {
         conversations,
+        organization: director_organization(ui),
         terminal_view,
         interrupted_detail,
         feedback,
@@ -3863,6 +3865,79 @@ fn director_drawer_projection(
             }
         },
     }
+}
+
+fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
+    fn append_children(
+        parent: Option<SessionId>,
+        depth: usize,
+        members: &[(SessionId, Option<SessionId>, DirectorOrganizationRow)],
+        emitted: &mut std::collections::BTreeSet<SessionId>,
+        rows: &mut Vec<DirectorOrganizationRow>,
+    ) {
+        for (id, member_parent, row) in members {
+            if *member_parent == parent && emitted.insert(*id) {
+                let mut row = row.clone();
+                row.depth = depth;
+                rows.push(row);
+                append_children(Some(*id), depth.saturating_add(1), members, emitted, rows);
+            }
+        }
+    }
+
+    let roles = ui.workspace.session_roles();
+    let mut members = Vec::new();
+    for (session_id, session) in ui
+        .workspace
+        .session_ids()
+        .iter()
+        .zip(ui.workspace.sessions())
+    {
+        let role_name = roles
+            .get(session_id)
+            .and_then(|role| role.role_id.as_ref())
+            .map_or("executor", usagi_core::domain::role::RoleId::as_str);
+        let status = match roles.get(session_id).and_then(|role| role.agent_status) {
+            Some(usagi_core::domain::agent::AgentStatus::Starting) => "starting",
+            Some(usagi_core::domain::agent::AgentStatus::Running) => "running",
+            Some(usagi_core::domain::agent::AgentStatus::Idle) => "waiting",
+            Some(usagi_core::domain::agent::AgentStatus::Exited) => "stopped",
+            Some(usagi_core::domain::agent::AgentStatus::Failed) => "failed",
+            None => "ready",
+        };
+        let row = DirectorOrganizationRow {
+            depth: 0,
+            label: format!("{} ({role_name})", session.name),
+            status: status.to_owned(),
+        };
+        members.push((
+            *session_id,
+            roles
+                .get(session_id)
+                .and_then(|role| role.parent_session_id),
+            row,
+        ));
+    }
+    if members.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = vec![DirectorOrganizationRow {
+        depth: 0,
+        label: "Director".into(),
+        status: "active".into(),
+    }];
+    let mut emitted = std::collections::BTreeSet::new();
+    append_children(None, 1, &members, &mut emitted, &mut rows);
+    // Corrupt or retention-truncated parentage is still visible, but never
+    // allowed to form an unbounded/cyclic presentation walk.
+    for (id, _, row) in members {
+        if emitted.insert(id) {
+            let mut row = row;
+            row.depth = 1;
+            rows.push(row);
+        }
+    }
+    rows
 }
 
 /// Run the per-frame foreground-terminal sweep: poll the one attached selection,
@@ -8322,6 +8397,8 @@ mod tests {
         let role = crate::usecase::application::controller::SessionRoleProjection {
             role_id: None,
             role_summary: Some("Reviewer".into()),
+            parent_session_id: None,
+            agent_status: None,
         };
         view.set_session_roles(BTreeMap::from([(session, role.clone())]));
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
@@ -23428,7 +23505,7 @@ mod tests {
         frames.iter().any(|frame| {
             let text = frame.join("\n");
             text.contains("󰚩 director")
-                && text.contains("No conversations yet")
+                && (text.contains("No conversations yet") || text.contains("Organization"))
                 && text.contains("[ New ]")
         })
     }

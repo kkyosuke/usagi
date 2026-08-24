@@ -115,6 +115,8 @@ pub struct SessionRoleCatalog {
 pub struct SessionRoleProjection {
     pub role_id: Option<RoleId>,
     pub role_summary: Option<String>,
+    pub parent_session_id: Option<SessionId>,
+    pub agent_status: Option<usagi_core::domain::agent::AgentStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5451,6 +5453,8 @@ mod tests {
                 SessionRoleProjection {
                     role_id: Some(RoleId::new("reviewer").unwrap()),
                     role_summary: None,
+                    parent_session_id: None,
+                    agent_status: None,
                 },
             )]))),
         );

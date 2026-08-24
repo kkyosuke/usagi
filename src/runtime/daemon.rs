@@ -69,7 +69,7 @@ use usagi_daemon::presentation::{
     DaemonCommand as PresentationDaemonCommand, DaemonEnv, ServeRole,
 };
 use usagi_daemon::usecase::agent_ipc::{
-    AGENT_RUNTIME_LIMIT, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor,
+    AGENT_RUNTIME_LIMIT, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor, PromptMode,
     ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
     TerminalOutcome,
 };
@@ -2055,10 +2055,49 @@ impl SharedAgentState {
 type SharedAgentRuntime = Arc<SharedAgentState>;
 type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 
+struct AgentDecisionWaker<'a> {
+    agent: &'a SharedAgentRuntime,
+}
+impl DecisionWaker for AgentDecisionWaker<'_> {
+    fn wake(&mut self, wake: &DecisionWake) -> anyhow::Result<()> {
+        let prompt = format!(
+            "Supervisor child {} finished ({:?}). Re-open the durable task tree, verify and aggregate the child result, then continue the parent decision. Summary: {}",
+            wake.child_run_id, wake.outcome.kind, wake.outcome.summary
+        );
+        let mut runtime = self
+            .agent
+            .lock()
+            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?;
+        if runtime
+            .prompt_run(wake.parent.dispatch_run_id, &prompt)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let binding = runtime
+            .dispatch_store()
+            .binding(wake.parent.dispatch_run_id)?
+            .ok_or_else(|| anyhow::anyhow!("parent dispatch binding is unavailable"))?;
+        let workspace = runtime
+            .dispatch_store()
+            .workspace_for_agent(binding.worker.agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("parent workspace is unavailable"))?;
+        runtime
+            .prompt(
+                workspace,
+                binding.worker.session_id,
+                &prompt,
+                PromptMode::Auto,
+            )
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        Ok(())
+    }
+}
+
 struct DeferredDecisionWaker;
 impl DecisionWaker for DeferredDecisionWaker {
     fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
-        anyhow::bail!("parent agent wake adapter is unavailable")
+        anyhow::bail!("parent agent wake is deferred until the agent owner is available")
     }
 }
 
@@ -3101,7 +3140,10 @@ fn spawn_ipc_server(
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
     let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
     if let Ok(runtime) = supervisor.lock()
-        && let Err(error) = runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
+        && let Err(error) = runtime.tick_all(
+            chrono::Utc::now(),
+            &mut AgentDecisionWaker { agent: &agent },
+        )
     {
         ErrorLog::record(&format!(
             "supervisor startup reconciliation deferred: {error}"
@@ -4192,9 +4234,11 @@ fn start_agent_observer(
                         // A candidate the output never terminated is only
                         // creditable once nothing more can arrive for it.
                         projection.submit_closed(reference.terminal_id, reference.session_id);
-                        if let Ok(runtime) = supervisor.lock()
-                            && let Err(error) =
-                                runtime.tick_all(chrono::Utc::now(), &mut DeferredDecisionWaker)
+                        if let (Some(agent), Ok(runtime)) = (agent.upgrade(), supervisor.lock())
+                            && let Err(error) = runtime.tick_all(
+                                chrono::Utc::now(),
+                                &mut AgentDecisionWaker { agent: &agent },
+                            )
                         {
                             ErrorLog::record(&format!(
                                 "supervisor completion reconciliation deferred: {error}"
@@ -5094,6 +5138,15 @@ fn dispatch_agent_tool(
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
                 drop(runtime);
+                authorize_delegation(
+                    bound,
+                    agent,
+                    &caller,
+                    Some(&serde_json::json!(requested_role)),
+                )
+                .map_err(|error| {
+                    ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
+                })?;
                 let created = bound
                     .sessions()
                     .lock()
@@ -6695,6 +6748,10 @@ fn dispatch_session_action(
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .handle(action, operation_id, payload)?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+            let store = runtime.dispatch_store();
+            let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;
+            let bindings = store.bindings().map_err(|_| SessionRuntimeError::Storage)?;
+            let runs = store.runs().map_err(|_| SessionRuntimeError::Storage)?;
             if let Some(items) = status
                 .body
                 .get_mut("sessions")
@@ -6710,6 +6767,22 @@ fn dispatch_session_action(
                         let (resumable, reason) = runtime.session_resume_status(id);
                         item["agent_resumable"] = serde_json::json!(resumable);
                         item["agent_resume_reason"] = serde_json::json!(reason);
+                        let member = agents
+                            .iter()
+                            .filter(|agent| agent.session_id == Some(id))
+                            .max_by_key(|agent| agent.current_run.is_some());
+                        item["agent_status"] = serde_json::json!(member.map(|agent| agent.status));
+                        let parent_session = bindings
+                            .iter()
+                            .filter(|binding| binding.worker.session_id == Some(id))
+                            .filter(|binding| binding.caller.agent_id != binding.worker.agent_id)
+                            .max_by_key(|binding| {
+                                runs.iter()
+                                    .find(|run| run.run_id == binding.run_id)
+                                    .map(|run| run.started_at)
+                            })
+                            .and_then(|binding| binding.caller.session_id);
+                        item["parent_session_id"] = serde_json::json!(parent_session);
                     }
                 }
             }
@@ -6878,6 +6951,20 @@ fn dispatch_session_action(
             payload,
         )?),
         SessionAction::DelegateIssue => {
+            let caller = payload
+                .get("_caller_credential")
+                .and_then(serde_json::Value::as_str)
+                .map(|credential| {
+                    agent
+                        .lock()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .mcp_dispatch_caller(credential)
+                        .ok_or(SessionRuntimeError::ScopeUnavailable)
+                })
+                .transpose()?;
+            if let Some(caller) = caller.as_ref() {
+                authorize_delegation(bound, agent, caller, payload.get("role"))?;
+            }
             let (name, prompt) = {
                 let number = payload
                     .get("number")
@@ -6926,11 +7013,23 @@ fn dispatch_session_action(
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_id(&name)?;
             let workspace = bound_workspace()?;
-            let delivery = agent
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .prompt(workspace, Some(id), &prompt, PromptMode::Queue)
-                .map_err(|error| SessionRuntimeError::Delivery(error.message))?;
+            let delivery = if let Some(caller) = caller {
+                let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+                runtime
+                    .dispatch_store()
+                    .queue_delegated_prompt(workspace, Some(id), prompt, chrono::Utc::now(), caller)
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                usagi_daemon::usecase::agent_ipc::PromptDelivery {
+                    delivered_to: "queue",
+                    queued: true,
+                }
+            } else {
+                agent
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .prompt(workspace, Some(id), &prompt, PromptMode::Queue)
+                    .map_err(|error| SessionRuntimeError::Delivery(error.message))?
+            };
             reply(
                 serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
             )
@@ -7008,6 +7107,104 @@ fn new_agent_selector(
     ))
 }
 
+/// Applies configured company-role authority before any delegated side effect.
+/// Catalogs without a `delegation` block keep version-1 compatibility; once a
+/// block is present the daemon, rather than the prompt, owns every decision.
+fn authorize_delegation(
+    bound: &ConnectionWorkspace,
+    agent: &SharedAgentRuntime,
+    caller: &usagi_core::domain::agent::CallerRef,
+    requested_role: Option<&serde_json::Value>,
+) -> Result<(), SessionRuntimeError> {
+    use std::collections::BTreeSet;
+    use usagi_core::domain::agent::RunStatus;
+    use usagi_core::domain::role::{RoleId, RoleScope};
+
+    let requested = requested_role
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<RoleId>)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+    let sessions = bound
+        .sessions()
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    let catalog = sessions.effective_role_catalog()?;
+    let parent_role = match caller.session_id {
+        Some(id) => sessions.session_role(id)?,
+        None => catalog
+            .resolve(None, RoleScope::Root)
+            .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?,
+    };
+    let child_role = catalog
+        .resolve(requested.as_ref(), RoleScope::Session)
+        .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?;
+    let Some(policy) = parent_role
+        .as_ref()
+        .and_then(|role| catalog.roles.get(role))
+        .and_then(|definition| definition.delegation.as_ref())
+    else {
+        return Ok(());
+    };
+    if !policy.enabled {
+        return Err(SessionRuntimeError::InvalidRole(
+            "caller role is not allowed to delegate".into(),
+        ));
+    }
+    let child_role = child_role.ok_or_else(|| {
+        SessionRuntimeError::InvalidRole("delegation requires an authorized child role".into())
+    })?;
+    if !policy.child_roles.contains(&child_role) {
+        return Err(SessionRuntimeError::InvalidRole(format!(
+            "caller role may not delegate to role \"{child_role}\""
+        )));
+    }
+    drop(sessions);
+
+    let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
+    let store = runtime.dispatch_store();
+    let bindings = store.bindings().map_err(|_| SessionRuntimeError::Storage)?;
+    let runs = store.runs().map_err(|_| SessionRuntimeError::Storage)?;
+    let active_children = bindings
+        .iter()
+        .filter(|binding| binding.caller == *caller)
+        .filter(|binding| {
+            runs.iter().any(|run| {
+                run.run_id == binding.run_id
+                    && matches!(run.status, RunStatus::Preparing | RunStatus::Running)
+            })
+        })
+        .count();
+    if active_children >= policy.max_concurrency {
+        return Err(SessionRuntimeError::InvalidRole(format!(
+            "delegation concurrency limit ({}) reached",
+            policy.max_concurrency
+        )));
+    }
+    let mut depth = 0usize;
+    let mut cursor = caller.agent_id;
+    let mut seen = BTreeSet::new();
+    while seen.insert(cursor) {
+        let Some(parent) = bindings
+            .iter()
+            .rev()
+            .find(|binding| binding.worker.agent_id == cursor && binding.caller.agent_id != cursor)
+        else {
+            break;
+        };
+        depth = depth.saturating_add(1);
+        cursor = parent.caller.agent_id;
+    }
+    if depth.saturating_add(1) > policy.max_depth {
+        return Err(SessionRuntimeError::InvalidRole(format!(
+            "delegation depth limit ({}) reached",
+            policy.max_depth
+        )));
+    }
+    Ok(())
+}
+
 /// Creates a triage session for a brief and dispatches a fresh worker into it,
 /// as one operation that either takes effect completely or leaves nothing.
 ///
@@ -7071,6 +7268,7 @@ fn delegate_brief(
             .ok_or(SessionRuntimeError::Storage)?;
         (workspace, caller, sessions.repository_root().to_path_buf())
     };
+    authorize_delegation(bound, agent, &caller, payload.get("role"))?;
     // Machine-local runtime/model policy belongs to the workspace root and is
     // not copied into managed worktrees. Decide every read-only refusal here;
     // `dispatch` still re-reads the same trusted root and stays the authority.

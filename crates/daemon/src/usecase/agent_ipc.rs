@@ -2026,10 +2026,16 @@ impl AgentRuntime {
             .map_err(map_dispatch_storage_error)?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
-        let caller = CallerRef {
-            session_id: worker.session_id,
-            agent_id: worker.agent_id,
-        };
+        // A delayed delegation carries the authenticated parent in its durable
+        // prompt slot. Ordinary interactive launches retain the historical
+        // self-binding used for a top-level conversation.
+        let caller = queued
+            .as_ref()
+            .and_then(|item| item.caller.clone())
+            .unwrap_or(CallerRef {
+                session_id: worker.session_id,
+                agent_id: worker.agent_id,
+            });
         self.dispatch
             .reserve_admission(
                 worker.clone(),
@@ -2361,6 +2367,30 @@ impl AgentRuntime {
             .map_err(map_dispatch_storage_error)?
             .into_iter()
             .find(|message| message.run_id == caller.operation);
+        // Inbox commit is the durable fact. The wake is only a notification:
+        // a live waiting Manager receives it immediately, while a stopped one
+        // gets a durable next-launch prompt. Failure here never rolls back or
+        // redirects the already committed report.
+        if accepted
+            && delivered_to.agent_id != worker.agent_id
+            && let Some(message) = committed.as_ref()
+            && let Some(workspace) = self
+                .dispatch
+                .workspace_for_agent(delivered_to.agent_id)
+                .ok()
+                .flatten()
+        {
+            let notice = format!(
+                "A child report is ready (run {}). Read your session inbox, verify the result, aggregate all required children, then report only to your caller. Summary: {}",
+                message.run_id, message.summary
+            );
+            let _ = self.prompt(
+                workspace,
+                delivered_to.session_id,
+                &notice,
+                PromptMode::Auto,
+            );
+        }
         Ok(ReportDelivery {
             delivered_to,
             worker,
@@ -5561,6 +5591,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn queued_prompt_is_consumed_by_launch_and_auto_then_delivers_live() {
         let mut runtime = runtime();
         let launch_intent = intent(None);
@@ -5592,6 +5623,20 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let parent = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        runtime
+            .dispatch
+            .queue_delegated_prompt(
+                workspace,
+                Some(session),
+                "delegated work".into(),
+                Utc::now(),
+                parent.clone(),
+            )
+            .unwrap();
 
         let operation = OperationId::new();
         runtime
@@ -5602,6 +5647,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+        assert_eq!(
+            runtime.dispatch.binding(operation).unwrap().unwrap().caller,
+            parent
+        );
         assert!(
             runtime
                 .dispatch

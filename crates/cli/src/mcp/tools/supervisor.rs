@@ -27,7 +27,7 @@ impl Tool for SupervisorStart {
         "daemon 所有の supervisor run を開始する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"root_task":{"type":"string"},"initial_task_dag":{"type":"array","items":{"type":"object","properties":{"task_id":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}},"instruction":{"type":"string"},"required_artifact_contract":{"type":"string"}},"required":["task_id","instruction"],"additionalProperties":false}},"policy_selector":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["root_task","idempotency_key"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"root_task":{"type":"string"},"initial_task_dag":{"type":"array","items":{"type":"object","properties":{"task_id":{"type":"string"},"parent_task_id":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}},"instruction":{"type":"string"},"required_artifact_contract":{"type":"string"}},"required":["task_id","instruction"],"additionalProperties":false}},"policy_selector":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["root_task","idempotency_key"],"additionalProperties":false}"#
     }
 }
 pub struct SupervisorGet;

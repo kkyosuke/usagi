@@ -45,6 +45,14 @@ pub struct DirectorConversation {
     pub selected: bool,
 }
 
+/// One safe row in the Director's organization overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectorOrganizationRow {
+    pub depth: usize,
+    pub label: String,
+    pub status: String,
+}
+
 /// Presentation-safe state of the drawer's explicit `New` chooser.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DirectorNewProjection {
@@ -66,6 +74,7 @@ pub enum DirectorNewProjection {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectorDrawerProjection {
     pub conversations: Vec<DirectorConversation>,
+    pub organization: Vec<DirectorOrganizationRow>,
     pub terminal_view: Option<TerminalViewProjection>,
     /// Safe reason for a selected interrupted conversation, outside PTY output.
     pub interrupted_detail: Option<String>,
@@ -293,6 +302,18 @@ fn drawer_body(width: usize, height: usize, projection: &DirectorDrawerProjectio
             footer_hint,
         ));
         return rows;
+    } else if !projection.organization.is_empty() {
+        rows.push(Role::Accent.style().bold().paint("Organization"));
+        for member in &projection.organization {
+            let branch = if member.depth == 0 { "" } else { "└─ " };
+            rows.push(format!(
+                "{}{}{}  {}",
+                "  ".repeat(member.depth),
+                branch,
+                member.label,
+                Style::new().dim().paint(&member.status)
+            ));
+        }
     } else if projection.conversations.is_empty() {
         let before = content_capacity.saturating_sub(3) / 2;
         rows.extend(std::iter::repeat_n(String::new(), before));
@@ -507,6 +528,39 @@ mod tests {
     }
 
     #[test]
+    fn organization_projection_renders_depth_and_status() {
+        let projection = DirectorDrawerProjection {
+            organization: vec![
+                DirectorOrganizationRow {
+                    depth: 0,
+                    label: "Director".into(),
+                    status: "active".into(),
+                },
+                DirectorOrganizationRow {
+                    depth: 1,
+                    label: "triage (manager)".into(),
+                    status: "waiting".into(),
+                },
+                DirectorOrganizationRow {
+                    depth: 2,
+                    label: "implement (executor)".into(),
+                    status: "stopped".into(),
+                },
+            ],
+            ..DirectorDrawerProjection::default()
+        };
+        let body = drawer_body(52, 10, &projection)
+            .into_iter()
+            .map(|row| strip_ansi(&row))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains("Organization"));
+        assert!(body.contains("triage (manager)"));
+        assert!(body.contains("implement (executor)"));
+        assert!(body.contains("stopped"));
+    }
+
+    #[test]
     fn populated_projection_renders_selected_conversation_and_terminal_rows() {
         let projection = DirectorDrawerProjection {
             conversations: vec![
@@ -519,6 +573,7 @@ mod tests {
                     selected: true,
                 },
             ],
+            organization: Vec::new(),
             terminal_view: Some(TerminalViewProjection {
                 rows: vec![
                     "agent output one".to_owned(),
@@ -578,6 +633,7 @@ mod tests {
                 label: "active".to_owned(),
                 selected: true,
             }],
+            organization: Vec::new(),
             terminal_view: Some(TerminalViewProjection {
                 rows: retained,
                 row_offset: 0,
@@ -637,6 +693,7 @@ mod tests {
                 label: "interrupted".to_owned(),
                 selected: true,
             }],
+            organization: Vec::new(),
             terminal_view: None,
             interrupted_detail: Some("identity unavailable".to_owned()),
             feedback: Some("resume failed safely".to_owned()),
@@ -820,6 +877,7 @@ mod tests {
                 label: "会話の履歴".to_owned(),
                 selected: true,
             }],
+            organization: Vec::new(),
             terminal_view: None,
             interrupted_detail: None,
             feedback: None,
