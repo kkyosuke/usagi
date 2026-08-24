@@ -790,21 +790,28 @@ impl WorkspaceRuntime {
     #[must_use]
     pub fn focused_agent_terminal(&self) -> Option<TerminalRef> {
         let terminal = self.focused_terminal()?;
-        self.panes
-            .active_pane()
-            .tabs()
-            .iter()
-            .find_map(|tab| match tab {
-                PaneTab::Live(live)
-                    if live.kind == PaneKind::Agent && live.terminal.fences(&terminal) =>
-                {
-                    Some(terminal.clone())
-                }
-                PaneTab::Live(_)
-                | PaneTab::Interrupted(_)
-                | PaneTab::Pending(_)
-                | PaneTab::Ready(_) => None,
+        self.is_agent_terminal(&terminal).then_some(terminal)
+    }
+
+    /// Whether `terminal` belongs to a live Agent tab in its target pane.
+    ///
+    /// Exit observation names the terminal after it may have moved into the
+    /// background, so callers must classify it by stable identity instead of
+    /// relying on the current selection.
+    #[must_use]
+    pub fn is_agent_terminal(&self, terminal: &TerminalRef) -> bool {
+        let target = terminal
+            .session_id
+            .map_or(Target::Root(terminal.workspace_id), Target::Session);
+        self.panes.pane(target).is_some_and(|pane| {
+            pane.tabs().iter().any(|tab| {
+                matches!(
+                    tab,
+                    PaneTab::Live(live)
+                        if live.kind == PaneKind::Agent && live.terminal.fences(terminal)
+                )
             })
+        })
     }
 
     /// The live tabs of every target that are **not** the attached foreground
