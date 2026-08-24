@@ -754,6 +754,53 @@ impl DispatchStore {
         })
     }
 
+    /// Atomically converges one reported run and its Agent without overwriting
+    /// a newer run that has already reused the same Agent identity.
+    ///
+    /// The run is always reconciled by its exact operation ID. The Agent is
+    /// released only while `current_run` still points at that same operation;
+    /// a successor admission is therefore a fence, not state for an older
+    /// report retry to clear.
+    ///
+    /// Returns whether the durable registry changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
+    pub fn reconcile_report_outcome(
+        &self,
+        run_id: OperationId,
+        agent_id: AgentId,
+        run_status: RunStatus,
+        agent_status: AgentStatus,
+        ended_at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let mut changed = false;
+        if let Some(run) = registry.runs.iter_mut().find(|run| run.run_id == run_id)
+            && run.status != run_status
+        {
+            run.status = run_status;
+            run.ended_at = Some(ended_at);
+            changed = true;
+        }
+        if let Some(agent) = registry
+            .agents
+            .iter_mut()
+            .find(|agent| agent.agent_id == agent_id && agent.current_run == Some(run_id))
+        {
+            agent.status = agent_status;
+            agent.current_run = None;
+            changed = true;
+        }
+        if changed {
+            registry.retain_bounded();
+            json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        }
+        Ok(changed)
+    }
+
     /// # Errors
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
@@ -1099,6 +1146,96 @@ mod tests {
                 .to_string()
                 .contains("ownership cannot be reassigned")
         );
+    }
+
+    #[test]
+    fn report_reconciliation_is_atomic_and_preserves_a_successor_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, _) = ids();
+        let first_run = OperationId::new();
+        let second_run = OperationId::new();
+        let workspace = WorkspaceId::new();
+        let mut worker = agent(session, agent_id);
+        worker.status = AgentStatus::Running;
+        worker.current_run = Some(first_run);
+        store.upsert_agent(workspace, worker).unwrap();
+        store
+            .upsert_run(DispatchRun {
+                run_id: first_run,
+                agent_id,
+                prompt: "first".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+
+        assert!(
+            store
+                .reconcile_report_outcome(
+                    first_run,
+                    agent_id,
+                    RunStatus::Completed,
+                    AgentStatus::Idle,
+                    now(),
+                )
+                .unwrap()
+        );
+        let first = store.run(first_run).unwrap().unwrap();
+        assert_eq!(first.status, RunStatus::Completed);
+        assert_eq!(first.ended_at, Some(now()));
+        assert_eq!(store.agent(agent_id).unwrap().unwrap().current_run, None);
+        assert!(
+            !store
+                .reconcile_report_outcome(
+                    first_run,
+                    agent_id,
+                    RunStatus::Completed,
+                    AgentStatus::Idle,
+                    now(),
+                )
+                .unwrap(),
+            "an already converged retry must not rewrite the registry"
+        );
+
+        store
+            .transition_agent(agent_id, AgentStatus::Running, Some(second_run))
+            .unwrap();
+        assert!(
+            !store
+                .reconcile_report_outcome(
+                    first_run,
+                    agent_id,
+                    RunStatus::Completed,
+                    AgentStatus::Idle,
+                    now(),
+                )
+                .unwrap(),
+            "the successor run fences its Agent state from the old report"
+        );
+        let preserved = store.agent(agent_id).unwrap().unwrap();
+        assert_eq!(preserved.status, AgentStatus::Running);
+        assert_eq!(preserved.current_run, Some(second_run));
+
+        store
+            .transition_run(first_run, RunStatus::Running, None)
+            .unwrap();
+        assert!(
+            store
+                .reconcile_report_outcome(
+                    first_run,
+                    agent_id,
+                    RunStatus::Completed,
+                    AgentStatus::Idle,
+                    now(),
+                )
+                .unwrap(),
+            "the old run still converges without clearing its successor"
+        );
+        let preserved = store.agent(agent_id).unwrap().unwrap();
+        assert_eq!(preserved.status, AgentStatus::Running);
+        assert_eq!(preserved.current_run, Some(second_run));
     }
 
     #[test]

@@ -2280,10 +2280,11 @@ impl AgentRuntime {
             .dispatch
             .inbox(&binding.caller)
             .map_err(map_dispatch_storage_error)?;
-        if inbox
+        if let Some(committed) = inbox
             .iter()
-            .any(|message| message.run_id == candidate.operation_id)
+            .find(|message| message.run_id == candidate.operation_id)
         {
+            self.reconcile_report_status(&binding, committed.kind)?;
             return Ok(false);
         }
         self.dispatch
@@ -2300,23 +2301,36 @@ impl AgentRuntime {
                 },
             )
             .map_err(map_dispatch_storage_error)?;
-        let status = if kind == InboxKind::Completed {
-            RunStatus::Completed
-        } else {
-            RunStatus::Failed
-        };
-        self.dispatch
-            .transition_run(candidate.operation_id, status, Some(Utc::now()))
-            .map_err(map_dispatch_storage_error)?;
-        let agent_status = if kind == InboxKind::Completed {
-            AgentStatus::Idle
-        } else {
-            AgentStatus::Failed
-        };
-        self.dispatch
-            .transition_agent(binding.worker.agent_id, agent_status, None)
-            .map_err(map_dispatch_storage_error)?;
+        self.reconcile_report_status(&binding, kind)?;
         Ok(true)
+    }
+
+    /// Converges the registry half of a report after the inbox half committed.
+    ///
+    /// A retry must use the committed message kind, not the new request: the
+    /// inbox write can succeed before either registry transition does. Replaying
+    /// both idempotent transitions repairs that partial state without changing
+    /// the first report's outcome or appending a second message.
+    fn reconcile_report_status(
+        &self,
+        binding: &DispatchBinding,
+        kind: InboxKind,
+    ) -> Result<(), ProtocolError> {
+        let (run_status, agent_status) = match kind {
+            InboxKind::Completed => (RunStatus::Completed, AgentStatus::Idle),
+            InboxKind::Failed => (RunStatus::Failed, AgentStatus::Failed),
+            InboxKind::NoReport => return Ok(()),
+        };
+        self.dispatch
+            .reconcile_report_outcome(
+                binding.run_id,
+                binding.worker.agent_id,
+                run_status,
+                agent_status,
+                Utc::now(),
+            )
+            .map_err(map_dispatch_storage_error)?;
+        Ok(())
     }
 
     /// Authenticates and delivers a completion report from a provisioned MCP
@@ -6451,16 +6465,58 @@ mod tests {
                 .and_then(|message| message.result.as_ref()),
             Some(&result)
         );
+        let completed_run = OperationId::parse(&operation).unwrap();
+        let completed_binding = runtime
+            .dispatch_store()
+            .binding(completed_run)
+            .unwrap()
+            .unwrap();
+        let completed_at = runtime
+            .dispatch_store()
+            .run(completed_run)
+            .unwrap()
+            .unwrap()
+            .ended_at;
+        runtime
+            .reconcile_report_status(&completed_binding, InboxKind::Completed)
+            .unwrap();
+        runtime
+            .reconcile_report_status(&completed_binding, InboxKind::NoReport)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .run(completed_run)
+                .unwrap()
+                .unwrap()
+                .ended_at,
+            completed_at,
+            "an already converged retry must preserve its completion time"
+        );
         let replacement = usagi_core::domain::agent::StructuredResult {
             pr: Some("https://github.com/o/r/pull/2".into()),
             ..Default::default()
         };
+        // Model a crash or storage failure after the inbox append committed but
+        // before either registry transition became durable.
+        runtime
+            .dispatch_store()
+            .transition_run(completed_run, RunStatus::Running, None)
+            .unwrap();
+        runtime
+            .dispatch_store()
+            .transition_agent(
+                completed_binding.worker.agent_id,
+                AgentStatus::Running,
+                Some(completed_run),
+            )
+            .unwrap();
         let duplicate = runtime
             .report_from_mcp(
                 &credential,
                 None,
-                InboxKind::Completed,
-                "duplicate".into(),
+                InboxKind::Failed,
+                "conflicting retry".into(),
                 Some(replacement),
             )
             .unwrap();
@@ -6473,11 +6529,69 @@ mod tests {
             Some(&result),
             "a retry must expose only the first committed artifact"
         );
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .run(completed_run)
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStatus::Completed,
+            "the committed outcome repairs a partially persisted run"
+        );
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .agent(completed_binding.worker.agent_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentStatus::Idle,
+            "the retry payload cannot reverse the committed outcome"
+        );
+
+        let successor_operation = OperationId::new();
+        let successor = runtime
+            .dispatch(
+                &successor_operation.to_string(),
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let successor_binding = runtime
+            .dispatch_store()
+            .binding(successor_operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            successor_binding.worker.agent_id, completed_binding.worker.agent_id,
+            "the runtime/model selector reuses the same stable Agent"
+        );
+        let late_duplicate = runtime
+            .report_from_mcp(
+                &credential,
+                None,
+                InboxKind::Completed,
+                "late duplicate".into(),
+                None,
+            )
+            .unwrap();
+        assert!(!late_duplicate.accepted);
+        let preserved = runtime
+            .dispatch_store()
+            .agent(successor_binding.worker.agent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.status, AgentStatus::Running);
+        assert_eq!(preserved.current_run, Some(successor_operation));
+
         runtime.exit(&admission.terminal, 0).unwrap();
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::Completed);
         assert_eq!(inbox[0].result, Some(result));
+        runtime.exit(&successor.terminal, 0).unwrap();
 
         let failed_operation = OperationId::new();
         let failed = runtime
@@ -6508,6 +6622,29 @@ mod tests {
             .binding(failed_operation)
             .unwrap()
             .unwrap();
+        runtime
+            .dispatch_store()
+            .transition_run(failed_operation, RunStatus::Running, None)
+            .unwrap();
+        runtime
+            .dispatch_store()
+            .transition_agent(
+                binding.worker.agent_id,
+                AgentStatus::Running,
+                Some(failed_operation),
+            )
+            .unwrap();
+        let duplicate = runtime
+            .report_from_mcp(
+                &failed_credential,
+                None,
+                InboxKind::Completed,
+                "conflicting retry".into(),
+                None,
+            )
+            .unwrap();
+        assert!(!duplicate.accepted);
+        assert_eq!(duplicate.committed.unwrap().kind, InboxKind::Failed);
         assert_eq!(
             runtime
                 .dispatch_store()

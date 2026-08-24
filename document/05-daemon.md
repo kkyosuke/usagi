@@ -1318,7 +1318,7 @@ caller credential を受け取る。claim は kernel 由来の peer PID / 親 PI
 後続 request 以外へ公開せず、durable snapshot、TUI、terminal journal、argv、log、safe error に保存・公開しない。
 この事前許可も spawn 時 argv に限り、durable snapshot や IPC response には残らない。
 
-[`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late、duplicate、wrong-generation は state や inbox を変更しない。
+[`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late と wrong-generation は state や inbox を変更しない。duplicate completion は inbox を増やさず、最初に確定した message の kind を権威として run / agent status の冪等な遷移だけを再実行する。run と agent の遷移は同じ dispatch registry lock 内で行い、agent は `current_run` が報告対象 run と一致する場合だけ解放するため、同じ Agent identity を再利用した後続 run を旧 report が上書きしない。これにより inbox 保存後の registry 保存失敗を同じ report の再送で収束させ、再送 payload による outcome の差し替えは許さない。
 
 Agent の workspace ownership と新しい prompt queue は `dispatch-workspaces.json` に保存する。`dispatch.json` の schema を
 変えないため、planned rollover 中に旧 draining generation が Agent exit を whole-snapshot 保存しても ownership を消さない。
