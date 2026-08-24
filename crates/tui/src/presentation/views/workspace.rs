@@ -4130,28 +4130,42 @@ mod tests {
         // badges never turn them into an attachable ordinary row.
         assert!(!frame.contains("[reviewer]"));
 
+        let child_id = SessionId::new();
         let mut available = projected_session(session_id, "alpha", "/work/alpha");
         available.role_id = Some("reviewer".to_owned());
-        let mut state = AppState::home(workspace, vec![session_id]);
+        let child = projected_session(child_id, "beta", "/work/beta");
+        let mut state = AppState::home(workspace, vec![session_id, child_id]);
         let _ = update(
             &mut state,
-            AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
-                session_id,
-                SessionRoleProjection {
-                    role_id: Some(RoleId::new("reviewer").unwrap()),
-                    role_summary: None,
-                    parent_session_id: None,
-                    agent_status: None,
-                },
-            )]))),
+            AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([
+                (
+                    session_id,
+                    SessionRoleProjection {
+                        role_id: Some(RoleId::new("reviewer").unwrap()),
+                        role_summary: None,
+                        parent_session_id: None,
+                        agent_status: None,
+                    },
+                ),
+                (
+                    child_id,
+                    SessionRoleProjection {
+                        role_id: Some(RoleId::new("coder").unwrap()),
+                        role_summary: None,
+                        parent_session_id: Some(session_id),
+                        agent_status: None,
+                    },
+                ),
+            ]))),
         );
         let frame = joined_home(&HomeProjection::from_state(
             &state,
             "work",
             Path::new("/work"),
-            &[available],
+            &[available, child],
         ));
-        assert!(frame.contains("[reviewer]"));
+        assert!(frame.contains("└─ alpha [reviewer]"));
+        assert!(frame.contains("  └─ beta [coder]"));
     }
 
     #[test]

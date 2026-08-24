@@ -8512,7 +8512,9 @@ mod tests {
                 failed_child,
                 role(Some(running_child), Some(AgentStatus::Failed)),
             ),
-            (orphan, role(Some(SessionId::new()), None)),
+            // A corrupt self-cycle is emitted as a root-level orphan and must
+            // not increase projection depth or loop forever.
+            (orphan, role(Some(orphan), None)),
         ]));
         let ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
 
