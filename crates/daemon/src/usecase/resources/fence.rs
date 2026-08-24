@@ -12,12 +12,14 @@
 //! | `pr-inventory.json` | whole snapshot | publishes an owner-local event; the active writer applies it |
 //! | supervisor state | whole snapshot | refused: the active generation's tick recomputes it |
 //! | `sessions.json` | whole snapshot | refused: lifecycle admission already closed for it |
-//! | `dispatch.json` | append only under a cross-process lock | allowed |
+//! | `dispatch.json` | locked reducer with a handoff-stable schema | allowed |
+//! | `dispatch-workspaces.json` | whole snapshot | refused |
 //! | `inbox/*.jsonl` | append only under a cross-process lock | allowed |
 //!
-//! Append-only writers need no fence: their cross-process lock plus append
-//! semantics cannot lose an update. Whole-snapshot writers need exactly one
-//! writer, which is the active generation.
+//! Multi-writer-safe reducers need no fence: they load current state only after
+//! taking the cross-process lock and preserve a handoff-stable schema. Ordinary
+//! whole-snapshot writers need exactly one writer, which is the active
+//! generation.
 
 use std::collections::BTreeMap;
 
@@ -34,7 +36,8 @@ pub enum WriteMode {
     /// update.
     WholeSnapshot,
     /// Entries are appended under a cross-process lock. Two writers do not lose
-    /// an update.
+    /// an update. This category also includes a locked reducer whose schema is
+    /// guaranteed not to change across the two handoff generations.
     AppendOnly,
 }
 
@@ -49,6 +52,8 @@ pub enum SharedWriter {
     SessionLifecycle,
     /// `dispatch.json`, the dispatch/run registry.
     DispatchRegistry,
+    /// `dispatch-workspaces.json`, the active generation's scoped sidecar.
+    WorkspaceDispatchRegistry,
     /// The per-caller completion inboxes.
     CompletionInbox,
 }
@@ -58,9 +63,10 @@ impl SharedWriter {
     #[must_use]
     pub fn mode(self) -> WriteMode {
         match self {
-            Self::PrInventory | Self::SupervisorState | Self::SessionLifecycle => {
-                WriteMode::WholeSnapshot
-            }
+            Self::PrInventory
+            | Self::SupervisorState
+            | Self::SessionLifecycle
+            | Self::WorkspaceDispatchRegistry => WriteMode::WholeSnapshot,
             Self::DispatchRegistry | Self::CompletionInbox => WriteMode::AppendOnly,
         }
     }
@@ -75,11 +81,12 @@ impl SharedWriter {
 
 /// Every shared writer this build knows about. A new whole-snapshot document must
 /// be added here, which is what keeps the inventory from silently going stale.
-pub const SHARED_WRITERS: [SharedWriter; 5] = [
+pub const SHARED_WRITERS: [SharedWriter; 6] = [
     SharedWriter::PrInventory,
     SharedWriter::SupervisorState,
     SharedWriter::SessionLifecycle,
     SharedWriter::DispatchRegistry,
+    SharedWriter::WorkspaceDispatchRegistry,
     SharedWriter::CompletionInbox,
 ];
 

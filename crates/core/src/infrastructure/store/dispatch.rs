@@ -1,9 +1,12 @@
 //! Durable registry and inboxes for daemon-owned agent dispatch.
 //!
-//! The registry is one atomically replaced JSON document. Each caller inbox is
-//! a locked, atomically replaced JSONL file so a crash cannot expose a partial
-//! delivery and concurrent daemon commands cannot lose one another's updates.
+//! The legacy-compatible dispatch registry and its workspace ownership sidecar
+//! are atomically replaced JSON documents under one cross-process lock. Each
+//! caller inbox is a locked, atomically replaced JSONL file so a crash cannot
+//! expose a partial delivery and concurrent daemon commands cannot lose one
+//! another's updates.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +22,7 @@ use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const REGISTRY_FILE: &str = "dispatch.json";
+const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
 const INBOX_DIR: &str = "inbox";
 
 /// How many finished dispatch runs the registry keeps.
@@ -53,20 +57,42 @@ fn session_segment(session_id: Option<SessionId>) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Registry {
     agents: Vec<Agent>,
-    /// Workspace ownership for every Agent incarnation.
-    ///
-    /// This is separate from the public `Agent` vocabulary so upgrading an
-    /// existing dispatch registry does not change its wire representation.
-    /// Legacy registries have no entries and claim an Agent the first time that
-    /// exact session/runtime/model tuple is launched from a fenced workspace.
-    #[serde(default)]
-    agent_workspaces: std::collections::BTreeMap<AgentId, WorkspaceId>,
     runs: Vec<DispatchRun>,
     bindings: Vec<DispatchBinding>,
     #[serde(default)]
     prompts: Vec<QueuedPrompt>,
     #[serde(default)]
     admissions: Vec<AgentAdmissionReservation>,
+}
+
+/// Workspace-scoped additions kept outside `dispatch.json`.
+///
+/// A draining predecessor is allowed to update the legacy whole-snapshot
+/// registry during a planned rollover. Keeping new fields in a sidecar means
+/// that predecessor cannot erase fields it does not understand when it
+/// serializes its older schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkspaceRegistry {
+    agent_workspaces: BTreeMap<AgentId, WorkspaceId>,
+    prompts: Vec<WorkspacePrompt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkspacePrompt {
+    workspace_id: WorkspaceId,
+    session_id: Option<SessionId>,
+    prompt: String,
+    queued_at: DateTime<Utc>,
+}
+
+impl WorkspacePrompt {
+    fn into_legacy_shape(self) -> QueuedPrompt {
+        QueuedPrompt {
+            session_id: self.session_id,
+            prompt: self.prompt,
+            queued_at: self.queued_at,
+        }
+    }
 }
 
 /// Durable, secret-free proof that an Agent operation was prepared before its
@@ -229,10 +255,6 @@ impl Registry {
 /// One prompt waiting for the next Agent launch in a durable session scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedPrompt {
-    /// Workspace that owns this prompt. `None` is a legacy record written before
-    /// the daemon could serve more than one workspace.
-    #[serde(default)]
-    pub workspace_id: Option<WorkspaceId>,
     pub session_id: Option<SessionId>,
     pub prompt: String,
     pub queued_at: DateTime<Utc>,
@@ -256,6 +278,10 @@ impl DispatchStore {
         self.dir.join(REGISTRY_FILE)
     }
 
+    fn workspace_registry_path(&self) -> PathBuf {
+        self.dir.join(WORKSPACE_REGISTRY_FILE)
+    }
+
     /// Replaces the next-launch prompt for a session. A single slot prevents a
     /// caller retry from creating an unbounded duplicate queue.
     ///
@@ -269,34 +295,47 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
     ) -> Result<QueuedPrompt> {
-        self.mutate_registry(|registry| {
-            let queued = QueuedPrompt {
-                workspace_id: Some(workspace_id),
-                session_id,
-                prompt,
-                queued_at,
-            };
-            let existing = registry
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        let mut legacy_registry = session_id
+            .is_some()
+            .then(|| self.load_registry())
+            .transpose()?;
+        let queued = WorkspacePrompt {
+            workspace_id,
+            session_id,
+            prompt,
+            queued_at,
+        };
+        let existing = workspace_registry
+            .prompts
+            .iter()
+            .position(|item| item.workspace_id == workspace_id && item.session_id == session_id);
+        if let Some(index) = existing {
+            workspace_registry.prompts[index] = queued.clone();
+        } else {
+            workspace_registry.prompts.push(queued.clone());
+        }
+        json_file::write_atomic(
+            &self.dir,
+            &self.workspace_registry_path(),
+            &workspace_registry,
+        )?;
+
+        // A session UUID is resolved from the fenced workspace before this
+        // method is called, so a new prompt may safely supersede its legacy
+        // queue slot. Root legacy prompts have no provable workspace and remain
+        // quarantined rather than being guessed or silently reassigned.
+        if let Some(registry) = legacy_registry.as_mut()
+            && let Some(index) = registry
                 .prompts
                 .iter()
-                .position(|item| {
-                    item.workspace_id == Some(workspace_id) && item.session_id == session_id
-                })
-                // A new explicit prompt safely supersedes the one legacy slot;
-                // merely launching an Agent never claims that ambiguous record.
-                .or_else(|| {
-                    registry.prompts.iter().position(|item| {
-                        item.workspace_id.is_none() && item.session_id == session_id
-                    })
-                });
-            if let Some(index) = existing {
-                let existing = &mut registry.prompts[index];
-                *existing = queued.clone();
-            } else {
-                registry.prompts.push(queued.clone());
-            }
-            queued
-        })
+                .position(|item| item.session_id == session_id)
+        {
+            registry.prompts.remove(index);
+            json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        }
+        Ok(queued.into_legacy_shape())
     }
 
     /// Reads, without consuming, the prompt waiting for a session launch.
@@ -309,11 +348,25 @@ impl DispatchStore {
         workspace_id: WorkspaceId,
         session_id: Option<SessionId>,
     ) -> Result<Option<QueuedPrompt>> {
-        Ok(self
-            .load_registry()?
+        if let Some(prompt) = self
+            .load_workspace_registry()?
             .prompts
             .into_iter()
-            .find(|item| item.workspace_id == Some(workspace_id) && item.session_id == session_id))
+            .find(|item| item.workspace_id == workspace_id && item.session_id == session_id)
+        {
+            return Ok(Some(prompt.into_legacy_shape()));
+        }
+        // Session IDs come from the exact workspace lifecycle and therefore
+        // prove which workspace owns a legacy session-scoped prompt. A legacy
+        // root slot (`None`) is ambiguous and is deliberately not delivered.
+        if session_id.is_some() {
+            return Ok(self
+                .load_registry()?
+                .prompts
+                .into_iter()
+                .find(|item| item.session_id == session_id));
+        }
+        Ok(None)
     }
 
     /// Removes a prompt only after its matching Agent launch succeeded.
@@ -326,15 +379,49 @@ impl DispatchStore {
         workspace_id: WorkspaceId,
         session_id: Option<SessionId>,
     ) -> Result<Option<QueuedPrompt>> {
-        self.mutate_registry(|registry| {
-            registry
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        if let Some(index) = workspace_registry
+            .prompts
+            .iter()
+            .position(|item| item.workspace_id == workspace_id && item.session_id == session_id)
+        {
+            let prompt = workspace_registry.prompts.remove(index);
+            // Remove a legacy predecessor's same-session slot first. If either
+            // write fails, the new scoped prompt remains available for an
+            // idempotent retry instead of revealing the superseded prompt on a
+            // later launch.
+            if session_id.is_some() {
+                let mut registry = self.load_registry()?;
+                if let Some(index) = registry
+                    .prompts
+                    .iter()
+                    .position(|item| item.session_id == session_id)
+                {
+                    registry.prompts.remove(index);
+                    json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+                }
+            }
+            json_file::write_atomic(
+                &self.dir,
+                &self.workspace_registry_path(),
+                &workspace_registry,
+            )?;
+            return Ok(Some(prompt.into_legacy_shape()));
+        }
+        if session_id.is_some() {
+            let mut registry = self.load_registry()?;
+            if let Some(index) = registry
                 .prompts
                 .iter()
-                .position(|item| {
-                    item.workspace_id == Some(workspace_id) && item.session_id == session_id
-                })
-                .map(|index| registry.prompts.remove(index))
-        })
+                .position(|item| item.session_id == session_id)
+            {
+                let prompt = registry.prompts.remove(index);
+                json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+                return Ok(Some(prompt));
+            }
+        }
+        Ok(None)
     }
 
     #[must_use]
@@ -351,21 +438,32 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_agent(&self, workspace_id: WorkspaceId, agent: Agent) -> Result<Agent> {
-        self.mutate_registry(|registry| {
-            if let Some(existing) = registry
-                .agents
-                .iter_mut()
-                .find(|item| item.agent_id == agent.agent_id)
-            {
-                *existing = agent.clone();
-            } else {
-                registry.agents.push(agent.clone());
-            }
-            registry
-                .agent_workspaces
-                .insert(agent.agent_id, workspace_id);
-            agent
-        })
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        if workspace_registry
+            .agent_workspaces
+            .get(&agent.agent_id)
+            .is_some_and(|owner| *owner != workspace_id)
+        {
+            anyhow::bail!("agent workspace ownership cannot be reassigned");
+        }
+        let mut registry = self.load_registry()?;
+        if let Some(existing) = registry
+            .agents
+            .iter_mut()
+            .find(|item| item.agent_id == agent.agent_id)
+        {
+            *existing = agent.clone();
+        } else {
+            registry.agents.push(agent.clone());
+        }
+        workspace_registry
+            .agent_workspaces
+            .insert(agent.agent_id, workspace_id);
+        self.write_workspace_registry(&workspace_registry)?;
+        registry.retain_bounded();
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(agent)
     }
 
     /// Reuses the agent for this session/runtime/model tuple or creates an idle one.
@@ -380,43 +478,60 @@ impl DispatchStore {
         runtime: AgentProfileId,
         model: ModelSelector,
     ) -> Result<Agent> {
-        self.mutate_registry(|registry| {
-            let matches = |agent: &Agent| {
-                agent.session_id == session_id && agent.runtime == runtime && agent.model == model
-            };
-            let existing = registry
-                .agents
-                .iter()
-                .position(|agent| {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        let matches = |agent: &Agent| {
+            agent.session_id == session_id && agent.runtime == runtime && agent.model == model
+        };
+        let existing = registry
+            .agents
+            .iter()
+            .position(|agent| {
+                matches(agent)
+                    && workspace_registry.agent_workspaces.get(&agent.agent_id)
+                        == Some(&workspace_id)
+            })
+            .or_else(|| {
+                // A session ID was resolved through the fenced workspace
+                // lifecycle, so it proves ownership of its old Agent. Root
+                // Agents have no such proof and receive a fresh identity.
+                session_id?;
+                registry.agents.iter().position(|agent| {
                     matches(agent)
-                        && registry.agent_workspaces.get(&agent.agent_id) == Some(&workspace_id)
+                        && !workspace_registry
+                            .agent_workspaces
+                            .contains_key(&agent.agent_id)
                 })
-                .or_else(|| {
-                    registry.agents.iter().position(|agent| {
-                        matches(agent) && !registry.agent_workspaces.contains_key(&agent.agent_id)
-                    })
-                });
-            if let Some(index) = existing {
-                let agent = registry.agents[index].clone();
-                registry
-                    .agent_workspaces
-                    .insert(agent.agent_id, workspace_id);
-                return agent;
-            }
-            let agent = Agent {
-                agent_id: AgentId::new(),
-                session_id,
-                runtime,
-                model,
-                status: AgentStatus::Idle,
-                current_run: None,
-            };
-            registry.agents.push(agent.clone());
-            registry
+            });
+        if let Some(index) = existing {
+            let agent = registry.agents[index].clone();
+            workspace_registry
                 .agent_workspaces
                 .insert(agent.agent_id, workspace_id);
-            agent
-        })
+            self.write_workspace_registry(&workspace_registry)?;
+            return Ok(agent);
+        }
+        let agent = Agent {
+            agent_id: AgentId::new(),
+            session_id,
+            runtime,
+            model,
+            status: AgentStatus::Idle,
+            current_run: None,
+        };
+        registry.agents.push(agent.clone());
+        workspace_registry
+            .agent_workspaces
+            .insert(agent.agent_id, workspace_id);
+        // Publish ownership first. A crash before the legacy registry write
+        // can leave only an inert mapping to a nonexistent Agent; the
+        // inverse order could publish an unowned Agent that a later
+        // workspace might incorrectly adopt.
+        self.write_workspace_registry(&workspace_registry)?;
+        registry.retain_bounded();
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(agent)
     }
 
     /// Reads an Agent only when it belongs to `workspace_id`.
@@ -429,10 +544,11 @@ impl DispatchStore {
         workspace_id: WorkspaceId,
         agent_id: AgentId,
     ) -> Result<Option<Agent>> {
-        let registry = self.load_registry()?;
-        if registry.agent_workspaces.get(&agent_id) != Some(&workspace_id) {
+        let workspace_registry = self.load_workspace_registry()?;
+        if workspace_registry.agent_workspaces.get(&agent_id) != Some(&workspace_id) {
             return Ok(None);
         }
+        let registry = self.load_registry()?;
         Ok(registry
             .agents
             .into_iter()
@@ -445,11 +561,14 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be read.
     pub fn agents_in_workspace(&self, workspace_id: WorkspaceId) -> Result<Vec<Agent>> {
+        let workspace_registry = self.load_workspace_registry()?;
         let registry = self.load_registry()?;
         Ok(registry
             .agents
             .into_iter()
-            .filter(|agent| registry.agent_workspaces.get(&agent.agent_id) == Some(&workspace_id))
+            .filter(|agent| {
+                workspace_registry.agent_workspaces.get(&agent.agent_id) == Some(&workspace_id)
+            })
             .collect())
     }
 
@@ -740,6 +859,14 @@ impl DispatchStore {
         Ok(json_file::read(&self.registry_path())?.unwrap_or_default())
     }
 
+    fn load_workspace_registry(&self) -> Result<WorkspaceRegistry> {
+        Ok(json_file::read(&self.workspace_registry_path())?.unwrap_or_default())
+    }
+
+    fn write_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
+        json_file::write_atomic(&self.dir, &self.workspace_registry_path(), registry)
+    }
+
     fn read_inbox(path: &Path) -> Result<Vec<InboxMessage>> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -1017,6 +1144,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_session_prompt_is_delivered_but_ambiguous_root_prompt_is_quarantined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut legacy = Registry::default();
+        legacy.prompts.push(QueuedPrompt {
+            session_id: Some(session),
+            prompt: "session work".into(),
+            queued_at: now(),
+        });
+        legacy.prompts.push(QueuedPrompt {
+            session_id: None,
+            prompt: "unknown root work".into(),
+            queued_at: now(),
+        });
+        json_file::write_atomic(tmp.path(), &store.registry_path(), &legacy).unwrap();
+
+        assert_eq!(
+            store
+                .queued_prompt(workspace, Some(session))
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "session work"
+        );
+        assert_eq!(
+            store
+                .consume_prompt(workspace, Some(session))
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "session work"
+        );
+        assert!(store.queued_prompt(workspace, None).unwrap().is_none());
+        assert_eq!(store.load_registry().unwrap().prompts.len(), 1);
+    }
+
+    #[test]
     fn admission_reservation_is_atomic_secret_free_and_reconciles_incomplete_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -1245,11 +1411,101 @@ mod tests {
     }
 
     #[test]
+    fn legacy_root_agent_is_not_claimed_but_session_ownership_can_be_proved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let runtime = AgentProfileId::new("codex").unwrap();
+        let model = ModelSelector::new("gpt-5").unwrap();
+        let legacy_root = Agent {
+            agent_id: AgentId::new(),
+            session_id: None,
+            runtime: runtime.clone(),
+            model: model.clone(),
+            status: AgentStatus::Exited,
+            current_run: None,
+        };
+        let legacy_session = Agent {
+            agent_id: AgentId::new(),
+            session_id: Some(session),
+            ..legacy_root.clone()
+        };
+        let legacy = Registry {
+            agents: vec![legacy_root.clone(), legacy_session.clone()],
+            ..Registry::default()
+        };
+        json_file::write_atomic(tmp.path(), &store.registry_path(), &legacy).unwrap();
+
+        let root = store
+            .upsert_agent_by_runtime_model(workspace, None, runtime.clone(), model.clone())
+            .unwrap();
+        assert_ne!(root.agent_id, legacy_root.agent_id);
+        assert!(
+            store
+                .agent_in_workspace(workspace, legacy_root.agent_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .upsert_agent_by_runtime_model(workspace, Some(session), runtime, model)
+                .unwrap()
+                .agent_id,
+            legacy_session.agent_id
+        );
+    }
+
+    #[test]
+    fn legacy_whole_snapshot_writes_cannot_erase_workspace_sidecar_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let runtime = AgentProfileId::new("codex").unwrap();
+        let model = ModelSelector::new("gpt-5").unwrap();
+        let agent = store
+            .upsert_agent_by_runtime_model(workspace, None, runtime, model)
+            .unwrap();
+        store
+            .queue_prompt(workspace, None, "after rollover".into(), now())
+            .unwrap();
+
+        let legacy_document = fs::read_to_string(store.registry_path()).unwrap();
+        assert!(!legacy_document.contains("agent_workspaces"));
+        assert!(!legacy_document.contains("workspace_id"));
+        // `transition_agent` rewrites the complete legacy-shaped document, as
+        // a draining predecessor does when one of its Agents exits.
+        store
+            .transition_agent(agent.agent_id, AgentStatus::Exited, None)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .agent_in_workspace(workspace, agent.agent_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentStatus::Exited
+        );
+        assert_eq!(
+            store
+                .queued_prompt(workspace, None)
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "after rollover"
+        );
+    }
+
+    #[test]
     fn malformed_registry_is_reported() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
         fs::write(store.registry_path(), "broken").unwrap();
         assert!(store.agents().is_err());
+        fs::remove_file(store.registry_path()).unwrap();
+        fs::write(store.workspace_registry_path(), "broken").unwrap();
+        assert!(store.agents_in_workspace(WorkspaceId::new()).is_err());
     }
     /// Every registry mutation replaces the whole document, so a history that is
     /// never dropped makes each dispatch cost more than the last — O(N²) over

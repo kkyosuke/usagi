@@ -602,12 +602,13 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `runtime-migration.json` | durable atomic JSON | legacy store から shard への一方向 migration の記録。schema、移行した generation、adopt 件数、証明不能だった件数を持つ（[legacy record の adoption](#legacy-record-の-adoption)） |
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
-| `dispatch.json` | durable atomic JSON | dispatchable agent、workspace ownership、workspace/session ごとの prompt queue、dispatch run、caller↔worker binding のレジストリ。run ID は既存の durable `OperationId` を使う |
+| `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
+| `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership と workspace/session ごとの prompt queue。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
 
 #### durable store の retention
 
-`dispatch.json`・inbox・`user-decisions.json` は **書き込みのたびに文書全体を read-modify-write** する。上限が無ければ
+`dispatch.json`・`dispatch-workspaces.json`・inbox・`user-decisions.json` は **書き込みのたびに文書全体を read-modify-write** する。上限が無ければ
 N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続ける。したがって各 store は
 書き込み経路そのものに上限を持ち、maintenance tick の実行有無に依存しない。
 
@@ -1308,6 +1309,12 @@ caller credential を受け取る。claim は kernel 由来の peer PID / 親 PI
 この事前許可も spawn 時 argv に限り、durable snapshot や IPC response には残らない。
 
 [`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late、duplicate、wrong-generation は state や inbox を変更しない。
+
+Agent の workspace ownership と新しい prompt queue は `dispatch-workspaces.json` に保存する。`dispatch.json` の schema を
+変えないため、planned rollover 中に旧 draining generation が Agent exit を whole-snapshot 保存しても ownership を消さない。
+sidecar を持たない legacy Agent は、fence 済み workspace lifecycle が `session_id` を解決した session Agent だけをその
+workspace へ引き継ぐ。workspace を証明できない legacy root Agent は再利用せず新しい identity を発行する。legacy prompt
+も session scope だけを同じ証明で次回 launch へ配送・consume し、root の legacy slot は別 workspace へ推測配送しない。
 
 新規 worker の runtime/model は MCP schema snapshot を信頼せず、spawn の直前に resolved managed-session worktree の current `.usagi/config.toml` allowlist と current executable locator で再検証する。allowlist 外・不完全な runtime/model は safe `invalid_argument`、CLI 不在は safe `unavailable` となり、reservation や spawn を行わない。既存 `agent.id` はこの再選択を通らず、保存済み agent の session ownership と lifecycle scope をそのまま用いる。allowlist、executable、または MCP wire / durable registry に path、argv、environment、credential、raw CLI output、provider model list は保存しない。
 
@@ -2081,14 +2088,16 @@ producer operation を持たない legacy record は placeholder id を共有す
 ### 他の shared writer
 
 shard を分けても、draining process が触り得る他の whole-snapshot document に lost update が移るなら意味が無い。
-対象は次のとおりで、append-only writer は cross-process lock で足りるため fence を要さない。
+対象は次のとおりで、append-only writer と current state を lock 後に読む schema-stable reducer は cross-process lock で
+足りるため fence を要さない。
 
 | shared writer | write mode | draining owner |
 |---|---|---|
 | `pr-inventory.json` | whole snapshot | 書かない。document へ到達する前に fence が拒否し、active generation の refresh が自分の session を再計算する |
 | supervisor state | whole snapshot | 拒否（active generation の tick が再計算する） |
 | `sessions.json` | whole snapshot | 拒否（lifecycle admission は既に閉じている） |
-| `dispatch.json` | append only（cross-process lock） | 許可 |
+| `dispatch.json` | cross-process lock 下の reducer（handoff 間で schema 不変） | 許可 |
+| `dispatch-workspaces.json` | whole snapshot | 書かない。ownership 発行と prompt queue は active の control / spawn 経路だけが更新する |
 | `inbox/*.jsonl` | append only（cross-process lock） | 許可 |
 
 standby と retired はいずれの document も書かない。read はどの role にも開いている。観測は lost update を
