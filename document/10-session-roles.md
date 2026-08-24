@@ -125,8 +125,9 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 | `- local_llm_ask:` | Global `local_llm.enabled` |
 
 `issue_enabled` / `memory_enabled` の effective 値は、Global 設定に **daemon に登録された workspace root** の
-`.usagi/settings.json` を重ねて解決する。`usagi mcp` が tool registry を組む解決と同一で、これが同一である必要がある:
-prompt が述べる系統と `tools/list` が登録する系統は同じ設定から出る。session worktree は `.usagi/settings.json` を
+`.usagi/settings.json` を重ねて解決する。設定を tool 系統へ写す規則は `usagi-core` の `domain::agent::mcp_tools` に
+1 つだけあり、`usagi mcp` が registry を組むときも同じ関数を通る。prompt が述べる系統と `tools/list` が登録する
+系統が同じ設定から出ることは、この共有によって構造的に保証する。session worktree は `.usagi/settings.json` を
 持たない（git 追跡外）ため、worktree を権威にすると workspace の上書きが消える。`local_llm` は Global だけが権威である
 （正本は [7. MCP サーバ#daemon Agent への local LLM 配線](07-mcp.md#daemon-agent-への-local-llm-配線)）。
 

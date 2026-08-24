@@ -636,7 +636,9 @@ negotiation capability、terminal authorization、lifecycle capability とは別
 `program` と `argv` を持つ。environment は名前の allowlist だけを durable に扱い、値・secret・
 adapter private config は含めない。
 
-system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。`LaunchScope.session_id`
+injected MCP wiring が公開する tool 系統は `usagi-core` の `domain::agent::mcp_tools` が持つ 1 つの規則で
+effective 設定から決まり、MCP server の registry と launch prompt の両方がそれを読む（読む設定を選ぶのは
+呼び出し側の責務である）。system prompt の本文と合成規則は `usagi-core` の `domain::agent::prompt` が正本である。`LaunchScope.session_id`
 が無い launch は main チェックアウトの root coordinator 用、ある launch は `usagi/<name>` session worktree 用の
 境界本文を使う。fragment の種類・合成順・省略条件は
 [10. session role#prompt 合成](10-session-roles.md#prompt-合成) が正本で、ここでは重複させない。

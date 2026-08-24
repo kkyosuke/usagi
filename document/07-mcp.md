@@ -142,9 +142,14 @@ session / agent など無効化対象ではない MCP tool は引き続き公開
 [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)を正本とする。Global または Workspace の
 設定が読み取れない場合は、既定の有効値へ黙って戻さず MCP serve loop の開始前に失敗する。
 
-daemon が Agent を起動するときは、この同じ 2 層を同じ規則で解決して system prompt の `<tools>` fragment を組む。
-registry に載らない系統を prompt が述べることはなく、設定が読めなければ launch も同じく失敗する
-（正本は [10. session role#`<tools>` fragment](10-session-roles.md#tools-fragment)）。
+設定を tool 系統へ写す規則は `usagi-core` の `domain::agent::mcp_tools` に 1 つだけ置く。MCP server は
+その結果から registry を組み、daemon が Agent を起動するときは同じ結果から system prompt の `<tools>` fragment を
+組む。したがって registry に載らない系統を prompt が述べることはなく、設定が読めなければ launch も
+serve loop と同じく失敗する（prompt 側の正本は
+[10. session role#`<tools>` fragment](10-session-roles.md#tools-fragment)）。
+
+規則を共有する一方、**どの設定を読むかは呼び出し側が決める**。MCP server は自身の cwd か daemon から渡された
+trusted root、daemon は登録済み workspace root を権威にする。この差は意図的なので規則側には畳み込まない。
 
 | tool | 実挙動 |
 |---|---|

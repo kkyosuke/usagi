@@ -508,3 +508,18 @@ fn full_settings_convert_to_workspace_owned_values_only() {
     assert!(format!("{local:?}").contains("Claude"));
     assert_eq!(local.clone(), local);
 }
+
+#[test]
+fn the_wired_local_llm_model_follows_the_enabled_flag() {
+    // One accessor, so "the delegation server is wired" and "a model was
+    // chosen" cannot be answered differently by two callers.
+    let mut settings = Settings::default();
+    assert!(!settings.local_llm.enabled);
+    assert_eq!(settings.wired_local_llm_model(), None);
+
+    settings.local_llm.enabled = true;
+    assert_eq!(
+        settings.wired_local_llm_model(),
+        Some(DEFAULT_LOCAL_LLM_MODEL)
+    );
+}
