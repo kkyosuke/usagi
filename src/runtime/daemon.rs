@@ -5254,9 +5254,6 @@ fn dispatch_agent_tool(
                 } else {
                     InboxKind::Failed
                 };
-                let reported_pr = (kind == InboxKind::Completed)
-                    .then(|| input.result.as_ref()?.pr.clone())
-                    .flatten();
                 let summary = input
                     .error
                     .filter(|_| kind == InboxKind::Failed)
@@ -5271,12 +5268,14 @@ fn dispatch_agent_tool(
                     input.result,
                 )?;
                 drop(runtime);
-                project_reported_pr(
-                    pr_inventory,
-                    delivery.accepted,
-                    delivery.worker.session_id,
-                    reported_pr.as_deref(),
-                );
+                let reported_pr = delivery
+                    .committed
+                    .as_ref()
+                    .filter(|message| message.kind == InboxKind::Completed)
+                    .and_then(|message| message.result.as_ref())
+                    .and_then(|result| result.pr.as_deref());
+                project_reported_pr(pr_inventory, delivery.worker.session_id, reported_pr)
+                    .inspect_err(|_| ErrorLog::record("reported PR projection failed"))?;
                 Ok((
                     ResponseOutcome::Ok,
                     serde_json::json!({"delivered_to": delivery.delivered_to}),
@@ -5319,21 +5318,20 @@ fn dispatch_agent_tool(
 
 fn project_reported_pr(
     inventory: &SharedPrInventory,
-    accepted: bool,
     session: Option<SessionId>,
     candidate: Option<&str>,
-) {
-    let (true, Some(session), Some(candidate)) = (accepted, session, candidate) else {
-        return;
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    let (Some(session), Some(candidate)) = (session, candidate) else {
+        return Ok(());
     };
-    match inventory.lock() {
-        Ok(mut inventory) => {
-            if inventory.observe_reported(session, candidate).is_err() {
-                ErrorLog::record("reported PR projection failed");
-            }
-        }
-        Err(_) => ErrorLog::record("reported PR inventory lock failed"),
-    }
+    inventory
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR inventory is unavailable"))?
+        .observe_reported(session, candidate)
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR projection is unavailable"))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -14991,7 +14989,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_structured_pr_report_enters_the_worker_session_inventory_once() {
+    fn structured_pr_report_enters_the_worker_session_inventory_idempotently() {
         let directory = tempfile::tempdir().unwrap();
         let session = SessionId::new();
         let inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
@@ -14999,19 +14997,8 @@ mod tests {
             GenerationRole::Active,
         ))));
 
-        project_reported_pr(
-            &inventory,
-            false,
-            Some(session),
-            Some("https://github.com/o/r/pull/1"),
-        );
-        project_reported_pr(
-            &inventory,
-            true,
-            None,
-            Some("https://github.com/o/r/pull/1"),
-        );
-        project_reported_pr(&inventory, true, Some(session), Some("#1"));
+        project_reported_pr(&inventory, Some(session), Some("#1")).unwrap();
+        project_reported_pr(&inventory, None, Some("https://github.com/o/r/pull/1")).unwrap();
         assert!(
             inventory
                 .lock()
@@ -15024,16 +15011,16 @@ mod tests {
 
         project_reported_pr(
             &inventory,
-            true,
             Some(session),
             Some("https://github.com/o/r/pull/1"),
-        );
+        )
+        .unwrap();
         project_reported_pr(
             &inventory,
-            false,
             Some(session),
-            Some("https://github.com/o/r/pull/2"),
-        );
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap();
 
         let snapshot = inventory.lock().unwrap().snapshot(session).unwrap();
         assert_eq!(snapshot.entries.len(), 1);
@@ -15042,6 +15029,48 @@ mod tests {
             "https://github.com/o/r/pull/1"
         );
         assert!(snapshot.entries[0].auto_open);
+    }
+
+    #[test]
+    fn structured_pr_projection_can_retry_after_a_fenced_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let refused = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Draining,
+        ))));
+
+        let error = project_reported_pr(
+            &refused,
+            Some(session),
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            usagi_core::infrastructure::ipc::ErrorCode::Unavailable
+        );
+
+        let active = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+            PrInventoryStore::new(directory.path()),
+            GenerationRole::Active,
+        ))));
+        project_reported_pr(
+            &active,
+            Some(session),
+            Some("https://github.com/o/r/pull/1"),
+        )
+        .unwrap();
+        assert_eq!(
+            active
+                .lock()
+                .unwrap()
+                .snapshot(session)
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
     }
 
     #[test]

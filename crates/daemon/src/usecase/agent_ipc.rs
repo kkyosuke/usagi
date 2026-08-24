@@ -133,13 +133,14 @@ pub struct AgentAdmission {
 /// Outcome of an authenticated worker report.
 ///
 /// `accepted` distinguishes the first fenced delivery from an idempotent retry.
-/// Projection consumers may react only to the former, so a duplicate report
-/// cannot introduce a different artifact after the inbox result was committed.
+/// `committed` is always read back from the authoritative inbox, so projection
+/// retries cannot introduce a different artifact from a duplicate request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportDelivery {
     pub delivered_to: CallerRef,
     pub worker: WorkerRef,
     pub accepted: bool,
+    pub committed: Option<InboxMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2345,10 +2346,17 @@ impl AgentRuntime {
         let delivered_to = binding.caller.clone();
         let worker = binding.worker;
         let accepted = self.report(&caller.runtime, &fence, kind, summary, result)?;
+        let committed = self
+            .dispatch
+            .inbox(&delivered_to)
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .find(|message| message.run_id == caller.operation);
         Ok(ReportDelivery {
             delivered_to,
             worker,
             accepted,
+            committed,
         })
     }
 
@@ -6371,6 +6379,7 @@ mod tests {
             ErrorCode::OwnershipUnknown
         );
         let result = usagi_core::domain::agent::StructuredResult {
+            pr: Some("https://github.com/o/r/pull/1".into()),
             commits: vec!["abc".into()],
             ..Default::default()
         };
@@ -6386,16 +6395,35 @@ mod tests {
         assert_eq!(delivery.delivered_to, caller);
         assert_eq!(delivery.worker.session_id, Some(session));
         assert!(delivery.accepted);
+        assert_eq!(
+            delivery
+                .committed
+                .as_ref()
+                .and_then(|message| message.result.as_ref()),
+            Some(&result)
+        );
+        let replacement = usagi_core::domain::agent::StructuredResult {
+            pr: Some("https://github.com/o/r/pull/2".into()),
+            ..Default::default()
+        };
         let duplicate = runtime
             .report_from_mcp(
                 &credential,
                 None,
                 InboxKind::Completed,
                 "duplicate".into(),
-                None,
+                Some(replacement),
             )
             .unwrap();
         assert!(!duplicate.accepted);
+        assert_eq!(
+            duplicate
+                .committed
+                .as_ref()
+                .and_then(|message| message.result.as_ref()),
+            Some(&result),
+            "a retry must expose only the first committed artifact"
+        );
         runtime.exit(&admission.terminal, 0).unwrap();
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
