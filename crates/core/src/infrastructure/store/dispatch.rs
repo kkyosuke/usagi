@@ -676,16 +676,26 @@ impl DispatchStore {
     }
 }
 
+/// Bound one caller's inbox with the shipped limits.
+fn retain_bounded_inbox(messages: &mut Vec<InboxMessage>) {
+    retain_inbox_within(messages, INBOX_READ_RETENTION, INBOX_HARD_LIMIT);
+}
+
 /// Bound one caller's inbox, dropping read messages before unread ones.
 ///
 /// An unread message is a report its caller has not seen, so it outranks every
 /// read one however old. "Never drop unread" is not by itself a bound, though: a
-/// caller that never reads would grow its inbox forever. Past
-/// [`INBOX_HARD_LIMIT`] the oldest unread messages go too, and the drop is
-/// recorded so the loss is inspectable rather than silent.
-fn retain_bounded_inbox(messages: &mut Vec<InboxMessage>) {
+/// caller that never reads would grow its inbox forever. Past `hard_limit` the
+/// oldest unread messages go too, and the drop is recorded so the loss is
+/// inspectable rather than silent.
+///
+/// The limits are parameters so the shipped ones can stay at values a real
+/// caller never reaches while the policy itself is still exercised directly.
+/// Driving `hard_limit` through the store would mean appending thousands of
+/// messages, each of which rewrites the whole file.
+fn retain_inbox_within(messages: &mut Vec<InboxMessage>, read_retention: usize, hard_limit: usize) {
     let read_count = messages.iter().filter(|message| message.read).count();
-    let mut over_read = read_count.saturating_sub(INBOX_READ_RETENTION);
+    let mut over_read = read_count.saturating_sub(read_retention);
     if over_read > 0 {
         messages.retain(|message| {
             if over_read > 0 && message.read {
@@ -695,14 +705,12 @@ fn retain_bounded_inbox(messages: &mut Vec<InboxMessage>) {
             true
         });
     }
-    let Some(over_hard) = messages.len().checked_sub(INBOX_HARD_LIMIT) else {
-        return;
-    };
+    let over_hard = messages.len().saturating_sub(hard_limit);
     if over_hard == 0 {
         return;
     }
     crate::infrastructure::error_log::ErrorLog::record(&format!(
-        "dispatch inbox reached its {INBOX_HARD_LIMIT} message ceiling; \
+        "dispatch inbox reached its {hard_limit} message ceiling; \
          dropping the {over_hard} oldest unread message(s)"
     ));
     messages.drain(..over_hard);
@@ -1262,5 +1270,52 @@ mod tests {
             "an unread report was dropped to make room for read ones"
         );
         assert!(inbox.len() <= INBOX_HARD_LIMIT);
+    }
+
+    /// "Never drop unread" is not a bound on its own: a caller that never reads
+    /// would grow its inbox forever. The ceiling is the backstop, and what it
+    /// drops is recorded rather than lost silently.
+    #[test]
+    fn the_inbox_ceiling_drops_the_oldest_unread_only_after_every_read_one() {
+        let (session, agent_id, _) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let mut messages: Vec<InboxMessage> = (0..10)
+            .map(|index| {
+                let mut item = message(OperationId::new(), worker.clone());
+                item.read = index % 2 == 0;
+                item.summary = format!("m{index}");
+                item
+            })
+            .collect();
+        let oldest_unread = messages
+            .iter()
+            .find(|item| !item.read)
+            .map(|item| item.summary.clone())
+            .unwrap();
+
+        // Exactly at the ceiling nothing is dropped: the bound is "no more
+        // than", not "fewer than".
+        let mut at_ceiling = messages.clone();
+        let ceiling = at_ceiling.len();
+        retain_inbox_within(&mut at_ceiling, 100, ceiling);
+        assert_eq!(at_ceiling.len(), 10);
+
+        // Read messages go first, and only what is still over the ceiling comes
+        // out of the unread ones.
+        retain_inbox_within(&mut messages, 2, 4);
+        assert_eq!(messages.len(), 4);
+        assert!(
+            messages.iter().filter(|item| item.read).count() <= 2,
+            "read messages were kept past their retention"
+        );
+        assert!(
+            !messages.iter().any(|item| item.summary == oldest_unread),
+            "the ceiling dropped a newer unread message before the oldest"
+        );
+        // What survives is the newest of what was there.
+        assert_eq!(messages.last().unwrap().summary, "m9");
     }
 }

@@ -725,4 +725,52 @@ mod tests {
         assert_eq!(store.prune_finished_runs().unwrap(), 0);
         assert_eq!(store.runs().unwrap().len(), 3);
     }
+
+    /// A prune that cannot delete must say so rather than report a removal it
+    /// did not make: the next start would otherwise never retry it.
+    #[test]
+    fn a_prune_that_cannot_remove_a_file_reports_the_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        // Started live so `initialize` prunes nothing, then finished in place.
+        // Creating them finished instead would let each `initialize` prune the
+        // previous one and the store would never exceed its bound.
+        let mut runs = Vec::new();
+        for index in 0..(RUN_RETENTION + 5) {
+            let run = SupervisorRun::new(
+                "caller".into(),
+                "task".into(),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(i64::try_from(index).unwrap()),
+            );
+            store.initialize(&run).unwrap();
+            runs.push(run);
+        }
+        for mut run in runs {
+            run.state = SupervisorRunState::Succeeded;
+            run.terminal_at = Some(run.created_at);
+            json_file::write_atomic(
+                &store.dir,
+                &store.snapshot_path(run.supervisor_run_id),
+                &run,
+            )
+            .unwrap();
+        }
+
+        // A read-only parent directory is what makes `remove_file` fail while
+        // the entries themselves are still present and listable.
+        let mode = fs::metadata(&store.dir).unwrap().permissions().mode();
+        fs::set_permissions(&store.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = store.prune_finished_runs();
+        fs::set_permissions(&store.dir, fs::Permissions::from_mode(mode)).unwrap();
+
+        let error = refused.expect_err("a prune that could delete nothing reported success");
+        assert!(
+            format!("{error:#}").contains("failed to remove"),
+            "{error:#}"
+        );
+    }
 }

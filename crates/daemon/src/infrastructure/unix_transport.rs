@@ -4003,6 +4003,29 @@ mod tests {
             refusal.contains("neither a directory nor a socket"),
             "{refusal}"
         );
+
+        // A symlink is reported as such rather than as whatever it points at:
+        // following it is exactly what this check refuses to do.
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&group_readable, &link).unwrap();
+        let refusal = verify_private(&link, DIR_MODE, true)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("it is a symlink"), "{refusal}");
+
+        // A real socket with an extra hard link is a socket, and the link count
+        // is what makes it unsafe — so the count is what the message reports.
+        let endpoint = temp.path().join("live.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+        verify_private(&endpoint, SOCKET_MODE, false).expect("a private socket is accepted");
+        let alias = temp.path().join("alias.sock");
+        fs::hard_link(&endpoint, &alias).unwrap();
+        let refusal = verify_private(&endpoint, SOCKET_MODE, false)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("a socket with 2 links"), "{refusal}");
+        drop(listener);
     }
 
     #[test]

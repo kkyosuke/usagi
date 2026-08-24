@@ -9722,7 +9722,7 @@ const BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 /// The wait is only charged while no daemon is reachable. A running daemon means
 /// the broker's job — being there when that daemon dies — is still pending, so
 /// an idle hour next to a live daemon is not idleness.
-const BROKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const BROKER_IDLE_TIMEOUT: Duration = Duration::from_hours(1);
 /// How often the idle watch re-checks. Coarse on purpose: it costs a connect
 /// attempt against the daemon endpoint each time.
 const BROKER_IDLE_POLL: Duration = Duration::from_secs(60);
@@ -12681,6 +12681,90 @@ mod tests {
         );
     }
 
+    /// A CLI or MCP client is as entitled to open a workspace as the TUI is.
+    /// Refusing here is what forced an operator to open every new repository in
+    /// the TUI once before their CLI would work in it.
+    #[test]
+    fn a_bound_client_adopts_the_repository_it_is_running_inside() {
+        use usagi_core::infrastructure::ipc::WorkspaceResolver;
+
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let data = temporary.path().join("data");
+        let held = temporary.path().join("held");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&held).unwrap();
+        let daemon_dir = data.join("daemon");
+        let held_root = paths::canonical_workspace_root(&held).unwrap();
+        let tenants = Arc::new(TenantRegistry::new(
+            daemon_dir,
+            FileWorkspaceFences {
+                pid: std::process::id(),
+            },
+            SystemTenantOpener {
+                data_home: data.clone(),
+                generation: usagi_core::domain::id::DaemonGeneration::new(),
+            },
+            DEFAULT_TENANT_LIMIT,
+        ));
+        tenants.adopt_initial(&held_root).unwrap();
+        let resolver = TenantWorkspaces {
+            tenants: Arc::clone(&tenants),
+            initial: held_root.clone(),
+        };
+        let wire = |root: &Path| paths::wire_workspace_root(root);
+
+        // A bound client in a directory with no repository above it is refused:
+        // a usagi session is a git worktree, so such a path names no workspace.
+        // Nothing is adopted for it.
+        let outside = tempfile::tempdir_in("/tmp").unwrap();
+        let refusal = resolver
+            .resolve(Some(&ClientWorkspace::Bound {
+                root: wire(&paths::canonical_workspace_root(outside.path()).unwrap()),
+            }))
+            .unwrap_err();
+        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
+            &refusal
+        ));
+        assert!(
+            refusal.message.contains("not inside a git repository"),
+            "{refusal:?}"
+        );
+        // The refusal names what this daemon really holds. Claiming one root
+        // while holding two, or naming the very root that was just refused, is
+        // what made this message unreadable.
+        assert!(refusal.message.contains(&wire(&held_root)), "{refusal:?}");
+        assert_eq!(tenants.adopted().len(), 1);
+
+        // A CLI or MCP client is as entitled to open a workspace as the TUI is.
+        // Running inside a repository this daemon has never seen adopts that
+        // repository — from its root, from a subdirectory, and from a session
+        // worktree, all of which resolve to the repository root itself.
+        let third = temporary.path().join("third");
+        std::fs::create_dir_all(third.join(".git")).unwrap();
+        std::fs::create_dir_all(third.join("crates/core")).unwrap();
+        let third_root = paths::canonical_workspace_root(&third).unwrap();
+        for candidate in [
+            third_root.clone(),
+            third_root.join("crates/core"),
+            third_root.join(".usagi/sessions/worker"),
+        ] {
+            assert_eq!(
+                resolver
+                    .resolve(Some(&ClientWorkspace::Bound {
+                        root: wire(&candidate),
+                    }))
+                    .unwrap(),
+                wire(&third_root),
+                "{candidate:?} did not resolve to its repository root"
+            );
+        }
+        assert_eq!(
+            tenants.adopted().len(),
+            2,
+            "the three spellings adopted more than the one repository they name"
+        );
+    }
+
     #[test]
     fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
         use usagi_core::infrastructure::ipc::WorkspaceResolver;
@@ -12751,54 +12835,6 @@ mod tests {
             assert_eq!(resolver.resolve(Some(&bound)).unwrap(), wire(&second_root));
         }
 
-        // A bound client in a directory with no repository above it is refused:
-        // a usagi session is a git worktree, so such a path names no workspace.
-        // Nothing is adopted for it.
-        let outside = tempfile::tempdir_in("/tmp").unwrap();
-        let refusal = resolver
-            .resolve(Some(&ClientWorkspace::Bound {
-                root: wire(&paths::canonical_workspace_root(outside.path()).unwrap()),
-            }))
-            .unwrap_err();
-        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
-            &refusal
-        ));
-        assert!(
-            refusal.message.contains("not inside a git repository"),
-            "{refusal:?}"
-        );
-        // The refusal names what this daemon really holds. Claiming one root
-        // while holding two, or naming the very root that was just refused, is
-        // what made this message unreadable.
-        assert!(refusal.message.contains(&wire(&first_root)), "{refusal:?}");
-        assert!(refusal.message.contains(&wire(&second_root)), "{refusal:?}");
-        assert_eq!(tenants.adopted().len(), 2);
-
-        // A CLI or MCP client is as entitled to open a workspace as the TUI is.
-        // Running inside a repository this daemon has never seen adopts that
-        // repository — from its root, from a subdirectory, and from a session
-        // worktree, all of which resolve to the repository root itself.
-        let third = temporary.path().join("third");
-        std::fs::create_dir_all(third.join(".git")).unwrap();
-        std::fs::create_dir_all(third.join("crates/core")).unwrap();
-        let third_root = paths::canonical_workspace_root(&third).unwrap();
-        for candidate in [
-            third_root.clone(),
-            third_root.join("crates/core"),
-            third_root.join(".usagi/sessions/worker"),
-        ] {
-            assert_eq!(
-                resolver
-                    .resolve(Some(&ClientWorkspace::Bound {
-                        root: wire(&candidate),
-                    }))
-                    .unwrap(),
-                wire(&third_root),
-                "{candidate:?} did not resolve to its repository root"
-            );
-        }
-        assert_eq!(tenants.adopted().len(), 3);
-
         // A selected root that does not resolve on this machine is refused, and
         // nothing is adopted for it.
         let refusal = resolver
@@ -12809,7 +12845,7 @@ mod tests {
         assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
             &refusal
         ));
-        assert_eq!(tenants.adopted().len(), 3);
+        assert_eq!(tenants.adopted().len(), 2);
 
         // The connection binds the workspace its handshake settled on.
         for (declared, expected) in [
@@ -16283,7 +16319,7 @@ instructions = "{instructions}"
         assert!(broker_may_retire(Duration::from_secs(60), timeout, false));
         assert!(broker_may_retire(Duration::from_secs(600), timeout, false));
         assert!(!broker_may_retire(Duration::from_secs(59), timeout, false));
-        for idle in [Duration::from_secs(0), Duration::from_secs(86_400)] {
+        for idle in [Duration::ZERO, Duration::from_hours(24)] {
             assert!(
                 !broker_may_retire(idle, timeout, true),
                 "a live daemon must keep its broker"
