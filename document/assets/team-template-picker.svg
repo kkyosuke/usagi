@@ -45,6 +45,6 @@
     </g>
     <text x="108" y="360" fill="#82788f" font-size="15">  [ Use no template ]</text>
     <line x1="76" y1="382" x2="860" y2="382" stroke="#51475f" stroke-width="1"/>
-    <text x="468" y="404" text-anchor="middle" fill="#82788f" font-size="14">←→/Tab: select   Enter: apply   Esc: cancel</text>
+    <text x="468" y="404" text-anchor="middle" fill="#82788f" font-size="14">←→: card   ↑↓: template/none   Enter: apply   Esc: cancel</text>
   </g>
 </svg>

@@ -75,7 +75,7 @@ Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme�
 新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Team・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
-`←→` / `Tab` で階層型・フラット・パイプライン型と独立した `Use no template` actionを選ぶ。`Enter` は選択をdraftへ適用し、
+`←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
 `Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
 
 ![Team template picker](assets/team-template-picker.svg)

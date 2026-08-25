@@ -24,14 +24,7 @@ const ENVIRONMENT_MAX_ROWS: usize = 10;
 const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
 const TEAM_PICKER_INNER_WIDTH: usize = 76;
 const TEAM_CARD_INNER_WIDTH: usize = 20;
-const TEAM_PICKER_OPTIONS: [TeamTemplate; 4] = [
-    TeamTemplate::Hierarchical,
-    TeamTemplate::Flat,
-    TeamTemplate::Pipeline,
-    TeamTemplate::None,
-];
-
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TeamCard {
     Hierarchical,
     Flat,
@@ -46,6 +39,51 @@ impl TeamCard {
             Self::Hierarchical => TeamTemplate::Hierarchical,
             Self::Flat => TeamTemplate::Flat,
             Self::Pipeline => TeamTemplate::Pipeline,
+        }
+    }
+
+    const fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Hierarchical, true) | (Self::Flat, false) => Self::Flat,
+            (Self::Flat, true) | (Self::Pipeline, false) => Self::Pipeline,
+            (Self::Pipeline, true) | (Self::Hierarchical, false) => Self::Hierarchical,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TeamPicker {
+    card: TeamCard,
+    none_focused: bool,
+}
+
+impl TeamPicker {
+    const fn new(template: TeamTemplate) -> Self {
+        match template {
+            TeamTemplate::None => Self {
+                card: TeamCard::Hierarchical,
+                none_focused: true,
+            },
+            TeamTemplate::Hierarchical => Self {
+                card: TeamCard::Hierarchical,
+                none_focused: false,
+            },
+            TeamTemplate::Flat => Self {
+                card: TeamCard::Flat,
+                none_focused: false,
+            },
+            TeamTemplate::Pipeline => Self {
+                card: TeamCard::Pipeline,
+                none_focused: false,
+            },
+        }
+    }
+
+    const fn selected(self) -> TeamTemplate {
+        if self.none_focused {
+            TeamTemplate::None
+        } else {
+            self.card.template()
         }
     }
 }
@@ -124,7 +162,7 @@ pub struct Config {
     save_animation_frame: usize,
     environment_editor: Option<EnvironmentSourceEditor>,
     environment_error: Option<String>,
-    team_picker: Option<TeamTemplate>,
+    team_picker: Option<TeamPicker>,
 }
 
 impl Config {
@@ -342,33 +380,32 @@ impl Config {
         if self.field != Field::TeamTemplate {
             return false;
         }
-        self.team_picker = Some(self.current().draft.team_template);
+        self.team_picker = Some(TeamPicker::new(self.current().draft.team_template));
         self.notice = None;
         true
     }
 
-    /// Move focus across the three cards and the separate no-template action.
-    pub fn cycle_team_picker(&mut self, forward: bool) {
-        let Some(selected) = self.team_picker.as_mut() else {
+    /// Move focus horizontally across the three cards.
+    pub fn cycle_team_card(&mut self, forward: bool) {
+        let Some(picker) = self.team_picker.as_mut() else {
             return;
         };
-        let index = TEAM_PICKER_OPTIONS
-            .iter()
-            .position(|candidate| candidate == selected)
-            .unwrap_or_default();
-        let next = if forward {
-            (index + 1) % TEAM_PICKER_OPTIONS.len()
-        } else {
-            (index + TEAM_PICKER_OPTIONS.len() - 1) % TEAM_PICKER_OPTIONS.len()
-        };
-        *selected = TEAM_PICKER_OPTIONS[next];
+        if !picker.none_focused {
+            picker.card = picker.card.cycle(forward);
+        }
+    }
+
+    /// Move vertically between the card row and the no-template action.
+    pub fn move_team_picker_vertical(&mut self, down: bool) {
+        if let Some(picker) = self.team_picker.as_mut() {
+            picker.none_focused = down;
+        }
     }
 
     /// Apply the focused Team choice to the Config draft and close the picker.
     pub fn apply_team_picker(&mut self) {
-        if let Some(selected) = self.team_picker.take() {
-            self.current_mut().draft.team_template = selected;
-            self.notice = None;
+        if let Some(picker) = self.team_picker.take() {
+            self.current_mut().draft.team_template = picker.selected();
         }
     }
 
@@ -638,8 +675,8 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
     });
     if let Some(editor) = config.environment_editor.as_ref() {
         render_environment_over(raw_height, raw_width, &base, config, editor)
-    } else if let Some(selected) = config.team_picker {
-        render_team_picker_over(raw_height, raw_width, &base, selected)
+    } else if let Some(picker) = config.team_picker {
+        render_team_picker_over(raw_height, raw_width, &base, picker)
     } else {
         base
     }
@@ -674,8 +711,8 @@ pub fn render_over(
     );
     if let Some(editor) = config.environment_editor.as_ref() {
         render_environment_over(raw_height, raw_width, &config_base, config, editor)
-    } else if let Some(selected) = config.team_picker {
-        render_team_picker_over(raw_height, raw_width, &config_base, selected)
+    } else if let Some(picker) = config.team_picker {
+        render_team_picker_over(raw_height, raw_width, &config_base, picker)
     } else {
         config_base
     }
@@ -685,7 +722,7 @@ fn render_team_picker_over(
     height: usize,
     width: usize,
     base: &[String],
-    selected: TeamTemplate,
+    picker: TeamPicker,
 ) -> Vec<String> {
     let inner_width = modal::modal_inner_width(width, TEAM_PICKER_INNER_WIDTH);
     let mut lines = vec![
@@ -693,7 +730,7 @@ fn render_team_picker_over(
         String::new(),
     ];
     if inner_width >= TEAM_PICKER_INNER_WIDTH {
-        let cards = TeamCard::ALL.map(|card| team_card(card, selected));
+        let cards = TeamCard::ALL.map(|card| team_card(card, picker.selected()));
         for row in 0..cards[0].len() {
             lines.push(
                 cards
@@ -707,25 +744,27 @@ fn render_team_picker_over(
         lines.extend([
             team_picker_row(
                 TeamTemplate::Hierarchical,
-                selected,
+                picker.selected(),
                 "Director → Manager → Worker",
             ),
-            team_picker_row(TeamTemplate::Flat, selected, "Director → Workers"),
+            team_picker_row(TeamTemplate::Flat, picker.selected(), "Director → Workers"),
             team_picker_row(
                 TeamTemplate::Pipeline,
-                selected,
+                picker.selected(),
                 "Planner → Implementer → Tester",
             ),
         ]);
     }
     lines.push(String::new());
-    let marker = modal::selection_marker(selected == TeamTemplate::None);
+    let marker = modal::selection_marker(picker.none_focused);
     lines.push(modal::content_line(
         &format!("{marker} [ Use no template ]"),
         inner_width,
     ));
     lines.push(String::new());
-    lines.push(modal::footer("←→/Tab: select   Enter: apply   Esc: cancel"));
+    lines.push(modal::footer(
+        "←→: card   ↑↓: template/none   Enter: apply   Esc: cancel",
+    ));
     modal::render_over(height, width, base, "Select a team", inner_width, &lines)
 }
 
@@ -800,9 +839,8 @@ fn form_rows(config: &Config) -> Vec<String> {
 
 fn save_action(config: &Config) -> String {
     if config.save_phase == SavePhase::Saving {
-        let marker = modal::selection_marker(config.field() == Field::Save);
         let caption = widgets::shimmer_text("Save", config.save_animation_frame);
-        format!("{marker}   [ {caption} ]")
+        select::action_with_styled_label(&caption, config.field() == Field::Save)
     } else {
         select::action(
             config.save_label(),
@@ -1935,7 +1973,8 @@ mod tests {
         let mut config =
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
         assert!(!config.open_team_picker());
-        config.cycle_team_picker(true);
+        config.cycle_team_card(true);
+        config.move_team_picker_vertical(true);
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
@@ -1959,8 +1998,16 @@ mod tests {
         config.apply_team_picker();
 
         assert!(config.open_team_picker());
-        config.cycle_team_picker(true);
-        config.cycle_team_picker(true);
+        config.cycle_team_card(true);
+        assert!(strip_ansi(&render(24, 80, &config).join("\n")).contains("Use no template"));
+        config.move_team_picker_vertical(false);
+        config.cycle_team_card(true);
+        config.cycle_team_card(true);
+        config.cycle_team_card(true);
+        config.cycle_team_card(false);
+        config.cycle_team_card(false);
+        config.cycle_team_card(false);
+        config.cycle_team_card(true);
         config.apply_team_picker();
         assert!(!config.is_selecting_team());
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
@@ -1968,15 +2015,19 @@ mod tests {
         assert!(config.open_team_picker());
         let selected_card = strip_ansi(&render(24, 80, &config).join("\n"));
         assert!(selected_card.contains("› Flat"));
-        config.cycle_team_picker(true);
-        config.cycle_team_picker(true);
+        config.move_team_picker_vertical(true);
+        config.cycle_team_card(true);
+        config.cycle_team_card(false);
         let none = strip_ansi(&render(24, 80, &config).join("\n"));
         assert!(none.contains("› [ Use no template ]"));
+        config.move_team_picker_vertical(false);
+        let restored_card = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(restored_card.contains("› Flat"));
         config.cancel_team_picker();
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
 
         assert!(config.open_team_picker());
-        config.cycle_team_picker(false);
+        config.cycle_team_card(false);
         let narrow = strip_ansi(&render(18, 48, &config).join("\n"));
         assert!(narrow.contains("hierarchical"));
         assert!(narrow.contains("Director → Manager"));
@@ -1991,6 +2042,21 @@ mod tests {
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
         assert_eq!(port.workspace.team_template, TeamTemplate::Flat);
+
+        for (template, marker) in [
+            (TeamTemplate::Hierarchical, "› Hierarchical"),
+            (TeamTemplate::Pipeline, "› Pipeline"),
+        ] {
+            port.workspace.team_template = template;
+            let mut restored = Config::load_workspace_with_available_models(
+                &mut port,
+                AvailableAgentModels::all(),
+            );
+            restored.next_field();
+            restored.next_field();
+            assert!(restored.open_team_picker());
+            assert!(strip_ansi(&render(24, 80, &restored).join("\n")).contains(marker));
+        }
     }
 
     /// Drive the Save row to the dirty state used by the phase tests.
@@ -2014,7 +2080,15 @@ mod tests {
     fn save_moves_from_an_animated_wave_to_done() {
         let mut port = FakeSettingsPort::default();
         let mut config = dirty_on_save_row(&mut port);
-        assert!(render(24, 80, &config).join("\n").contains("[ Save ]"));
+        let action_column = |frame: Vec<String>, label: &str| {
+            let row = frame
+                .iter()
+                .map(|line| strip_ansi(line))
+                .find(|line| line.contains(label))
+                .unwrap();
+            display_width(&row[..row.find('[').unwrap()])
+        };
+        let idle_column = action_column(render(24, 80, &config), "[ Save ]");
 
         // begin_save enters the loading phase and clears any earlier notice.
         assert!(config.begin_save());
@@ -2027,14 +2101,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(first_plain.contains("[ Save ]"));
+        assert_eq!(action_column(first_wave.clone(), "[ Save ]"), idle_column);
         config.advance_save_animation();
-        assert_ne!(first_wave, render(24, 80, &config));
+        let next_wave = render(24, 80, &config);
+        assert_ne!(first_wave, next_wave);
+        assert_eq!(action_column(next_wave, "[ Save ]"), idle_column);
 
         // commit_save persists, settles to Done, and stops being dirty.
         assert!(config.commit_save(&mut port));
         assert_eq!(config.notice(), None);
         assert!(!config.is_dirty());
-        assert!(render(24, 80, &config).join("\n").contains("[ done ]"));
+        let done = render(24, 80, &config);
+        assert_eq!(action_column(done, "[ done ]"), idle_column);
         assert_eq!(port.global.theme, Theme::Dark);
     }
 
