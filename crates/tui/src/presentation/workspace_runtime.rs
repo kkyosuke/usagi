@@ -785,8 +785,9 @@ impl WorkspaceRuntime {
 
     /// The focused live terminal when its tab hosts an Agent conversation.
     ///
-    /// Agent tabs remain inventory-owned and cannot be closed from the tab UI,
-    /// so the shell must tell them apart from closable generic terminal tabs.
+    /// Agent tabs remain inventory-owned: the tab close chord exits their CLI
+    /// instead of detaching the client subscription like a generic terminal, so
+    /// the shell must distinguish the two kinds before handling that chord.
     #[must_use]
     pub fn focused_agent_terminal(&self) -> Option<TerminalRef> {
         let terminal = self.focused_terminal()?;
@@ -3427,8 +3428,18 @@ mod tests {
         let mut runtime = closeup_on(workspace, session);
         assert!(!runtime.state().has_live_pane());
 
-        // The PR overlay opens and stays open across a resampling tick.
+        // An empty PR request stays hidden. A returned PR opens the overlay,
+        // which then stays open across a resampling tick.
         let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), None);
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target: Target::Session(session),
+            revision: 1,
+            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                41,
+                "https://github.com/o/r/pull/41",
+            )],
+        }));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
         let _ = runtime.apply_event(AppEvent::Tick);
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));

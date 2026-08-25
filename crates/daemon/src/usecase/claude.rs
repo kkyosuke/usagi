@@ -22,7 +22,7 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-const PROFILE_REVISION: u32 = 1;
+pub const PROFILE_REVISION: u32 = 2;
 
 /// Claude's product-private provisioning result.
 ///

@@ -1260,6 +1260,26 @@ producer `OperationId` と target 全体を semantic key にして dedupe する
 
 daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude UUID、structured Codex capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
 
+### Doctor による integration repair
+
+`usagi doctor --fix` は現在の client、published daemon、live Agent の build / integration revision を順に診断する。
+daemon だけが古ければ planned replacement を使い、Agent PTY を破棄しない。古い Agent integration がある場合は一覧を表示し、
+`--restart-agents` が明示されるまで Agent process を停止しない。`--force` は `running` phase（tool / prompt の途中を含む）を
+破棄する追加 authority であり、通常の idle / waiting Agent 再起動や daemon rollover の force ではない。
+
+修復順序は old owner で exact Agent を停止、daemon build を rollover、current adapter で provider-native session ID を exact
+resume、再診断の順である。これにより old owner の PTY handle を successor が推測して signal することも、old adapter が新設定を
+materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
+modern daemon は全件 effect-before-zero で拒否する。停止後に scope が stale、current adapter が resume 非対応と判明しても、別
+conversation は推測しない。最終診断は outdated Agent 数、live Agent 数、retained draining
+generation 数を表示する。IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
+
+診断 vocabulary 導入前の daemon は integration revision を返せず Agent を選択停止できない。live Agent が無ければ通常の
+planned replacement を行う。live Agent がある場合は runtime 一覧を表示して rollover を保留し、
+`--restart-agents --force` が同時に指定された場合だけ既存 lifecycle の cold restart を互換経路として使う。この経路は
+generic terminal も破棄し得るため、CLI は実行前の案内と refusal にその追加影響を明記する。再起動後は durable provider
+metadata から exact target を読み直し、current integration で resume する。
+
 restart 後の Agent owner は hydrate 済み operation を admission より先に照合する。同じ semantic intent は保存済み
 accepted / completed / safe failure を replay し、同じ `OperationId` の異なる intent は
 `idempotency_conflict` にする。新規 launch の snapshot write は hydrate 済み全 record を含むため、過去の terminal、
@@ -1813,8 +1833,8 @@ wire request をこの表の縦軸（work の種類）へ写す分類は 1 か�
 | wire の `kind`（terminal は `action`） | work の種類 | runtime を名指すか |
 |---|---|---|
 | `rollover` | active 自身の barrier trigger（lease なし） | no |
-| `terminal` / `launch`、`agent`、`resume_agent` | spawn | no |
-| `terminal` / `inventory`・`completed_inventory`、`agent_inventory` | inventory | no |
+| `terminal` / `launch`、`agent`、`resume_agent`、`resume_agent_with_current_integration` | spawn | no |
+| `terminal` / `inventory`・`completed_inventory`、`agent_inventory`、`diagnose_agents` | inventory | no |
 | `terminal` / `input_outcome` | read | yes |
 | `terminal` のその他の action | terminal IO | yes |
 | `metrics`、`pr` | read | no |
@@ -1994,8 +2014,16 @@ wall clock・PID 由来の値は identity にしない。観測結果は `exact`
 ### standby hydrate と activation
 
 standby readiness が hydrate するのは single-writer lifecycle store（`sessions.json`）だけである。読むのは 1 回で、
-active が authority を取った workspace root と state revision を得る。readiness 中は reconcile / save、
-worker / tick、spawn を行わず、未初期化の store は「初期化するのは所有者だけ」として拒否する。
+active が authority を取った workspace root と state revision を得る。`daemon restart` の実行 directory が初期化済み
+workspace 内ならその subtree を使い、採用外または root 記録だけの partial adoption なら `sessions.json` を持つ
+初期化済み subtree を root 順で選ぶ。壊れた lifecycle node は別 subtree へ読み飛ばさず fail closed にする。
+replacement は machine-wide なので、standby の hydrate と active へ送る `rollover` control connection は無関係な
+実行 directory を新規 workspace として採用せず、readiness と handoff の成否もそこへ依存させない。control
+connection は locator・owner record・peer PID・process-start identity・generation を一致させて既存 active へ直接
+接続し、通常 client bootstrap の build mismatch 判定を再実行しない。handoff 自体がその判定を消費する replacement
+operation であり、ここで再判定すると `RolloverRequired` が自分自身を再帰的に要求するためである。
+readiness 中は reconcile / save、worker / tick、spawn を行わず、初期化済み subtree が 1 つも無い場合は
+「初期化するのは所有者だけ」として拒否する。
 
 handoff commit 後は readiness-only accept loop を止めて listener を回収し、同じ generation の空 owner shard と
 global allocator を active writer として開く。retained shard は owner routing で旧 generation 自身が serve するため、

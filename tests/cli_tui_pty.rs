@@ -2425,8 +2425,9 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     });
 
     // Close the drawer to restore Switch, then enter the managed session. Only
-    // its selected Claude attaches. Closing an Agent tab keeps it visible and
-    // attached so the user can terminate the CLI with Ctrl-D when needed.
+    // its selected Claude attaches. The dedicated close-chord E2E below owns
+    // Agent termination; this lifecycle test keeps all three runtimes alive so
+    // its later reopen and process-identity assertions remain independent.
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "[switch]");
     send(&mut master, b"\r");
@@ -2439,7 +2440,6 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         "claude-input:claude-session-one",
     );
 
-    send(&mut master, b"\x0fx");
     assert!(read_agent_intent(home.path()).dismissed.is_empty());
     send(&mut master, b"claude-session-still-visible\r");
     wait_for_screen_since(
@@ -2629,6 +2629,91 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         2
     );
 
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+}
+
+/// The shipping TUI maps the documented leader + Ctrl-X chord to the same EOT
+/// as Ctrl-D for a live Agent. The daemon-owned tab remains until that process
+/// really exits, then the ordinary exit observation removes it without writing
+/// client-side dismissal intent.
+#[test]
+fn real_pty_close_chord_exits_the_focused_live_agent() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("agent-close-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
+        .output()
+        .expect("workspace registers");
+    assert!(registered.status.success());
+    let (workspace_id, session_id) = create_session(home.path(), "agent-close");
+    let terminal = launch_agent(home.path(), workspace_id, Some(session_id), "claude");
+    wait_for_file_lines(&fixtures.claude_count, 1);
+    let process = agent_process_for(&agent_processes(home.path(), 1), &terminal);
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+    let intent = wait_for_agent_tabs(home.path(), 1);
+    assert!(intent.dismissed.is_empty());
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, baseline, "[closeup]");
+    wait_for_screen_since(
+        &captured,
+        baseline,
+        &format!("claude-ready-unique:{process}"),
+    );
+    send(&mut master, b"before-agent-close\r");
+    wait_for_screen_since(&captured, baseline, "claude-input:before-agent-close");
+
+    // Ctrl-O followed by the raw Ctrl-X byte is the exact chord users press.
+    send(&mut master, b"\x0f\x18");
+    wait_for_dead_processes(&[process]);
+    assert!(agent_processes(home.path(), 0).is_empty());
+    wait_for_screen_since(&captured, baseline, "Type a command:");
+    assert!(read_agent_intent(home.path()).dismissed.is_empty());
+    assert_eq!(
+        fixtures.claude_spawns(),
+        1,
+        "close must not respawn the Agent"
+    );
+
+    // The last tab exiting opens Closeup's action modal. Escape returns to
+    // Switch, where the ordinary workspace quit contract applies.
+    send(&mut master, b"\x1b");
+    assert!(quit_from_switch(&mut master, &mut tui, &captured, baseline).success());
     drop(slave);
     drop(master);
     reader.join().unwrap();

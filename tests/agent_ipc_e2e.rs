@@ -1702,10 +1702,13 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
         .expect("the terminal owner is registered");
     assert_eq!(u64::from(old_entry.process.pid), old_pid);
 
+    // Lifecycle is machine-wide: both standby hydration and the rollover
+    // control request must stay independent of an unrelated caller cwd.
+    let restart_cwd = short_dir("restart-cwd-");
     let mut restart = usagi_command(
         home.path(),
         Channel::Local,
-        repo.path(),
+        restart_cwd.path(),
         &["daemon".as_ref(), "restart".as_ref()],
     );
     let restarted = restart.output().expect("the shipping restart command runs");

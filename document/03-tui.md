@@ -423,7 +423,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
-| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消、[interrupted](#interrupted-agent-の-tab-投影と明示-resume) なら lineage を dismiss） |
+| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる。live Agent には `Ctrl-D` と同じ EOT を送り、generic live tab は subscription を detach、pending は起動待ちを取消す |
 | `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
@@ -742,7 +742,8 @@ Config の `Modal mode` は Overview と Closeup の command surface に共通�
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
 `config` は引数を取らず、現在開いている workspace の Config を Agent / Team / Issue / Memory だけの overlay modal で開く。
-`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。
+`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
+64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
@@ -937,8 +938,8 @@ attach されない。Garden から daemon command は発行しない。
 
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
 sidebar の右端に Nerd Font の PR アイコンとともに固定列で投影する。Switch の `p`、Closeup の
-`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について同じ PR modal を即時表示し、
-resident PR lane を wake する。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
+`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
+dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
 一覧へ 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
 保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
@@ -1225,9 +1226,12 @@ client-owned pending launch を閉じる。close 後は次の tab（末尾なら
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
 detach するだけで daemon-owned terminal を停止しない。pending launch は送信済み operation を推測して再送・cancel しない。
 
-live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、`Ctrl-O x` / `Ctrl-O Ctrl-X` では閉じない。
-この操作には `Agent tabs stay visible; exit the Agent with Ctrl-D` を表示する。Agent runtime を終了して実行枠を空ける操作は、
-対象 tab を選択して CLI へ `Ctrl-D` を送る。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
+live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、client-side の detach だけでは非表示にしない。
+live Agent で `Ctrl-O x` / `Ctrl-O Ctrl-X` を入力すると、対象 CLI へ `Ctrl-D` と同じ EOT (`0x04`) を送り、runtime の終了を
+要求する。tab は入力直後に推測で消さず、daemon が終了を観測した時点で閉じ、同じ観測で sidebar・Garden の membership と
+実行枠を更新する。終了入力を配送できなかった場合は tab を残して safe notice を表示する。interrupted Agent は live PTY を
+持たないため chord では閉じず、`Interrupted Agent has no live process; resume it before closing` を表示する。必要なら
+`Ctrl-O r` で明示 resume してから閉じる。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
 
 shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
 切替時は以前の subscription を detach する。background target と選択外 tab の terminal coordinator は bounded
@@ -1861,8 +1865,8 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
    同じ位置に残る。
 4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
    inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
-5. `Ctrl-O x` は tab を閉じず、`Agent tabs stay visible; exit the Agent with Ctrl-D` を表示する。interrupted tab は
-   runtime を持たないため `Ctrl-D` も送らず、必要なら `Ctrl-O r` で明示 resume する。
+5. live tab の `Ctrl-O x` は CLI へ `Ctrl-D` と同じ EOT を送り、daemon が runtime の終了を観測した時点で tab を閉じる。
+   interrupted tab は runtime を持たないため EOT を送らず、必要なら `Ctrl-O r` で明示 resume してから閉じる。
 
 resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
 daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。

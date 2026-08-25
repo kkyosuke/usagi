@@ -18,7 +18,7 @@
     clippy::too_many_arguments
 )] // Injected runtime ports make these boundary signatures part of the contract.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -26,12 +26,13 @@ use usagi_core::{
     domain::session_lifecycle::AgentPhase,
     domain::{
         agent::{
-            AgentCapability, AgentInventory, AgentProfileId, AgentResumableInventoryItem,
-            AgentResumeRelation, AgentResumeTarget, AgentRuntimeInventoryItem,
-            AgentRuntimeInventoryState, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
-            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
-            ProviderCaptureProvenance, ProviderKind, ProviderResumePhase, ProviderResumeReason,
-            ProviderResumeRef, ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
+            AgentCapability, AgentIntegrationDiagnosis, AgentIntegrationRevision, AgentInventory,
+            AgentProfileId, AgentResumableInventoryItem, AgentResumeRelation, AgentResumeTarget,
+            AgentRuntimeInventoryItem, AgentRuntimeInventoryState, AgentStatus, CallerRef,
+            DispatchBinding, DispatchRun, InboxKind, InboxMessage, LaunchMode, LaunchRequest,
+            LaunchScope, ModelSelector, OutdatedAgentRuntime, ProviderCaptureProvenance,
+            ProviderKind, ProviderResumePhase, ProviderResumeReason, ProviderResumeRef,
+            ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
         },
         id::{
             AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, CompletionFence, ConnectionId,
@@ -394,11 +395,31 @@ impl AgentRuntime {
         target: &AgentResumeTarget,
     ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
         let semantic = resume_semantic_key(target);
+        self.prepare_resume_readiness_for(operation_id, target, &semantic)
+    }
+
+    /// Readiness preflight for the repair-only revision migration semantic.
+    pub fn prepare_current_integration_resume_readiness(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        let semantic = repair_resume_semantic_key(target, expected_revision);
+        self.prepare_resume_readiness_for(operation_id, target, &semantic)
+    }
+
+    fn prepare_resume_readiness_for(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        semantic: &str,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
         if let Some(existing) = self.operations.get(operation_id) {
             if existing
                 .semantic_key
                 .as_ref()
-                .is_some_and(|key| key != &semantic)
+                .is_some_and(|key| key != semantic)
             {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
@@ -477,6 +498,25 @@ impl AgentRuntime {
         let current = self.prepare_resume_readiness(operation_id, target)?;
         self.validate_readiness(preflight, current.as_ref())?;
         self.resume_exact(operation_id, target, scope)
+    }
+
+    /// Repair-only resume counterpart. The readiness ticket is taken from the
+    /// current adapter while `target` continues to fence the old durable source.
+    pub fn resume_with_current_integration_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_current_integration_resume_readiness(
+            operation_id,
+            target,
+            expected_revision,
+        )?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_with_current_integration(operation_id, target, expected_revision, scope)
     }
 
     /// Dispatch counterpart of [`Self::launch_after_readiness`].
@@ -1044,6 +1084,138 @@ impl AgentRuntime {
         })
     }
 
+    /// Diagnoses launch-time hook/MCP integration revisions without exposing
+    /// rendered configuration or provider-native identities.
+    pub fn diagnose_integrations(
+        &self,
+        workspace: WorkspaceId,
+        expected: &[AgentIntegrationRevision],
+    ) -> Result<AgentIntegrationDiagnosis, ProtocolError> {
+        let expected = expected_integration_revisions(expected)?;
+        let records = self.coordinator.snapshot().records;
+        let mut outdated = records
+            .iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .filter(|record| {
+                integration_diagnosable_state(record.state) && record.superseded_by.is_none()
+            })
+            .filter_map(|record| {
+                let expected_revision = expected.get(record.launch.plan.profile_id.as_str())?;
+                (record.launch.plan.profile_revision < *expected_revision).then(|| {
+                    let resume_available = Self::repair_source_availability(record, &records).0;
+                    OutdatedAgentRuntime {
+                        runtime: record.runtime.clone(),
+                        continuation: record.continuation,
+                        profile_id: record.launch.plan.profile_id.clone(),
+                        actual_revision: record.launch.plan.profile_revision,
+                        expected_revision: *expected_revision,
+                        state: runtime_inventory_state(record.state),
+                        phase: if matches!(
+                            record.state,
+                            super::runtime::RuntimeState::Reserved
+                                | super::runtime::RuntimeState::Running
+                        ) {
+                            self.record_phase(record).1
+                        } else {
+                            runtime_phase(record.state).1
+                        },
+                        resume_available,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        outdated.sort_by_key(|item| item.runtime.agent_runtime_id.as_str());
+        let outdated_mcp_children = self
+            .mcp_callers
+            .values()
+            .filter(|caller| caller.child_pid.is_some())
+            .filter(|caller| {
+                outdated
+                    .iter()
+                    .any(|item| item.runtime.agent_runtime_id == caller.runtime.agent_runtime_id)
+            })
+            .count();
+        Ok(AgentIntegrationDiagnosis {
+            workspace_id: workspace,
+            outdated,
+            outdated_mcp_children,
+        })
+    }
+
+    /// Stops only outdated integrations selected by a diagnosis against the
+    /// invoking binary. `Running` is fail-closed because it may be inside a
+    /// provider tool call; `--force` is the explicit authority to discard it.
+    pub fn interrupt_outdated_agents(
+        &mut self,
+        workspace: WorkspaceId,
+        expected: &[AgentIntegrationRevision],
+        selected: &[AgentRuntimeRef],
+        force: bool,
+    ) -> Result<(usize, AgentIntegrationDiagnosis), ProtocolError> {
+        let mut diagnosis = self.diagnose_integrations(workspace, expected)?;
+        let selected_ids = selected
+            .iter()
+            .map(|runtime| runtime.agent_runtime_id)
+            .collect::<BTreeSet<_>>();
+        if selected_ids.len() != selected.len()
+            || selected.iter().any(|runtime| {
+                !diagnosis
+                    .outdated
+                    .iter()
+                    .any(|candidate| candidate.runtime == *runtime)
+            })
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::StaleTarget,
+                "outdated Agent selection changed after diagnosis; no Agent was stopped",
+            ));
+        }
+        diagnosis
+            .outdated
+            .retain(|runtime| selected_ids.contains(&runtime.runtime.agent_runtime_id));
+        diagnosis.outdated_mcp_children = self
+            .mcp_callers
+            .values()
+            .filter(|caller| caller.child_pid.is_some())
+            .filter(|caller| selected_ids.contains(&caller.runtime.agent_runtime_id))
+            .count();
+        if diagnosis
+            .outdated
+            .iter()
+            .any(|runtime| !runtime.resume_available)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "an outdated Agent has no exact provider resume metadata; no Agent was stopped",
+            ));
+        }
+        if !force
+            && diagnosis
+                .outdated
+                .iter()
+                .any(|runtime| runtime.phase == AgentPhase::Running)
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::Busy,
+                "an outdated Agent is running a prompt or tool; retry with --force to discard it",
+            ));
+        }
+        let runtime_ids = diagnosis
+            .outdated
+            .iter()
+            .map(|item| item.runtime.agent_runtime_id.as_str())
+            .collect();
+        let result = self
+            .coordinator
+            .interrupt_agents(&runtime_ids, &mut *self.store, &mut *self.pty)
+            .map_err(map_runtime_error)?;
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id.as_str()));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
+        Ok((result, diagnosis))
+    }
+
     /// Returns one deterministic, secret-free inventory for workspace-root and
     /// managed-session Agent runtimes.
     #[must_use]
@@ -1128,7 +1300,45 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit_resume_exact(operation_id, target, &semantic_key, scope);
+        let outcome = self.admit_resume_exact(operation_id, target, &semantic_key, scope, None);
+        self.operations.insert(
+            operation_id.to_owned(),
+            AgentOperation {
+                semantic_key: Some(semantic_key),
+                outcome: outcome.clone(),
+            },
+        );
+        outcome
+    }
+
+    /// Resumes one interrupted source while intentionally migrating only its
+    /// adapter integration revision. Provider, scope, lineage, and source
+    /// incarnation remain exact; provider-global "last" semantics are never
+    /// used.
+    pub fn resume_with_current_integration(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+        scope: &dyn SessionScopeResolver,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let semantic_key = repair_resume_semantic_key(target, expected_revision);
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing.semantic_key.as_deref() != Some(&semantic_key) {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different agent repair resume",
+                ));
+            }
+            return existing.outcome.clone();
+        }
+        let outcome = self.admit_resume_exact(
+            operation_id,
+            target,
+            &semantic_key,
+            scope,
+            Some(expected_revision),
+        );
         self.operations.insert(
             operation_id.to_owned(),
             AgentOperation {
@@ -1287,6 +1497,80 @@ impl AgentRuntime {
                     && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
             });
         if internally_compatible && adapter_compatible {
+            (true, ProviderResumeReason::ExplicitResumeAvailable)
+        } else {
+            (false, ProviderResumeReason::IncompatibleProviderMetadata)
+        }
+    }
+
+    fn repair_resume_source_availability(
+        &self,
+        record: &super::runtime::DurableRuntimeRecord,
+        records: &[super::runtime::DurableRuntimeRecord],
+        expected_revision: u32,
+    ) -> (bool, ProviderResumeReason) {
+        let (source_compatible, reason) = Self::repair_source_availability(record, records);
+        if !source_compatible {
+            return (false, reason);
+        }
+        let reference = record
+            .provider_resume
+            .as_ref()
+            .expect("repair-compatible source has provider metadata");
+        let current_compatible = self
+            .registry
+            .profile(&record.launch.plan.profile_id)
+            .is_ok_and(|profile| {
+                profile.revision == expected_revision
+                    && profile.capabilities.contains(&AgentCapability::Resume)
+                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
+            });
+        if current_compatible {
+            (true, ProviderResumeReason::ExplicitResumeAvailable)
+        } else {
+            (false, ProviderResumeReason::IncompatibleProviderMetadata)
+        }
+    }
+
+    fn repair_source_availability(
+        record: &super::runtime::DurableRuntimeRecord,
+        records: &[super::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        let (Some(continuation), Some(_source), Some(reference)) = (
+            record.continuation,
+            record.resume_source,
+            record.provider_resume.as_ref(),
+        ) else {
+            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+        };
+        if record.superseded_by.is_some() {
+            return (false, ProviderResumeReason::SourceAlreadySuperseded);
+        }
+        if records.iter().any(|candidate| {
+            candidate.runtime.agent_runtime_id != record.runtime.agent_runtime_id
+                && candidate.continuation == Some(continuation)
+                && holds_live_or_unknown_agent(candidate.state)
+        }) {
+            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
+        }
+        let capture_compatible = matches!(
+            (reference.provider, reference.provenance),
+            (
+                ProviderKind::Claude,
+                ProviderCaptureProvenance::DaemonIssued
+            ) | (
+                ProviderKind::Codex,
+                ProviderCaptureProvenance::ProviderStructured
+            )
+        );
+        let internally_compatible = capture_compatible
+            && record.launch.plan.profile_revision == reference.adapter_revision
+            && record.launch.request.scope == reference.scope
+            && record.runtime.terminal.workspace_id == reference.scope.workspace_id
+            && record.runtime.terminal.session_id == reference.scope.session_id
+            && record.runtime.terminal.worktree_id == reference.scope.worktree_id
+            && provider_matches_profile(reference.provider, &record.launch.plan.profile_id);
+        if internally_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
         } else {
             (false, ProviderResumeReason::IncompatibleProviderMetadata)
@@ -1599,6 +1883,7 @@ impl AgentRuntime {
         target: &AgentResumeTarget,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
+        repair_revision: Option<u32>,
     ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| {
             ProtocolError::new(
@@ -1660,7 +1945,10 @@ impl AgentRuntime {
             debug_assert_eq!(replacement.continuation, Some(target.continuation));
             return durable_operation_outcome(replacement);
         }
-        let (available, reason) = self.resume_source_availability(source, &records);
+        let (available, reason) = match repair_revision {
+            Some(revision) => self.repair_resume_source_availability(source, &records, revision),
+            None => self.resume_source_availability(source, &records),
+        };
         if !available {
             let (code, message) = match reason {
                 ProviderResumeReason::LiveOrOwnershipUnknown => (
@@ -1680,11 +1968,14 @@ impl AgentRuntime {
                 "agent resume worktree incarnation is stale",
             ));
         }
-        let reference = source
+        let mut reference = source
             .provider_resume
             .as_ref()
             .expect("available exact source has provider resume metadata")
             .clone();
+        if let Some(revision) = repair_revision {
+            reference.adapter_revision = revision;
+        }
         let profile_id = source.launch.plan.profile_id.clone();
         let terminal = TerminalRef {
             daemon_generation: self.active_generation()?,
@@ -2681,6 +2972,13 @@ fn resume_semantic_key(target: &AgentResumeTarget) -> String {
     usagi_core::usecase::client::agent_resume_semantic_key(target)
 }
 
+fn repair_resume_semantic_key(target: &AgentResumeTarget, expected_revision: u32) -> String {
+    format!(
+        "{}\nrepair_revision={expected_revision}",
+        resume_semantic_key(target)
+    )
+}
+
 fn resume_target(record: &super::runtime::DurableRuntimeRecord) -> Option<AgentResumeTarget> {
     Some(AgentResumeTarget {
         continuation: record.continuation?,
@@ -2691,6 +2989,38 @@ fn resume_target(record: &super::runtime::DurableRuntimeRecord) -> Option<AgentR
         runtime_id: record.runtime.agent_runtime_id,
         adapter_revision: record.launch.plan.profile_revision,
     })
+}
+
+fn expected_integration_revisions(
+    expected: &[AgentIntegrationRevision],
+) -> Result<BTreeMap<&str, u32>, ProtocolError> {
+    let mut revisions = BTreeMap::new();
+    for integration in expected {
+        if integration.revision == 0
+            || revisions
+                .insert(integration.profile_id.as_str(), integration.revision)
+                .is_some()
+        {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "Agent integration revisions must be non-zero and unique by profile",
+            ));
+        }
+    }
+    Ok(revisions)
+}
+
+const fn integration_diagnosable_state(state: super::runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        super::runtime::RuntimeState::Reserved
+            | super::runtime::RuntimeState::Running
+            | super::runtime::RuntimeState::Exited
+            | super::runtime::RuntimeState::Interrupted
+            | super::runtime::RuntimeState::ReconcileRequired(
+                super::runtime::ReconcileState::IdentityUnknown
+            )
+    )
 }
 
 const fn runtime_inventory_state(
@@ -3409,6 +3739,390 @@ mod tests {
         )
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)] // One end-to-end usecase scenario proves stop, lost response, migration, and replay together.
+    fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
+        let workspace = WorkspaceId::new();
+        let resolved = scope();
+        let mut agent = AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let runtime_id = agent
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap()
+            .agent_runtime_id;
+        agent
+            .mcp_callers
+            .values_mut()
+            .next()
+            .expect("launch registers one MCP caller")
+            .child_pid = Some(9001);
+        let mut snapshot = agent.coordinator.snapshot();
+        snapshot.records[0].launch.plan.profile_revision = 1;
+        snapshot.records[0]
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .adapter_revision = 1;
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        agent
+            .reported_phases
+            .insert(runtime_id, AgentPhase::Waiting);
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: 2,
+        }];
+
+        let diagnosis = agent.diagnose_integrations(workspace, &expected).unwrap();
+        assert_eq!(diagnosis.outdated.len(), 1);
+        assert_eq!(diagnosis.outdated[0].actual_revision, 1);
+        assert_eq!(diagnosis.outdated[0].expected_revision, 2);
+        assert_eq!(diagnosis.outdated[0].phase, AgentPhase::Waiting);
+        assert!(diagnosis.outdated[0].resume_available);
+        assert_eq!(diagnosis.outdated_mcp_children, 1);
+        let newcomer = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap();
+        let newcomer_runtime = agent
+            .coordinator
+            .runtime_for_terminal(&newcomer.terminal)
+            .unwrap()
+            .clone();
+        let mut snapshot = agent.coordinator.snapshot();
+        let newcomer_record = snapshot
+            .records
+            .iter_mut()
+            .find(|record| record.runtime == newcomer_runtime)
+            .unwrap();
+        newcomer_record.launch.plan.profile_revision = 1;
+        newcomer_record
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .adapter_revision = 1;
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        agent
+            .reported_phases
+            .insert(newcomer_runtime.agent_runtime_id, AgentPhase::Waiting);
+        let (interrupted, stopped) = agent
+            .interrupt_outdated_agents(
+                workspace,
+                &expected,
+                &diagnosis
+                    .outdated
+                    .iter()
+                    .map(|item| item.runtime.clone())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(interrupted, 1);
+        assert_eq!(stopped, diagnosis);
+        assert_eq!(
+            agent
+                .coordinator
+                .runtime_for_terminal(&newcomer.terminal)
+                .unwrap(),
+            newcomer_runtime.clone(),
+            "an Agent that became outdated after diagnosis is not part of the confirmed selection"
+        );
+        assert_eq!(agent.mcp_callers.len(), 1);
+        assert_eq!(
+            agent
+                .diagnose_integrations(workspace, &expected)
+                .unwrap()
+                .outdated
+                .len(),
+            2,
+            "the stopped source and the unselected newcomer both remain diagnosable"
+        );
+        assert_eq!(
+            agent
+                .interrupt_outdated_agents(
+                    workspace,
+                    &expected,
+                    &diagnosis
+                        .outdated
+                        .iter()
+                        .map(|item| item.runtime.clone())
+                        .collect::<Vec<_>>(),
+                    false,
+                )
+                .unwrap()
+                .0,
+            0
+        );
+        let target = agent.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        assert_eq!(
+            agent
+                .resume_with_current_integration(
+                    &OperationId::new().to_string(),
+                    &target,
+                    3,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+        let repair_operation = OperationId::new().to_string();
+        let replacement = agent
+            .resume_with_current_integration(
+                &repair_operation,
+                &target,
+                2,
+                &FakeScope(Ok(resolved)),
+            )
+            .unwrap();
+        assert!(
+            agent
+                .prepare_current_integration_resume_readiness(&repair_operation, &target, 2)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            agent
+                .resume_with_current_integration(
+                    &repair_operation,
+                    &target,
+                    2,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap(),
+            replacement
+        );
+        assert_ne!(replacement.terminal, admission.terminal);
+        let after = agent.diagnose_integrations(workspace, &expected).unwrap();
+        assert_eq!(after.outdated.len(), 1);
+        assert_eq!(after.outdated[0].runtime, newcomer_runtime);
+        assert_eq!(
+            agent
+                .resume_with_current_integration(
+                    &repair_operation,
+                    &target,
+                    3,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+    }
+
+    #[test]
+    fn doctor_refuses_invalid_revision_catalog_and_running_agent_without_force() {
+        let workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        let invalid = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: 0,
+        }];
+        assert_eq!(
+            agent
+                .diagnose_integrations(workspace, &invalid)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let mut snapshot = agent.coordinator.snapshot();
+        snapshot.records[0].launch.plan.profile_revision = 1;
+        snapshot.records[0]
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .adapter_revision = 1;
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: 2,
+        }];
+        let selected = agent
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap()
+            .clone();
+        let mut stale = selected.clone();
+        stale.agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            agent
+                .interrupt_outdated_agents(workspace, &expected, &[stale], false)
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
+        assert_eq!(
+            agent
+                .interrupt_outdated_agents(
+                    workspace,
+                    &expected,
+                    std::slice::from_ref(&selected),
+                    false,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        assert_eq!(
+            agent
+                .coordinator
+                .runtime_for_terminal(&admission.terminal)
+                .unwrap()
+                .terminal,
+            admission.terminal
+        );
+
+        let mut snapshot = agent.coordinator.snapshot();
+        snapshot.records[0].provider_resume = None;
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        let diagnosis = agent.diagnose_integrations(workspace, &expected).unwrap();
+        assert!(!diagnosis.outdated[0].resume_available);
+        assert_eq!(
+            agent
+                .interrupt_outdated_agents(
+                    workspace,
+                    &expected,
+                    std::slice::from_ref(&selected),
+                    true,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        assert_eq!(
+            agent
+                .coordinator
+                .runtime_for_terminal(&admission.terminal)
+                .unwrap()
+                .terminal,
+            admission.terminal,
+            "missing exact provider metadata must be refused before termination"
+        );
+    }
+
+    #[test]
+    fn integration_diagnosis_admits_only_resumable_or_ownership_unknown_states() {
+        use super::super::runtime::{ReconcileState, RuntimeState};
+
+        for state in [
+            RuntimeState::Reserved,
+            RuntimeState::Running,
+            RuntimeState::Exited,
+            RuntimeState::Interrupted,
+            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
+        ] {
+            assert!(integration_diagnosable_state(state));
+        }
+        for state in [
+            RuntimeState::Reclaimed,
+            RuntimeState::SpawnFailed,
+            RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous),
+            RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning),
+        ] {
+            assert!(!integration_diagnosable_state(state));
+        }
+    }
+
+    #[test]
+    fn repair_source_diagnosis_covers_every_fail_closed_relation() {
+        let workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let records = agent.coordinator.snapshot().records;
+        assert!(AgentRuntime::repair_source_availability(&records[0], &records).0);
+        let mut missing = records[0].clone();
+        missing.provider_resume = None;
+        assert_eq!(
+            agent
+                .repair_resume_source_availability(&missing, &records, 2)
+                .1,
+            ProviderResumeReason::ProviderMetadataUnavailable
+        );
+
+        let mut superseded = records[0].clone();
+        superseded.superseded_by = Some(AgentRuntimeId::new());
+        assert_eq!(
+            AgentRuntime::repair_source_availability(&superseded, &records).1,
+            ProviderResumeReason::SourceAlreadySuperseded
+        );
+
+        let mut duplicate = records[0].clone();
+        duplicate.runtime.agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            AgentRuntime::repair_source_availability(
+                &records[0],
+                &[records[0].clone(), duplicate],
+            )
+            .1,
+            ProviderResumeReason::LiveOrOwnershipUnknown
+        );
+
+        let mut incompatible = records[0].clone();
+        incompatible
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .scope
+            .worktree_id = WorktreeId::new();
+        assert_eq!(
+            AgentRuntime::repair_source_availability(&incompatible, &records).1,
+            ProviderResumeReason::IncompatibleProviderMetadata
+        );
+    }
+
     fn hydrate_restart_runtime(snapshot: RuntimeStoreSnapshot) -> AgentRuntime {
         AgentRuntime::hydrate_with_dispatch_and_locator(
             DaemonGeneration::new(),
@@ -3813,6 +4527,37 @@ mod tests {
             )
             .unwrap();
         runtime.exit(&resumed.terminal, 0).unwrap();
+        let repair_target = runtime.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let repair_operation = OperationId::new().to_string();
+        let repair_ticket = runtime
+            .prepare_current_integration_resume_readiness(&repair_operation, &repair_target, 2)
+            .unwrap()
+            .unwrap();
+        runtime
+            .resume_with_current_integration_after_readiness(
+                &repair_operation,
+                &repair_target,
+                2,
+                &FakeScope(Ok(resolved.clone())),
+                Some(&repair_ticket),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .resume_with_current_integration_after_readiness(
+                    "invalid",
+                    &repair_target,
+                    2,
+                    &FakeScope(Ok(resolved.clone())),
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
         let worktree = tempfile::tempdir().unwrap();
         let mut dispatch_runtime =
             runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
@@ -4211,6 +4956,7 @@ mod tests {
                     &target,
                     &resume_semantic_key(&target),
                     &FakeScope(Ok(resolved.clone())),
+                    None,
                 )
                 .unwrap_err()
                 .code,
