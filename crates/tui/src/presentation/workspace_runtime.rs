@@ -3427,8 +3427,18 @@ mod tests {
         let mut runtime = closeup_on(workspace, session);
         assert!(!runtime.state().has_live_pane());
 
-        // The PR overlay opens and stays open across a resampling tick.
+        // An empty PR request stays hidden. A returned PR opens the overlay,
+        // which then stays open across a resampling tick.
         let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), None);
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target: Target::Session(session),
+            revision: 1,
+            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                41,
+                "https://github.com/o/r/pull/41",
+            )],
+        }));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
         let _ = runtime.apply_event(AppEvent::Tick);
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
