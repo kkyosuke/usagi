@@ -1082,16 +1082,7 @@ impl AgentRuntime {
             .iter()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
             .filter(|record| {
-                matches!(
-                    record.state,
-                    super::runtime::RuntimeState::Reserved
-                        | super::runtime::RuntimeState::Running
-                        | super::runtime::RuntimeState::Exited
-                        | super::runtime::RuntimeState::Interrupted
-                        | super::runtime::RuntimeState::ReconcileRequired(
-                            super::runtime::ReconcileState::IdentityUnknown
-                        )
-                ) && record.superseded_by.is_none()
+                integration_diagnosable_state(record.state) && record.superseded_by.is_none()
             })
             .filter_map(|record| {
                 let expected_revision = expected.get(record.launch.plan.profile_id.as_str())?;
@@ -3004,6 +2995,19 @@ fn expected_integration_revisions(
     Ok(revisions)
 }
 
+const fn integration_diagnosable_state(state: super::runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        super::runtime::RuntimeState::Reserved
+            | super::runtime::RuntimeState::Running
+            | super::runtime::RuntimeState::Exited
+            | super::runtime::RuntimeState::Interrupted
+            | super::runtime::RuntimeState::ReconcileRequired(
+                super::runtime::ReconcileState::IdentityUnknown
+            )
+    )
+}
+
 const fn runtime_inventory_state(
     state: super::runtime::RuntimeState,
 ) -> AgentRuntimeInventoryState {
@@ -3866,6 +3870,18 @@ mod tests {
             .target
             .clone()
             .unwrap();
+        assert_eq!(
+            agent
+                .resume_with_current_integration(
+                    &OperationId::new().to_string(),
+                    &target,
+                    3,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
         let repair_operation = OperationId::new().to_string();
         let replacement = agent
             .resume_with_current_integration(
@@ -3896,6 +3912,18 @@ mod tests {
         let after = agent.diagnose_integrations(workspace, &expected).unwrap();
         assert_eq!(after.outdated.len(), 1);
         assert_eq!(after.outdated[0].runtime, newcomer_runtime);
+        assert_eq!(
+            agent
+                .resume_with_current_integration(
+                    &repair_operation,
+                    &target,
+                    3,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
     }
 
     #[test]
@@ -3942,6 +3970,15 @@ mod tests {
             .runtime_for_terminal(&admission.terminal)
             .unwrap()
             .clone();
+        let mut stale = selected.clone();
+        stale.agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            agent
+                .interrupt_outdated_agents(workspace, &expected, &[stale], false)
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleTarget
+        );
         assert_eq!(
             agent
                 .interrupt_outdated_agents(
@@ -3988,6 +4025,86 @@ mod tests {
                 .terminal,
             admission.terminal,
             "missing exact provider metadata must be refused before termination"
+        );
+    }
+
+    #[test]
+    fn integration_diagnosis_admits_only_resumable_or_ownership_unknown_states() {
+        use super::super::runtime::{ReconcileState, RuntimeState};
+
+        for state in [
+            RuntimeState::Reserved,
+            RuntimeState::Running,
+            RuntimeState::Exited,
+            RuntimeState::Interrupted,
+            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
+        ] {
+            assert!(integration_diagnosable_state(state));
+        }
+        for state in [
+            RuntimeState::Reclaimed,
+            RuntimeState::SpawnFailed,
+            RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous),
+            RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning),
+        ] {
+            assert!(!integration_diagnosable_state(state));
+        }
+    }
+
+    #[test]
+    fn repair_source_diagnosis_covers_every_fail_closed_relation() {
+        let workspace = WorkspaceId::new();
+        let mut agent = runtime();
+        agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: None,
+                    profile: Some(AgentProfileId::new("claude").unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let records = agent.coordinator.snapshot().records;
+        assert!(AgentRuntime::repair_source_availability(&records[0], &records).0);
+        let mut missing = records[0].clone();
+        missing.provider_resume = None;
+        assert_eq!(
+            agent
+                .repair_resume_source_availability(&missing, &records, 2)
+                .1,
+            ProviderResumeReason::ProviderMetadataUnavailable
+        );
+
+        let mut superseded = records[0].clone();
+        superseded.superseded_by = Some(AgentRuntimeId::new());
+        assert_eq!(
+            AgentRuntime::repair_source_availability(&superseded, &records).1,
+            ProviderResumeReason::SourceAlreadySuperseded
+        );
+
+        let mut duplicate = records[0].clone();
+        duplicate.runtime.agent_runtime_id = AgentRuntimeId::new();
+        assert_eq!(
+            AgentRuntime::repair_source_availability(
+                &records[0],
+                &[records[0].clone(), duplicate],
+            )
+            .1,
+            ProviderResumeReason::LiveOrOwnershipUnknown
+        );
+
+        let mut incompatible = records[0].clone();
+        incompatible
+            .provider_resume
+            .as_mut()
+            .unwrap()
+            .scope
+            .worktree_id = WorktreeId::new();
+        assert_eq!(
+            AgentRuntime::repair_source_availability(&incompatible, &records).1,
+            ProviderResumeReason::IncompatibleProviderMetadata
         );
     }
 
@@ -4395,6 +4512,37 @@ mod tests {
             )
             .unwrap();
         runtime.exit(&resumed.terminal, 0).unwrap();
+        let repair_target = runtime.inventory(workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let repair_operation = OperationId::new().to_string();
+        let repair_ticket = runtime
+            .prepare_current_integration_resume_readiness(&repair_operation, &repair_target, 2)
+            .unwrap()
+            .unwrap();
+        runtime
+            .resume_with_current_integration_after_readiness(
+                &repair_operation,
+                &repair_target,
+                2,
+                &FakeScope(Ok(resolved.clone())),
+                Some(&repair_ticket),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .resume_with_current_integration_after_readiness(
+                    "invalid",
+                    &repair_target,
+                    2,
+                    &FakeScope(Ok(resolved.clone())),
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
         let worktree = tempfile::tempdir().unwrap();
         let mut dispatch_runtime =
             runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));

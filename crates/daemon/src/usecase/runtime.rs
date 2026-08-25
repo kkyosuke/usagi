@@ -2471,6 +2471,41 @@ mod tests {
     }
 
     #[test]
+    fn interrupting_agents_marks_a_process_that_cannot_be_reaped_for_reconcile() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+
+        assert_eq!(
+            coordinator.interrupt_agents(
+                &[runtime.agent_runtime_id.as_str().clone()]
+                    .into_iter()
+                    .collect(),
+                &mut store,
+                &mut spawner,
+            ),
+            Err(RuntimeError::ReconcileRequired(
+                ReconcileState::OrphanRunning
+            ))
+        );
+        assert_eq!(
+            coordinator.snapshot().records[0].state,
+            RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
+        );
+    }
+
+    #[test]
     fn resolve_once_persists_before_spawn_and_replays_after_detach() {
         let first_request = request();
         let (runtime, fence) = refs(&first_request);
