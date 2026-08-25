@@ -24881,7 +24881,7 @@ mod tests {
     }
 
     #[test]
-    fn project_deck_composition_helpers_cover_safe_fallbacks() {
+    fn project_registry_path_fence_covers_empty_match_and_mismatch() {
         let alpha = snapshot("alpha");
         assert!(!registry_contains_path(&[], &alpha.workspace.path));
         assert!(registry_contains_path(
@@ -24892,6 +24892,11 @@ mod tests {
             std::slice::from_ref(&alpha.workspace),
             Path::new("/tmp/beta"),
         ));
+    }
+
+    #[test]
+    fn project_deck_composition_helpers_cover_safe_fallbacks() {
+        let alpha = snapshot("alpha");
         assert!(!workspace_has_unsaved_surface(&WorkspaceRuntime::new(
             alpha.workspace_id,
             Vec::new(),
