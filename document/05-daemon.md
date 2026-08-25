@@ -1237,7 +1237,7 @@ validation error である。
 
 各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Codex では [private structured capture request](04-ipc.md#codex-structured-capture-request) の入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は spawn 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
-Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook process group と exact live runtime の照合で structured capture 境界へ渡す。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
+Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook PID・parent PID・process group と exact live runtime の照合で structured capture 境界へ渡す。provider と同じ process group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
 
 この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および daemon が指定する hook trust bypass を CLI が提供することである。managed policy による hooks 無効化、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
 
@@ -1362,8 +1362,9 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 | `SpawnFailed` / その他の `ReconcileRequired` | `exited` | 2 |
 | `Exited` / `Reclaimed` | `ended` | 1 |
 
-報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、daemon が発行した
-credential で報告元 runtime に束縛される。反映は次の規則に従う。
+報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
+process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
+照合でき、従来の inherited process group も互換経路として受理する。反映は次の規則に従う。
 
 | 報告 phase | projection | 集約重み | durable `ProviderResumePhase` |
 |---|---|---|---|
@@ -1378,7 +1379,7 @@ credential で報告元 runtime に束縛される。反映は次の規則に従
 - session の phase は、その session に属する runtime のうち集約重みが最大のものを選ぶ。報告 phase の相対順序は
   Home の集約（`done > waiting > running > ready > absent`）と core usecase の共有順位を使うため、最も人の
   対応を要する runtime が session 全体の phase になる。
-- 報告 phase は in-memory であり、caller credential と同じく daemon restart で失効する（restart 後は観測 state
+- 報告 phase は in-memory であり、runtime の process binding と同じく daemon restart で失効する（restart 後は観測 state
   由来の phase に戻る）。
 - durable な写像は `ProviderResumeRef.last_known_phase` だけを更新し、`last_known_status`（liveness）は書かない。
   値が変わらない報告は snapshot を書き直さない。`exited` を durable に書かないのは、hook の言う `exited` が

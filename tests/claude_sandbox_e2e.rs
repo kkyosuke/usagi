@@ -21,9 +21,17 @@ fn fixture_root() -> PathBuf {
 }
 
 fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
-    let protected = fixture_root()
-        .canonicalize()
-        .expect("canonical protected root");
+    run_in_session_with_roots(&fixture_root(), own, &[], script, arguments)
+}
+
+fn run_in_session_with_roots(
+    protected: &Path,
+    own: &Path,
+    additional_writable_roots: &[&Path],
+    script: &str,
+    arguments: &[&Path],
+) -> Output {
+    let protected = protected.canonicalize().expect("canonical protected root");
     let own = own.canonicalize().expect("canonical writable root");
     let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
     command
@@ -31,6 +39,11 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .arg(protected)
         .arg("--writable-root")
         .arg(&own);
+    for root in additional_writable_roots {
+        command
+            .arg("--writable-root")
+            .arg(root.canonicalize().expect("canonical writable root"));
+    }
     #[cfg(target_os = "macos")]
     command.arg("--backend").arg(
         PathBuf::from("/usr/bin/sandbox-exec")
@@ -44,6 +57,79 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .current_dir(own)
         .output()
         .expect("shipping launcher starts")
+}
+
+#[test]
+fn session_scope_can_commit_its_linked_worktree_without_writing_sibling_content() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("agent-session-git-scope");
+    let _ = fs::remove_dir_all(&fixture);
+    let repository = fixture.join("repository");
+    let own = fixture.join("sessions/a");
+    let sibling = fixture.join("sessions/b/sentinel");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    fs::write(&sibling, ORIGINAL).unwrap();
+
+    let git = |cwd: &Path, arguments: &[&str]| {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "fixture"]);
+    git(
+        &repository,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(repository.join("tracked"), "base\n").unwrap();
+    git(&repository, &["add", "tracked"]);
+    git(&repository, &["commit", "--quiet", "-m", "base"]);
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "usagi/a",
+            own.to_str().unwrap(),
+        ],
+    );
+    let common = repository.join(".git");
+    let output = run_in_session_with_roots(
+        &fixture,
+        &own,
+        &[&common],
+        "printf change >> tracked && git add tracked && git -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m change",
+        &[],
+    );
+    if !output.status.success() && sandbox_backend_unavailable(&output) {
+        let _ = fs::remove_dir_all(&fixture);
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "linked-worktree commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_unchanged(&sibling);
+    let count = Command::new("git")
+        .args(["rev-list", "--count", "usagi/a"])
+        .current_dir(&repository)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(count.stdout).unwrap().trim(), "2");
+
+    let _ = fs::remove_dir_all(&fixture);
 }
 
 fn run_in_root(root: &Path, script: &str) -> Output {

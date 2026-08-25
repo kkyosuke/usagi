@@ -2283,7 +2283,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     assert!(
         launched.iter().all(|argv| {
             argv.contains("--settings")
-                && argv.contains("agent-phase running")
+                && argv.contains(r#""args":["agent-phase","running"]"#)
                 && argv.matches("--append-system-prompt").count() == 1
         }),
         "{launched_argv}"

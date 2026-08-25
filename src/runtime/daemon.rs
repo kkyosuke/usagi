@@ -761,7 +761,13 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
-        let launch_roots = claude_writable_roots(mode, &working_directory);
+        let git_common = if mode == SandboxMode::Session {
+            session_git_common_dir(&workspace_root)
+                .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?
+        } else {
+            None
+        };
+        let launch_roots = claude_writable_roots(mode, &working_directory, git_common.as_deref());
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -855,14 +861,35 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 }
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
-/// A session launch receives exactly its own worktree. A root coordinator receives
-/// no repository-local writable root. Daemon bootstrap is delegated to the
-/// out-of-sandbox bootstrap broker.
-fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
+///
+/// A managed session receives its own checkout and, for a Git workspace, the
+/// repository's administrative common directory. A linked worktree keeps its
+/// index, refs, logs and object database outside the checkout, so withholding
+/// that directory makes `git add` / `git commit` fail even though file edits are
+/// correctly confined to the session. A root coordinator receives no
+/// repository-local writable root.
+fn claude_writable_roots(
+    mode: SandboxMode,
+    working_directory: &Path,
+    git_common_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
-        vec![working_directory.to_path_buf()]
+        let mut roots = vec![working_directory.to_path_buf()];
+        roots.extend(git_common_dir.map(Path::to_path_buf));
+        roots
     } else {
         Vec::new()
+    }
+}
+
+/// Resolve the optional Git administrative authority for a managed workspace.
+/// Absence means a non-Git workspace; a present but malformed marker is an
+/// admission failure rather than a silently weakened Git launch.
+fn session_git_common_dir(workspace_root: &Path) -> Result<Option<PathBuf>, ()> {
+    match std::fs::symlink_metadata(workspace_root.join(".git")) {
+        Ok(_) => git_common_dir(workspace_root).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
     }
 }
 
@@ -4723,8 +4750,8 @@ fn start_ipc_accept_loop(
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
-                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process.2, request_id, &body, hello),
-                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
+                                        Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
+                                        Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
@@ -7669,7 +7696,7 @@ fn resume_agent_after_preflight(
 
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
-    process_group: u32,
+    peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -7696,7 +7723,7 @@ fn dispatch_codex_session_capture(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(process_group))
+                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -7729,7 +7756,7 @@ fn dispatch_codex_session_capture(
 /// of being echoed back as a success.
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
-    process_group: u32,
+    peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -7757,7 +7784,7 @@ fn dispatch_agent_phase_report(
                 .as_ref()
                 .map(|context| context.credential.as_str())
                 .filter(|credential| !credential.is_empty())
-                .or_else(|| agent.hook_credential(process_group))
+                .or_else(|| agent.hook_credential(peer_process.0, peer_process.1, peer_process.2))
                 .map(str::to_owned)
                 .ok_or_else(|| {
                     ProtocolError::new(
@@ -17167,8 +17194,11 @@ instructions = "{instructions}"
 
             // 3. Root sandbox scope: daemon bootstrap is brokered out of process,
             // so neither the selected directory nor its mode-neutral base is writable.
-            let roots =
-                claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
+            let roots = claude_writable_roots(
+                SandboxMode::Root,
+                Path::new("/repo/.usagi/sessions/work"),
+                None,
+            );
             assert!(roots.is_empty(), "{roots:?}");
         }
     }
@@ -17538,10 +17568,15 @@ instructions = "{instructions}"
     fn root_git_common_dir_must_not_overlap_sandbox_writable_state() {
         std::fs::create_dir_all("target").unwrap();
         let safe = tempfile::tempdir_in("target").unwrap();
+        assert_eq!(session_git_common_dir(safe.path()), Ok(None));
         std::fs::create_dir(safe.path().join(".git")).unwrap();
         assert_eq!(
             git_common_dir(safe.path()).unwrap(),
             safe.path().join(".git").canonicalize().unwrap()
+        );
+        assert_eq!(
+            session_git_common_dir(safe.path()),
+            Ok(Some(safe.path().join(".git").canonicalize().unwrap()))
         );
         assert!(
             validate_root_git_common_dir_policy(
@@ -17568,6 +17603,10 @@ instructions = "{instructions}"
             git_common_dir(linked.path()).unwrap(),
             common.path().canonicalize().unwrap()
         );
+        assert_eq!(
+            session_git_common_dir(linked.path()),
+            Ok(Some(common.path().canonicalize().unwrap()))
+        );
         assert!(
             validate_root_git_common_dir_policy(
                 linked.path(),
@@ -17578,6 +17617,9 @@ instructions = "{instructions}"
             )
             .is_err()
         );
+
+        let not_a_directory = tempfile::NamedTempFile::new_in("target").unwrap();
+        assert_eq!(session_git_common_dir(not_a_directory.path()), Err(()));
 
         // The `$HOME` state root covered by this check is the launched agent's own
         // (`~/.codex` for Codex), so a Git common directory under it is refused for
@@ -17616,8 +17658,18 @@ instructions = "{instructions}"
         let mode = sandbox_mode(&context);
         assert_eq!(mode, SandboxMode::Session);
 
-        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"));
-        assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
+        let roots = claude_writable_roots(
+            mode,
+            Path::new("/repo/.usagi/sessions/work"),
+            Some(Path::new("/repo/.git")),
+        );
+        assert_eq!(
+            roots,
+            [
+                PathBuf::from("/repo/.usagi/sessions/work"),
+                PathBuf::from("/repo/.git")
+            ]
+        );
 
         let launcher = claude_sandbox_launcher(
             usagi,
@@ -17638,6 +17690,8 @@ instructions = "{instructions}"
                 "/repo",
                 "--writable-root",
                 "/repo/.usagi/sessions/work",
+                "--writable-root",
+                "/repo/.git",
                 "--",
             ]
         );
@@ -17679,6 +17733,8 @@ instructions = "{instructions}"
                 "/home/dev",
                 "--writable-root",
                 "/repo/.usagi/sessions/work",
+                "--writable-root",
+                "/repo/.git",
                 "--",
             ]
         );
@@ -17690,12 +17746,12 @@ instructions = "{instructions}"
             .as_array()
             .unwrap();
         assert_eq!(
-            pre_tool_use[1]["command"],
-            serde_json::json!("'/opt/usagi/bin/usagi' guard-workspace")
+            pre_tool_use[1]["args"],
+            serde_json::json!(["guard-workspace"])
         );
         assert_eq!(
-            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-            serde_json::json!("'/opt/usagi/bin/usagi' agent-phase ready")
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+            serde_json::json!(["agent-phase", "ready"])
         );
     }
 
@@ -17901,7 +17957,7 @@ instructions = "{instructions}"
         assert_eq!(mode, SandboxMode::Root);
 
         // A root launch's cwd and daemon data stay read-only; bootstrap uses the broker.
-        let roots = claude_writable_roots(mode, Path::new("/repo"));
+        let roots = claude_writable_roots(mode, Path::new("/repo"), None);
         assert!(roots.is_empty());
         let launcher = claude_sandbox_launcher(
             usagi,
@@ -17915,9 +17971,16 @@ instructions = "{instructions}"
         assert_eq!(launcher.prefix.last().unwrap(), "--");
 
         let arguments = claude_settings_arguments(usagi).unwrap();
-        assert!(arguments[1].contains("guard-workspace"));
+        let settings: serde_json::Value = serde_json::from_str(&arguments[1]).unwrap();
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][1]["args"],
+            serde_json::json!(["guard-workspace"])
+        );
         // Lifecycle phase reporting stays wired for a root coordinator.
-        assert!(arguments[1].contains("agent-phase running"));
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][0]["hooks"][0]["args"],
+            serde_json::json!(["agent-phase", "running"])
+        );
     }
 
     #[derive(Clone)]
