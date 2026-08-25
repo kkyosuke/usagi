@@ -3789,15 +3789,16 @@ mod tests {
         agent
             .reported_phases
             .insert(runtime_id, AgentPhase::Waiting);
+        let current_revision = crate::usecase::claude::PROFILE_REVISION;
         let expected = [AgentIntegrationRevision {
             profile_id: AgentProfileId::new("claude").unwrap(),
-            revision: 2,
+            revision: current_revision,
         }];
 
         let diagnosis = agent.diagnose_integrations(workspace, &expected).unwrap();
         assert_eq!(diagnosis.outdated.len(), 1);
         assert_eq!(diagnosis.outdated[0].actual_revision, 1);
-        assert_eq!(diagnosis.outdated[0].expected_revision, 2);
+        assert_eq!(diagnosis.outdated[0].expected_revision, current_revision);
         assert_eq!(diagnosis.outdated[0].phase, AgentPhase::Waiting);
         assert!(diagnosis.outdated[0].resume_available);
         assert_eq!(diagnosis.outdated_mcp_children, 1);
@@ -3890,7 +3891,7 @@ mod tests {
                 .resume_with_current_integration(
                     &OperationId::new().to_string(),
                     &target,
-                    3,
+                    current_revision + 1,
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -3902,13 +3903,17 @@ mod tests {
             .resume_with_current_integration(
                 &repair_operation,
                 &target,
-                2,
+                current_revision,
                 &FakeScope(Ok(resolved)),
             )
             .unwrap();
         assert!(
             agent
-                .prepare_current_integration_resume_readiness(&repair_operation, &target, 2)
+                .prepare_current_integration_resume_readiness(
+                    &repair_operation,
+                    &target,
+                    current_revision,
+                )
                 .unwrap()
                 .is_none()
         );
@@ -3917,7 +3922,7 @@ mod tests {
                 .resume_with_current_integration(
                     &repair_operation,
                     &target,
-                    2,
+                    current_revision,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap(),
@@ -3932,7 +3937,7 @@ mod tests {
                 .resume_with_current_integration(
                     &repair_operation,
                     &target,
-                    3,
+                    current_revision + 1,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap_err()
