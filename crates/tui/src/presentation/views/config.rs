@@ -1966,6 +1966,8 @@ mod tests {
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
 
         assert!(config.open_team_picker());
+        let selected_card = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(selected_card.contains("› Flat"));
         config.cycle_team_picker(true);
         config.cycle_team_picker(true);
         let none = strip_ansi(&render(24, 80, &config).join("\n"));
