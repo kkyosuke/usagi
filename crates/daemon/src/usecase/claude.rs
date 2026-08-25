@@ -22,7 +22,9 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-pub const PROFILE_REVISION: u32 = 2;
+/// Bump whenever Claude's launch-time hooks, sandbox, argv, or config changes.
+/// Revision 3 introduces exec-form hooks and the session Git common-dir grant.
+pub const PROFILE_REVISION: u32 = 3;
 
 /// Claude's product-private provisioning result.
 ///

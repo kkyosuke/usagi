@@ -1266,6 +1266,8 @@ daemon restart reconciliation は unfinished record の provider status を `int
 daemon だけが古ければ planned replacement を使い、Agent PTY を破棄しない。古い Agent integration がある場合は一覧を表示し、
 `--restart-agents` が明示されるまで Agent process を停止しない。`--force` は `running` phase（tool / prompt の途中を含む）を
 破棄する追加 authority であり、通常の idle / waiting Agent 再起動や daemon rollover の force ではない。
+launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
+これにより Doctor は同じ build の runtime でも旧 launch 設定を識別し、current adapter での再開対象にできる。
 
 修復順序は old owner で exact Agent を停止、daemon build を rollover、current adapter で provider-native session ID を exact
 resume、再診断の順である。これにより old owner の PTY handle を successor が推測して signal することも、old adapter が新設定を
