@@ -6,7 +6,6 @@ priority: high
 labels: [review, v2, core, daemon, git, security, integrity]
 dependson: []
 related: [605, 631]
-parent: 671
 created_at: 2026-08-13T22:28:26.087856+00:00
 updated_at: 2026-08-23T23:22:34.965949+00:00
 ---

@@ -468,7 +468,7 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない
   （それらは `infrastructure/` の責務）。
 - 外部クレートの version はルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、
-  必要になった時点で追加する（legacy の依存を先回りで持ち込まない）。
+  必要になった時点で追加する。
 - lint 設定は `[workspace.lints]` に置き、各クレートは `[lints] workspace = true` で継承する。
 
 ## クリーンアーキテクチャとの対応
@@ -625,7 +625,7 @@ effective 設定から決まり、MCP server の registry と launch prompt の�
 [10. session role#prompt 合成](10-session-roles.md#prompt-合成) が正本で、ここでは重複させない。
 `SystemPrompt` は `McpWiring` と同じ必須 agent capability として fail-closed に検証する一方、選択・合成した
 system prompt 本文は ephemeral な adapter materialization であり、`LaunchRequest`、`LaunchPlan`、
-`DurableLaunchSnapshot` には保存しない（設計判断は issue #592）。
+`DurableLaunchSnapshot` には保存しない。
 
 daemon が snapshot を再生するときは schema と profile revision を検証する。不一致、unknown profile、
 request capability 不足、plan provenance 不一致は typed error で fail-closed とし、最新 catalog から
@@ -1102,6 +1102,6 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
 
 | 代替案 | 不採用の理由 |
 |---|---|
-| 単一クレート内のモジュール分割（legacy 方式） | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
+| 単一クレート内のモジュール分割 | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
 | 層ごとのクレート分割（domain / usecase / infrastructure / presentation を各クレート化） | 実行面（TUI / daemon）の境界を表現できず、daemon 専用と TUI 専用の infrastructure が同じクレートに同居する |
 | TUI / daemon を別バイナリとして配布 | リリース CI（4 プラットフォーム）と配布手順の変更が大きい。単一バイナリ＋サブコマンドなら現行リリース機構が無変更で使える |

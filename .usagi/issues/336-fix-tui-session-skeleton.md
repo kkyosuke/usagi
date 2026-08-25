@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [bug, tui]
 dependson: []
-related: [151, 152]
+related: []
 created_at: 2026-07-10T13:29:38.545662+00:00
 updated_at: 2026-07-10T13:52:56.259694+00:00
 ---
@@ -21,8 +21,6 @@ session 作成中に表示されるサイドバーのローディング skeleton
 3. 作成が完了しても skeleton が消えず、アニメーションしたまま残る（detach して 選択 に戻るまで残る）
 
 ## 原因
-
-作成/削除完了（`tasks::Completion`）の適用 — skeleton の除去（`clear_pending_session` / `clear_removing_session`）、結果ログ、session リスト反映、pool 退避 — は外側イベントループの `tasks.drain_completed()` ドレイン（`event/mod.rs`）だけが行う。没入（Attached）中は `terminal/pane.rs` の `drive()` がイベントループを専有し、PR リンク（`monitor.take_pr_link_updates()`）や state.json watcher（`sessions_refresh.take_all()`）はドレインするのに、task 完了メールボックスはドレインしない。そのため没入中に完了した create/remove の skeleton が除去されず残り続ける（#151 は skeleton の「アニメーション」を全モードで動かしたが、「完了時の除去」は外側ループ依存のまま）。
 
 ## 修正方針
 

@@ -26,8 +26,6 @@ updated_at: 2026-07-24T14:52:57.341569+00:00
 ## 受入条件
 
 - [ ] round-trip: 任意の `VtScreen` state → `checkpoint()` → `from_checkpoint()` が元 state と一致（property）。
-- [ ] 64 KiB 超出力で UTF-8/CSI/OSC/SGR/alt/combining/CJK/malformed の**全 split 位置**を、untrimmed reference parser と checkpoint 復元後 state で property/fixture 比較（設計テスト #2）。
-- [ ] rows/cols 0・最大値・乗算 overflow・巨大 cell/attribute/scrollback count・compression bomb 相当を fuzz/property し、確保前 bounded rejection を測定（設計テスト #4）。
 - [ ] coverage 100% / clippy / fmt 緑。
 
 ## 非目標

@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, core, daemon, supervisor, resource, retention, performance]
 dependson: []
 related: [325, 328, 585]
-parent: 671
 created_at: 2026-08-13T22:45:35.302573+00:00
 updated_at: 2026-08-23T23:22:34.965949+00:00
 ---

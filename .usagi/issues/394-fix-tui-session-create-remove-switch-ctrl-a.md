@@ -6,7 +6,6 @@ priority: high
 labels: [tui, session, bug, parity]
 dependson: []
 related: []
-parent: 227
 created_at: 2026-07-20T03:57:18.717441+00:00
 updated_at: 2026-07-20T04:24:29.429293+00:00
 ---
@@ -14,8 +13,6 @@ updated_at: 2026-07-20T04:24:29.429293+00:00
 ## 背景
 
 Home sidebar の inline session create は pending skeleton を表示するが、その loading に semantic `Accent` を一貫して使う回帰を固定していない。session remove checklist も、選択候補と破壊的な remove action を Danger として明示する必要がある。さらに Switch の `Ctrl-A` は controller/reducer 契約を満たしつつ runtime 入力経路で create form を開くことを回帰させない。
-
-#287 は旧 runtime adapter 前提の未着手 issue である。本 issue は現行 controller/runtime 構成で同じ Ctrl-A 契約を実装・回帰テストする。
 
 ## 受け入れ条件
 

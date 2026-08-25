@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, daemon, pullrequest]
 dependson: []
 related: [346]
-parent: 453
 created_at: 2026-07-20T12:06:52.141783+00:00
 updated_at: 2026-07-21T02:19:31.427226+00:00
 ---

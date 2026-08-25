@@ -6,7 +6,6 @@ priority: high
 labels: [tui, lifecycle]
 dependson: [223, 225]
 related: []
-parent: 227
 created_at: 2026-07-12T21:11:18.263928+00:00
 updated_at: 2026-07-12T22:34:24.927632+00:00
 ---
@@ -29,8 +28,6 @@ create/remove の pending skeleton、progress/error、interaction counter と sa
 - `A-LIFE-1` / `A-LIFE-2` の pure/fake slice。
 
 ## 依存
-
-- #223/#225/#226。D2 adapter integration は #232。
 
 ## 検証
 

@@ -17,14 +17,13 @@
 //!   text in reading order; [`link_cells`] is the cell-only half.
 //! - [`link_cells_at`] is the hover counterpart to [`link_cells`]: it returns
 //!   just the cells of the one URL under the pointer.
-//! - [`validate_url`] is the defense-in-depth gate a browser launcher (#389)
+//! - [`validate_url`] is the defense-in-depth gate a browser launcher
 //!   runs on a detected string before spawning: it re-checks the scheme
 //!   allowlist and rejects any control character, escape, newline, or space, so
 //!   an ANSI/terminal-control sequence can never reach a browser argument.
 //!
-//! This is the pure core of the click-to-open feature ported from legacy's
-//! `presentation::tui::home::terminal::link`. The mouse hit-test, selection-drag
-//! coexistence, and the browser spawn itself live in later wiring (#389);
+//! This is the pure core of the click-to-open feature. The mouse hit-test, selection-drag
+//! coexistence, and the browser spawn itself live in later wiring;
 //! everything here is pure and unit-tested against plain row strings.
 //!
 //! Because [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) drops the
@@ -118,8 +117,8 @@ fn columns_of(row: &str, width: usize) -> Vec<char> {
     for ch in row.chars() {
         cols.push(ch);
         // A wide glyph's trailing column(s) carry no character of their own; a
-        // blank keeps them out of any URL run, exactly as legacy treats a wide-glyph
-        // continuation cell.
+        // blank keeps them out of any URL run by representing the wide-glyph
+        // continuation cell explicitly.
         cols.extend(std::iter::repeat_n(' ', char_width(ch) - 1));
     }
     cols.truncate(width);

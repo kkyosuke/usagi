@@ -1,6 +1,6 @@
 //! TUI 面の presentation 層。画面描画（各画面の view・共通 widget）と
-//! キー入力のマッピングを置く。描画は legacy と同じく自前の差分レンダリングで行い、
-//! UI フレームワーク（ratatui 等）には依存しない方針を引き継ぐ。
+//! キー入力のマッピングを置く。描画は自前の差分レンダリングで行い、
+//! UI フレームワーク（ratatui 等）には依存しない。
 //! 実 IO は持たず、出力先は呼び出し側（合成ルート）から注入する。
 //!
 //! 描画は 3 つに分ける: 各画面の view（[`views`]）・再利用 UI 部品（[`widgets`]）・
@@ -519,7 +519,7 @@ impl PaneLaunchCommandPort for UnavailablePaneLaunchPort {
 /// Platform-native terminal launch boundary.
 ///
 /// This is deliberately independent from [`AgentCommandPort`]: `terminal new`
-/// must remain available just as it is in legacy, without any daemon client.
+/// must remain available without any daemon client.
 pub trait ExternalTerminalPort: Send {
     /// Open a native terminal rooted at `directory`.
     ///
@@ -3348,8 +3348,8 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Escape => AppKey::Escape,
         // Runtime adapters preserve Ctrl-A as U+0001. `Ctrl-A` (LineStart) and
         // `Home` both mean `+ new session` here, where no text field owns focus:
-        // the sidebar-navigation contract from #257/#287 that this issue keeps
-        // intact. A focused palette / create form intercepts these before the
+        // the established sidebar-navigation contract that the reducer keeps intact.
+        // A focused palette / create form intercepts these before the
         // reducer, so caret motion never reaches this navigation branch.
         Key::LineStart | Key::Home | Key::Char('\u{1}') => AppKey::CtrlA,
         Key::Char(character) => AppKey::Char(character),
@@ -7021,7 +7021,7 @@ pub fn run_screen_graph_with_backend(
     }
 }
 
-/// legacy と同じ Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
+/// Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
 ///
 /// **打鍵で中断できる**。フレーム間の待機は [`Terminal::wait_for_key`] で行い、
 /// キーが届いた時点で残りのフレームを捨てて抜ける。中断に使ったキーは
@@ -20338,7 +20338,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_splash_draws_and_paces_every_legacy_frame_without_reading_input() {
+    fn startup_splash_draws_and_paces_every_frame_without_reading_input() {
         let mut term = FakeTerminal::default();
 
         play_startup_splash(&mut term).unwrap();

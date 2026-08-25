@@ -6,20 +6,16 @@ priority: high
 labels: [tui, pane, terminal, closeup, design]
 dependson: []
 related: [279]
-parent: 227
 created_at: 2026-07-13T11:20:25.806247+00:00
 updated_at: 2026-07-13T11:31:34.203907+00:00
 ---
 
 ## 目的
 
-Closeup pane の tab 状態を selected session ごとに完全分離する registry として定義し、terminal / Agent tab の作成・選択・close を stable identity のまま還元する。#265 の daemon attach runtime と #279 の controller/Closeup input は、この registry を唯一の tab state contract として利用する。
-
 ## 現状の根拠
 
 - `crates/tui/src/usecase/application/pane.rs` の `PaneState` は pending `OperationId` / live `TerminalRef` を stable identity にする純粋 reducer として実装済みだが、selected target ごとの所有・切替を表す registry を持たない。
 - `controller.rs` は `LivePaneAvailability(bool)` だけを保持するため、session A の tab 作成・close が session B の Closeup modal / tab state に影響しないことを表現・検証できない。
-- #278 は live runtime の tab-gated input ownership を、#279 は controller path への投影を、#265 は daemon-owned terminal launch/attach runtime をそれぞれ扱う。session-scoped state contract を先に固定しないと三経路で状態が分岐する。
 
 ## スコープ
 
@@ -27,7 +23,6 @@ Closeup pane の tab 状態を selected session ごとに完全分離する regi
 - tab の作成・completion・restore・selection・exit・close を target-scoped に dispatch する。pending は `OperationId`、live は complete `TerminalRef` で重複排除・選択を行い、表示 label/index を identity に使わない。
 - 選択中 tab の close は隣接 tab を安定して選択し、最後の tab を閉じたときだけ target 選択＋空 pane へ遷移する。background session の tab 作成、completion、exit、close は、表示中 session の tab・selected tab・modal visibility を変更しない。
 - Closeup modal visibility の authoritative predicate を target-scoped tab 有無と explicit/forced action stateから導く。tab 無しは modal 表示、tab 有りは tab が入力を所有し、明示操作だけが modal を開く。modal 表示中は tab navigation/close/passthrough と競合しない command routing contract を effect/event で表す。
-- daemon launch、IPC wire、PTY spawn、実 renderer/event pump は変更しない（#265）。live runtime の prefix 実装・controller renderer への接続は #278/#279 が行う。
 
 ## 受け入れ条件
 
@@ -41,5 +36,4 @@ Closeup pane の tab 状態を selected session ごとに完全分離する regi
 ## 依存と後続
 
 - 本 issue は pure application state と tests を所有する。
-- #265 は daemon launch/attach と renderer/runtime integration をこの registry に接続する。
 - #279 は controller reducer path の tab-gating と modal projection をこの registry に接続する。

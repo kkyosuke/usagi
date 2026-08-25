@@ -6,7 +6,6 @@ priority: high
 labels: [daemon, session, orchestration]
 dependson: [216, 217]
 related: []
-parent: 213
 created_at: 2026-07-12T11:39:24.399363+00:00
 updated_at: 2026-07-12T20:45:56.871474+00:00
 ---

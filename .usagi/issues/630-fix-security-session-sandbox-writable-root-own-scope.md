@@ -46,5 +46,3 @@ own session scope外を狙うfilesystem effectはsandbox/typed broker境界で�
 - absolute path、`..`、symlink alias、hardlinkを含むmatrixを固定する。
 
 ## 既存 issue との差分
-
-#530 / #537 は broad roots を導入したissue、#602 は保存値の再検証による特定teardown防御である。本issueはsession間・root・daemon authorityのwritable capabilityそのものを分離する。

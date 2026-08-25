@@ -22,5 +22,3 @@ Session mode（session の選択・切替を行う面）では、右ペインを
 - renderer test / golden test で Session mode と Closeup mode の明度差を固定する。
 
 ## 関連
-
-#302 は Switch の左 sidebar 非選択 row を dim にする修正であり、右ペインの mode-aware dim は対象外。

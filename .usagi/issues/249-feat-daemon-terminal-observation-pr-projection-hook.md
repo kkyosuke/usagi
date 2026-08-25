@@ -6,7 +6,6 @@ priority: high
 labels: [daemon, terminal, pr]
 dependson: []
 related: []
-parent: 213
 created_at: 2026-07-12T21:53:55.361643+00:00
 updated_at: 2026-07-12T21:54:27.305557+00:00
 ---

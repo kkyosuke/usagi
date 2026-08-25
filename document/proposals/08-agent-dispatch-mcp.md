@@ -26,7 +26,7 @@
 ## 1. 目的と背景
 
 現在の orchestration は「起源フロー（root が brief/issue を渡して新 session を起こす）」と
-「遂行フロー（session が worktree で作業して PR する）」を [session_delegate_brief](../../.usagi/issues/109-feat-mcp-session-delegate-brief-issue-session.md) /
+「遂行フロー（session が worktree で作業して PR する）」を `session_delegate_brief` /
 `session_delegate_issue` で回す（[01-entry-surfaces.md](01-entry-surfaces.md)）。これらは
 **session 単位**の粗い委譲で、配送も `queue`（起動時キュー）が前提であり、次の要求を満たさない。
 
@@ -92,7 +92,7 @@ session_dispatch {
 - `agent` は **id 指定**（既存 agent の再利用）**か** `runtime`+`model` 指定（新規作成）の**排他**。
   `id` と `runtime`/`model` の併用は typed error（`ErrorCode::InvalidArgument`）にする。
 - `runtime` は `AgentProfileId`（`claude` / `codex` …）、`model` は `ModelSelector`。可否は
-  agent capability（#146）で検証する。
+agent capability で検証する。
 - prompt は `LaunchRequest.initial_prompt` に載せ、daemon が**即時 launch**する。queue/live は選ばせない。
 - dispatch 成立時に **caller↔worker を durable に binding**（[§5](#5-callerworker-binding-と-caller-推論)）し、
   `run_id`（＝ launch operation の `OperationId`）を返す。
@@ -220,7 +220,7 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 | 既存 tool | 関係 | 移行方針 |
 |---|---|---|
 | `session_delegate_brief` | 起源フロー（事前 issue 不要でトリアージ session を起こす） | 維持。`agent` selector を受け、同じ dispatch 経路で直ちに worker を起動する |
-| `session_delegate_issue` | 遂行フロー（committed issue を新 session へ委譲） | 維持。基点コミット検証（#110）もそのまま |
+| `session_delegate_issue` | 遂行フロー（committed issue を新 session へ委譲） | 維持。基点コミット検証もそのまま |
 | `issue_to_prompt` | issue → prompt 整形 | 維持。dispatch の prompt 生成に組み合わせて使える |
 | `session_prompt` | session の agent へ prompt 送信（`mode` 公開） | 維持。dispatch は `mode` を隠蔽した即時実行の上位入口 |
 | `session_complete` | session→親 session/`:root` へ自由文報告 | 維持。`agent_complete` は agent 単位＋構造化 result＋durable inbox で粒度が細かい |
@@ -299,6 +299,6 @@ MCP は runtime/model 以外の path、argv、environment、credential、CLI raw
 ## 10. 非目標
 
 - queue/live 配送モードの再設計（`session_prompt` の既存挙動は変えない）。
-- `claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化（#146 の語彙に従う）。
+- `claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化（定義済みの語彙に従う）。
 - daemon crash 後の PTY FD 継続（[07-pty-crash-continuation.md](07-pty-crash-continuation.md) の範疇）。
 - TUI からの dispatch 表示／操作 UX（別 issue）。

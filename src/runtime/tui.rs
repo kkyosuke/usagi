@@ -1112,8 +1112,8 @@ impl MetricsPort for DaemonMetricsPort {
 /// connection that attached it, so attach, poll and input must share it.
 /// Native-terminal launcher kept independent from daemon terminal streaming.
 ///
-/// This mirrors legacy's detached platform launcher: `terminal new` must still
-/// work while an embedded terminal's daemon port is owned by a launch worker.
+/// `terminal new` must remain available while an embedded terminal's daemon
+/// port is owned by a launch worker.
 struct PlatformExternalTerminalPort {
     reaper: PlatformChildReaper,
 }
@@ -3706,7 +3706,7 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     }
     // Ctrl-A / Ctrl-E become semantic caret keys. A focused text field reads
     // them as emacs line-start / line-end; the reducer's navigation branch maps
-    // `LineStart` back to the reserved `+ new session` action (IME-safe #287),
+    // `LineStart` back to the reserved `+ new session` action (IME-safe),
     // and `key_to_terminal_bytes` still forwards U+0001 / U+0005 to a focused
     // shell. `Home` / `End` carry the same split without the control modifier.
     if (key.modifiers.control && key.code == KeyCode::Char('a'))

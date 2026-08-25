@@ -6,14 +6,11 @@ priority: high
 labels: [mcp, agent, config]
 dependson: [323]
 related: [322, 332]
-parent: 105
 created_at: 2026-07-18T00:30:00+00:00
 updated_at: 2026-07-17T23:11:27.684162+00:00
 ---
 
 ## 目的
-
-#323 が実装する `session_dispatch` の新規 agent branch を、workspace runtime/model allowlist と MCP 起動時の CLI availability snapshot によって厳密に制限する。設計の正本は [document/proposals/08-agent-dispatch-mcp.md](../../document/proposals/08-agent-dispatch-mcp.md#9-runtimemodel-allowlist-schema-snapshot-と再検証) である。
 
 ## スコープ
 

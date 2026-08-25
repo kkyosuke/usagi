@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [daemon, ipc, cli, tui, mcp]
 dependson: [216, 220]
-related: [207, 268]
+related: [268]
 created_at: 2026-07-13T03:00:00+00:00
 updated_at: 2026-07-13T03:20:00+00:00
 ---

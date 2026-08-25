@@ -5,8 +5,7 @@ status: done
 priority: high
 labels: [daemon, lifecycle, safety, ipc]
 dependson: [216, 219]
-related: [159, 205, 206, 207, 208]
-parent: 213
+related: []
 created_at: 2026-07-11T12:13:49.117451+00:00
 updated_at: 2026-07-12T21:11:18.362685+00:00
 ---

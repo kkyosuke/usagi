@@ -6,7 +6,6 @@ priority: medium
 labels: [tui, parity-b, overlay]
 dependson: [228]
 related: []
-parent: 227
 created_at: 2026-07-12T21:12:34.018319+00:00
 updated_at: 2026-07-12T22:58:16.219014+00:00
 ---
@@ -28,8 +27,6 @@ Session note/todos/decisions と workspace/session env editor を overlay とし
 - `B-OVERLAY-2`（proposal の note/todos/decisions/env 後回し項目）。
 
 ## 依存
-
-- #226、#228。各 persistence/settings port の所有権は維持する。
 
 ## 検証
 

@@ -5,14 +5,12 @@ status: done
 priority: high
 labels: [daemon, agent, claude]
 dependson: [251]
-related: [142, 145, 146]
+related: []
 created_at: 2026-07-12T22:33:12.438314+00:00
 updated_at: 2026-07-12T23:04:37.483270+00:00
 ---
 
 ## 目的
-
-#250 の共通 contract と #251 の daemon runtime port を使い、Claude 固有の launch plan renderer と provisioner を adapter 境界に閉じて daemon launch へ接続する。Claude の CLI 文法、hook/config 形式、model の解釈、secret materialization は core と共通 daemon orchestration に漏らさない。
 
 ## Architecture ownership
 
@@ -22,8 +20,6 @@ updated_at: 2026-07-12T23:04:37.483270+00:00
 | Claude adapter module/crate | Claude profile の support 宣言、request → argv plan renderer、設定/MCP/hook materialization、secret を含まない provision result |
 | `crates/daemon/src/usecase` | adapter port を profile ID で解決し、validated plan/provision result を #251 の reservation/PTY lifecycle に渡す |
 | `crates/daemon/src/infrastructure` | provisioner が要求する scoped file/env と process/PTY を注入して実行し、secret を durable record/log に残さない |
-
-Claude adapter の write-set は Claude 専用 module・fixture・test に限定する。Codex adapter (#252) の renderer/provisioner を参照せず、両 issue は #250/#251 後に並行できる。
 
 ## 受け入れ条件
 

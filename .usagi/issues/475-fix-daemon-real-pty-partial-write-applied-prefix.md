@@ -6,7 +6,6 @@ priority: high
 labels: [review, v2, daemon, pty, ipc]
 dependson: []
 related: [264, 271]
-parent: 453
 created_at: 2026-07-20T12:06:24.693479+00:00
 updated_at: 2026-07-20T22:00:35.772047+00:00
 ---
