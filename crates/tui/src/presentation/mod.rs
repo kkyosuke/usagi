@@ -305,11 +305,13 @@ pub trait AgentCommandPort: Send {
     /// Declare the **detached background** terminals whose exit the client still
     /// has to notice.
     ///
-    /// Only the selected foreground terminal is attached, so a background tab
-    /// has no stream that could report its process exiting. The production
-    /// adapter observes these refs through a bounded per-scope terminal
-    /// inventory on its own thread — never by attaching or resuming one of them
-    /// — and reports each exit once through
+    /// A background tab normally has no stream that could report its process
+    /// exiting. The one exception is the managed terminal still visible behind
+    /// Director: it remains attached for live, dimmed output and is filtered out
+    /// before this method is called. The production adapter observes the
+    /// remaining refs through a bounded per-scope terminal inventory on its own
+    /// thread — never by attaching or resuming one of them — and reports each
+    /// exit once through
     /// [`take_exited_background_terminals`](Self::take_exited_background_terminals).
     /// Their **final output bytes** are not fetched here: they are read when the
     /// tab is brought to the foreground, or through the explicit read-only
@@ -1667,8 +1669,10 @@ struct WorkspaceUi {
     /// unadmitted completion can never free a newer worker's slot.
     next_pane_launch: u64,
     active_pane_launch: Option<u64>,
-    /// Live coordinator for the active target's selected foreground terminal.
-    /// Background and unselected tabs retain only their stable pane identity.
+    /// Live coordinators for terminals visible in the current frame. This is
+    /// normally the selected foreground terminal; Director additionally keeps
+    /// the dimmed managed-session preview attached. Hidden and unselected tabs
+    /// retain only their stable pane identity.
     terminals: Vec<TerminalSession>,
     /// Recently detached coordinators, oldest first. Keeping the coordinator
     /// preserves its connection-local input ledger and unresolved input fence.
@@ -2178,24 +2182,49 @@ impl WorkspaceUi {
     }
 
     /// Keep exactly the active target's selected foreground terminal attached.
-    /// Every background target and unselected tab remains detached.
+    /// Every hidden background target and unselected tab remains detached.
     fn sync_foreground_terminal(&mut self, focused: Option<&TerminalRef>, geometry: Geometry) {
+        let visible = focused
+            .map(|terminal| vec![(terminal.clone(), geometry)])
+            .unwrap_or_default();
+        self.sync_visible_terminals(&visible);
+    }
+
+    /// Keep the bounded set of terminals visible in this frame attached, each
+    /// at the geometry of the surface that draws it.
+    ///
+    /// Ordinary Home supplies one entry. An open Director drawer supplies its
+    /// root conversation plus the managed-session terminal that remains visible
+    /// and dimmed behind it. Input ownership is independent: only the runtime's
+    /// focused terminal receives bytes.
+    fn sync_visible_terminals(&mut self, visible: &[(TerminalRef, Geometry)]) {
         let stale = self
             .terminals
             .iter()
-            .filter(|session| focused.is_none_or(|terminal| !session.terminal().fences(terminal)))
+            .filter(|session| {
+                !visible
+                    .iter()
+                    .any(|(terminal, _)| session.terminal().fences(terminal))
+            })
             .map(|session| session.terminal().clone())
             .collect::<Vec<_>>();
         for terminal in stale {
             self.close_terminal(&terminal);
         }
-        if let Some(terminal) = focused
-            && !self
+
+        for (terminal, geometry) in visible {
+            if let Some(index) = self
                 .terminals
                 .iter()
-                .any(|session| session.terminal().fences(terminal))
-        {
-            self.start_terminal_session(terminal.clone(), geometry);
+                .position(|session| session.terminal().fences(terminal))
+            {
+                if let Some(agent) = self.agent.as_mut() {
+                    self.terminals[index]
+                        .resize(&mut AgentStreamPort(agent.port.as_mut()), *geometry);
+                }
+            } else {
+                self.start_terminal_session(terminal.clone(), *geometry);
+            }
         }
     }
 
@@ -2211,6 +2240,7 @@ impl WorkspaceUi {
         }
     }
 
+    #[cfg(test)]
     fn resize_terminals(&mut self, geometry: Geometry) {
         let Some(agent) = self.agent.as_mut() else {
             return;
@@ -2273,15 +2303,29 @@ impl WorkspaceUi {
     /// Hand the detached background tabs to the port's bounded scope-inventory
     /// lane and drain the exits it has observed since the last frame.
     ///
-    /// This is the whole background contract: metadata only, per scope, off the
-    /// render thread. No `Attach` and no terminal-specific `Resume` is ever sent
-    /// for a background tab, and the returned refs are exactly the tabs whose
-    /// runtime the daemon no longer reports as live.
+    /// This is the whole detached-background contract: metadata only, per scope,
+    /// off the render thread. No `Attach` and no terminal-specific `Resume` is
+    /// ever sent for a detached tab, and the returned refs are exactly the tabs
+    /// whose runtime the daemon no longer reports as live.
     fn sync_background_terminals(&mut self, background: &[TerminalRef]) -> Vec<TerminalRef> {
         let Some(agent) = self.agent.as_mut() else {
             return Vec::new();
         };
-        agent.port.watch_background_terminals(background);
+        // Director's dimmed managed pane is background with respect to input,
+        // but visible and attached with respect to output. Its stream reports
+        // exit directly, so only genuinely detached tabs belong in the scope
+        // inventory lane.
+        let detached = background
+            .iter()
+            .filter(|terminal| {
+                !self
+                    .terminals
+                    .iter()
+                    .any(|session| session.terminal().fences(terminal))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        agent.port.watch_background_terminals(&detached);
         agent
             .port
             .take_exited_background_terminals(MAX_BACKGROUND_EXITS_PER_FRAME)
@@ -2519,9 +2563,9 @@ impl WorkspaceUi {
             .map(TerminalSession::input_modes)
     }
 
-    /// Snapshot the retained rows of a detached background terminal without
-    /// attaching or polling it. Director owns the one live subscription; this
-    /// projection keeps the managed right pane visible behind the drawer.
+    /// Snapshot the retained rows of a background terminal without changing its
+    /// attachment or scroll controls. Director keeps the visible managed pane
+    /// attached, so this projection advances as its live stream is drained.
     fn retained_terminal_view(
         &self,
         terminal: &TerminalRef,
@@ -4053,8 +4097,8 @@ fn director_organization(ui: &WorkspaceUi) -> Vec<DirectorOrganizationRow> {
     rows
 }
 
-/// Run the per-frame foreground-terminal sweep: poll the one attached selection,
-/// auto-close it if exited, then project its freshly polled viewport. Returns
+/// Run the per-frame visible-terminal sweep: poll the attached selection(s),
+/// auto-close them if exited, then project the focused viewport. Returns
 /// the projection plus its `(rows_len, scroll)` so a later pointer drag maps back
 /// to the exact retained cell.
 #[cfg(test)]
@@ -4074,7 +4118,7 @@ fn poll_and_project_terminals(
 }
 
 /// Close every pane the daemon reports as exited, from either observation lane:
-/// the attached foreground terminal's own `Resume` stream, and the bounded
+/// each attached visible terminal's own `Resume` stream, and the bounded
 /// per-scope inventory that watches the detached background tabs. The runtime
 /// drops the tab (clearing `has_live_pane` when it was the last) and the shell
 /// releases whatever client state it held.
@@ -5938,13 +5982,26 @@ fn drive_workspace_controller(
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
         let _ = runtime.apply_event(AppEvent::GardenAvailability(garden_fits(height, width)));
-        let geometry =
-            foreground_terminal_geometry(height, width, runtime.state().director_drawer_open());
+        let director_open = runtime.state().director_drawer_open();
+        let geometry = foreground_terminal_geometry(height, width, director_open);
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
-        // The right pane is what the foreground attachment serves, so it follows
-        // the previewed terminal: Switch's hover, Closeup's focus.
-        ui.sync_foreground_terminal(runtime.preview_terminal().as_ref(), geometry);
-        ui.resize_terminals(geometry);
+        // Ordinarily the right pane's preview is the only visible attachment.
+        // Director adds a second, read-only attachment for the managed terminal
+        // still visible behind the drawer. Each keeps its own viewport: the root
+        // conversation uses drawer geometry while the dimmed pane keeps the
+        // ordinary Home right-pane geometry.
+        let foreground_terminal = runtime.preview_terminal();
+        let background_terminal = runtime.director_background_terminal();
+        if let Some(terminal) = background_terminal {
+            let mut visible_terminals = Vec::with_capacity(2);
+            if let Some(foreground) = foreground_terminal {
+                visible_terminals.push((foreground, geometry));
+            }
+            visible_terminals.push((terminal, terminal_geometry(height, width)));
+            ui.sync_visible_terminals(&visible_terminals);
+        } else {
+            ui.sync_foreground_terminal(foreground_terminal.as_ref(), geometry);
+        }
         // Polling still runs every tick so output/admission progresses, but row
         // String creation and URL scanning run only behind the projection key.
         close_exited_panes(&mut ui, &mut runtime);
@@ -7332,6 +7389,7 @@ mod tests {
         select_right_pane_tab, sidebar_pointer_event, step_config, step_new, step_open,
         terminal_geometry, visit_garden_agent, welcome_action, write_banner,
     };
+    use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
@@ -9195,6 +9253,9 @@ mod tests {
         /// terminal's geometry with the attach itself.
         attach_geometries: Vec<(TerminalRef, Geometry)>,
         polls: usize,
+        poll_terminals: Vec<TerminalRef>,
+        scripted_polls: Vec<(TerminalRef, Vec<TerminalChunk>)>,
+        background_watches: Vec<Vec<TerminalRef>>,
         inputs: Vec<Vec<u8>>,
         resizes: usize,
         resize_geometries: Vec<(TerminalRef, Geometry)>,
@@ -9240,11 +9301,20 @@ mod tests {
 
         fn poll_terminal(
             &mut self,
-            _terminal: &TerminalRef,
+            terminal: &TerminalRef,
             _after_offset: u64,
         ) -> Result<Vec<TerminalChunk>, TerminalError> {
-            self.0.lock().unwrap().polls += 1;
-            Ok(Vec::new())
+            let mut calls = self.0.lock().unwrap();
+            calls.polls += 1;
+            calls.poll_terminals.push(terminal.clone());
+            let Some(position) = calls
+                .scripted_polls
+                .iter()
+                .position(|(candidate, _)| candidate.fences(terminal))
+            else {
+                return Ok(Vec::new());
+            };
+            Ok(calls.scripted_polls.remove(position).1)
         }
 
         fn input_terminal(
@@ -9276,6 +9346,14 @@ mod tests {
             _subscription: TerminalSubscription,
         ) {
             self.0.lock().unwrap().detaches += 1;
+        }
+
+        fn watch_background_terminals(&mut self, terminals: &[TerminalRef]) {
+            self.0
+                .lock()
+                .unwrap()
+                .background_watches
+                .push(terminals.to_vec());
         }
     }
 
@@ -17671,6 +17749,130 @@ mod tests {
     }
 
     #[test]
+    fn director_keeps_the_dimmed_managed_terminal_attached_and_moving() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = scoped_terminal_ref(workspace, Some(session));
+        let root = scoped_terminal_ref(workspace, None);
+        let initial = b"one\r\ntwo\r\nthree";
+        let moved = b"\r\ndim-managed-moved";
+        let calls = Arc::new(Mutex::new(StreamCalls {
+            scripted_polls: vec![(
+                managed.clone(),
+                vec![TerminalChunk {
+                    start_offset: initial.len() as u64,
+                    end_offset: (initial.len() + moved.len()) as u64,
+                    data: moved.to_vec(),
+                }],
+            )],
+            ..StreamCalls::default()
+        }));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(RecordingStreamPort(Arc::clone(&calls))),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![
+                super::PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![LivePane {
+                        terminal: root.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(root.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                super::PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(managed.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+        let managed_geometry = terminal_geometry(24, 100);
+        let drawer_geometry = foreground_terminal_geometry(24, 100, true);
+
+        ui.sync_foreground_terminal(Some(&managed), managed_geometry);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        ui.sync_visible_terminals(&[
+            (root.clone(), drawer_geometry),
+            (managed.clone(), managed_geometry),
+        ]);
+        close_exited_panes(&mut ui, &mut runtime);
+
+        let dimmed_view = ui
+            .retained_terminal_view(&managed, 2)
+            .expect("the visible managed terminal remains projected");
+        assert!(
+            strip_ansi(&dimmed_view.rows.join("\n")).contains("dim-managed-moved"),
+            "the attached background stream must advance its retained view"
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls.attach_geometries,
+            [
+                (managed.clone(), managed_geometry),
+                (root.clone(), drawer_geometry),
+            ]
+        );
+        assert!(
+            calls
+                .poll_terminals
+                .iter()
+                .any(|terminal| terminal == &root)
+        );
+        assert!(
+            calls
+                .poll_terminals
+                .iter()
+                .any(|terminal| terminal == &managed)
+        );
+        assert_eq!(
+            calls.background_watches.last().cloned(),
+            Some(Vec::new()),
+            "the attached dimmed terminal must not also enter inventory polling"
+        );
+        assert_eq!(calls.detaches, 0);
+    }
+
+    fn sync_test_director_terminals(
+        ui: &mut WorkspaceUi,
+        root: &TerminalRef,
+        managed: &TerminalRef,
+        height: usize,
+        width: usize,
+    ) {
+        ui.sync_visible_terminals(&[
+            (
+                root.clone(),
+                foreground_terminal_geometry(height, width, true),
+            ),
+            (managed.clone(), terminal_geometry(height, width)),
+        ]);
+    }
+
+    fn plain_terminal_rows(view: &super::TerminalViewProjection) -> String {
+        strip_ansi(&view.rows.join("\n"))
+            .replace(TERMINAL_CURSOR_MARKER, "")
+            .trim_end()
+            .to_owned()
+    }
+
+    #[test]
     fn drawer_round_trip_restores_both_views_and_restates_each_viewport_without_resync() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -17718,7 +17920,6 @@ mod tests {
         let mut controls = LiveTerminalControls::default();
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
-        ui.resize_terminals(managed_geometry);
         let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         controls.scroll_up();
         controls.begin_selection(TerminalSelection::begin(
@@ -17730,10 +17931,9 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
-        ui.sync_foreground_terminal(Some(&root), drawer_geometry);
-        ui.resize_terminals(drawer_geometry);
+        sync_test_director_terminals(&mut ui, &root, &managed, 24, 100);
         let retained = ui.retained_terminal_view(&managed, 1).unwrap();
-        assert_eq!(retained.rows, vec!["three"]);
+        assert_eq!(plain_terminal_rows(&retained), "three");
         let _ = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         controls.scroll_up();
         controls.scroll_up();
@@ -17747,7 +17947,6 @@ mod tests {
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(managed.clone()));
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
-        ui.resize_terminals(managed_geometry);
         let managed_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         assert_eq!(managed_view.scroll, 1);
         assert_eq!(
@@ -17757,8 +17956,7 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root.clone()));
-        ui.sync_foreground_terminal(Some(&root), drawer_geometry);
-        ui.resize_terminals(drawer_geometry);
+        sync_test_director_terminals(&mut ui, &root, &managed, 24, 100);
         let drawer_view = controller_terminal_view(&ui, &runtime, &mut controls, 1).unwrap();
         assert_eq!(drawer_view.scroll, 2);
         assert_eq!(
@@ -17767,20 +17965,20 @@ mod tests {
         );
 
         let calls = calls.lock().unwrap();
-        // Every attach states its pane's viewport, including the two that return
-        // to a size the pane already had: the daemon released this window's
-        // claim on the shared viewport together with the detached attachment.
-        // None of it costs a separate resize.
-        let round_trip = [(managed, managed_geometry), (root, drawer_geometry)];
+        // The managed pane stays attached through both Director visits. Only the
+        // root conversation is detached when the drawer closes and attached
+        // again when it reopens; each attach states that surface's own viewport.
         assert_eq!(
             calls.attach_geometries,
-            [round_trip.clone(), round_trip].concat()
+            [
+                (managed, managed_geometry),
+                (root.clone(), drawer_geometry),
+                (root, drawer_geometry),
+            ]
         );
         assert_eq!(calls.resize_geometries, Vec::new());
-        // One attach per focus transition means neither same-geometry reattach
-        // entered the checkpoint-refusal retry path.
-        assert_eq!(calls.attaches, 4);
-        assert_eq!(calls.detaches, 3);
+        assert_eq!(calls.attaches, 3);
+        assert_eq!(calls.detaches, 1);
     }
 
     #[test]

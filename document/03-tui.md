@@ -318,10 +318,10 @@ preview は表示だけを移し、command target（active）と live PTY 入力
 active を変えないのは [Home と target](#home-と-target) のとおりで、Switch は PTY へキーを流さないため、
 入力は常に active target の focus 済み tab へ向かう。一度も開かれていない session を hover した場合は、
 未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
-追従するため、同時に attach する live terminal は従来どおり 1 つである。Director drawer が開いている間だけは、
-背景の右ペインが Switch の cursor に追従したまま、foreground terminal の attach と入力を drawer で選択中の
-root conversation が所有する。右ペインは detach 前に保持した managed terminal の viewport を dim のまま描き、
-root conversation へ foreground attach を移しても背景の Agent content を空にしない。
+追従するため、通常は同時に attach する live terminal は 1 つである。Director drawer が開いている間だけは、
+背景の右ペインが Switch の cursor に追従したまま、foreground input を drawer で選択中の root conversation が
+所有する。このとき可視の managed terminal も 2 本目の read-only attachment として通常の右ペイン geometry を維持し、
+出力を取得し続ける。したがって Agent content は dim のまま更新され、drawer を開いたことでは静止しない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
@@ -468,7 +468,8 @@ button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live p
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
 同時に保てない幅では全幅へ縮退する。背景 Home は ANSI span ごと dim にし、header は表示したままにする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
-managed-session Closeup の right pane viewport とは別の pure geometry とする。
+managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
+その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
@@ -511,10 +512,11 @@ resumable なら同じ slot の interrupted tab を投影する。inventory-only
 加え、消失した selection は同 slot より後の surviving tab、なければ先頭、conversation が無ければ empty state へ
 縮退する。drawer 自体は observation から自動 open しない。
 
-drawer open 時は root の selected live Agent だけを foreground attach し、drawer 専用 viewport geometry を使う。
+drawer open 時は root の selected live Agent を foreground attach し、drawer 専用 viewport geometry を使う。
 選択中 Agent へ既存の ordered input / ACK、terminal-local な scroll / selection / feedback、copy / link を接続する。
-他の root tab と managed pane は detached background である。drawer close 時は root subscription を detach し、
-開く前の managed-session selected live tab を元の right pane geometry で attach する。detach 中の terminal は別 pane の
+drawer の背後で実際に見えている managed-session selected live tab も read-only で attach し、通常の right pane geometry と
+live output を維持する。他の root tab と不可視の managed pane は detached background である。drawer close 時は root
+subscription を detach し、右ペインに残る managed terminal の attachment を維持する。detach 中の terminal は別 pane の
 geometry へ resize せず、**attach 自体がその pane の viewport を宣言する**。daemon は detach と一緒にその window の
 [共有 viewport](05-daemon.md#共有-viewport複数-client-の-geometry) の要求を捨てるため、再 attach では毎回宣言し直す
 必要がある（黙って attach すると、他 window の小さい viewport がその window の終了後も残ってしまう）。宣言は
@@ -1233,9 +1235,10 @@ live Agent で `Ctrl-O x` / `Ctrl-O Ctrl-X` を入力すると、対象 CLI へ 
 持たないため chord では閉じず、`Interrupted Agent has no live process; resume it before closing` を表示する。必要なら
 `Ctrl-O r` で明示 resume してから閉じる。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
 
-shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
-切替時は以前の subscription を detach する。background target と選択外 tab の terminal coordinator は bounded
-cache にだけ保持し、foreground stream lane からは外す。
+shell が attach するのは、現在の active target に属する selected foreground terminal と、Director drawer の背後に
+実際に見えている selected managed terminal だけである。通常は前者 1 件、Director 中は root foreground と read-only な
+managed background の最大 2 件になる。surface / target / tab が不可視になった時点でその subscription を detach する。
+その他の background target と選択外 tab の terminal coordinator は bounded cache にだけ保持し、foreground stream lane からは外す。
 **定常状態の観測のために 1 frame が同期 request を出すことはない**: foreground の出力取得も background tab の exit 観測も
 [背景 observation lane](#背景-observation-lane) が別 thread で行い、描画スレッドはその結果を非ブロッキングに drain するだけである
 （利用者の操作が起こす attach / input / resize / detach は従来どおり描画スレッドから同期送信する）。
@@ -1336,14 +1339,14 @@ foreground poll worker の fetch が panic した場合も worker を終了さ�
 |---|---|---|
 | live | attach 済みで streaming 中 | 出力を適用し、入力を PTY へ送る |
 | 再接続待ち | exit 以外の attach / `Resume` 失敗（daemon 不通・resync 要求・stale な参照・ownership 不明・input ordering のずれ） | backoff 満了ごとに再 attach する。復帰するまで最後の screen を静止表示し、入力は安全な理由付きで拒否する |
-| detach 済み | foreground を別の pane（例: [指示モード](#指示モードdirector-mode)の root conversation）へ渡した | 自分からは再 attach しない。再び foreground に選ばれた frame で attach する |
+| detach 済み | target / tab が現在の frame から不可視になった | 自分からは再 attach しない。再び foreground または Director 背景として可視になった frame で attach する |
 | exit 済み | process の終了を観測した | 最終 screen を保持し、tab は inventory 観測とともに閉じる |
 
 detach と失敗の区別は状態名ではなく**予約された再試行の有無**であり、背景へ回した pane が勝手に attach を
 奪い返すことも、失敗した pane が TUI の再起動まで回復しないこともない。daemon が拒否し続ける失敗
 （二度と受理されない `TerminalRef` など）も同じ backoff で再試行し続ける。上限に達した backoff で
-attach 1 往復 / 2s、しかも attach 済みの foreground pane 1 つ分に限られるため、「自力で戻れない pane を
-表示し続けない」ことを優先する。
+attach 1 往復 / 2s、しかも attach 済みの可視 pane（通常 1 件、Director 中だけ最大 2 件）に限られるため、
+「自力で戻れない pane を表示し続けない」ことを優先する。
 
 再 attach で live へ戻った pane は、失敗の種類にかかわらず reconnect として扱い、`Reconnected` feedback と
 PR target の再同期を 1 度だけ発行する。
@@ -1360,13 +1363,15 @@ Home の inventory（decision / session / metrics）を観測する 3 lane は
 
 | lane | 観測対象 | primitive | cadence |
 |---|---|---|---|
-| foreground poll pump | 選択中の attach 済み terminal 1 件の出力 | `Resume { after_offset }` | 出力がある間は interactive（8ms）。無出力が続くと 64ms 上限まで倍々に後退し、出力・attach・入力・resize で即座に interactive へ戻る |
+| foreground poll pump | attach 済みの可視 terminal（通常 1 件、Director 中は root foreground と dimmed managed background の最大 2 件）の出力 | `Resume { after_offset }` | 出力がある間は interactive（8ms）。無出力が続くと 64ms 上限まで倍々に後退し、出力・attach・入力・resize で即座に interactive へ戻る |
 | background inventory pump | detach 済み background tab の **exit metadata だけ** | scope 単位の `Inventory` | 2s。失敗中は 500ms から 8s 上限の指数 backoff |
 
 この分離により、idle な TUI が生む daemon request は frame rate（約 62.5Hz）ではなく上表の cadence で決まり、pane 数にも比例しない
-（foreground は常に高々 1 件、background は tab 数ではなく **scope 数**に比例する）。
+（foreground は可視 surface 数により高々 2 件、background は tab 数ではなく **scope 数**に比例する）。
 
-- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。detach 済み tab の観測 primitive は scope inventory だけである。
+- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。Director 背景として可視・attach 済みの
+  managed terminal は foreground poll pump が扱い、background lane へ重複登録しない。detach 済み tab の観測 primitive は
+  scope inventory だけである。
 - background で bound するのは exit metadata の観測時刻（cadence + queue 遅延 + request deadline 1 回分）だけであり、**final output byte の取得時刻は bound しない**。
   final output は tab を foreground 化して再 attach したとき、または [completed entry](#exited-terminal-の-completed-entry) を history から明示選択したときに
   read-only に読む。
@@ -1687,7 +1692,8 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
   exact ref で 1 枚へ収束する。managed session の generic Terminal はその後ろへ決定的に追加し、root scope の generic
   Terminal は拒否する。saved ref が non-live でも同じ continuation が resumable なら slot intent を保持し、
   interrupted tab として root drawer または managed-session Closeup へ投影する。表示中 surface の selected foreground
-  tab だけを attach / resync し、background target と選択外 tab は detached のまま保持する。
+  tab に加え、Director 背景で実際に見えている selected managed tab だけを attach / resync し、不可視の background target と
+  選択外 tab は detached のまま保持する。
 - **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
   結果だけが durable Observe と pane projection を適用できる。遅延・順序外の結果は全体を拒否し、専用 port が戻り次第、
   fresh fence で一度だけ再観測する。後続の reorder・selection を上書きせず focus を奪わない。transport failure と
