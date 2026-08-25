@@ -3557,6 +3557,18 @@ fn foreground_terminal_geometry(height: usize, width: usize, director_open: bool
     }
 }
 
+/// Return the managed terminal that is genuinely visible beside Director.
+/// A full-width drawer occludes Home completely, so keeping that terminal
+/// attached would spend a stream slot on an invisible surface.
+fn visible_director_background_terminal(
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> Option<TerminalRef> {
+    let terminal = runtime.director_background_terminal()?;
+    (!director_drawer::geometry(height, width).full_width).then_some(terminal)
+}
+
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let base = open::render(height, width, open, now);
     if let Some(path) = open.unregistering_path() {
@@ -5991,7 +6003,7 @@ fn drive_workspace_controller(
         // conversation uses drawer geometry while the dimmed pane keeps the
         // ordinary Home right-pane geometry.
         let foreground_terminal = runtime.preview_terminal();
-        let background_terminal = runtime.director_background_terminal();
+        let background_terminal = visible_director_background_terminal(&runtime, height, width);
         if let Some(terminal) = background_terminal {
             let mut visible_terminals = Vec::with_capacity(2);
             if let Some(foreground) = foreground_terminal {
@@ -6033,7 +6045,7 @@ fn drive_workspace_controller(
             terminal_material_key = Some(next_terminal_key);
             terminal_generation = terminal_generation.saturating_add(1);
         }
-        let background_terminal = runtime.director_background_terminal();
+        let background_terminal = visible_director_background_terminal(&runtime, height, width);
         let background_revision = background_terminal
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
@@ -17808,6 +17820,7 @@ mod tests {
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert_director_background_visibility(&runtime, &managed);
         ui.sync_visible_terminals(&[
             (root.clone(), drawer_geometry),
             (managed.clone(), managed_geometry),
@@ -17847,6 +17860,18 @@ mod tests {
             "the attached dimmed terminal must not also enter inventory polling"
         );
         assert_eq!(calls.detaches, 0);
+    }
+
+    fn assert_director_background_visibility(runtime: &WorkspaceRuntime, managed: &TerminalRef) {
+        assert_eq!(
+            super::visible_director_background_terminal(runtime, 24, 80).as_ref(),
+            Some(managed)
+        );
+        assert_eq!(
+            super::visible_director_background_terminal(runtime, 24, 79),
+            None,
+            "a full-width drawer must not keep an occluded terminal attached"
+        );
     }
 
     fn sync_test_director_terminals(
