@@ -1557,7 +1557,10 @@ drag を離した後も、選択範囲は右ペインに reverse-video で示し
 コピーに使わず、`Ctrl-C` を含めて live terminal へそのまま送る。
 clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
 Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、
-安全な feedback を表示する。
+安全な feedback を表示する。各 backend は専用 process group と stdin writer を同じ owner が持ち、250ms の deadline 後は
+TERM → 50ms grace → KILL → reap を完了してから次の fallback へ進む。親が先に終了して子孫だけが pipe を保持する場合も
+同じ cleanup を適用し、writer/reader を残さない。copy は同期 `&mut ClipboardPort` の単一 lane なので同時 worker/queue を作らず、
+burst も1件ずつ収束する。入力は1 MiB、stdout/stderr は各8 KiBを上限とし、超過時は既存 clipboard を成功扱いで変更しない。
 
 出力中の `http(s)` URL は左クリックで OS 既定ブラウザに開ける。URL が載るセルは下線で装飾し、クリック可能で
 あることを示す。drag で非空の選択が成立した release は**コピー**、選択が生じない素のクリックだけを**リンクオープン**として扱い、

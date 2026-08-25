@@ -1,13 +1,13 @@
 ---
 number: 680
 title: fix(tui): clipboard helper の wait を deadline と cleanup で bounded にする
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, clipboard, process, freeze, resource]
 dependson: []
 related: [307, 390, 662]
 created_at: 2026-08-13T22:45:35.558571+00:00
-updated_at: 2026-08-13T22:45:35.558571+00:00
+updated_at: 2026-08-25T23:44:15+00:00
 ---
 
 ## Finding（P2 UI freeze / process lifecycle）
@@ -26,10 +26,10 @@ clipboard backendがhang、stdinを読まない、descendantを残す、また�
 
 ## 受入条件
 
-- [ ] stdinを読まない/hangするfixtureでもTUI copy callまたはcompletionがbounded time内に戻る。
-- [ ] parent/descendant、normal success、nonzero、broken pipeの全経路でchildをreapしzombie/pipeを残さない。
-- [ ] copy burstでthread/process/queueを無制限生成せず、latest selectionまたは明示refusalへ収束する。
-- [ ] macOS / Windows / Wayland / X11のfallback順とsafe feedbackを維持する。
+- [x] stdinを読まない/hangするfixtureでもTUI copy callまたはcompletionがbounded time内に戻る。
+- [x] parent/descendant、normal success、nonzero、broken pipeの全経路でchildをreapしzombie/pipeを残さない。
+- [x] copy burstでthread/process/queueを無制限生成せず、latest selectionまたは明示refusalへ収束する。
+- [x] macOS / Windows / Wayland / X11のfallback順とsafe feedbackを維持する。
 
 ## 根拠箇所
 

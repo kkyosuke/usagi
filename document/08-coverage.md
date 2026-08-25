@@ -64,7 +64,7 @@ runtime executable snapshot を束ねる `serve_with_client` を `composition` �
 | `src/main.rs` | なし（argv・stdio の最終合成だけを持つ） | `main` 1 件（`composition`） |
 | `src/runtime/bootstrap.rs` | expected build 判定、readiness 上限・workspace refusal・error mapping、test module | この返済対象は 0 件。別 owner の generic 単相化 2 件だけ残る |
 | `src/runtime/cli.rs` | 全 `RunOutcome` から typed action への routing | parser/stdio の `dispatch` と production action IO module の 2 件（`composition`） |
-| `src/runtime/clipboard.rs` | platform command ordering、fallback、partial/all failure の集約 | 環境参照・clipboard process module 1 件（`real_io`） |
+| `src/runtime/clipboard.rs` | platform command ordering、input limit、typed child outcome、fallback、partial/all failure、deadline の集約 | 環境参照・clipboard process module 1 件（`real_io`、process-group cleanup は共有 bounded process でも検証） |
 | `src/runtime/launchd.rs` | plist path・escaping・生成、install/uninstall の存在判定と error propagation | home・filesystem・`launchctl` module 1 件（`real_io`） |
 
 root・CLI 側で残す 7 件は `coverage-off-allowlist.json` に owner `root-cli`、期限 2027-01-31、
