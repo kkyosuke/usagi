@@ -233,6 +233,7 @@ mod tests {
             .map(|index| format!("context line {index}"))
             .collect::<Vec<_>>()
             .join("\n");
+        scoped.prompt.insert(0, '\n');
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::Decisions {
@@ -252,6 +253,14 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::DecisionNext));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+        let scrolled = render_over(
+            24,
+            80,
+            &[],
+            state.decision_overlay().unwrap(),
+            &[scoped.clone()],
+        );
+        assert!(scrolled.join("\n").contains("context line"));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
         let _ = update(
             &mut state,
