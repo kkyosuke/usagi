@@ -447,8 +447,10 @@ pub struct EnvironmentEditor {
 pub struct DecisionEditor {
     decision: UserDecision,
     selected_option: usize,
-    /// Explicit text viewport offset. `None` follows the selected option.
+    /// Explicit text viewport offset. `None` follows the active automatic anchor.
     scroll_offset: Option<usize>,
+    /// Whether automatic scrolling follows the freeform draft instead.
+    follow_freeform: bool,
     freeform: String,
     error: Option<SafeError>,
 }
@@ -459,6 +461,7 @@ impl DecisionEditor {
             decision,
             selected_option: 0,
             scroll_offset: None,
+            follow_freeform: false,
             freeform: String::new(),
             error: None,
         }
@@ -474,6 +477,10 @@ impl DecisionEditor {
     #[must_use]
     pub const fn scroll_offset(&self) -> Option<usize> {
         self.scroll_offset
+    }
+    #[must_use]
+    pub const fn follows_freeform(&self) -> bool {
+        self.follow_freeform
     }
     #[must_use]
     pub fn freeform(&self) -> &str {
@@ -3809,111 +3816,127 @@ fn reconcile_decision_overlay(state: &mut AppState) {
 }
 
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    let workspace = state.workspace;
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
+    if overlay.editor.is_some() && matches!(&key, AppKey::Escape) {
+        overlay.editor = None;
+        return Vec::new();
+    }
     if let Some(editor) = overlay.editor.as_mut() {
-        match key {
-            AppKey::Escape => {
-                overlay.editor = None;
-            }
-            AppKey::DecisionPrevious | AppKey::Up => {
-                editor.selected_option = editor.selected_option.saturating_sub(1);
-                editor.scroll_offset = None;
-            }
-            AppKey::DecisionNext | AppKey::Down => {
-                editor.selected_option = (editor.selected_option + 1)
-                    .min(editor.decision.options.len().saturating_sub(1));
-                editor.scroll_offset = None;
-            }
-            AppKey::PageUp => {
-                editor.scroll_offset =
-                    Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
-            }
-            AppKey::PageDown => {
-                editor.scroll_offset =
-                    Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
-            }
-            AppKey::SetDecisionFreeform(text) => {
-                if editor.decision.allow_freeform {
-                    editor.freeform = text;
-                    editor.error = None;
-                }
-            }
-            AppKey::Char(ch) if editor.decision.allow_freeform => {
-                editor.freeform.push(ch);
-                editor.error = None;
-            }
-            AppKey::Backspace if editor.decision.allow_freeform => {
-                editor.freeform.pop();
-                editor.error = None;
-            }
-            AppKey::Paste(text) if editor.decision.allow_freeform => {
-                paste_decision_freeform(editor, &text);
-            }
-            AppKey::SubmitDecision | AppKey::Enter => {
-                let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty()
-                {
-                    UserDecisionAnswer::Freeform {
-                        text: editor.freeform.trim().to_owned(),
-                    }
-                } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
-                    UserDecisionAnswer::Option {
-                        option_id: option.id.clone(),
-                    }
-                } else {
-                    editor.error = Some(SafeError {
-                        message: SafeMessage::new("select a valid answer"),
-                        error_id: "decision-invalid-answer".to_owned(),
-                    });
-                    return Vec::new();
-                };
-                if editor
-                    .decision
-                    .validate_answer(&answer, chrono::Utc::now())
-                    .is_err()
-                {
-                    editor.error = Some(SafeError {
-                        message: SafeMessage::new("select a valid answer"),
-                        error_id: "decision-invalid-answer".to_owned(),
-                    });
-                    return Vec::new();
-                }
-                return vec![Effect::ResolveDecision {
-                    workspace: state.workspace,
-                    decision_id: editor.decision.decision_id,
-                    answer,
-                }];
-            }
-            _ => {}
+        return update_decision_editor(workspace, editor, key);
+    }
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.decision_overlay = None;
         }
-    } else {
-        match key {
-            AppKey::Escape => {
-                state.overlay = None;
-                state.decision_overlay = None;
-            }
-            AppKey::DecisionPrevious | AppKey::Up => {
-                overlay.selected = overlay.selected.saturating_sub(1);
-            }
-            AppKey::DecisionNext | AppKey::Down => {
-                overlay.selected =
-                    (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
-            }
-            AppKey::Enter => {
-                if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
-                    overlay.editor = Some(DecisionEditor::new(decision));
-                }
-            }
-            _ => {}
+        AppKey::DecisionPrevious | AppKey::Up => {
+            overlay.selected = overlay.selected.saturating_sub(1);
         }
+        AppKey::DecisionNext | AppKey::Down => {
+            overlay.selected = (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
+        }
+        AppKey::Enter => {
+            if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
+                overlay.editor = Some(DecisionEditor::new(decision));
+            }
+        }
+        _ => {}
     }
     Vec::new()
 }
 
+fn update_decision_editor(
+    workspace: WorkspaceId,
+    editor: &mut DecisionEditor,
+    key: AppKey,
+) -> Vec<Effect> {
+    match key {
+        AppKey::DecisionPrevious | AppKey::Up => {
+            editor.selected_option = editor.selected_option.saturating_sub(1);
+            editor.scroll_offset = None;
+            editor.follow_freeform = false;
+        }
+        AppKey::DecisionNext | AppKey::Down => {
+            editor.selected_option =
+                (editor.selected_option + 1).min(editor.decision.options.len().saturating_sub(1));
+            editor.scroll_offset = None;
+            editor.follow_freeform = false;
+        }
+        AppKey::PageUp => {
+            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
+            editor.follow_freeform = false;
+        }
+        AppKey::PageDown => {
+            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
+            editor.follow_freeform = false;
+        }
+        AppKey::SetDecisionFreeform(text) => {
+            if editor.decision.allow_freeform {
+                editor.freeform = text;
+                follow_decision_freeform(editor);
+            }
+        }
+        AppKey::Char(ch) if editor.decision.allow_freeform => {
+            editor.freeform.push(ch);
+            follow_decision_freeform(editor);
+        }
+        AppKey::Backspace if editor.decision.allow_freeform => {
+            editor.freeform.pop();
+            follow_decision_freeform(editor);
+        }
+        AppKey::Paste(text) if editor.decision.allow_freeform => {
+            paste_decision_freeform(editor, &text);
+        }
+        AppKey::SubmitDecision | AppKey::Enter => {
+            let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty() {
+                UserDecisionAnswer::Freeform {
+                    text: editor.freeform.trim().to_owned(),
+                }
+            } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
+                UserDecisionAnswer::Option {
+                    option_id: option.id.clone(),
+                }
+            } else {
+                editor.error = Some(SafeError {
+                    message: SafeMessage::new("select a valid answer"),
+                    error_id: "decision-invalid-answer".to_owned(),
+                });
+                return Vec::new();
+            };
+            if editor
+                .decision
+                .validate_answer(&answer, chrono::Utc::now())
+                .is_err()
+            {
+                editor.error = Some(SafeError {
+                    message: SafeMessage::new("select a valid answer"),
+                    error_id: "decision-invalid-answer".to_owned(),
+                });
+                return Vec::new();
+            }
+            return vec![Effect::ResolveDecision {
+                workspace,
+                decision_id: editor.decision.decision_id,
+                answer,
+            }];
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn follow_decision_freeform(editor: &mut DecisionEditor) {
+    editor.scroll_offset = None;
+    editor.follow_freeform = true;
+    editor.error = None;
+}
+
 fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
     editor.freeform.push_str(text);
-    editor.error = None;
+    follow_decision_freeform(editor);
 }
 
 /// Open the pending-decision list and ask its owner for a fresh snapshot.

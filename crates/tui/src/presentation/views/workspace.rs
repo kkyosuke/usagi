@@ -73,6 +73,9 @@ const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
 /// Nerd Font cogs: the Agent concurrency slots the daemon admits from.
 const AGENT_ICON: char = '\u{f085}';
+/// Nerd Font bell: pending user decisions. A font glyph keeps the Home chrome
+/// monochrome instead of asking terminals to render the coloured bell emoji.
+const DECISION_NOTICE_ICON: char = '\u{f0f3}';
 /// daemon が Agent concurrency を報告しない場合の表示。`0` と読み違えられない
 /// 1 文字にするため em dash を使う。
 const UNREPORTED: char = '—';
@@ -1275,8 +1278,12 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .dim()
             .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
-    let notice = (!home.unread_decision_ids.is_empty())
-        .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
+    let notice = (!home.unread_decision_ids.is_empty()).then(|| {
+        format!(
+            "{DECISION_NOTICE_ICON} {} notice",
+            home.unread_decision_ids.len()
+        )
+    });
     let mode = mode_toggle(mode);
 
     // Preserve the drawer entry first, then the mode indicator, then the notice.
@@ -2073,7 +2080,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     };
     widgets::clip_to_width(
         &format!(
-            "  🔔 {}: {}  (click bell to review)",
+            "  {DECISION_NOTICE_ICON} {}: {}  (click bell to review)",
             decision
                 .owner
                 .session_id
@@ -2831,10 +2838,10 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
-        DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession, SESSION_ROW_LINES,
-        SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
+        DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
+        HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
+        SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
+        Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
         garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
         home_header_action_at, home_header_layout, home_left_pane, home_row_height,
         home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
@@ -3709,6 +3716,8 @@ mod tests {
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
         assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} Director")));
+        assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
+        assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
