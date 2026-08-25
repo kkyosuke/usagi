@@ -785,8 +785,9 @@ impl WorkspaceRuntime {
 
     /// The focused live terminal when its tab hosts an Agent conversation.
     ///
-    /// Agent tabs remain inventory-owned and cannot be closed from the tab UI,
-    /// so the shell must tell them apart from closable generic terminal tabs.
+    /// Agent tabs remain inventory-owned: the tab close chord exits their CLI
+    /// instead of detaching the client subscription like a generic terminal, so
+    /// the shell must distinguish the two kinds before handling that chord.
     #[must_use]
     pub fn focused_agent_terminal(&self) -> Option<TerminalRef> {
         let terminal = self.focused_terminal()?;

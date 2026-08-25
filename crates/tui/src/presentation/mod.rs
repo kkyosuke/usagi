@@ -4572,13 +4572,26 @@ fn close_focused_terminal_pane(
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) {
-    // Agent inventory is authoritative and every existing Agent stays visible.
-    // Closing a live or interrupted Agent tab would only hide a still-owned
-    // runtime and make capacity impossible to manage, so direct the user to
-    // terminate the CLI instead. Pending launches remain cancellable below.
-    if runtime.focused_agent_terminal().is_some() || runtime.focused_interrupted().is_some() {
+    // A live Agent is daemon-owned, so detaching its client subscription would
+    // only hide a still-running process and leave its capacity occupied. Make
+    // the close chord equivalent to the documented Ctrl-D exit instead. The
+    // normal exit observation then removes the authoritative tab and refreshes
+    // sidebar/Garden membership.
+    if let Some(terminal) = runtime.focused_agent_terminal() {
+        let ctrl_d = key_to_terminal_bytes(Key::CtrlD)
+            .expect("Ctrl-D always has a live-terminal byte encoding");
+        if let Err(message) = ui.send_terminal_bytes(&terminal, &ctrl_d) {
+            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                message,
+            ))));
+        }
+        return;
+    }
+    // An interrupted Agent owns no live PTY to receive Ctrl-D. Keep the history
+    // visible and tell the user how to re-establish an exit-capable runtime.
+    if runtime.focused_interrupted().is_some() {
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-            "Agent tabs stay visible; exit the Agent with Ctrl-D",
+            "Interrupted Agent has no live process; resume it before closing",
         ))));
         return;
     }
@@ -14208,21 +14221,20 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_live_action_keeps_the_focused_agent_attached() {
+    fn close_tab_live_action_sends_ctrl_d_to_the_focused_agent() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
-        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let inputs = Arc::new(Mutex::new(Vec::new()));
         let (ui, mut runtime) = focused_live_pane(
             workspace,
             session,
             terminal.clone(),
-            Box::new(ScriptedAgentPort {
+            Box::new(WheelRecordingPort {
                 terminal,
-                subscription: 8,
                 replay: Vec::new(),
-                poll_error: None,
-                detaches: Arc::clone(&detaches),
+                inputs: Arc::clone(&inputs),
+                input_error: false,
             }),
         );
         let mut controls = LiveTerminalControls::default();
@@ -14246,14 +14258,8 @@ mod tests {
         ));
 
         assert_eq!(runtime.active_pane().tabs().len(), 1);
-        assert!(detaches.lock().unwrap().is_empty());
-        assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
-        );
+        assert_eq!(*inputs.lock().unwrap(), vec![vec![4]]);
+        assert!(runtime.state().notice().is_none());
     }
 
     #[test]
@@ -17895,7 +17901,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            Some("terminal session is no longer available")
         );
 
         let mut closed_intent = durable.lock().unwrap().clone();
@@ -18360,7 +18366,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            Some("terminal session is no longer available")
         );
     }
 
@@ -23245,7 +23251,7 @@ mod tests {
                 .state()
                 .notice()
                 .map(|notice| notice.message.as_str()),
-            Some("Agent tabs stay visible; exit the Agent with Ctrl-D")
+            Some("Interrupted Agent has no live process; resume it before closing")
         );
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
