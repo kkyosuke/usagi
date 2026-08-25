@@ -2,7 +2,7 @@
 //!
 //! The global, per-user preferences persisted as `settings.json` in the data
 //! directory, plus workspace settings persisted beside a project. Theme and
-//! modal interaction stay global; Agent, Issue, and Memory values are copied to
+//! modal interaction stay global; Agent, Team, Issue, and Memory values are copied to
 //! a workspace when it is registered and may then be changed independently.
 //! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
 //! adds to — or overrides — what every workspace inherits.
@@ -100,6 +100,47 @@ pub enum PrAutoOpen {
     /// Update only the sidebar badge.
     #[serde(other)]
     Never,
+}
+
+/// Built-in Agent team structure selected from Config.
+///
+/// `None` preserves the role-less compatibility mode. The other values select
+/// a code-defined role catalog; workspace `roles.toml` may layer over that
+/// catalog without changing this stable selection token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamTemplate {
+    /// Director → Manager → Worker.
+    Hierarchical,
+    /// Director directly coordinates parallel Workers.
+    Flat,
+    /// Planner → Implementer → Tester staged delivery.
+    Pipeline,
+    /// Do not inject a built-in role catalog. The default, and the state an
+    /// unrecognised stored token degrades to.
+    #[default]
+    #[serde(other)]
+    None,
+}
+
+impl TeamTemplate {
+    /// Every selectable Config value in display order.
+    pub const ALL: [Self; 4] = [Self::None, Self::Hierarchical, Self::Flat, Self::Pipeline];
+
+    /// Select the adjacent value, wrapping at either edge.
+    #[must_use]
+    pub fn cycle(self, forward: bool) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or_default();
+        let next = if forward {
+            (index + 1) % Self::ALL.len()
+        } else {
+            (index + Self::ALL.len() - 1) % Self::ALL.len()
+        };
+        Self::ALL[next]
+    }
 }
 
 /// The public, non-secret status invocation that decides whether an agent CLI is
@@ -381,6 +422,8 @@ pub struct Settings {
     pub issue_enabled: bool,
     /// Whether durable-memory MCP tools are available to agents.
     pub memory_enabled: bool,
+    /// Built-in role catalog used for new and resumed Agent work.
+    pub team_template: TeamTemplate,
     /// Optional local LLM exposed only through daemon-owned Agent provisioning.
     pub local_llm: LocalLlm,
     /// Environment bindings injected into every workspace's Agent and terminal
@@ -399,6 +442,7 @@ impl Default for Settings {
             default_model: DefaultModel::default(),
             issue_enabled: true,
             memory_enabled: true,
+            team_template: TeamTemplate::default(),
             local_llm: LocalLlm::default(),
             // No environment is injected unless it is configured explicitly.
             env: EnvBindings::new(),
@@ -432,10 +476,11 @@ impl Settings {
         self.default_model = settings.default_model;
         self.issue_enabled = settings.issue_enabled;
         self.memory_enabled = settings.memory_enabled;
+        self.team_template = settings.team_template;
         self
     }
 
-    /// Apply workspace-owned Agent, Issue, Memory, and environment values over
+    /// Apply workspace-owned Agent, Team, Issue, Memory, and environment values over
     /// this global baseline. Theme and modal interaction always remain global.
     ///
     /// Environment bindings accumulate rather than replace: the workspace map is
@@ -451,6 +496,9 @@ impl Settings {
         }
         if let Some(enabled) = local.memory_enabled {
             self.memory_enabled = enabled;
+        }
+        if let Some(template) = local.team_template {
+            self.team_template = template;
         }
         for (name, value) in valid_bindings(&local.env) {
             self.env.insert(name.to_owned(), value.to_owned());
@@ -478,7 +526,7 @@ impl Settings {
     }
 }
 
-/// Per-workspace Agent, Issue, and Memory settings stored in
+/// Per-workspace Agent, Team, Issue, and Memory settings stored in
 /// `<workspace>/.usagi/settings.json` (or the development-mode-specific `dev`
 /// directory).
 ///
@@ -492,13 +540,16 @@ pub struct LocalSettings {
     pub default_model: Option<DefaultModel>,
     pub issue_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
+    /// Workspace override for the built-in team template.
+    #[serde(deserialize_with = "deserialize_local_team_template")]
+    pub team_template: Option<TeamTemplate>,
     /// Environment bindings this workspace adds to the global ones. An empty map
     /// means the workspace uses exactly what it inherits.
     pub env: EnvBindings,
 }
 
 impl LocalSettings {
-    /// Replace the Agent, Issue, and Memory choices with `settings`, keeping this
+    /// Replace the Agent, Team, Issue, and Memory choices with `settings`, keeping this
     /// workspace's own environment bindings.
     ///
     /// The Config surface edits a merged [`Settings`] view, which carries the
@@ -510,6 +561,7 @@ impl LocalSettings {
         self.default_model = Some(settings.default_model);
         self.issue_enabled = Some(settings.issue_enabled);
         self.memory_enabled = Some(settings.memory_enabled);
+        self.team_template = Some(settings.team_template);
         self
     }
 
@@ -537,6 +589,22 @@ where
         Some("claude") => Some(DefaultModel::Claude),
         Some("openai") => Some(DefaultModel::OpenAi),
         Some("sakana_ai" | "sakana.ai" | "codex_fugu") => Some(DefaultModel::SakanaAi),
+        _ => None,
+    })
+}
+
+fn deserialize_local_team_template<'de, D>(
+    deserializer: D,
+) -> Result<Option<TeamTemplate>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let token = Option::<String>::deserialize(deserializer)?;
+    Ok(match token.as_deref() {
+        Some("none") => Some(TeamTemplate::None),
+        Some("hierarchical") => Some(TeamTemplate::Hierarchical),
+        Some("flat") => Some(TeamTemplate::Flat),
+        Some("pipeline") => Some(TeamTemplate::Pipeline),
         _ => None,
     })
 }

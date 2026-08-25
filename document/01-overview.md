@@ -90,15 +90,16 @@ workspace を開いて Home へ遷移する。失敗時は notice を表示し�
 入力検証と作成フローの詳細は [TUI の画面と入力](03-tui.md#画面と入力) を正本とする。Esc で Welcome へ戻る。
 
 Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。`Global` の Theme / Modal mode / PR auto-open と、
-`Workspace init` の Agent / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
+`Workspace init` の Agent / Team / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
 Agent はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。
+Team は session role の組み込みテンプレートを選ぶ。テンプレートと role catalog の仕様は [session role](10-session-roles.md#catalog)を正本とする。
 Issue と Memory は対応する MCP tool 群を on / off し、どちらも Global の初期値では on である。
 変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して Welcome へ戻り、保存失敗時は draft を保って
-error を表示する。Theme と Modal mode は user data directory の `settings.json` から全体へ適用する。Agent / Issue / Memory は
+error を表示する。Theme と Modal mode は user data directory の `settings.json` から全体へ適用する。Agent / Team / Issue / Memory は
 同じファイルから新規 workspace の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は
 `.usagi/local/settings.json`）へ登録時に一度コピーし、作成済み workspace へ後から反映しない。
-Overview の `config` は Home 上の overlay modal として Agent / Issue / Memory だけを表示し、scope 表示を置かない。
+Overview の `config` は Home 上の overlay modal として Agent / Team / Issue / Memory だけを表示し、scope 表示を置かない。
 settings resolution と entry lifecycle の正本は [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)
 である。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
 開始画面を Welcome か Config かで選び、どちらも同じループを回す。

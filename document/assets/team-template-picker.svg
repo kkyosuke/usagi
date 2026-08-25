@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500" role="img" aria-labelledby="title desc">
+  <title id="title">usagi Team template picker</title>
+  <desc id="desc">A terminal modal comparing hierarchical, flat, and pipeline team structures as three cards.</desc>
+  <rect width="960" height="500" fill="#f4eefe"/>
+  <circle cx="80" cy="60" r="125" fill="#f7c8ff" opacity="0.42"/>
+  <circle cx="890" cy="455" r="180" fill="#bdefff" opacity="0.45"/>
+  <rect x="58" y="58" width="844" height="410" rx="18" fill="#30283d" opacity="0.24"/>
+  <rect x="46" y="38" width="844" height="410" rx="18" fill="#17131f"/>
+  <rect x="46" y="38" width="844" height="48" rx="18" fill="#241d30"/>
+  <rect x="46" y="68" width="844" height="18" fill="#241d30"/>
+  <circle cx="78" cy="62" r="7" fill="#ff6b83"/>
+  <circle cx="102" cy="62" r="7" fill="#ffd166"/>
+  <circle cx="126" cy="62" r="7" fill="#5ed6a6"/>
+  <text x="468" y="68" text-anchor="middle" fill="#9c92ab" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">usagi config</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <rect x="76" y="106" width="784" height="314" rx="8" fill="none" stroke="#ed73ff" stroke-width="2"/>
+    <rect x="98" y="95" width="176" height="24" fill="#17131f"/>
+    <text x="106" y="114" fill="#ed73ff" font-size="17" font-weight="700">Select a team</text>
+    <text x="108" y="148" fill="#82788f" font-size="14">Choose how Agents coordinate work</text>
+    <g font-size="15">
+      <rect x="108" y="168" width="232" height="164" rx="5" fill="#211a2b" stroke="#ed73ff" stroke-width="2"/>
+      <rect x="120" y="157" width="164" height="23" fill="#17131f"/>
+      <text x="126" y="175" fill="#ed73ff" font-weight="700">› Hierarchical</text>
+      <text x="126" y="205" fill="#ffffff">♛ Director</text>
+      <text x="126" y="229" fill="#ffffff">├ ◆ Manager</text>
+      <text x="126" y="253" fill="#ffffff">│ └ ● Worker</text>
+      <text x="126" y="277" fill="#ffffff">└ ● Worker</text>
+      <text x="126" y="310" fill="#82788f">large / mixed work</text>
+      <rect x="352" y="168" width="232" height="164" rx="5" fill="#211a2b" stroke="#51475f" stroke-width="1.5"/>
+      <rect x="364" y="157" width="86" height="23" fill="#17131f"/>
+      <text x="370" y="175" fill="#82788f">Flat</text>
+      <text x="370" y="205" fill="#ffffff">♛ Director</text>
+      <text x="370" y="229" fill="#ffffff">├ ● Worker</text>
+      <text x="370" y="253" fill="#ffffff">├ ● Worker</text>
+      <text x="370" y="277" fill="#ffffff">└ ● Worker</text>
+      <text x="370" y="310" fill="#82788f">parallel work</text>
+      <rect x="596" y="168" width="232" height="164" rx="5" fill="#211a2b" stroke="#51475f" stroke-width="1.5"/>
+      <rect x="608" y="157" width="112" height="23" fill="#17131f"/>
+      <text x="614" y="175" fill="#82788f">Pipeline</text>
+      <text x="614" y="205" fill="#ffffff">Director → Planner</text>
+      <text x="688" y="229" fill="#ffffff">↓</text>
+      <text x="646" y="253" fill="#ffffff">Implementer</text>
+      <text x="688" y="277" fill="#ffffff">↓</text>
+      <text x="670" y="301" fill="#ffffff">Tester</text>
+    </g>
+    <text x="108" y="360" fill="#82788f" font-size="15">  [ Use no template ]</text>
+    <line x1="76" y1="382" x2="860" y2="382" stroke="#51475f" stroke-width="1"/>
+    <text x="468" y="404" text-anchor="middle" fill="#82788f" font-size="14">←→/Tab: select   Enter: apply   Esc: cancel</text>
+  </g>
+</svg>

@@ -22,6 +22,7 @@ filesystem sandbox、MCP authorization、session lifecycle の権限ではない
 |---|---|---|
 | scope | `RoleScope`（`root` / `session`） | launch identity から決まり、role では変更しない |
 | assignment | `ManagedSession.role_id: RoleId?` | managed session incarnation の作成時に固定する |
+| template | global / workspace settings の `team_template` | Config 保存後の新規 launch / explicit resume から反映する |
 | definition | global / workspace `roles.toml` | live Agent は変えず、次回 launch / explicit resume から反映する |
 
 `RoleId` は 1–64 byte の小文字 ASCII kebab-case である。session 名から role を推測せず、session の途中で `role_id` を変更しない。
@@ -29,64 +30,49 @@ role を変える場合は別 session を作成する。
 
 ## catalog
 
+Config の `Team` は次の組み込み catalog を選ぶ。global の値は workspace 登録時の初期値になり、Workspace Config の値が
+その workspace で優先される。Team 行で `Enter` を押すと3種類を構造図付きカードで比較でき、狭い端末では同じ候補を
+縦リストで表示する。`none` はカードとは別の `Use no template` actionで選択する。
+
+| 表示 | `team_template` | root default | session default | 許可する委譲経路 |
+|---|---|---|---|---|
+| none | `none` | 未指定 | 未指定 | 組み込み role なし |
+| hierarchical | `hierarchical` | Director | Manager | Director → Manager / Worker、Manager → Worker |
+| flat | `flat` | Director | Worker | Director → Worker |
+| pipeline | `pipeline` | Director | Planner | Director → Planner → Implementer → Tester |
+
+`none` は既定値であり、組み込み catalog を注入しない。未知の `team_template` token、および読み取れないworkspace設定も
+委譲権限を暗黙に増やさないよう `none` へ縮退する。
+各テンプレートの委譲上限 `max_concurrency` は 4 である。パイプライン型は role と委譲経路によって工程順を制約し、
+独立した workflow engine や自動ステージ遷移は追加しない。各 Agent が role instruction に従って次工程へ dispatch する。
+
+catalog は次の順で合成する。後の layer にある同一 role ID は、前の定義を field 単位で混ぜず定義全体を置換する。
+default は各 layer で指定された scope だけを上書きする。
+
 | layer | path | precedence |
 |---|---|---|
-| global | `<data-dir>/roles.toml` | fallback |
+| built-in | settings の `team_template` | base |
+| global | `<data-dir>/roles.toml` | built-in を上書き |
 | workspace | `<registered-workspace-root>/.usagi/roles.toml` | global を上書き |
 
-両ファイルは `version = 1` を持つ。workspace の同一 role ID は global 定義を field 単位で混ぜず、定義全体を置換する。
-default は `workspace → global → 未指定` の順で解決する。両ファイルが無い場合は role 無しの互換モードとなる。
+`roles.toml` は `version = 1` を持つ。選択したテンプレートを土台に差分定義を重ねられるため、テンプレート選択と
+catalog 編集は両立する。`none` を選び両ファイルも無い場合は role 無しの互換モードとなる。
 
-```toml
-version = 1
-
-[defaults]
-root = "director"
-session = "manager"
-
-[roles.director]
-summary = "全体方針を決める"
-scopes = ["root"]
-instructions = "要求を分解し、session の結果を統合する。"
-[roles.director.delegation]
-enabled = true
-child_roles = ["manager", "worker"]
-max_depth = 2
-max_concurrency = 4
-
-[roles.worker]
-summary = "実装と検証を行う"
-scopes = ["session"]
-instructions = "依頼された変更を実装し、リスクに応じたテストを実行する。"
-[roles.worker.delegation]
-enabled = false
-
-[roles.manager]
-summary = "大きいタスクを分解・統合する"
-scopes = ["session"]
-instructions = "タスクを Executor へ委譲し、各結果を検証・統合して直近 caller へ報告する。"
-[roles.manager.delegation]
-enabled = true
-child_roles = ["worker"]
-max_depth = 2
-max_concurrency = 4
-```
-
-role は組織上の責務を prompt として与える。Director が小さいタスクを session role の Executor へ直接 dispatch
-する場合は 2 層、大きいタスクを Manager role へ dispatch し、その Manager が Executor を dispatch する場合は
-3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Executor → Manager → Director と
+role は組織上の責務を prompt として与える。階層型チームで Director が小さいタスクを Worker へ直接 dispatch
+する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker を dispatch する場合は
+3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Worker → Manager → Director と
 一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
 `max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
-会社テンプレートでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
+階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
 `manager` とする。Director/Managerが実行者を委譲するときは `role = "worker"` を明示し、既定値に依存しない。
 sidebar は各session名の横に `◆ Manager` / `● Worker` と階層インデントを常時表示し、Garden は `role-icon Role · parent › session` の nameplate と session 内の Agent を表すうさぎを表示する。Director drawerは `♛ Director` をrootとする親子ツリーを表示する。
 
 `session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
 したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
-いずれかの role に `delegation` block がある会社モードでは、credential のない `session_delegate_issue` を拒否する。
+いずれかの effective role に `delegation` block がある場合は、credential のない `session_delegate_issue` を拒否する。
 `max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
 同じ session の利用数と絶対深度を引き継ぐ。
 

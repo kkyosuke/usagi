@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, Theme, format_env_bindings,
+    DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
+    format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -21,6 +22,33 @@ const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
 const ENVIRONMENT_MAX_ROWS: usize = 10;
 const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
+const TEAM_PICKER_INNER_WIDTH: usize = 76;
+const TEAM_CARD_INNER_WIDTH: usize = 20;
+const TEAM_PICKER_OPTIONS: [TeamTemplate; 4] = [
+    TeamTemplate::Hierarchical,
+    TeamTemplate::Flat,
+    TeamTemplate::Pipeline,
+    TeamTemplate::None,
+];
+
+#[derive(Clone, Copy)]
+enum TeamCard {
+    Hierarchical,
+    Flat,
+    Pipeline,
+}
+
+impl TeamCard {
+    const ALL: [Self; 3] = [Self::Hierarchical, Self::Flat, Self::Pipeline];
+
+    const fn template(self) -> TeamTemplate {
+        match self {
+            Self::Hierarchical => TeamTemplate::Hierarchical,
+            Self::Flat => TeamTemplate::Flat,
+            Self::Pipeline => TeamTemplate::Pipeline,
+        }
+    }
+}
 
 /// Time between frames while the Save button's highlight wave is moving.
 pub const SAVE_WAVE_TICK: Duration = Duration::from_millis(60);
@@ -56,6 +84,7 @@ pub enum Field {
     PrAutoOpen,
     Environment,
     DefaultModel,
+    TeamTemplate,
     Issue,
     Memory,
     Save,
@@ -83,7 +112,7 @@ impl ScopeSettings {
 
 /// Editable Config screen state. Global Config edits application preferences
 /// and workspace defaults; the Overview modal edits only the current
-/// workspace's Agent, Issue, and Memory choices.
+/// workspace's Agent, Team, Issue, and Memory choices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     scope: SettingsScope,
@@ -95,6 +124,7 @@ pub struct Config {
     save_animation_frame: usize,
     environment_editor: Option<EnvironmentSourceEditor>,
     environment_error: Option<String>,
+    team_picker: Option<TeamTemplate>,
 }
 
 impl Config {
@@ -142,6 +172,7 @@ impl Config {
             save_animation_frame: 0,
             environment_editor: None,
             environment_error: None,
+            team_picker: None,
         }
     }
 
@@ -176,7 +207,8 @@ impl Config {
                 Field::Theme => Field::ModalSelectionMode,
                 Field::ModalSelectionMode => Field::Environment,
                 Field::Environment => Field::DefaultModel,
-                Field::DefaultModel => Field::Issue,
+                Field::DefaultModel => Field::TeamTemplate,
+                Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::PrAutoOpen,
                 Field::PrAutoOpen => Field::Save,
@@ -184,7 +216,8 @@ impl Config {
             },
             SettingsScope::Workspace => match self.field {
                 Field::DefaultModel => Field::Environment,
-                Field::Environment => Field::Issue,
+                Field::Environment => Field::TeamTemplate,
+                Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
                 Field::Save | Field::Theme | Field::ModalSelectionMode | Field::PrAutoOpen => {
@@ -194,7 +227,7 @@ impl Config {
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
             self.field = match self.scope {
-                SettingsScope::Global => Field::Issue,
+                SettingsScope::Global => Field::TeamTemplate,
                 SettingsScope::Workspace => Field::Environment,
             };
         }
@@ -209,14 +242,16 @@ impl Config {
                 Field::ModalSelectionMode => Field::Theme,
                 Field::Environment => Field::ModalSelectionMode,
                 Field::DefaultModel => Field::Environment,
-                Field::Issue => Field::DefaultModel,
+                Field::Issue => Field::TeamTemplate,
+                Field::TeamTemplate => Field::DefaultModel,
                 Field::Memory => Field::Issue,
                 Field::PrAutoOpen => Field::Memory,
                 Field::Save => Field::PrAutoOpen,
             },
             SettingsScope::Workspace => match self.field {
                 Field::Environment => Field::DefaultModel,
-                Field::Issue => Field::Environment,
+                Field::Issue => Field::TeamTemplate,
+                Field::TeamTemplate => Field::Environment,
                 Field::Memory => Field::Issue,
                 Field::Save => Field::Memory,
                 Field::DefaultModel
@@ -296,6 +331,52 @@ impl Config {
         self.notice = None;
     }
 
+    /// Whether the visual Team picker currently owns Config input.
+    #[must_use]
+    pub fn is_selecting_team(&self) -> bool {
+        self.team_picker.is_some()
+    }
+
+    /// Open the Team picker from its Config row without changing the draft.
+    pub fn open_team_picker(&mut self) -> bool {
+        if self.field != Field::TeamTemplate {
+            return false;
+        }
+        self.team_picker = Some(self.current().draft.team_template);
+        self.notice = None;
+        true
+    }
+
+    /// Move focus across the three cards and the separate no-template action.
+    pub fn cycle_team_picker(&mut self, forward: bool) {
+        let Some(selected) = self.team_picker.as_mut() else {
+            return;
+        };
+        let index = TEAM_PICKER_OPTIONS
+            .iter()
+            .position(|candidate| candidate == selected)
+            .unwrap_or_default();
+        let next = if forward {
+            (index + 1) % TEAM_PICKER_OPTIONS.len()
+        } else {
+            (index + TEAM_PICKER_OPTIONS.len() - 1) % TEAM_PICKER_OPTIONS.len()
+        };
+        *selected = TEAM_PICKER_OPTIONS[next];
+    }
+
+    /// Apply the focused Team choice to the Config draft and close the picker.
+    pub fn apply_team_picker(&mut self) {
+        if let Some(selected) = self.team_picker.take() {
+            self.current_mut().draft.team_template = selected;
+            self.notice = None;
+        }
+    }
+
+    /// Close the Team picker without changing the Config draft.
+    pub fn cancel_team_picker(&mut self) {
+        self.team_picker = None;
+    }
+
     /// Toggle availability of the issue MCP tool family.
     pub fn cycle_issue_enabled(&mut self) {
         let enabled = &mut self.current_mut().draft.issue_enabled;
@@ -319,7 +400,7 @@ impl Config {
             Field::DefaultModel => self.cycle_default_model(),
             Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
-            Field::Environment | Field::Save => return false,
+            Field::TeamTemplate | Field::Environment | Field::Save => return false,
         }
         true
     }
@@ -555,9 +636,12 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             .map(|line| mascot_screen::centered_line(width, &line, Style::new()))
             .collect()
     });
-    match config.environment_editor.as_ref() {
-        Some(editor) => render_environment_over(raw_height, raw_width, &base, config, editor),
-        None => base,
+    if let Some(editor) = config.environment_editor.as_ref() {
+        render_environment_over(raw_height, raw_width, &base, config, editor)
+    } else if let Some(selected) = config.team_picker {
+        render_team_picker_over(raw_height, raw_width, &base, selected)
+    } else {
+        base
     }
 }
 
@@ -588,12 +672,117 @@ pub fn render_over(
         MODAL_BODY_HEIGHT,
         lines,
     );
-    match config.environment_editor.as_ref() {
-        Some(editor) => {
-            render_environment_over(raw_height, raw_width, &config_base, config, editor)
-        }
-        None => config_base,
+    if let Some(editor) = config.environment_editor.as_ref() {
+        render_environment_over(raw_height, raw_width, &config_base, config, editor)
+    } else if let Some(selected) = config.team_picker {
+        render_team_picker_over(raw_height, raw_width, &config_base, selected)
+    } else {
+        config_base
     }
+}
+
+fn render_team_picker_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    selected: TeamTemplate,
+) -> Vec<String> {
+    let inner_width = modal::modal_inner_width(width, TEAM_PICKER_INNER_WIDTH);
+    let mut lines = vec![
+        modal::caption("Choose how Agents coordinate work"),
+        String::new(),
+    ];
+    if inner_width >= TEAM_PICKER_INNER_WIDTH {
+        let cards = TeamCard::ALL.map(|card| team_card(card, selected));
+        for row in 0..cards[0].len() {
+            lines.push(
+                cards
+                    .iter()
+                    .map(|card| card[row].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+    } else {
+        lines.extend([
+            team_picker_row(
+                TeamTemplate::Hierarchical,
+                selected,
+                "Director → Manager → Worker",
+            ),
+            team_picker_row(TeamTemplate::Flat, selected, "Director → Workers"),
+            team_picker_row(
+                TeamTemplate::Pipeline,
+                selected,
+                "Planner → Implementer → Tester",
+            ),
+        ]);
+    }
+    lines.push(String::new());
+    let marker = modal::selection_marker(selected == TeamTemplate::None);
+    lines.push(modal::content_line(
+        &format!("{marker} [ Use no template ]"),
+        inner_width,
+    ));
+    lines.push(String::new());
+    lines.push(modal::footer("←→/Tab: select   Enter: apply   Esc: cancel"));
+    modal::render_over(height, width, base, "Select a team", inner_width, &lines)
+}
+
+fn team_card(card: TeamCard, selected: TeamTemplate) -> Vec<String> {
+    let title = match card {
+        TeamCard::Hierarchical => "Hierarchical",
+        TeamCard::Flat => "Flat",
+        TeamCard::Pipeline => "Pipeline",
+    };
+    let marker = if card.template() == selected {
+        "› "
+    } else {
+        "  "
+    };
+    let title = if card.template() == selected {
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&format!("{marker}{title}"))
+    } else {
+        Style::new().dim().paint(&format!("{marker}{title}"))
+    };
+    let body = match card {
+        TeamCard::Hierarchical => [
+            "♛ Director",
+            "├ ◆ Manager",
+            "│ └ ● Worker",
+            "└ ● Worker",
+            "large / mixed work",
+        ],
+        TeamCard::Flat => [
+            "♛ Director",
+            "├ ● Worker",
+            "├ ● Worker",
+            "└ ● Worker",
+            "parallel work",
+        ],
+        TeamCard::Pipeline => [
+            "Director → Planner",
+            "          ↓",
+            "     Implementer",
+            "          ↓",
+            "        Tester",
+        ],
+    };
+    modal::compact_boxed(&title, TEAM_CARD_INNER_WIDTH, &body.map(str::to_owned))
+}
+
+fn team_picker_row(template: TeamTemplate, selected: TeamTemplate, description: &str) -> String {
+    let marker = modal::selection_marker(template == selected);
+    modal::content_line(
+        &format!(
+            "{marker} {:<12} {description}",
+            team_template_name(template)
+        ),
+        TEAM_PICKER_INNER_WIDTH,
+    )
 }
 
 fn form_rows(config: &Config) -> Vec<String> {
@@ -837,6 +1026,12 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
                 config.settings().default_model != config.current().saved.default_model,
             )
         },
+        select::bracketed(
+            "Team",
+            team_template_name(config.settings().team_template),
+            config.field() == Field::TeamTemplate,
+            config.settings().team_template != config.current().saved.team_template,
+        ),
         select::render(
             "Issue",
             enabled_name(config.settings().issue_enabled),
@@ -850,6 +1045,15 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
             config.settings().memory_enabled != config.current().saved.memory_enabled,
         ),
     ]
+}
+
+fn team_template_name(template: TeamTemplate) -> &'static str {
+    match template {
+        TeamTemplate::None => "none",
+        TeamTemplate::Hierarchical => "hierarchical",
+        TeamTemplate::Flat => "flat",
+        TeamTemplate::Pipeline => "pipeline",
+    }
 }
 
 fn section_heading(label: &str) -> String {
@@ -899,7 +1103,7 @@ fn enabled_name(enabled: bool) -> &'static str {
 mod tests {
     use super::{
         AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, ENVIRONMENT_TEXTAREA_WIDTH, Field,
-        environment_textarea, render, render_over,
+        environment_textarea, render, render_over, team_template_name,
     };
     use crate::presentation::widgets::{display_width, modal, strip_ansi};
     use crate::usecase::application::environment_source::{
@@ -907,7 +1111,7 @@ mod tests {
     };
     use std::io;
     use usagi_core::domain::settings::{
-        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, Theme,
+        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
     };
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -1341,7 +1545,7 @@ mod tests {
             .unwrap();
         assert_eq!(column_of(&dirty, "●"), changed_column);
 
-        for _ in 0..7 {
+        for _ in 0..8 {
             config.next_field();
         }
         let save_frame = render(24, 80, &config)
@@ -1398,7 +1602,11 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Issue);
         config.previous_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        config.previous_field();
         assert_eq!(config.field(), Field::Environment);
+        config.next_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
         config.next_field();
         assert_eq!(config.field(), Field::Issue);
         config.next_field();
@@ -1493,7 +1701,7 @@ mod tests {
     fn pr_auto_open_cycles_all_safe_modes_from_global_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        for _ in 0..6 {
+        for _ in 0..7 {
             config.next_field();
         }
         assert_eq!(config.field(), Field::PrAutoOpen);
@@ -1526,9 +1734,11 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(!config.can_save());
 
+        config.previous_field();
         config.previous_field();
         config.previous_field();
         config.previous_field();
@@ -1542,6 +1752,7 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1572,6 +1783,8 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Issue);
         config.previous_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        config.previous_field();
         assert_eq!(config.field(), Field::DefaultModel);
         config.previous_field();
         assert_eq!(config.field(), Field::Environment);
@@ -1579,6 +1792,7 @@ mod tests {
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1611,6 +1825,7 @@ mod tests {
         assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1675,17 +1890,20 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        config.next_field();
         assert_eq!(config.field(), Field::Issue);
         config.previous_field();
-        assert_eq!(config.field(), Field::Environment);
+        assert_eq!(config.field(), Field::TeamTemplate);
         config.previous_field();
-        assert_eq!(config.field(), Field::ModalSelectionMode);
+        assert_eq!(config.field(), Field::Environment);
     }
 
     #[test]
     fn issue_and_memory_availability_toggle_independently() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1711,10 +1929,75 @@ mod tests {
         assert!(!port.global.memory_enabled);
     }
 
+    #[test]
+    fn team_picker_renders_applies_cancels_and_saves_for_the_workspace() {
+        let mut port = FakeSettingsPort::default();
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        assert!(!config.open_team_picker());
+        config.cycle_team_picker(true);
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        assert_eq!(config.settings().team_template, TeamTemplate::None);
+        assert!(!config.cycle_selected(true));
+
+        assert!(config.open_team_picker());
+        assert!(config.is_selecting_team());
+        let cards = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(cards.contains("Select a team"));
+        assert!(cards.contains("Hierarchical"));
+        assert!(cards.contains("Flat"));
+        assert!(cards.contains("Pipeline"));
+        assert!(cards.contains("♛ Director"));
+        assert!(cards.contains("› [ Use no template ]"));
+        let base = vec!["home background".to_owned(); 24];
+        let overlay = strip_ansi(&render_over(24, 80, &base, &config).join("\n"));
+        assert!(overlay.contains("Select a team"));
+        config.apply_team_picker();
+        assert_eq!(config.settings().team_template, TeamTemplate::None);
+        config.apply_team_picker();
+
+        assert!(config.open_team_picker());
+        config.cycle_team_picker(true);
+        config.cycle_team_picker(true);
+        config.apply_team_picker();
+        assert!(!config.is_selecting_team());
+        assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+
+        assert!(config.open_team_picker());
+        let selected_card = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(selected_card.contains("› Flat"));
+        config.cycle_team_picker(true);
+        config.cycle_team_picker(true);
+        let none = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(none.contains("› [ Use no template ]"));
+        config.cancel_team_picker();
+        assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+
+        assert!(config.open_team_picker());
+        config.cycle_team_picker(false);
+        let narrow = strip_ansi(&render(18, 48, &config).join("\n"));
+        assert!(narrow.contains("hierarchical"));
+        assert!(narrow.contains("Director → Manager"));
+        config.cancel_team_picker();
+
+        assert_eq!(team_template_name(TeamTemplate::Flat), "flat");
+        assert_eq!(team_template_name(TeamTemplate::Pipeline), "pipeline");
+        config.next_field();
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert_eq!(port.workspace.team_template, TeamTemplate::Flat);
+    }
+
     /// Drive the Save row to the dirty state used by the phase tests.
     fn dirty_on_save_row(port: &mut FakeSettingsPort) -> Config {
         let mut config = Config::load(port);
         config.cycle_theme(true);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1761,6 +2044,7 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
+            base.next_field();
             base.next_field();
             base.next_field();
             base.next_field();

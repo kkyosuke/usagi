@@ -2517,6 +2517,16 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 /// 開始（loading）する。保存中の再入力は `begin_save` が弾く。
 #[allow(clippy::needless_pass_by_value)]
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
+    if config.is_selecting_team() {
+        match key {
+            Key::Left | Key::Char('h') => config.cycle_team_picker(false),
+            Key::Right | Key::Char('l') | Key::Tab => config.cycle_team_picker(true),
+            Key::Enter => config.apply_team_picker(),
+            Key::Escape => config.cancel_team_picker(),
+            _ => {}
+        }
+        return ConfigStep::Stay;
+    }
     if config.is_editing_environment() {
         match key {
             Key::Management {
@@ -2568,6 +2578,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
         // dirty Save row is focused with no save already in flight, so a rapid
         // second Enter cannot start a second save.
         Key::Enter if config.open_environment(settings) => ConfigStep::Stay,
+        Key::Enter if config.open_team_picker() => ConfigStep::Stay,
         Key::Enter if config.begin_save() => ConfigStep::Save,
         Key::Escape => ConfigStep::Back,
         Key::Quit | Key::CtrlQ => ConfigStep::Quit,
@@ -6161,6 +6172,12 @@ fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
+                // Team selection changes the effective role catalog immediately
+                // for the next session creation or Agent launch.
+                let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
+                let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
+                    role_catalog,
+                )));
                 continue;
             }
             // Both stops return from here, which is what performs the teardown:
@@ -20460,6 +20477,37 @@ mod tests {
     }
 
     #[test]
+    fn step_config_opens_applies_and_cancels_the_team_picker() {
+        use crate::presentation::views::config::Field as ConfigField;
+        use usagi_core::domain::settings::TeamTemplate;
+
+        let mut settings = DefaultSettingsPort;
+        let mut config = Config::load(&mut settings);
+        for _ in 0..4 {
+            step_config(&mut config, Key::Down, &mut settings);
+        }
+        assert_eq!(config.field(), ConfigField::TeamTemplate);
+        step_config(&mut config, Key::Right, &mut settings);
+        assert_eq!(config.settings().team_template, TeamTemplate::None);
+
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(config.is_selecting_team());
+        step_config(&mut config, Key::Other, &mut settings);
+        step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Enter, &mut settings);
+        assert!(!config.is_selecting_team());
+        assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+
+        step_config(&mut config, Key::Enter, &mut settings);
+        step_config(&mut config, Key::Left, &mut settings);
+        step_config(&mut config, Key::Tab, &mut settings);
+        step_config(&mut config, Key::Escape, &mut settings);
+        assert!(!config.is_selecting_team());
+        assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+    }
+
+    #[test]
     fn step_config_routes_input_to_the_global_environment_editor() {
         use crate::presentation::views::config::Field as ConfigField;
 
@@ -20545,6 +20593,7 @@ mod tests {
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         // Enter on the dirty Save row begins the save flow (loading).
         assert!(matches!(
             step_config(&mut config, Key::Enter, &mut settings),
@@ -20603,6 +20652,7 @@ mod tests {
         keys.extend("config".chars().map(Key::Char));
         keys.extend([
             Key::Enter,
+            Key::Down,
             Key::Down,
             Key::Down,
             Key::Right,
@@ -20737,9 +20787,10 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Environment → Agent model → Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 9] = [
+    // Save (Theme → Modal mode → Environment → Agent model → Team → Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 10] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -20750,10 +20801,11 @@ mod tests {
         Key::Enter,
     ];
 
-    // Workspace Config starts on Agent and contains Agent → env → Issue →
-    // Memory → Save.
-    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 6] = [
+    // Workspace Config starts on Agent and contains Agent → env → Team →
+    // Issue → Memory → Save.
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 7] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
