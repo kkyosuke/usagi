@@ -104,7 +104,7 @@ Switch で session 行を選択しているとき、`x` は `session remove`、`
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
 Workspace entry は各 session の daemon PR snapshot を読み、sidebar の右端に PR アイコンと件数を表示する。
 Switch の `p`、Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、同じ snapshot projection から
-対象 session の Pull Request モーダルを開き、root では `p` により空一覧を表示する。新しい PR URL の検知時は、別の modal や Director drawer が前面になければ
+対象 session に dismissed でない PR がある場合だけ Pull Request モーダルを開く。新しい PR URL の検知時は、別の modal や Director drawer が前面になければ
 対象 session の Pull Request モーダルを検知した PR を選択して自動で開く。初回 snapshot の既存 PR は
 自動表示しない。`v` は対象の
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で

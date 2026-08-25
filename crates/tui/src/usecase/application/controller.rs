@@ -963,6 +963,10 @@ pub struct AppState {
     interaction_count: u64,
     mascot_tick: u64,
     size: Option<(u16, u16)>,
+    /// Whether presentation can currently draw the Garden without hiding Home
+    /// behind an invisible overlay. The renderer injects this layout fact; the
+    /// reducer uses it to admit both automatic and manual opening consistently.
+    garden_available: bool,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1104,6 +1108,7 @@ impl AppState {
             interaction_count: 0,
             mascot_tick: 0,
             size: None,
+            garden_available: true,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1829,6 +1834,8 @@ pub enum AppEvent {
     Key(AppKey),
     /// terminal size の変更。
     Resize { width: u16, height: u16 },
+    /// Presentation-level Garden layout availability for the current terminal.
+    GardenAvailability(bool),
     /// 定期 tick。
     Tick,
     /// backend snapshot / notice。
@@ -2974,6 +2981,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.size = Some((width, height));
             Vec::new()
         }
+        AppEvent::GardenAvailability(available) => {
+            state.garden_available = available;
+            if !available && state.overlay == Some(Overlay::Garden) {
+                state.overlay = None;
+            }
+            Vec::new()
+        }
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
@@ -3294,6 +3308,31 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     .min(overlay.prs.len().saturating_sub(1));
                 overlay.error = None;
             }
+            // An explicit `p` request is kept as a hidden pending overlay until
+            // its snapshot arrives. Only a non-empty projection may become a
+            // modal; an empty result closes an already-visible stale modal too.
+            if state
+                .pr_overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == *target)
+            {
+                if state
+                    .pr_overlay
+                    .as_ref()
+                    .is_some_and(|overlay| overlay.prs.is_empty())
+                {
+                    state.pr_overlay = None;
+                    if state.overlay == Some(Overlay::Prs) {
+                        state.overlay = None;
+                    }
+                } else if state.overlay.is_none() && !state.director_drawer_open {
+                    state.overlay = Some(Overlay::Prs);
+                } else if state.overlay != Some(Overlay::Prs) {
+                    // Do not let a delayed explicit request steal a newer
+                    // foreground interaction.
+                    state.pr_overlay = None;
+                }
+            }
             // A freshly discovered PR is the completion of work the user is
             // waiting for, so surface it immediately. Metadata-only refreshes,
             // duplicate snapshots, and deliberate dismissals stay quiet. An
@@ -3334,12 +3373,19 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             }
         }
         BackendEvent::PullRequestsError { target, error } => {
-            if let Some(overlay) = state
+            let matching_request = state
                 .pr_overlay
-                .as_mut()
-                .filter(|overlay| overlay.target == *target)
-            {
-                overlay.error = Some(error.clone());
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == *target);
+            if matching_request {
+                if state.overlay.is_none() && !state.director_drawer_open {
+                    state.overlay = Some(Overlay::Prs);
+                } else if state.overlay != Some(Overlay::Prs) {
+                    state.pr_overlay = None;
+                }
+                if let Some(overlay) = state.pr_overlay.as_mut() {
+                    overlay.error = Some(error.clone());
+                }
             }
         }
         BackendEvent::PreviewLoaded { target, lines } => {
@@ -4300,13 +4346,15 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
-    state.overlay = Some(Overlay::Prs);
     let mut overlay = PrOverlay::loading(target);
     if let Target::Session(session) = target
         && let Some(prs) = state.session_prs(session)
     {
         overlay.prs = filtered_prs(prs, PrFilter::All);
     }
+    // Keep the request state so a newly returned PR can still open immediately,
+    // but do not render an empty loading/empty-state modal.
+    state.overlay = (!overlay.prs.is_empty()).then_some(Overlay::Prs);
     state.pr_overlay = Some(overlay);
     state.preview_overlay = None;
     vec![Effect::LoadPullRequests { target }]
@@ -4482,8 +4530,15 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
-                state.overlay = Some(Overlay::Garden);
-                state.notice = None;
+                if state.garden_available {
+                    state.overlay = Some(Overlay::Garden);
+                    state.notice = None;
+                } else {
+                    state.overlay = None;
+                    state.notice = Some(Notice::new(
+                        "Garden needs a terminal at least 64 columns wide and 14 rows tall",
+                    ));
+                }
             } else {
                 state.notice = Some(Notice::new("garden takes no arguments (usage: garden)"));
             }
@@ -4800,7 +4855,7 @@ fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect
 /// entirely on a terminal too small to draw a garden (`presentation::views::
 /// workspace::garden_fits`).
 fn garden_may_auto_open(state: &AppState) -> bool {
-    state.overlay.is_none() && !state.director_drawer_open
+    state.garden_available && state.overlay.is_none() && !state.director_drawer_open
 }
 
 /// Reduce a click the presentation layer already resolved against the garden's
@@ -8519,6 +8574,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manual_garden_refuses_an_unavailable_layout_without_leaving_an_overlay() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+        state.overlay = Some(Overlay::Overview);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("garden".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| { notice.message.as_str().contains("at least 64 columns") })
+        );
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        assert!(update(&mut state, AppEvent::GardenAvailability(true)).is_empty());
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+        assert_eq!(state.overlay(), None);
+    }
+
     /// Just under the threshold nothing happens; reaching it opens the garden.
     /// The reducer owns no clock, so the whole timer is one injected duration.
     #[test]
@@ -9255,12 +9340,12 @@ mod tests {
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
 
-        // `p` opens the PR overlay for the active target and requests its list.
+        // `p` requests the active target's list without showing an empty modal.
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('p'))),
             vec![Effect::LoadPullRequests { target }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
         assert!(state.pr_overlay().unwrap().prs().is_empty());
 
         // A list for another target is ignored; the matching one fills the overlay.
@@ -9282,6 +9367,7 @@ mod tests {
                 prs: prs.clone(),
             }),
         );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
         assert_eq!(state.pr_overlay().unwrap().selected(), 0);
         assert_eq!(state.session_prs(session), Some(prs.as_slice()));
@@ -9358,15 +9444,14 @@ mod tests {
     }
 
     #[test]
-    fn pr_overlay_enter_is_inert_while_empty_and_errors_stay_visible() {
+    fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-        // Enter with no entries emits nothing and keeps the overlay open.
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
-        // A safe fetch error surfaces on the open overlay.
+        assert_eq!(state.overlay(), None);
+        // A fetch error is not an authoritative empty snapshot, so its safe
+        // diagnostic remains visible in the PR modal.
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsError {
@@ -9374,6 +9459,7 @@ mod tests {
                 error: safe_error("gh unavailable"),
             }),
         );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(
             state
                 .pr_overlay()
@@ -9382,6 +9468,89 @@ mod tests {
                 .map(|error| error.message.as_str()),
             Some("gh unavailable")
         );
+
+        // An authoritative empty result discards the pending modal state.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+
+        // Reopening from the known-empty cache also stays hidden, and the
+        // duplicate revision returned by an explicit refresh clears its pending
+        // request instead of leaving it to misclassify a future discovery.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_some());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+    }
+
+    #[test]
+    fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // A foreground interaction opened after `p` wins over a delayed error.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pr_overlay().is_none());
+
+        // The same foreground interaction also wins over a delayed successful
+        // response, while the authoritative PR cache still advances.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let pr = pr_link(41);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pr_overlay().is_none());
+        assert_eq!(state.session_prs(session), Some(std::slice::from_ref(&pr)));
+
+        // A cached PR opens immediately. If a newer authoritative snapshot no
+        // longer contains any visible PR, the stale modal closes.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
     }
 
     #[test]
@@ -9822,7 +9991,8 @@ mod tests {
         // And the reverse: opening PRs discards the preview state.
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_some());
         assert!(state.preview_overlay().is_none());
     }
 

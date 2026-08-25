@@ -182,7 +182,7 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 ### 4. 状態と PR を確認する
 
 session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
-Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックで PR 一覧を開き、`d` で diff、
+Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
 `n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR を選んで Enter を押すと既定のブラウザで開く。
 
@@ -230,6 +230,9 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi open [path]` | workspace を登録して直接開く |
 | `usagi config` | Global Config を開く |
 | `usagi doctor` | 必要ツールの診断画面を開く |
+| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
+| `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
+| `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
