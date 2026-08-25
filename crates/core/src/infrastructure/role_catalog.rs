@@ -626,7 +626,7 @@ mod tests {
             &home,
             &workspace,
             CatalogLayer::Global,
-            "version = 1\n[defaults]\nsession = \"coder\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n",
+            "version = 1\n[defaults]\nroot = \"director\"\nsession = \"coder\"\n[roles.director]\nsummary = \"Director\"\nscopes = [\"root\"]\ninstructions = \"direct\"\n[roles.coder]\nsummary = \"Code\"\nscopes = [\"session\"]\ninstructions = \"code\"\n",
         )
         .unwrap();
 

@@ -928,7 +928,7 @@ fn enabled_name(enabled: bool) -> &'static str {
 mod tests {
     use super::{
         AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, ENVIRONMENT_TEXTAREA_WIDTH, Field,
-        environment_textarea, render, render_over,
+        environment_textarea, render, render_over, team_template_name,
     };
     use crate::presentation::widgets::{display_width, modal, strip_ansi};
     use crate::usecase::application::environment_source::{
@@ -1772,6 +1772,8 @@ mod tests {
         config.cycle_team_template(true);
         config.cycle_team_template(true);
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+        assert_eq!(team_template_name(TeamTemplate::Flat), "flat");
+        assert_eq!(team_template_name(TeamTemplate::Pipeline), "pipeline");
         config.next_field();
         config.next_field();
         config.next_field();
