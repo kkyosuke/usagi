@@ -5,9 +5,9 @@ status: todo
 priority: low
 labels: [v2, cli, docs, daemon]
 dependson: []
-related: [1507]
+related: []
 created_at: 2026-08-23T23:21:39.680915+00:00
-updated_at: 2026-08-23T23:21:39.680915+00:00
+updated_at: 2026-08-25T22:25:22.537811+00:00
 ---
 
 ## Finding

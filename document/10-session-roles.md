@@ -56,13 +56,13 @@ default は各 layer で指定された scope だけを上書きする。
 | workspace | `<registered-workspace-root>/.usagi/roles.toml` | global を上書き |
 
 `roles.toml` は `version = 1` を持つ。選択したテンプレートを土台に差分定義を重ねられるため、テンプレート選択と
-catalog 編集は両立する。`none` を選び両ファイルも無い場合は role 無しの互換モードとなる。
+catalog 編集は両立する。`none` を選び両ファイルも無い場合は role を適用しない。
 
 role は組織上の責務を prompt として与える。階層型チームで Director が小さいタスクを Worker へ直接 dispatch
 する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker を dispatch する場合は
 3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Worker → Manager → Director と
 一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
-`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
+`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない role は従来の許可動作を維持する。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
