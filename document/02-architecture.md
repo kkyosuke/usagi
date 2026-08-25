@@ -2,7 +2,7 @@
 
 > [ドキュメント目次](README.md) ｜ ← 前へ [1. プロジェクト概要](01-overview.md) ｜ 次へ → [3. TUI](03-tui.md)
 
-v2 の実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
+実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
 面（TUI / daemon / 入口）の境界をクレート境界に一致させ、依存方向を rustc で強制する。
 本書がディレクトリ構成・クレート責務・依存ルールの正本である。
 
@@ -26,8 +26,7 @@ v2 の実装は **Cargo workspace 上の 4 クレート＋合成ルート（ル�
 
 ## なぜ 4 クレートか
 
-v2 は「PTY 所有を daemon に移し、TUI は attach クライアントになる」設計
-（[v1/document/proposals/02-daemon.md](../v1/document/04-orchestration.md)）と、
+「PTY 所有を daemon に移し、TUI は attach クライアントになる」設計と、
 「常駐しない入口（CLI / MCP）は daemon を権威とするクライアントにする」設計
 （[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）を前提にする。
 この設計ではコードが自然に次の 4 つに分かれる。
@@ -37,8 +36,7 @@ v2 は「PTY 所有を daemon に移し、TUI は attach クライアントに�
 - **入口面（cli）**: 常駐しない入口。人間向け CLI サブコマンドとエージェント向け MCP サーバ。
 - **共通（common）**: 各面が共有する domain エンティティ・usecase・IPC プロトコル型・永続化。
 
-v1 は単一クレート内のモジュール分割だったため、層・面の依存方向はレビューでしか守れなかった。
-v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon の内部実装へうっかり依存する」類の
+この4分割をクレートとして表現し、「TUI が daemon の内部実装へうっかり依存する」類の
 逆流をコンパイルエラーにする。
 
 ## ディレクトリ構成
@@ -115,7 +113,6 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │               └── layouts/          # 領域配置（ペイン分割・chrome＝枠/ヘッダ/フッタ/ステータス行）
 │                   ├── mascot_screen      # マスコット＋タイトル＋中央寄せボディ＋固定フッタの共通全画面 chrome（welcome / config 等が共有）
 │                   └── panes              # 左右 2 ペインの幅割り当てと結合（workspace 画面が使う）
-└── v1/                   # 退避された旧実装（独立 Cargo プロジェクト。workspace exclude）
 ```
 
 ディレクトリ名は `crates/<短い名前>`、パッケージ名は衝突回避のため `usagi-<名前>` とする
@@ -140,7 +137,7 @@ TUI 面はクレート内でクリーンアーキテクチャの層を切る（�
 
 | 層（`crates/tui/src/`） | 置くもの |
 |---|---|
-| `presentation/` | 画面描画・キー入力マッピング。描画は v1 と同じく自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分け、view が layout で領域を割りそこへ widget を配置する。色は `theme`（意味的な役割 accent / success / danger … を具体色へ写す単一情報源。ANSI SGR を直接吐き外部クレートに依存しない）で一元管理する。対話ループもここに置く（`run_with_settings` は `Terminal`、`WorkspaceLoader`、`SettingsPort` を注入し、Welcome ⇄ Open / New / Config、Open ⇄ Workspace の画面グラフを回す。Config は scope ごとの draft を持ち、保存失敗時も保持する。Workspace 内では Switch / Closeup の mode と Overview / PR の最前面 modal を状態機械で dispatch し、modal widget が組み立て済み workspace frame に枠を合成する。Recent は Welcome から Workspace へ直接進み、Esc で Welcome へ戻る） |
+| `presentation/` | 画面描画・キー入力マッピング。描画は legacy と同じく自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分け、view が layout で領域を割りそこへ widget を配置する。色は `theme`（意味的な役割 accent / success / danger … を具体色へ写す単一情報源。ANSI SGR を直接吐き外部クレートに依存しない）で一元管理する。対話ループもここに置く（`run_with_settings` は `Terminal`、`WorkspaceLoader`、`SettingsPort` を注入し、Welcome ⇄ Open / New / Config、Open ⇄ Workspace の画面グラフを回す。Config は scope ごとの draft を持ち、保存失敗時も保持する。Workspace 内では Switch / Closeup の mode と Overview / PR の最前面 modal を状態機械で dispatch し、modal widget が組み立て済み workspace frame に枠を合成する。Recent は Welcome から Workspace へ直接進み、Esc で Welcome へ戻る） |
 | `usecase/` | TUI に閉じた application ロジック。起動画面の `EntryScreen`、それを具体的な描画・入力実装へ委譲する `ScreenRunner` 境界、管理画面用の端末ポート `Terminal` と入力語彙 `Key`、live pane 専用の端末非依存入力語彙・bytes encoder・`Ctrl-O` classifier、Welcome / Open / Recent の typed attach と Home の純粋 controller（state / event / effect reducer、TUI-local backend port と fake backend）。controller が返した全 `Effect` を daemon 所有のポート群（session command / agent / notes・environment store / workspace command / decision / PR・preview・browser）へ振り分ける本番 executor `daemon_backend`。実 IO ポートは合成ルートが 1 つの backend factory から注入し、`effect → 実行 → event → update()` の単方向ループを閉じる。Home は runtime ごとの phase を保持し、target ごとに `done > waiting > running > ready > absent` で集約する。progress・operation / terminal error・disconnect / reconnect / resync は safe message と error ID だけを TUI-local feedback として保持する。stable `TerminalRef` で tab / pending placeholder / attach policy を扱う Closeup pane reducer と、その reducer を daemon inventory / stream / resume / geometry dedupe へ結合する `pane_runtime`、Agent tab の order / selection を還元し legacy dismissal を移行する TUI-local `AgentTabIntent` domain と persistence port、Overview / Closeup コマンドの解釈・dispatch、画面グラフの遷移、イベント処理の状態機械 |
 | `infrastructure/` | daemon 端末へ attach する IPC クライアント側と端末バックエンド（raw mode・端末制御・キー/ホイール読み取り・クリップボード）。daemon push adapter は phase、safe error、connection feedback を TUI-local projection に変換し、wire の detail を越境させない |
 
@@ -257,7 +254,7 @@ create の再送は、初期 status と request fields が一致する committed
 重複していれば既存番号を任意に返さず ambiguity error になる。したがって derived failure や応答
 消失の後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
 
-issue number の採番 authority も本節を正本とする。Git repository では v1 / v2 が共有する
+issue number の採番 authority も本節を正本とする。Git repository では legacy / v2 が共有する
 `<git-common-dir>/usagi/issue-numbers/`、非 Git workspace では
 `<workspace>/.usagi/issue-numbers/` にだけ authoritative state を置く。
 
@@ -282,7 +279,7 @@ issue number の採番 authority も本節を正本とする。Git repository �
 ```
 
 raw cwd が repository 内の深い path でも、最寄り ancestor の `.git` まで遡って worktree boundary を決める。
-authority は v1 と同じく、[Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
+authority は legacy と同じく、[Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
 `git -C <worktree-root> rev-parse --path-format=absolute --git-common-dir` の成功結果だけを canonical existing
 directory として採用する。valid separate-git-dir / submodule で `commondir` が無い場合は Git が返す git dir
 自体を使う。empty / non-repository `.git`、stale / dangling gitfile・`commondir`、non-UTF-8 / empty output、
@@ -304,16 +301,16 @@ plain `u32` として high-water へ fold する。observed path のうち senti
 
 ```text
 fresh Normal sequence + sole unfenced legacy:
-  v1-visible floor A == durable floor F:
+  legacy-visible floor A == durable floor F:
     legacy next = sentinel(F)（atomic; 旧 v2 を最初に停止）
   sole live legacy floor B == durable floor F:
-    sequence blocker(F)（atomic; 旧 v1 を一時停止）
+    sequence blocker(F)（atomic; 旧 legacy を一時停止）
   A < F and B < F:
     fail-closed（1 writeで安全にbridgeできない）
 no unfenced legacy:
   sequence blocker(F)
 pre-existing blocker + unfenced legacy:
-  legacy next = sentinel(F)（旧 v1 は既に停止済み）
+  legacy next = sentinel(F)（旧 legacy は既に停止済み）
 
   → sequence blocker(F) を保証
   → all observed legacy next = "migrated-to-usagi-issue-numbers:N\n"
@@ -323,22 +320,22 @@ pre-existing blocker + unfenced legacy:
   → source Markdown
 ```
 
-ここで `A` は全旧v1 callerが共有して見えるNormal sequence / reservation journalの最大、`B` はsole unfenced legacy
+ここで `A` は全旧legacy callerが共有して見えるNormal sequence / reservation journalの最大、`B` はsole unfenced legacy
 floor、`F` はこれらに全worktree source / blocker recovery floor / optional migration watermark / 全fenced legacy floorも加えたdurable最大、
 `N = F + 1` である。異なる2 authority を1回でatomic updateできないため、fresh migrationの最初の成功writeは、もう片側に
 全durable floorが見える場合にだけlive allocatorを1つへ減らす。sentinelは旧v2を恒久的にfenceし、blockerはnormal sequenceを
-最後に戻すまで旧v1を一時停止する。両live sideがfenced watermarkより低ければ、どちらを先に止めても他方が番号を再利用するため、
+最後に戻すまで旧legacyを一時停止する。両live sideがfenced watermarkより低ければ、どちらを先に止めても他方が番号を再利用するため、
 write前にoffline reconciliationを要求する。source visibilityはcallerのworkspace rootによって異なるため、first-write判定で
 `A`へ加えない。
 
 blocker は `{ "version": 1, "last_reserved": 4294967295, "migration_floor": F }` を1回の atomic write で公開する。
-旧 v1 は追加 field を無視するが `u32::MAX` の checked increment で停止し、fixed v2 は `F` から本来の high-water を
+旧 legacy は追加 field を無視するが `u32::MAX` の checked increment で停止し、fixed v2 は `F` から本来の high-water を
 回復する。`migration_floor` が無い `last_reserved = u32::MAX` は最終番号を正常予約した exhausted state である。
 blocker 以外で `migration_floor` が存在する、または floor 自体が `u32::MAX` の JSON は破損として拒否する。
 
 旧 writer が先に列挙済み旧 lock を保持していれば、その writer が更新した最新 `u32` を fixed allocator が fold する。
 fixed allocator を待っていた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。non-exhaustedなnormal sequence
-は全 sentinel / reservation / Git marker より後、かつ最後に公開するため、正常終了後は旧 v1も同じ authority の次番号へ
+は全 sentinel / reservation / Git marker より後、かつ最後に公開するため、正常終了後は旧 legacyも同じ authority の次番号へ
 進める。Git の sentinel と `legacy-v2-migrated` は migration watermark であり通常採番の live high-water ではない。
 通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発 legacy path を
 再移行するときだけ全 observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。interrupted
@@ -349,14 +346,14 @@ crash recovery は次の境界で固定する。atomic write の Write / Rename 
 | 最後に durable になった境界 | crash 後に進める旧 allocator | retry |
 | --- | --- | --- |
 | first sentinel / blocker が未commit | 変更前の旧state（fixed予約なし） | 元のfloorからfirst writeを再試行 |
-| sentinel-first(F), blockerなし | v1 のみ | v1のsequence / journal進捗をfold |
+| sentinel-first(F), blockerなし | legacy のみ | legacyのsequence / journal進捗をfold |
 | blockerのみ | 高水位を持つsole unfenced legacy v2（存在時）のみ | その`next`の進捗をfold |
 | blocker after sentinel-first, sentinel(N)なし | なし | blocker floorからF+1を予約 |
 | first / partial / all sentinel(N) | なし | Nを消費し、retryはN+1へ進む |
 | reservation marker | なし | journal を fold して次番号へ進む |
 | Git migration marker | なし | blocker / journal / marker を fold |
-| normal sequence, source 未作成 | v1 のみ（旧 v2 は fenced） | 予約済み gap を再利用しない |
-| exhausted safe-first sentinel(MAX) | v1のみ（MAXで停止） | normal sequence(MAX)をrecovery tagとして公開 |
+| normal sequence, source 未作成 | legacy のみ（旧 v2 は fenced） | 予約済み gap を再利用しない |
+| exhausted safe-first sentinel(MAX) | legacyのみ（MAXで停止） | normal sequence(MAX)をrecovery tagとして公開 |
 | exhausted safe-first sequence(MAX) | legacyはMAXで既に停止 | 全sentinel(MAX)へ収束 |
 | exhausted normal(MAX) + partial sentinel / old Git marker | なし | 残りsentinel → marker(MAX) → final normal(MAX) |
 | exhausted Git marker(MAX), final sequence failure | なし | blocker / journal / marker MAXをfoldしnormal(MAX)へ収束 |
@@ -365,7 +362,7 @@ sequence は strict な schema / version / blocker semantics、sentinel、migrat
 filename/body を検証する。active legacy numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid state、read
 failure、および non-exhausted normal sequence 下の Git marker / shared sentinel mismatch は新しい write より前に fail-closed になる。
 marker 未作成の sentinel-first 境界、または blocker 下で crash が残した valid sentinel / reservation / marker floor の差だけは
-最大値を fold して回復する。`Normal(u32::MAX)`は旧v1の停止をdurableに証明するterminal recovery tagなので、
+最大値を fold して回復する。`Normal(u32::MAX)`は旧legacyの停止をdurableに証明するterminal recovery tagなので、
 その下でのshared sentinel(MAX) / 旧Git markerの差だけもpartial exhausted migrationとして回復する。
 
 source high-waterはfilename prefixだけでなく、parse可能なfrontmatterの`number`も含む。
@@ -374,7 +371,7 @@ source high-waterはfilename prefixだけでなく、parse可能なfrontmatter�
 lenient listingのようにskipせずfail-closedにする。
 
 durable floorが`u32::MAX`の場合も、safe first-write条件を満たすならallocation errorを即時返してnumericな旧`next`を残さない。
-旧v1がMAXのsequence / journal / blockerを見る場合はsentinel(MAX)を先に公開し、sole legacyがMAXを持つ場合は
+旧legacyがMAXのsequence / journal / blockerを見る場合はsentinel(MAX)を先に公開し、sole legacyがMAXを持つ場合は
 normal sequence(MAX)を先に公開する。旧v2が既にsentinelで停止している場合もsequence(MAX)を先に公開できる。
 どちらのlive側もMAXを見ないsource-only exhaustionはwrite前に停止する。safeなfirst write後は
 normal sequence(MAX)をrecovery tagとして直ちに公開し、全sentinel(MAX) → Git marker(MAX) →
@@ -513,7 +510,7 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない
   （それらは `infrastructure/` の責務）。
 - 外部クレートの version はルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、
-  必要になった時点で追加する（v1 の依存を先回りで持ち込まない）。
+  必要になった時点で追加する（legacy の依存を先回りで持ち込まない）。
 - lint 設定は `[workspace.lints]` に置き、各クレートは `[lints] workspace = true` で継承する。
 
 ## クリーンアーキテクチャとの対応
@@ -613,11 +610,10 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | test / clippy | ルートで実行するとルートパッケージしか対象にならないため、`--workspace` を付ける（test.yml / lefthook / recommend-tests の fail-safe も同様） |
 | auto-release | ルート `Cargo.toml` の `version` 変更を監視する。workspace 継承にせずリテラルで置くのは、この監視が `version = "..."` 行を grep するためである |
 | release-build-check / release.yml | ルートの v2 パッケージを `--features production` で release ビルドする |
-| `v1/` | `[workspace] exclude` で計測・ビルド対象外。`v1/**` を変更する push / PR は v1-test.yml が v1 のマニフェストで検証する |
 
 ## 実装の置き場所ガイド
 
-v1 から機能を再実装するときの置き場所の指針。
+機能を実装するときの置き場所の指針。
 
 | 実装 | 置き場所 |
 |---|---|
@@ -1148,6 +1144,6 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
 
 | 代替案 | 不採用の理由 |
 |---|---|
-| 単一クレート内のモジュール分割（v1 方式） | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
+| 単一クレート内のモジュール分割（legacy 方式） | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
 | 層ごとのクレート分割（domain / usecase / infrastructure / presentation を各クレート化） | 実行面（TUI / daemon）の境界を表現できず、daemon 専用と TUI 専用の infrastructure が同じクレートに同居する |
 | TUI / daemon を別バイナリとして配布 | リリース CI（4 プラットフォーム）と配布手順の変更が大きい。単一バイナリ＋サブコマンドなら現行リリース機構が無変更で使える |

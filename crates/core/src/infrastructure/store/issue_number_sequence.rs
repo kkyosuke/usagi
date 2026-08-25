@@ -2,7 +2,7 @@
 //!
 //! Issue Markdown lives in each Git worktree, so a per-store lock cannot
 //! serialize allocation across sibling worktrees. The one authority shared
-//! with the production v1 allocator lives below Git's common directory and
+//! with the production legacy allocator lives below Git's common directory and
 //! combines a high-water sequence with durable per-number reservation markers.
 
 use std::fs;
@@ -32,7 +32,7 @@ const LEGACY_V2_SENTINEL_PREFIX: &str = "migrated-to-usagi-issue-numbers:";
 struct SequenceFile {
     version: u32,
     last_reserved: u32,
-    /// Present only while `last_reserved == u32::MAX`. Old v1 ignores this
+    /// Present only while `last_reserved == u32::MAX`. Old legacy ignores this
     /// additional field and fails its checked increment, while fixed v2 uses
     /// it to recover the real high-water after a crash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,7 +56,7 @@ impl SequenceState {
         matches!(self, Self::MigrationBlocked(_))
     }
 
-    fn stops_old_v1(self) -> bool {
+    fn stops_old_legacy(self) -> bool {
         self.is_blocked() || self == Self::Normal(u32::MAX)
     }
 }
@@ -107,13 +107,13 @@ pub(crate) struct IssueNumberSequence {
 }
 
 /// Source maxima observed by fixed v2 and, only when proven by a controlled
-/// caller, by every compatible old-v1 allocator. Production Git callers set
-/// `v1_visible` to zero because no source tree is visible from every possible
+/// caller, by every compatible old-legacy allocator. Production Git callers set
+/// `legacy_visible` to zero because no source tree is visible from every possible
 /// linked-worktree cwd sharing the common authority.
 #[derive(Debug)]
 pub(crate) struct ExistingIssueFloors {
     pub(crate) all: u32,
-    pub(crate) v1_visible: u32,
+    pub(crate) legacy_visible: u32,
 }
 
 impl ExistingIssueFloors {
@@ -121,13 +121,13 @@ impl ExistingIssueFloors {
     fn shared(floor: u32) -> Self {
         Self {
             all: floor,
-            v1_visible: floor,
+            legacy_visible: floor,
         }
     }
 }
 
 impl IssueNumberSequence {
-    /// Resolve the v1-compatible authority and every old-v2 authority that must
+    /// Resolve the legacy-compatible authority and every old-v2 authority that must
     /// be folded and fenced.
     ///
     /// Git repositories use the nearest ancestor worktree boundary and Git's
@@ -233,11 +233,11 @@ impl IssueNumberSequence {
     /// Reserve one number while holding both the new authority lock and every
     /// relevant old-v2 lock in that fixed order.
     ///
-    /// For a fresh migration, the first write fences old v2 when old v1 can see
-    /// every durable floor, or blocks old v1 when the sole live legacy path can
+    /// For a fresh migration, the first write fences old v2 when old legacy can see
+    /// every durable floor, or blocks old legacy when the sole live legacy path can
     /// see every durable floor. If neither side can, migration fails before an
     /// authoritative write. Every legacy path is then fenced and the
-    /// reservation is committed before the normal v1 sequence is restored.
+    /// reservation is committed before the normal legacy sequence is restored.
     #[cfg(test)]
     pub(crate) fn reserve<F>(&self, max_existing: F) -> Result<u32>
     where
@@ -289,8 +289,8 @@ impl IssueNumberSequence {
         // Validate every authority input before the first authoritative write.
         let existing = existing_floors()?;
         ensure!(
-            existing.v1_visible <= existing.all,
-            "v1-visible issue floor exceeds the complete source floor"
+            existing.legacy_visible <= existing.all,
+            "legacy-visible issue floor exceeds the complete source floor"
         );
         let sequence = self.read_sequence()?;
         let migration = self.read_legacy_v2_migration()?;
@@ -311,7 +311,7 @@ impl IssueNumberSequence {
                 .find_map(|(path, state)| (*path == shared).then_some(*state))
                 .context("Git issue allocation did not inspect its shared legacy authority")?;
             ensure!(
-                shared_state == LegacyState::Fenced(migration_floor) || sequence.stops_old_v1(),
+                shared_state == LegacyState::Fenced(migration_floor) || sequence.stops_old_legacy(),
                 "shared legacy v2 issue sequence fence disagrees with migration marker: {}",
                 shared.display()
             );
@@ -322,8 +322,8 @@ impl IssueNumberSequence {
             .map(|(_, state)| state.floor())
             .max()
             .unwrap_or(0);
-        let v1_visible_floor = existing
-            .v1_visible
+        let legacy_visible_floor = existing
+            .legacy_visible
             .max(match sequence {
                 SequenceState::Normal(floor) => floor,
                 SequenceState::MigrationBlocked(_) => 0,
@@ -331,7 +331,7 @@ impl IssueNumberSequence {
             .max(journal);
         let floor = existing
             .all
-            .max(v1_visible_floor)
+            .max(legacy_visible_floor)
             .max(sequence.floor())
             .max(migration.unwrap_or(0))
             .max(legacy_floor);
@@ -363,7 +363,7 @@ impl IssueNumberSequence {
         }
 
         if floor == u32::MAX {
-            self.finish_exhausted_migration(sequence, v1_visible_floor, &legacy_states)?;
+            self.finish_exhausted_migration(sequence, legacy_visible_floor, &legacy_states)?;
             bail!("cannot allocate another issue number because the u32 range is exhausted");
         }
 
@@ -378,7 +378,7 @@ impl IssueNumberSequence {
         self.migrate_and_reserve(
             floor,
             sequence,
-            v1_visible_floor,
+            legacy_visible_floor,
             &legacy_states,
             migration_blocked,
         )
@@ -387,26 +387,26 @@ impl IssueNumberSequence {
     fn finish_exhausted_migration(
         &self,
         sequence: SequenceState,
-        v1_visible_floor: u32,
+        legacy_visible_floor: u32,
         legacy_states: &[(&PathBuf, LegacyState)],
     ) -> Result<()> {
         let unfenced = single_unfenced_legacy(legacy_states)?;
         if let Some((path, state)) = unfenced {
-            if sequence.is_blocked() || v1_visible_floor == u32::MAX {
+            if sequence.is_blocked() || legacy_visible_floor == u32::MAX {
                 write_legacy_sentinel(path, u32::MAX)?;
             } else {
                 ensure!(
                     state.floor() == u32::MAX,
-                    "neither live legacy v2 nor v1 can see the durable issue floor; stop old writers and reconcile every authority before retrying"
+                    "neither live legacy v2 nor legacy can see the durable issue floor; stop old writers and reconcile every authority before retrying"
                 );
                 self.write_sequence(u32::MAX)?;
             }
-        } else if !sequence.is_blocked() && v1_visible_floor != u32::MAX {
+        } else if !sequence.is_blocked() && legacy_visible_floor != u32::MAX {
             self.write_sequence(u32::MAX)?;
         }
 
         // This terminal sequence is the recovery tag for any following partial
-        // sentinel/marker write as well as an old-v1 stop.
+        // sentinel/marker write as well as an old-legacy stop.
         self.write_sequence(u32::MAX)?;
         for (path, _) in legacy_states {
             write_legacy_sentinel(path, u32::MAX)?;
@@ -421,7 +421,7 @@ impl IssueNumberSequence {
         &self,
         floor: u32,
         sequence: SequenceState,
-        v1_visible_floor: u32,
+        legacy_visible_floor: u32,
         legacy_states: &[(&PathBuf, LegacyState)],
         migration_blocked: &mut dyn FnMut(),
     ) -> Result<u32> {
@@ -435,12 +435,12 @@ impl IssueNumberSequence {
                 write_legacy_sentinel(path, floor)?;
             }
         } else if let Some((path, state)) = unfenced {
-            if v1_visible_floor == floor {
+            if legacy_visible_floor == floor {
                 write_legacy_sentinel(path, floor)?;
             } else {
                 ensure!(
                     state.floor() == floor,
-                    "neither live legacy v2 nor v1 can see the durable issue floor; stop old writers and reconcile every authority before retrying"
+                    "neither live legacy v2 nor legacy can see the durable issue floor; stop old writers and reconcile every authority before retrying"
                 );
             }
         }
@@ -1296,7 +1296,7 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
     let root_error = format!("failed to canonicalize Git worktree root {worktree_root_display}");
     let worktree_root = fs::canonicalize(&worktree_root).context(root_error)?;
 
-    // Match the production v1 resolver instead of accepting a merely existing
+    // Match the production legacy resolver instead of accepting a merely existing
     // `.git` directory or gitfile target. Environment overrides are removed so
     // validation is anchored to the ancestor boundary inspected above.
     let mut command = confined_git_command(&worktree_root);
@@ -1692,7 +1692,7 @@ mod tests {
         .unwrap();
     }
 
-    fn v1_reserve(authority: &IssueNumberSequence) -> Result<u32> {
+    fn legacy_reserve(authority: &IssueNumberSequence) -> Result<u32> {
         #[derive(Deserialize, Serialize)]
         struct V1Sequence {
             last_reserved: u32,
@@ -1755,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_sequence_preseed_allocates_the_following_number() {
+    fn legacy_sequence_preseed_allocates_the_following_number() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         seed_sequence(&authority, 515);
@@ -1774,36 +1774,36 @@ mod tests {
     }
 
     #[test]
-    fn v1_emulator_propagates_journal_and_atomic_write_failures() {
+    fn legacy_emulator_propagates_journal_and_atomic_write_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         fs::create_dir_all(authority.reservations_dir()).unwrap();
         fs::write(authority.reservations_dir().join("README"), b"ignored\n").unwrap();
-        assert_eq!(v1_reserve(&authority).unwrap(), 1);
+        assert_eq!(legacy_reserve(&authority).unwrap(), 1);
 
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         fs::create_dir_all(authority.sequence_path()).unwrap();
-        assert!(v1_reserve(&authority).is_err());
+        assert!(legacy_reserve(&authority).is_err());
 
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         seed_sequence(&authority, 1);
         fs::write(authority.reservations_dir(), b"not a directory\n").unwrap();
-        assert!(v1_reserve(&authority).is_err());
+        assert!(legacy_reserve(&authority).is_err());
 
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         let marker = authority.reservations_dir().join(reservation_name(1));
         fail_next_atomic_write(&marker, AtomicWriteStage::Write);
-        assert!(v1_reserve(&authority).is_err());
+        assert!(legacy_reserve(&authority).is_err());
         assert!(!marker.exists());
         assert!(!authority.sequence_path().exists());
 
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         fail_next_atomic_write(&authority.sequence_path(), AtomicWriteStage::Write);
-        assert!(v1_reserve(&authority).is_err());
+        assert!(legacy_reserve(&authority).is_err());
         assert!(
             authority
                 .reservations_dir()
@@ -1840,7 +1840,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_migration_remains_bidirectionally_compatible_with_v1() {
+    fn completed_migration_remains_bidirectionally_compatible_with_legacy() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = git_sequence(tmp.path());
         let legacy = only_legacy(&authority);
@@ -1851,7 +1851,7 @@ mod tests {
         let fence = fs::read(&legacy).unwrap();
         let migration = fs::read(authority.legacy_v2_migration_path()).unwrap();
 
-        assert_eq!(v1_reserve(&authority).unwrap(), 517);
+        assert_eq!(legacy_reserve(&authority).unwrap(), 517);
         assert_eq!(fs::read(&legacy).unwrap(), fence);
         assert_eq!(
             fs::read(authority.legacy_v2_migration_path()).unwrap(),
@@ -1913,7 +1913,11 @@ mod tests {
         let local_before = fs::read(&local).unwrap();
 
         let error = authority.reserve(|| Ok(0)).unwrap_err();
-        assert!(error.to_string().contains("neither live legacy v2 nor v1"));
+        assert!(
+            error
+                .to_string()
+                .contains("neither live legacy v2 nor legacy")
+        );
         assert_eq!(
             fs::read(authority.sequence_path()).unwrap(),
             sequence_before
@@ -1922,7 +1926,7 @@ mod tests {
         assert_eq!(fs::read(&local).unwrap(), local_before);
         assert!(!authority.reservations_dir().exists());
 
-        // If the v1 blocker was already durable, v1 is no longer live. The
+        // If the legacy blocker was already durable, legacy is no longer live. The
         // fixed allocator can safely fence the stale legacy path and recover.
         seed_migration_blocker(&authority, 700);
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 701);
@@ -1931,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_only_source_floor_blocks_v1_before_fencing_legacy() {
+    fn fixed_only_source_floor_blocks_legacy_before_fencing_legacy() {
         for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
             let tmp = tempfile::tempdir().unwrap();
             let root = tmp.path();
@@ -1956,7 +1960,7 @@ mod tests {
                     || {
                         Ok(ExistingIssueFloors {
                             all: 800,
-                            v1_visible: 0,
+                            legacy_visible: 0,
                         })
                     },
                     || {},
@@ -1972,9 +1976,9 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&local).unwrap(), "800\n");
 
-            let result = root.join("blocked-old-v1-result");
+            let result = root.join("blocked-old-legacy-result");
             let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v1_emulator_process_helper", "--nocapture"])
+                .args(["old_legacy_emulator_process_helper", "--nocapture"])
                 .env(OLD_V1_ROOT_ENV, root)
                 .env(OLD_V1_RESULT_ENV, &result)
                 .output()
@@ -1996,7 +2000,7 @@ mod tests {
                         || {
                             Ok(ExistingIssueFloors {
                                 all: 800,
-                                v1_visible: 0,
+                                legacy_visible: 0,
                             })
                         },
                         || {},
@@ -2053,7 +2057,7 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_write_failure_keeps_v1_blocked_and_folds_later_old_v2_progress() {
+    fn sentinel_write_failure_keeps_legacy_blocked_and_folds_later_old_v2_progress() {
         for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
             let tmp = tempfile::tempdir().unwrap();
             let authority = git_sequence(tmp.path());
@@ -2072,7 +2076,7 @@ mod tests {
             assert!(!authority.legacy_v2_migration_path().exists());
             let blocker_before = fs::read(authority.sequence_path()).unwrap();
             let legacy_before = fs::read(&legacy).unwrap();
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
             assert_eq!(fs::read(authority.sequence_path()).unwrap(), blocker_before);
             assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
             assert!(!authority.reservations_dir().exists());
@@ -2142,7 +2146,7 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(516));
             assert!(!marker.exists());
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
 
             assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 517);
             assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(517));
@@ -2179,7 +2183,7 @@ mod tests {
                 fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
                 "516\n"
             );
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
 
             assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 517);
             assert_eq!(
@@ -2631,7 +2635,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_leading_migration_fences_old_v2_before_a_blocker_failure() {
+    fn legacy_leading_migration_fences_old_v2_before_a_blocker_failure() {
         for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
             let tmp = tempfile::tempdir().unwrap();
             let authority = git_sequence(tmp.path());
@@ -2658,9 +2662,9 @@ mod tests {
                 .unwrap();
             assert!(!output.status.success());
 
-            // The compatible v1 side is the only old allocator still able to
+            // The compatible legacy side is the only old allocator still able to
             // progress after this first-boundary failure. A retry folds it.
-            assert_eq!(v1_reserve(&authority).unwrap(), 801);
+            assert_eq!(legacy_reserve(&authority).unwrap(), 801);
             assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 802);
             assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(802));
         }
@@ -2956,7 +2960,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         seed_sequence(&authority, u32::MAX - 1);
-        assert_eq!(v1_reserve(&authority).unwrap(), u32::MAX);
+        assert_eq!(legacy_reserve(&authority).unwrap(), u32::MAX);
         assert!(authority.reserve(|| Ok(0)).is_err());
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3026,13 +3030,17 @@ mod tests {
                 || {
                     Ok(ExistingIssueFloors {
                         all: u32::MAX,
-                        v1_visible: 0,
+                        legacy_visible: 0,
                     })
                 },
                 thread::yield_now,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("neither live legacy v2 nor v1"));
+        assert!(
+            error
+                .to_string()
+                .contains("neither live legacy v2 nor legacy")
+        );
         assert_eq!(
             fs::read(authority.sequence_path()).unwrap(),
             sequence_before
@@ -3054,7 +3062,7 @@ mod tests {
                 || {
                     Ok(ExistingIssueFloors {
                         all: u32::MAX,
-                        v1_visible: 0,
+                        legacy_visible: 0,
                     })
                 },
                 thread::yield_now,
@@ -3083,7 +3091,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_v1_leading_sentinel_failures_recover_without_a_reservation() {
+    fn exhausted_legacy_leading_sentinel_failures_recover_without_a_reservation() {
         for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
             let tmp = tempfile::tempdir().unwrap();
             let authority = git_sequence(tmp.path());
@@ -3104,7 +3112,7 @@ mod tests {
             assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
             assert!(!authority.legacy_v2_migration_path().exists());
             assert!(!authority.reservations_dir().exists());
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
             assert_eq!(
                 fs::read(authority.sequence_path()).unwrap(),
                 sequence_before
@@ -3125,7 +3133,7 @@ mod tests {
                 format!("{}\n", u32::MAX)
             );
             assert!(!authority.reservations_dir().exists());
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
 
             let legacy_before = fs::read(&legacy).unwrap();
             let output = Command::new(std::env::current_exe().unwrap())
@@ -3184,7 +3192,7 @@ mod tests {
                 format!("{}\n", u32::MAX)
             );
             assert!(!authority.reservations_dir().exists());
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
         }
     }
 
@@ -3205,7 +3213,7 @@ mod tests {
                     || {
                         Ok(ExistingIssueFloors {
                             all: u32::MAX,
-                            v1_visible: 0,
+                            legacy_visible: 0,
                         })
                     },
                     thread::yield_now,
@@ -3225,7 +3233,7 @@ mod tests {
                 "500\n"
             );
             assert!(!authority.reservations_dir().exists());
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
 
             let legacy_before = fs::read(&legacy).unwrap();
             let output = Command::new(std::env::current_exe().unwrap())
@@ -3241,7 +3249,7 @@ mod tests {
                     || {
                         Ok(ExistingIssueFloors {
                             all: u32::MAX,
-                            v1_visible: 0,
+                            legacy_visible: 0,
                         })
                     },
                     thread::yield_now,
@@ -3373,7 +3381,7 @@ mod tests {
                 fs::read_dir(authority.reservations_dir()).unwrap().count(),
                 1
             );
-            assert!(v1_reserve(&authority).is_err());
+            assert!(legacy_reserve(&authority).is_err());
 
             let output = Command::new(std::env::current_exe().unwrap())
                 .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
@@ -3435,7 +3443,7 @@ mod tests {
     }
 
     #[test]
-    fn git_and_linked_worktree_layouts_share_the_v1_authority() {
+    fn git_and_linked_worktree_layouts_share_the_legacy_authority() {
         let tmp = tempfile::tempdir().unwrap();
         git(tmp.path(), &["init", "-q"]);
         let main = sequence(tmp.path());
@@ -4247,12 +4255,12 @@ mod tests {
     }
 
     #[test]
-    fn old_v1_emulator_process_helper() {
+    fn old_legacy_emulator_process_helper() {
         let Some(root) = std::env::var_os(OLD_V1_ROOT_ENV).map(PathBuf::from) else {
             return;
         };
         let result = PathBuf::from(std::env::var_os(OLD_V1_RESULT_ENV).unwrap());
-        let number = v1_reserve(&sequence(&root)).unwrap();
+        let number = legacy_reserve(&sequence(&root)).unwrap();
         fs::write(result, format!("{number}\n")).unwrap();
     }
 
@@ -4268,7 +4276,7 @@ mod tests {
     }
 
     #[test]
-    fn migrated_authority_is_usable_by_an_old_v1_emulator_process_then_fixed_v2() {
+    fn migrated_authority_is_usable_by_an_old_legacy_emulator_process_then_fixed_v2() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = git_sequence(tmp.path());
         let legacy = only_legacy(&authority);
@@ -4277,15 +4285,15 @@ mod tests {
 
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 516);
         let fence = fs::read(&legacy).unwrap();
-        let result = tmp.path().join("old-v1-result");
+        let result = tmp.path().join("old-legacy-result");
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["old_v1_emulator_process_helper", "--nocapture"])
+            .args(["old_legacy_emulator_process_helper", "--nocapture"])
             .env(OLD_V1_ROOT_ENV, tmp.path())
             .env(OLD_V1_RESULT_ENV, &result)
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "old v1 failed: {stderr}");
+        assert!(output.status.success(), "old legacy failed: {stderr}");
         assert_eq!(fs::read_to_string(result).unwrap(), "517\n");
         assert_eq!(fs::read(&legacy).unwrap(), fence);
         assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 518);
@@ -4677,7 +4685,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_leading_handshake_fences_a_queued_old_v2_emulator_process() {
+    fn legacy_leading_handshake_fences_a_queued_old_v2_emulator_process() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = git_sequence(tmp.path());
         let legacy = only_legacy(&authority);

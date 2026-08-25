@@ -17,6 +17,4 @@ src/runtime/*	root-runtime	root composition runtime changed	cargo test -p usagi 
 src/tui_input.rs	root-runtime	root terminal input adapter changed	cargo test -p usagi --bin usagi	src/tui_input.rs
 tests/support/*	shared-test	shared root integration harness affects consumer tests	cargo test --workspace --quiet	tests/support/mod.rs
 tests/*.rs	root-integration	root integration test target changed	cargo test -p usagi --test {test}	tests/agent_ipc_e2e.rs
-v1/third_party/vt100/*	v1	vendored v1 terminal parser affects terminal and TUI behavior	cargo test --manifest-path v1/third_party/vt100/Cargo.toml|cargo test --manifest-path v1/Cargo.toml --test tui_e2e|cargo test --manifest-path v1/Cargo.toml --quiet	v1/third_party/vt100/src/lib.rs
-*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'	README.md
-v1/*	v1	retained v1 implementation still ships releases; run the v1 suite via its own manifest	cargo clippy --all-targets --manifest-path v1/Cargo.toml -- -D warnings|cargo test --manifest-path v1/Cargo.toml --quiet	v1/src/main.rs
+*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.github/**/*.md'	README.md

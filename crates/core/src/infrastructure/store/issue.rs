@@ -382,7 +382,7 @@ impl IssueStore {
     ///
     /// A worktree has its own checked-out `.usagi/issues` directory, so its
     /// local maximum alone cannot safely allocate a number while another
-    /// worktree is creating an issue. The v1-compatible authority below Git's
+    /// worktree is creating an issue. The legacy-compatible authority below Git's
     /// common directory serializes every reservation. Its high-water sequence,
     /// durable journal, retired v2 sequence, and every workspace source maximum
     /// are folded without ever reusing a gap.
@@ -674,7 +674,7 @@ impl IssueStore {
 
     /// Highest filename claims seen by fixed v2.
     ///
-    /// No source maximum is marked v1-visible: two old-v1 callers sharing the
+    /// No source maximum is marked legacy-visible: two old-legacy callers sharing the
     /// Git-common authority can derive different workspace roots (for example,
     /// an external linked worktree). Only their shared sequence and journal are
     /// universal. Fixed v2 also discovers tracked, untracked, and ignored
@@ -690,13 +690,13 @@ impl IssueStore {
     ) -> Result<ExistingIssueFloors> {
         let mut session_parents = BTreeSet::from([workspace_root.to_path_buf()]);
         session_parents.extend(registered_worktrees.iter().cloned());
-        let mut v1_roots = BTreeSet::new();
+        let mut legacy_roots = BTreeSet::new();
         for root in session_parents {
-            v1_roots.insert(root.clone());
-            insert_session_roots(&mut v1_roots, &root)?;
+            legacy_roots.insert(root.clone());
+            insert_session_roots(&mut legacy_roots, &root)?;
         }
 
-        let mut all_roots = v1_roots.clone();
+        let mut all_roots = legacy_roots.clone();
         all_roots.insert(worktree_root.to_path_buf());
         all_roots.insert(self.repo_root.clone());
         all_roots.extend(registered_worktrees.iter().cloned());
@@ -707,7 +707,10 @@ impl IssueStore {
             let maximum = Self::new(&root).max_claimed_number()?;
             all = all.max(maximum);
         }
-        Ok(ExistingIssueFloors { all, v1_visible: 0 })
+        Ok(ExistingIssueFloors {
+            all,
+            legacy_visible: 0,
+        })
     }
 }
 
@@ -2203,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn source_only_floor_is_not_assumed_visible_to_every_old_v1_worktree() {
+    fn source_only_floor_is_not_assumed_visible_to_every_old_legacy_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("workspace");
         fs::create_dir(&root).unwrap();
@@ -2222,7 +2225,7 @@ mod tests {
                 "add",
                 "-q",
                 "-b",
-                "test-stale-v1-source-visibility",
+                "test-stale-legacy-source-visibility",
                 external.to_str().unwrap(),
             ],
         );
@@ -2250,7 +2253,11 @@ mod tests {
         let nested_before = fs::read(&nested_legacy).unwrap();
 
         let error = store.reserve_next_number().unwrap_err();
-        assert!(error.to_string().contains("neither live legacy v2 nor v1"));
+        assert!(
+            error
+                .to_string()
+                .contains("neither live legacy v2 nor legacy")
+        );
         assert_eq!(fs::read(&source).unwrap(), source_before);
         assert_eq!(fs::read(&sequence).unwrap(), sequence_before);
         assert_eq!(fs::read(&common_legacy).unwrap(), common_before);

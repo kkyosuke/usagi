@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Report whether the distributable v1 package version differs between two refs.
+# Report whether the distributable package version differs between two refs.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -9,7 +9,7 @@ fi
 
 base_ref=$1
 head_ref=$2
-manifest=v1/Cargo.toml
+manifest=Cargo.toml
 
 package_version() {
   git show "$1:$manifest" | awk '

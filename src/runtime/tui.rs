@@ -1112,7 +1112,7 @@ impl MetricsPort for DaemonMetricsPort {
 /// connection that attached it, so attach, poll and input must share it.
 /// Native-terminal launcher kept independent from daemon terminal streaming.
 ///
-/// This mirrors v1's detached platform launcher: `terminal new` must still
+/// This mirrors legacy's detached platform launcher: `terminal new` must still
 /// work while an embedded terminal's daemon port is owned by a launch worker.
 struct PlatformExternalTerminalPort {
     reaper: PlatformChildReaper,

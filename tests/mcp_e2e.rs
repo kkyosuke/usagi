@@ -652,8 +652,8 @@ fn production_issue_create_commits_source_when_derived_refresh_fails() {
 }
 
 #[test]
-fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
-    let mut mcp = McpHarness::start_in_session("v1-sequence-compat");
+fn production_issue_create_uses_the_legacy_git_common_sequence_authority() {
+    let mut mcp = McpHarness::start_in_session("legacy-sequence-compat");
     let authority = mcp.workspace().join(".git/usagi/issue-numbers");
     let reservations = authority.join("reservations");
     fs::create_dir_all(&reservations).unwrap();
@@ -664,10 +664,14 @@ fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
     .unwrap();
     fs::write(reservations.join("0000000515.reserved"), "515\n").unwrap();
 
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After v1"})));
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After legacy"})));
 
     assert_eq!(created["number"], 516);
-    assert!(mcp.cwd().join(".usagi/issues/516-after-v1.md").is_file());
+    assert!(
+        mcp.cwd()
+            .join(".usagi/issues/516-after-legacy.md")
+            .is_file()
+    );
     assert_eq!(
         fs::read_to_string(reservations.join("0000000516.reserved")).unwrap(),
         "516\n"
@@ -681,7 +685,7 @@ fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
 
 #[test]
 fn production_issue_create_from_nested_linked_worktree_uses_git_common_authority() {
-    let mut mcp = McpHarness::start_in_nested_session("nested-v1-sequence-compat");
+    let mut mcp = McpHarness::start_in_nested_session("nested-legacy-sequence-compat");
     let authority = mcp.workspace().join(".git/usagi/issue-numbers");
     fs::create_dir_all(&authority).unwrap();
     fs::write(

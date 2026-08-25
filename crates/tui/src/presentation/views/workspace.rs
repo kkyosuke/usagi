@@ -68,7 +68,7 @@ const SESSION_ROW_LINES: usize = 3;
 const _: () = assert!(
     SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
 );
-/// v1 と同じ Nerd Font glyph: processor and resident-memory server.
+/// legacy と同じ Nerd Font glyph: processor and resident-memory server.
 const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
 /// Nerd Font cogs: the Agent concurrency slots the daemon admits from.
@@ -137,7 +137,7 @@ pub struct ProjectedSession {
     pub role_id: Option<String>,
 }
 
-/// Nerd Font pull-request glyph shared with v1's right-aligned sidebar badge.
+/// Nerd Font pull-request glyph shared with legacy's right-aligned sidebar badge.
 const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
 /// Keep the common one-digit badge column stable even before a PR is detected.
 const PR_RESERVE_WIDTH: usize = 3;
@@ -1124,7 +1124,7 @@ impl Workspace {
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// v1 の chrome と同じアイコン付き mode 表示。現在の mode だけを accent で強調する。
+/// legacy の chrome と同じアイコン付き mode 表示。現在の mode だけを accent で強調する。
 fn mode_toggle(current: Mode) -> String {
     Mode::ALL
         .iter()
@@ -2188,7 +2188,7 @@ fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> us
     home_row_height(row)
 }
 
-/// Paint a Home sidebar row label with v1's colour precedence.
+/// Paint a Home sidebar row label with legacy's colour precedence.
 ///
 /// `+ new session` is a Success (green) affordance in every mode (#302 / #362):
 /// resolve it before the generic accent branches so the Switch cursor only adds
@@ -2551,9 +2551,9 @@ fn create_session_input_lines(
     lines
 }
 
-/// v1-compatible sidebar marker with explicit precedence.
+/// legacy-compatible sidebar marker with explicit precedence.
 ///
-/// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
+/// A selected session starts with legacy's usagi glyph and uses a red `|` continuation;
 /// in Closeup its active two-line stack is green. Switch does not retain a rail
 /// for the previous target because its cursor is the sole selection indicator.
 /// The action row remains chevron-free even while it owns the Switch cursor.
@@ -4977,7 +4977,7 @@ mod tests {
     }
 
     #[test]
-    fn home_projection_uses_v1_marker_precedence_and_hides_cursor_in_closeup() {
+    fn home_projection_uses_legacy_marker_precedence_and_hides_cursor_in_closeup() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
         let second = SessionId::new();
@@ -5399,7 +5399,7 @@ mod tests {
             .find(|line| line.contains('\u{f2db}'))
             .expect("daemon metric row beside usagi");
 
-        // The row carries both glyphs and the v1 CPU/memory summary text.
+        // The row carries both glyphs and the legacy CPU/memory summary text.
         assert!(strip(controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
 
         // The Agent concurrency the daemon admits from sits on its own row below,
