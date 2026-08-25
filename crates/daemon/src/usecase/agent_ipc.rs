@@ -808,19 +808,34 @@ impl AgentRuntime {
         }
     }
 
-    /// Resolves a short-lived provider hook from its OS process group. Hooks
-    /// receive no bearer and cannot acquire the MCP child's dispatch scope.
+    /// Resolves a short-lived provider hook from authenticated OS process identity.
+    ///
+    /// Claude uses exec-form hooks, so the hook is a direct child of the live
+    /// provider and may either inherit its process group or lead its own.
+    /// The inherited-group case remains accepted for providers/configurations
+    /// which still use a shell-form hook. Hooks receive no bearer and cannot
+    /// acquire the MCP child's dispatch scope.
     #[must_use]
-    pub fn hook_credential(&self, process_group: u32) -> Option<&str> {
+    pub fn hook_credential(
+        &self,
+        hook_pid: u32,
+        parent_pid: u32,
+        process_group: u32,
+    ) -> Option<&str> {
         let mut matches = self.mcp_callers.iter().filter(|(_, caller)| {
             self.coordinator
                 .record_for(&caller.runtime)
                 .is_ok_and(|record| {
                     record.state == super::runtime::RuntimeState::Running
-                        && record
-                            .process
-                            .as_ref()
-                            .is_some_and(|process| process.process_group == process_group)
+                        && record.process.as_ref().is_some_and(|process| {
+                            process.process_group == process_group
+                                || (process.pid == parent_pid
+                                    && mcp_child_process_group_matches(
+                                        process.process_group,
+                                        hook_pid,
+                                        process_group,
+                                    ))
+                        })
                 })
         });
         let (credential, _) = matches.next()?;
@@ -3774,15 +3789,16 @@ mod tests {
         agent
             .reported_phases
             .insert(runtime_id, AgentPhase::Waiting);
+        let current_revision = crate::usecase::claude::PROFILE_REVISION;
         let expected = [AgentIntegrationRevision {
             profile_id: AgentProfileId::new("claude").unwrap(),
-            revision: 2,
+            revision: current_revision,
         }];
 
         let diagnosis = agent.diagnose_integrations(workspace, &expected).unwrap();
         assert_eq!(diagnosis.outdated.len(), 1);
         assert_eq!(diagnosis.outdated[0].actual_revision, 1);
-        assert_eq!(diagnosis.outdated[0].expected_revision, 2);
+        assert_eq!(diagnosis.outdated[0].expected_revision, current_revision);
         assert_eq!(diagnosis.outdated[0].phase, AgentPhase::Waiting);
         assert!(diagnosis.outdated[0].resume_available);
         assert_eq!(diagnosis.outdated_mcp_children, 1);
@@ -3875,7 +3891,7 @@ mod tests {
                 .resume_with_current_integration(
                     &OperationId::new().to_string(),
                     &target,
-                    3,
+                    current_revision + 1,
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -3887,13 +3903,17 @@ mod tests {
             .resume_with_current_integration(
                 &repair_operation,
                 &target,
-                2,
+                current_revision,
                 &FakeScope(Ok(resolved)),
             )
             .unwrap();
         assert!(
             agent
-                .prepare_current_integration_resume_readiness(&repair_operation, &target, 2)
+                .prepare_current_integration_resume_readiness(
+                    &repair_operation,
+                    &target,
+                    current_revision,
+                )
                 .unwrap()
                 .is_none()
         );
@@ -3902,7 +3922,7 @@ mod tests {
                 .resume_with_current_integration(
                     &repair_operation,
                     &target,
-                    2,
+                    current_revision,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap(),
@@ -3917,7 +3937,7 @@ mod tests {
                 .resume_with_current_integration(
                     &repair_operation,
                     &target,
-                    3,
+                    current_revision + 1,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap_err()
@@ -6843,6 +6863,31 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn hook_identity_accepts_exec_form_direct_children_and_legacy_inherited_groups() {
+        let mut runtime = runtime();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session: Some(SessionId::new()),
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().unwrap().as_str();
+
+        // Shell-form hooks inherit the provider's process group.
+        assert_eq!(runtime.hook_credential(9000, 8999, 4321), Some(credential));
+        // Exec-form hooks are direct children and may be their own group leader.
+        assert_eq!(runtime.hook_credential(9001, 4321, 9001), Some(credential));
+        // Merely being self-led is insufficient without the direct-parent fence.
+        assert_eq!(runtime.hook_credential(9002, 8999, 9002), None);
+        assert_eq!(runtime.hook_credential(9003, 4321, 9999), None);
     }
 
     #[test]

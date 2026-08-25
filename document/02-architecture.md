@@ -864,10 +864,13 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   呼び出しを担う薄い adapter で、実 stdin は合成ルートが束ねる。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
-  `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。報告は
-  daemon が発行して process environment に閉じ込めた credential で報告元 runtime に束縛され、caller は runtime /
-  session / path を名指しできない。未知 phase・malformed payload・配線外 event・credential 欠落は
-  fail-closed で拒否し、request は送らない（非 0 終了）。`transcript_path` は deserialize せず file も開かない。
+  `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。command hook は
+  `command` と `args` を分けた exec form で注入し、shell の quote / tokenization と中間 process に依存しない。報告は
+  kernel から得た hook PID・parent PID・process group を exact live runtime と照合して束縛し、caller は runtime /
+  session / path を名指しできない。provider の direct child は inherited / self-led process group の双方を受理し、
+  shell form との互換用に provider と同じ process group も受理する。未知 phase・malformed payload・配線外 event は
+  request 前に、runtime に束縛できない process は daemon 境界で fail-closed に拒否する（いずれも非 0 終了）。
+  `transcript_path` は deserialize せず file も開かない。
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
   この報告は**すでに動いている daemon へ attach するだけ**で、bootstrap lock も daemon の cold start も
   一切行わない。報告元は当の daemon が起動した agent であり daemon は定義上生きている一方、その agent が
@@ -877,7 +880,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   遅延を払わないという意味でも、attach だけが正しい。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。session の repository 書き込みは own worktree だけに閉じ込め、両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  起動する。session の repository content 書き込みは own worktree に閉じ込め、Git workspace では linked worktree が
+  checkout 外に持つ Git common directory も administrative state として許可する。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
@@ -922,9 +926,12 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
-- **起動固有 writable root**: session は own worktree だけであり、workspace の `.usagi`、Git common dir、
-  data home を追加しない。したがって sibling session、root の tracked issue source、daemon durable state は
-  path の表記や symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
+- **起動固有 writable root**: session は own worktree と、その repository の Git common directory を受け取る。
+  linked worktree の index・refs・logs・object database は checkout 外の common directory にあるため、後者が無いと
+  checkout 内の編集が可能でも `git add` / `git commit` は失敗する。workspace の `.usagi` と data home は追加しないため、
+  sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や symlink alias に
+  かかわらず read-only である。Git common directory は worktree 間で共有される administrative authority なので、
+  session 名・branch・worktree の対応と teardown は引き続き daemon lifecycle state が権威を持つ。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)と
@@ -938,7 +945,9 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   permission mode・onboarding・folder trust・MCP 承認が毎起動リセットされ、Keychain / MDS が無いと
   認証が 401 で失敗する。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
-  （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
+  （host path をディスクへ materialize しない）。各 command hook は `command: <usagi path>` と
+  `args: [...]` を分けた exec form であり、Claude は shell を介さず hook process を直接 spawn する。
+  `PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
   も checkout と Git common dir の書き込みを拒否する。

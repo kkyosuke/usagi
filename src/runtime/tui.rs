@@ -5039,14 +5039,9 @@ mod tests {
         assert_eq!(
             integrations
                 .iter()
-                .map(|integration| integration.profile_id.as_str())
+                .map(|integration| (integration.profile_id.as_str(), integration.revision))
                 .collect::<Vec<_>>(),
-            ["claude", "codex", "sakana-ai"]
-        );
-        assert!(
-            integrations
-                .iter()
-                .all(|integration| integration.revision > 1)
+            [("claude", 3), ("codex", 2), ("sakana-ai", 2)]
         );
         assert_eq!(
             doctor_reply_body(DaemonReply::Ok(serde_json::json!({"ok": true}))),
