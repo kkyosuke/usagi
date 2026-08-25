@@ -7,7 +7,10 @@
 //! unite shows are derived from its members (a plain fold), so the caller only
 //! assembles the members and the domain aggregates them.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use super::workspace::WorkspaceOverview;
 
@@ -21,13 +24,31 @@ use super::workspace::WorkspaceOverview;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UniteOverview {
     members: Vec<WorkspaceOverview>,
+    updated_at: Option<DateTime<Utc>>,
 }
 
 impl UniteOverview {
     /// Build a unite from its member workspaces (open order; first is primary).
     #[must_use]
     pub fn new(members: Vec<WorkspaceOverview>) -> Self {
-        Self { members }
+        let updated_at = members
+            .iter()
+            .map(|member| member.workspace.updated_at)
+            .max();
+        Self {
+            members,
+            updated_at,
+        }
+    }
+
+    /// Build a persisted Unite whose own last-opened clock is independent of
+    /// later touches to individual members.
+    #[must_use]
+    pub fn with_updated_at(members: Vec<WorkspaceOverview>, updated_at: DateTime<Utc>) -> Self {
+        Self {
+            members,
+            updated_at: Some(updated_at),
+        }
     }
 
     /// The member workspaces, in open order.
@@ -55,10 +76,7 @@ impl UniteOverview {
     /// is empty.
     #[must_use]
     pub fn updated_at(&self) -> Option<DateTime<Utc>> {
-        self.members
-            .iter()
-            .map(|member| member.workspace.updated_at)
-            .max()
+        self.updated_at
     }
 
     /// Total sessions across the members.
@@ -80,6 +98,22 @@ impl UniteOverview {
     #[must_use]
     pub fn pr_count(&self) -> usize {
         self.members.iter().map(|member| member.pr_count).sum()
+    }
+}
+
+/// User-data record for one ordered set of project tabs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unite {
+    /// Canonical workspace paths in tab order.
+    pub paths: Vec<PathBuf>,
+    /// Last time this exact ordered set was opened or changed.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Unite {
+    #[must_use]
+    pub const fn new(paths: Vec<PathBuf>, updated_at: DateTime<Utc>) -> Self {
+        Self { paths, updated_at }
     }
 }
 

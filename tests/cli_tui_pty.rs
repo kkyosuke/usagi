@@ -239,18 +239,18 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
-/// 100-column Home header の右端にある指示モード button を実 mouse event で押す。
+/// 100-column Home header（project bar の次の行）の右端にある指示モード button を実 mouse event で押す。
 ///
 /// SGR mouse coordinates are one-based. The button is right-aligned and occupies
 /// the rightmost 14 cells, so column 91 is safely inside it even when the mode
 /// segment is also present.
 fn click_director_button(master: &mut File) {
-    send(master, b"\x1b[<0;91;1M\x1b[<0;91;1m");
+    send(master, b"\x1b[<0;91;2M\x1b[<0;91;2m");
 }
 
 /// Click `[ New ]` in the 100-column drawer selector row below the top padding.
 fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;4M\x1b[<0;96;4m");
+    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
 }
 
 fn toggle_director_with_key(master: &mut File) {
@@ -1454,16 +1454,16 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
     stop_daemon(&home);
 }
 
-/// Switching workspaces no longer costs the first workspace's runtimes: the
-/// daemon adopts the second workspace during the switch instead of refusing it,
-/// and the terminal left running in the first one keeps its PTY child (#711).
+/// Project tabs switch through the shipping `Ctrl-O` prefix without costing the
+/// first workspace's runtimes: the daemon adopts the added workspace, and the
+/// Agent left running in the first one keeps its exact PTY child (#721).
 ///
 /// The daemon is stopped before the TUI starts, so the switch is the moment the
 /// second workspace is adopted rather than something an earlier `open` already
 /// arranged.
 #[test]
-#[allow(clippy::too_many_lines)] // The two-workspace switch is intentionally chronological.
-fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
+#[allow(clippy::too_many_lines)] // The two-project-tab switch is intentionally chronological.
+fn real_pty_project_tabs_add_switch_and_reattach_the_same_agent() {
     let _serial = serial();
     let home = short_home();
     let roots = tempfile::tempdir().unwrap();
@@ -1481,9 +1481,9 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
 
     write_prompt_settings(home.path());
     let fixture = tempfile::tempdir().unwrap();
-    let shell = fixture.path().join("fixture-shell");
-    let spawn_count = fixture.path().join("shell-spawn-count");
-    write_terminal_fixture(&shell, &spawn_count);
+    let fixtures = AgentFixtures::new(fixture.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
 
     // Register both workspaces, then stop the daemon: the TUI below cold-starts
     // one for the workspace it opens, and must adopt the other when it switches.
@@ -1494,9 +1494,10 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
                 workspace,
                 &["open".as_ref(), workspace.as_os_str()],
             )
-            .env("SHELL", &shell)
+            .env("PATH", &fixture_path)
+            .env(SANDBOX_PASSTHROUGH, "1")
             .output()
-            .expect("workspace registers with fixture login shell");
+            .expect("workspace registers with fixture provider");
         assert!(registered.status.success());
     }
     // A session in each workspace, so both Home screens have a scope to open.
@@ -1513,19 +1514,10 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
     let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
 
     let baseline = capture_len(&captured);
-    // The TUI cold-starts the daemon, so the fixture login shell has to be in
-    // *its* environment: the daemon inherits it and every terminal it launches
-    // then reports its pid on the screen.
-    let mut child = TuiChild(
-        home.command_at(Channel::Local, &first, &["hop".as_ref()])
-            .env("SHELL", &shell)
-            .env(SANDBOX_PASSTHROUGH, "1")
-            .stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(Stdio::from(slave.try_clone().unwrap()))
-            .stderr(Stdio::from(slave.try_clone().unwrap()))
-            .spawn()
-            .expect("usagi hop starts on the PTY"),
-    );
+    // The TUI cold-starts the daemon, so the provider fixture must be in its
+    // PATH before the first Agent launch.
+    let mut child = spawn_hop_with_path(&home, &first, &fixture_path, &slave)
+        .expect("usagi hop starts on the PTY");
 
     // Recent lists the most recently opened workspace first, so the second entry
     // is the workspace registered first.
@@ -1534,35 +1526,55 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
     wait_for_screen_since(&captured, baseline, "[switch]");
     wait_for_screen_since(&captured, baseline, "switch-first");
 
-    // A live PTY child in the first workspace.
-    submit_closeup_command(&mut master, &captured, baseline, "terminal open");
-    wait_for_screen_since(&captured, baseline, "generic-ready-unique:");
-    let live = displayed_terminal_pid(&captured, baseline);
-    assert!(process_is_alive(live));
+    // A live Agent child in the first workspace. A plain digit has no leader,
+    // so it reaches the provider exactly once instead of activating project 1.
+    submit_closeup_command(&mut master, &captured, baseline, "agent -m codex");
+    wait_for_screen_since(&captured, baseline, "codex-ready-unique:");
+    let original_agent = agent_processes(home.path(), 1)[0].clone();
+    send_line_until_delivered(&mut master, &captured, baseline, "1", "codex-input:1");
+    assert_spawns_settle(&fixtures.codex_count, 1);
 
-    // Leave for Welcome, then open the other workspace. The same daemon adopts
-    // it: no refusal, no restart.
-    send(&mut master, b"\x0f\x0f");
-    wait_for_screen_since(&captured, baseline, "[switch]");
-    send(&mut master, b"\x11");
-    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
-    send(&mut master, b"w");
-    wait_for_screen_absent_since(&captured, baseline, "[switch]");
-    wait_for_screen_since(&captured, baseline, "Recent");
+    // Add the second registered workspace over the current Home. The first row
+    // is the checked/disabled current tab; Down selects the second row.
+    send(&mut master, b"\x0f+");
+    wait_for_screen_since(&captured, baseline, "Add workspace");
+    send(&mut master, b"\x1b[B \r");
+    wait_for_screen_since(&captured, baseline, "second-session");
 
-    // The needle must distinguish the new screen from the old one: `[switch]`
-    // was on screen before the switch, so the second workspace's own name is
-    // what proves this open landed in it. Reconstruction stays anchored to the
-    // original baseline, because a fresh one only holds the deltas since it.
-    send(&mut master, b"1");
-    wait_for_screen_since(&captured, baseline, "switch-second");
+    // Addition activates project 2. Ctrl-O 1 returns to the first project and
+    // the durable Agent tab reattaches to the same daemon-owned runtime.
+    send(&mut master, b"\x0f1");
+    wait_for_screen_since(&captured, baseline, "first-session");
+    activate_selected_live_pane(&mut master, &captured, baseline);
+    wait_for_screen_since(&captured, baseline, "codex-input:1");
+    assert_eq!(
+        agent_processes(home.path(), 1),
+        vec![original_agent.clone()]
+    );
+    assert_eq!(fixtures.codex_spawns(), 1);
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        baseline,
+        "after-project-switch",
+        "codex-input:after-project-switch",
+    );
 
-    // The first workspace's child survived the switch, and both workspaces now
+    // Both numbered directions remain process-level even from a focused live
+    // Agent pane; neither prefix byte reaches the provider.
+    send(&mut master, b"\x0f2");
+    wait_for_screen_since(&captured, baseline, "second-session");
+    send(&mut master, b"\x0f1");
+    wait_for_screen_since(&captured, baseline, "first-session");
+
+    // The first workspace's child survived every switch, and both workspaces now
     // have their own state subtree under the one daemon.
     assert!(
-        process_is_alive(live),
+        process_is_alive(original_agent.1),
         "switching workspaces must not end the first workspace's runtimes"
     );
+    assert_eq!(agent_processes(home.path(), 1), vec![original_agent]);
+    assert_eq!(fixtures.codex_spawns(), 1);
     let adopted = usagi_core::infrastructure::workspace_state::adopted(
         &Channel::Local.data_dir(home.path()).join("daemon"),
     )
@@ -1574,6 +1586,17 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
         let root = usagi_core::infrastructure::paths::canonical_workspace_root(workspace).unwrap();
         assert!(adopted.contains(&root), "{adopted:?}");
     }
+    let expected_unite = vec![
+        usagi_core::infrastructure::paths::canonical_workspace_root(&first).unwrap(),
+        usagi_core::infrastructure::paths::canonical_workspace_root(&second).unwrap(),
+    ];
+    assert!(
+        Storage::new(channel_data_dir(home.path()))
+            .load_unites()
+            .unwrap()
+            .iter()
+            .any(|unite| unite.paths == expected_unite)
+    );
 
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
@@ -3316,7 +3339,7 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
 
     // Scroll back with the mouse wheel over the drawer, then with the key chord.
     for _ in 0..6 {
-        send(&mut master, b"\x1b[<64;70;12M");
+        send(&mut master, b"\x1b[<64;70;13M");
         thread::sleep(Duration::from_millis(60));
     }
     send(&mut master, b"\x0fu");

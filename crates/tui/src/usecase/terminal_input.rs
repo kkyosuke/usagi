@@ -167,6 +167,12 @@ pub enum RuntimeEvent<B> {
 /// A TUI-local action reserved from the live terminal stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
+    /// Open the process-level workspace add overlay (`Ctrl-O +`).
+    OpenWorkspace,
+    /// Open the process-level all-project switcher (`Ctrl-O 0`).
+    OpenWorkspaceSwitcher,
+    /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
+    ActivateWorkspace(u8),
     /// Return to Switch mode.
     Switch,
     /// Open the active target's Closeup modal.
@@ -421,6 +427,18 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_g(key) {
         return Some(LiveTerminalAction::Director);
     }
+    // `+` is physically Shift+= on common layouts. Crossterm may retain that
+    // Shift bit even though the semantic character is already `+`.
+    if key.code == KeyCode::Char('+')
+        && (key.modifiers == Modifiers::default()
+            || key.modifiers
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                })
+    {
+        return Some(LiveTerminalAction::OpenWorkspace);
+    }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
     // not own: scroll the PTY output and close the focused tab. A
     // modified variant (other than the control chords above) is not a prefix
@@ -429,6 +447,10 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return None;
     }
     match key.code {
+        KeyCode::Char('0') => Some(LiveTerminalAction::OpenWorkspaceSwitcher),
+        KeyCode::Char(digit @ '1'..='9') => Some(LiveTerminalAction::ActivateWorkspace(
+            u8::try_from(digit.to_digit(10).unwrap_or(1)).unwrap_or(1),
+        )),
         KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
         KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
@@ -850,6 +872,51 @@ mod tests {
                 LiveInputOutput::Action(case.action)
             );
         }
+    }
+
+    #[test]
+    fn project_deck_prefix_reserves_plus_switcher_and_digits() {
+        for plain in ['+', '0', '1', '2'] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, key(KeyCode::Char(plain))),
+                LiveInputOutput::Passthrough(vec![plain as u8])
+            );
+        }
+        let cases = [
+            ('+', LiveTerminalAction::OpenWorkspace),
+            ('0', LiveTerminalAction::OpenWorkspaceSwitcher),
+            ('1', LiveTerminalAction::ActivateWorkspace(1)),
+            ('9', LiveTerminalAction::ActivateWorkspace(9)),
+        ];
+        for (follow_up, action) in cases {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(follow_up))),
+                LiveInputOutput::Action(action)
+            );
+        }
+        let mut classifier = LiveInputClassifier::default();
+        let shifted_plus = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('+'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), shifted_plus),
+            LiveInputOutput::Action(LiveTerminalAction::OpenWorkspace)
+        );
     }
 
     #[test]

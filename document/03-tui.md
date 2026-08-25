@@ -9,6 +9,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 ## 目次
 
 - [画面と入力](#画面と入力)
+- [project tab と workspace deck](#project-tab-と-workspace-deck)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
@@ -40,8 +41,9 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 Welcome は Open / Recent / New / Config の入口である。Open は登録済み workspace を名前の
 大文字・小文字を区別しない alphabet 順に並べる。常時表示する Filter 欄は編集位置に cursor を
 示し、入力した文字で即座に名前を絞り込み、↑↓ で絞り込み結果を選ぶ。各 workspace は名前と、session 数・未完了 issue 数・
-最終更新の相対時刻を 2 行で表示する。Recent は上下の内側余白を持たない compact card で表示し、
-同じ Workspace 画面を直接開く。New と Config は
+最終更新の相対時刻を 2 行で表示する。`Tab` で Single / Unite を切り替え、Unite では `Space` で複数 workspace を
+選んで `Enter` を押すと、その順序の project tab deck を開く。Recent は上下の内側余白を持たない compact card で表示し、
+単体 workspace または保存済み Unite deck を直接開く。New と Config は
 それぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 New は Clone（リポジトリを新しいディレクトリへ clone）と Existing（既存ディレクトリを登録）の
@@ -110,6 +112,37 @@ CJK / 全角を含んでもハイライト幅が見た目とずれない。
 management input](#home-と-target) 参照）。この境界は「テキスト入力にフォーカスがあるか」で切り分け、
 両者の意味が衝突しない。
 
+## project tab と workspace deck
+
+Home の最上段には project tab bar を常時 1 行表示する。deck が 1 件でも `+ Open` を表示し、active tab の既存 Home だけを
+その下へ全面表示する。複数 workspace の session を同じ sidebar に混ぜる aggregate view ではない。tab は deck の安定した順序で
+1 から採番し、active は accent + bold、inactive は dim で描く。狭幅では active を必ず残す contiguous window へ縮め、隠れた件数を
+`… +N` として示す。描画と click hit-test は同じ canonical path 付き projection を使う。
+
+| 入力 | 動作 |
+|---|---|
+| `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する |
+| `Ctrl-O` → `1` … `9` / tab click | 1〜9 番目またはクリックした project tab を active にする |
+| `Ctrl-O` → `0` | 全件 switcher。`↑↓` / 数字 / `Enter` で切替し、10 件目以降にも到達できる |
+| switcher の `x` | 選択 project tab を deck から detach する。workspace 登録、session、daemon terminal は削除・終了しない |
+
+直接の `Ctrl+1` … `Ctrl+9` / `Ctrl++` は標準 binding にしない。legacy terminal では Control と数字・記号を一意に報告できないため、
+live PTY と management surface の両方で解決できる 1 秒の `Ctrl-O` leader を使う。leader がない plain digit / `+` は従来どおり live PTY へ
+1 回だけ渡す。project shortcut は Switch、Closeup、Director、project overlay より先に process shell が消費する。
+
+Add は現在の Home composition を背面に保ち、既存 tab を checked + disabled で示す。選択した全 workspace の snapshot と settings を
+現在の composition を保ったまま準備し、1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
+旧 composition を drop してから新しい composition を作る。通常切替も同じ prepare → commit 境界を使うため、失敗時は current workspace と
+その接続を保つ。未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
+
+TUI が resident に持つ `ControllerBackendComposition` は active workspace の 1 件だけである。切替 return が旧 workspace の port、pump、worker、
+subscription をすべて drop してから次の factory を呼ぶ。drop は daemon-owned Agent / terminal / operation を停止せず detach だけを行い、
+再選択時は daemon inventory と durable tab intent から同じ runtime へ attach する。
+
+2 件以上の ordered canonical path は user-data scope の versioned/atomic `unites.json` に保存する。同じ順序は touch し、Recent では registry の
+workspace overview と read-time join して `Recent::Unite` を組み立てる。unregister / missing member は読み取り時に除外し、0 件は表示しない。
+破損または future version の Unite store は single-workspace Recent を壊さず、保存済み Unite card の選択は同じ tab 順を再構築する。
+
 Home を開く入口は direct workspace、Welcome の Recent、Open の選択、New の作成成功で共通である。
 いずれも workspace snapshot を同じ production backend factory に渡し、factory が生成した
 `DaemonBackend` と同一の port set を使う。Home controller が発行した Effect は
@@ -133,7 +166,7 @@ production fallback stub は持たない。
 | `quit` | `q` / `y` | この TUI client を終了する |
 | `stay` | `n` / `Esc` | この workspace に留まる |
 
-離脱と終了はどちらも **この workspace のために確立した資源をすべて落とす**。terminal lane・poll lane・
+離脱と終了はどちらも **active workspace のために確立した資源をすべて落とす**。project tab の切替も同じ detach 境界を使う。terminal lane・poll lane・
 pane launch client・restore client の接続、Home の 3 つの[背景観測 lane](#home-frame-loop-と背景観測-lane)、
 metrics lane はいずれも workspace の frame loop が所有しており、loop を抜けることが teardown そのものである。
 したがって**次の workspace を開く時点で、前の workspace の port・pump・worker は 1 つも残っていない**。
@@ -414,6 +447,9 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 
 | prefix | アクション | 効果 |
 |---|---|---|
+| `Ctrl-O` `+` | OpenWorkspace | Add workspace overlay を開く |
+| `Ctrl-O` `1` … `9` | ActivateWorkspace | 対応する project tab へ切り替える |
+| `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project tab の switcher を開く |
 | `Ctrl-O` `Ctrl-O` | Switch | Closeup から Switch へ戻る |
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ（[指示モード](#指示モードdirector-mode)が開いている間は New） |

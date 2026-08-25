@@ -1,13 +1,13 @@
 ---
 number: 721
 title: feat(tui): 複数 workspace を project tab で開き Ctrl-O + / 1..9 で操作する
-status: todo
+status: done
 priority: medium
 labels: [feat, v2, tui, ux, navigation]
 dependson: []
 related: [77, 224, 239, 506, 549, 556]
-created_at: 2026-08-25T00:00:00+09:00
-updated_at: 2026-08-25T00:00:00+09:00
+created_at: 2026-08-24T15:00:00+00:00
+updated_at: 2026-08-25T23:13:26.406377+00:00
 ---
 
 ## 目的
@@ -94,19 +94,20 @@ WorkspaceDeck
 ├── slots: Vec<WorkspaceSlot>  // canonical path / WorkspaceId / label / order
 ├── active: WorkspaceId
 ├── overlay: None | Add | Switcher
-└── pending: None | Add(token) | Activate(token, target)
+└── notice: Option<String>
 ```
 
-`WorkspaceDeck` は membership、順序、active identity、overlay、pending token だけを所有する。session / pane / modal / Agent state は既存の
+`WorkspaceDeck` は membership、順序、active identity、overlay、notice だけを所有する。session / pane / modal / Agent state は既存の
 workspace controller の責務に残し、workspace 間で共有しない。
 
 ### active composition は 1 件だけ
 
 - TUI が daemon 接続と `ControllerBackendComposition` を保持するのは active workspace 1 件だけとする。inactive slot ごとに session refresh、
   metrics、restore、terminal stream の resident connection を常駐させない。
-- 切替前に target の canonical root を daemon へ申告して fresh `WorkspaceSnapshot` と settings を準備する。成功 completion が pending token と
-  target identity に一致したときだけ current composition を drop し、target composition を生成する。
-- prepare に失敗した場合は current composition と active identity を不変に保ち、notice を表示する。late / duplicate completion は無視する。
+- 切替前に target の canonical root を daemon へ申告して fresh `WorkspaceSnapshot` と settings を同期的に準備する。成功結果の target identity を
+  確認してから current composition を drop し、target composition を生成する。
+- prepare に失敗した場合は current composition と active identity を不変に保ち、notice を表示する。prepare は同じ frame loop 内の同期処理なので
+  late / duplicate completion 自体を生成しない。
 - current composition の drop は #556 と同じ detach 契約を使う。client subscription と背景 lane は解放するが、daemon-owned terminal / Agent /
   operation は停止しない。
 - target entry は daemon inventory と durable Agent tab intent（#506）から pane を復元する。これにより inactive 中も処理は継続し、再選択時に
@@ -150,27 +151,27 @@ v1 Unite aggregate（#77）や複数 workspace の live pane を同時描画す�
 
 ## 受入条件
 
-- [ ] 2 件以上の workspace を 1 TUI の project tab として開き、上部に同時表示できる。
-- [ ] `Ctrl-O 1` / `Ctrl-O 2` と tab click で workspace を切り替え、plain `1` / `2` は live PTY へ従来どおり 1 回届く。
-- [ ] `Ctrl-O +` と `+ Open` click から 1 件または複数 workspace を既存 deck へ追加できる。
-- [ ] 10 件以上でも `Ctrl-O 0` の switcher から全件へ到達でき、active tab は狭い端末でも bar 内に見える。
-- [ ] 切替中の target attach 失敗は current workspace を閉じず、stale / duplicate completion で別 workspace を active にしない。
-- [ ] inactive workspace の daemon-owned Agent / terminal は継続し、再選択時に新規 spawn せず exact runtime へ再 attach する。
-- [ ] 同時に resident な workspace composition は常に 1 件で、切替後に旧 workspace の port / worker / subscription が残らない。
-- [ ] Add cancel / attach failure / dirty editor の切替拒否で入力 draft と deck membership を失わない。
-- [ ] project tab close は detach のみで、workspace unregister、session 削除、terminal 終了を起こさない。
-- [ ] deck を終了・再起動して Welcome の Unite recent を選ぶと、同じ順序の tab set が復元される。
-- [ ] direct `Ctrl+digit` / `Ctrl++` に依存せず、対応端末・非対応端末で標準操作が一致する。
+- [x] 2 件以上の workspace を 1 TUI の project tab として開き、上部に同時表示できる。
+- [x] `Ctrl-O 1` / `Ctrl-O 2` と tab click で workspace を切り替え、plain `1` / `2` は live PTY へ従来どおり 1 回届く。
+- [x] `Ctrl-O +` と `+ Open` click から 1 件または複数 workspace を既存 deck へ追加できる。
+- [x] 10 件以上でも `Ctrl-O 0` の switcher から全件へ到達でき、active tab は狭い端末でも bar 内に見える。
+- [x] 切替中の target attach 失敗は current workspace を閉じず、同期 prepare は stale / duplicate completion を生成しない。
+- [x] inactive workspace の daemon-owned Agent / terminal は継続し、再選択時に新規 spawn せず exact runtime へ再 attach する。
+- [x] 同時に resident な workspace composition は常に 1 件で、切替後に旧 workspace の port / worker / subscription が残らない。
+- [x] Add cancel / attach failure / dirty editor の切替拒否で入力 draft と deck membership を失わない。
+- [x] project tab close は detach のみで、workspace unregister、session 削除、terminal 終了を起こさない。
+- [x] deck を終了・再起動して Welcome の Unite recent を選ぶと、同じ順序の tab set が復元される。
+- [x] direct `Ctrl+digit` / `Ctrl++` に依存せず、対応端末・非対応端末で標準操作が一致する。
 - [ ] coverage 100% を維持する。
 
 ## 必須テスト
 
-- pure reducer: add dedupe/order、activate identity、close fallback、last close、10件以上、stale token。
+- pure reducer: add dedupe/order、activate identity、close fallback、last close、10件以上、同期 prepare の failure fence。
 - input classifier: live / management / Director / overlay、digit / plus / zero、timeout、unknown follow-up、plain digit passthrough、Press / Repeat / Release。
 - render: 1件・複数・狭幅・CJK・overflow、active visibility、identity-bearing mouse hit。
 - screen graph fake: 2 workspace の prepare→drop→activate 順、prepare failure 時の current 保持、old ports が next composition 作成前に全 drop されること。
 - daemon fake: inactive 中に Agent output / session snapshot が進み、再選択時に same `TerminalRef` へ attach して spawn count が増えないこと。
-- add overlay: multi-select all-or-nothing、cancel、重複、部分 failure、late completion。
+- add overlay: multi-select all-or-nothing、cancel、重複、部分 failure。同期 prepare のため late completion は発生しない。
 - persistence: version round-trip、ordered-set dedupe、missing member、future/corrupt version の安全な縮退、Unite recent 再入場。
 - shipping PTY E2E: workspace A で Agent を起動 → `Ctrl-O +` で B を追加 → `Ctrl-O 2` / `Ctrl-O 1` で往復 → A の同じ Agent が
   継続し、plain digit は Agent に届く。

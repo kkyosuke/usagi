@@ -11373,7 +11373,7 @@ pub(crate) fn declare_opened_workspace(root: &Path) -> std::io::Result<PathBuf> 
     Ok(canonical)
 }
 
-fn opened_workspace() -> Option<PathBuf> {
+pub(crate) fn opened_workspace() -> Option<PathBuf> {
     OPENED_WORKSPACE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
