@@ -239,8 +239,8 @@ impl WorkspaceRuntime {
     }
 
     /// The selected managed-session terminal drawn behind an open Director
-    /// drawer. It remains detached and read-only while the root conversation
-    /// owns the sole foreground subscription.
+    /// drawer. It remains attached for live output but read-only while the root
+    /// conversation owns foreground input.
     #[must_use]
     pub fn director_background_terminal(&self) -> Option<TerminalRef> {
         if !self.state.director_drawer_open() {
