@@ -953,6 +953,23 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Surface display-safe feedback for the active pane without changing its
+    /// tab membership or selection.
+    pub fn surface_focused_pane_feedback(&mut self, message: impl Into<String>) {
+        if let Some(target) = self.panes.active() {
+            let _ = reduce_registry(
+                &mut self.panes,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Feedback {
+                        message: message.into(),
+                    },
+                },
+            );
+            self.sync_live_pane();
+        }
+    }
+
     /// Focus the live tab attached to `terminal` for `target`. The shell calls
     /// this after it opens a pane the user initiated, so the completed tab becomes
     /// the input owner and its viewport renders (completion alone never steals
