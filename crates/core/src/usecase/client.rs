@@ -99,10 +99,33 @@ pub enum DaemonRequest {
     /// Read the safe Agent runtime and interrupted-source inventory for one
     /// workspace. Root and managed-session records share this response.
     AgentInventory { workspace: WorkspaceId },
+    /// Diagnose launch-time hook/MCP integration revisions against the invoking
+    /// binary without exposing rendered configuration or provider identity.
+    DiagnoseAgents {
+        workspace: WorkspaceId,
+        expected: Vec<crate::domain::agent::AgentIntegrationRevision>,
+    },
+    /// Stop only daemon-owned Agents whose launch-time integration is older
+    /// than the invoking binary. A reported running phase requires `force`;
+    /// generic terminals are never part of this operation.
+    RestartAgents {
+        workspace: WorkspaceId,
+        expected: Vec<crate::domain::agent::AgentIntegrationRevision>,
+        runtimes: Vec<crate::domain::id::AgentRuntimeRef>,
+        force: bool,
+    },
     /// Resume exactly one interrupted runtime selected from `AgentInventory`.
     ResumeAgent {
         operation_id: String,
         target: AgentResumeTarget,
+    },
+    /// Repair-only exact resume. The old revision still fences the retained
+    /// source, while the active daemon re-resolves hooks/MCP with its current
+    /// profile revision.
+    ResumeAgentWithCurrentIntegration {
+        operation_id: String,
+        target: AgentResumeTarget,
+        expected_revision: u32,
     },
     /// Immediately dispatch a prompt to one durable Agent.  Session creation
     /// and Agent launch remain daemon-owned; this request only names the
@@ -1574,6 +1597,7 @@ impl RetryEligibility {
             | DaemonRequest::PrBatch { .. }
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
+            | DaemonRequest::DiagnoseAgents { .. }
             // Resolving a durable input operation only reads the daemon's
             // ledger, so a lost response is safely re-read on a fresh
             // connection. Every other terminal action stays fail-closed below.
@@ -1618,8 +1642,10 @@ impl RetryEligibility {
             DaemonRequest::Rollover { .. }
             | DaemonRequest::Agent { .. }
             | DaemonRequest::ResumeAgent { .. }
+            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::PrDismiss { .. }
+            | DaemonRequest::RestartAgents { .. }
             | DaemonRequest::Terminal { .. }
             | DaemonRequest::CodexSessionCapture { .. }
             | DaemonRequest::AgentPhaseReport { .. }

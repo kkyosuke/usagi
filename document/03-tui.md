@@ -742,7 +742,8 @@ Config の `Modal mode` は Overview と Closeup の command surface に共通�
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
 `config` は引数を取らず、現在開いている workspace の Config を Agent / Team / Issue / Memory だけの overlay modal で開く。
-`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。
+`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
+64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
@@ -937,8 +938,8 @@ attach されない。Garden から daemon command は発行しない。
 
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
 sidebar の右端に Nerd Font の PR アイコンとともに固定列で投影する。Switch の `p`、Closeup の
-`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について同じ PR modal を即時表示し、
-resident PR lane を wake する。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
+`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
+dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
 一覧へ 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
 保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、

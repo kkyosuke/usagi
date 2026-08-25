@@ -4722,7 +4722,7 @@ fn start_ipc_accept_loop(
                                         Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -7397,7 +7397,18 @@ fn reconcile_orphan_delegations(
 enum AgentDispatchRequest {
     Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
     Inventory(WorkspaceId),
+    Diagnose(
+        WorkspaceId,
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+    ),
+    Restart(
+        WorkspaceId,
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+        Vec<usagi_core::domain::id::AgentRuntimeRef>,
+        bool,
+    ),
     Resume(String, usagi_core::domain::agent::AgentResumeTarget),
+    RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
 }
 
 fn admit_agent_dispatch_request(
@@ -7419,7 +7430,14 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.prepare_resume_readiness(operation_id, target)
             }
-            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => {
+                owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
+            }
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
     agent
@@ -7432,8 +7450,71 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
             }
-            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
+                .resume_with_current_integration_after_readiness(
+                    operation_id,
+                    target,
+                    *revision,
+                    scope,
+                    preflight.as_ref(),
+                ),
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
         })
+}
+
+fn dispatch_agent_maintenance(
+    agent: &SharedAgentRuntime,
+    request: &AgentDispatchRequest,
+) -> Option<Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError>> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    match request {
+        AgentDispatchRequest::Inventory(workspace) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .map(|agent| {
+                    serde_json::to_value(agent.inventory(*workspace))
+                        .expect("safe Agent inventory is serializable")
+                }),
+        ),
+        AgentDispatchRequest::Diagnose(workspace, expected) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.diagnose_integrations(*workspace, expected))
+                .map(|diagnosis| {
+                    serde_json::to_value(diagnosis).expect("safe Agent diagnosis is serializable")
+                }),
+        ),
+        AgentDispatchRequest::Restart(workspace, expected, runtimes, force) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|mut agent| {
+                    let (interrupted, diagnosis) =
+                        agent.interrupt_outdated_agents(*workspace, expected, runtimes, *force)?;
+                    Ok(serde_json::json!({
+                        "interrupted": interrupted,
+                        "diagnosis": diagnosis,
+                        "inventory": agent.inventory(*workspace)
+                    }))
+                }),
+        ),
+        AgentDispatchRequest::Launch(..)
+        | AgentDispatchRequest::Resume(..)
+        | AgentDispatchRequest::RepairResume(..) => None,
+    }
 }
 
 fn dispatch_agent(
@@ -7443,7 +7524,7 @@ fn dispatch_agent(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::infrastructure::ipc::ResponseOutcome;
     use usagi_core::usecase::client::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -7455,28 +7536,40 @@ fn dispatch_agent(
             DaemonRequest::AgentInventory { workspace } => {
                 Some(AgentDispatchRequest::Inventory(workspace))
             }
+            DaemonRequest::DiagnoseAgents {
+                workspace,
+                expected,
+            } => Some(AgentDispatchRequest::Diagnose(workspace, expected)),
+            DaemonRequest::RestartAgents {
+                workspace,
+                expected,
+                runtimes,
+                force,
+            } => Some(AgentDispatchRequest::Restart(
+                workspace, expected, runtimes, force,
+            )),
             DaemonRequest::ResumeAgent {
                 operation_id,
                 target,
             } => Some(AgentDispatchRequest::Resume(operation_id, target)),
+            DaemonRequest::ResumeAgentWithCurrentIntegration {
+                operation_id,
+                target,
+                expected_revision,
+            } => Some(AgentDispatchRequest::RepairResume(
+                operation_id,
+                target,
+                expected_revision,
+            )),
             _ => None,
         });
     let Some(request) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let scope = bound.scope_resolver();
-    if let AgentDispatchRequest::Inventory(workspace) = &request {
-        let result = agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"));
+    if let Some(result) = dispatch_agent_maintenance(agent, &request) {
         return match result {
-            Ok(agent) => envelope(
-                hello,
-                request_id,
-                ResponseOutcome::Ok,
-                serde_json::to_value(agent.inventory(*workspace))
-                    .expect("safe Agent inventory is serializable"),
-            ),
+            Ok(body) => envelope(hello, request_id, ResponseOutcome::Ok, body),
             Err(error) => envelope(
                 hello,
                 request_id,
@@ -8855,7 +8948,7 @@ impl<'a> StandbyIpc<'a> {
     /// that initializes it is by definition the one that owns it.
     fn hydrate(&self) -> std::io::Result<(PathBuf, u64)> {
         let store = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(
-            &adopted_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
+            &standby_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
         );
         let (root, state) = store
             .load_with_workspace()
@@ -10576,11 +10669,16 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             Self::stop_standby(pid);
             return Err(error);
         }
-        let result = policy_client(ClientPolicy::cli()).and_then(|mut client| {
-            client.request(DaemonRequest::Rollover {
-                operation_id: operation.0.clone(),
-            })
-        });
+        // Rollover is a machine-wide lifecycle request. Binding this control
+        // connection to the command's cwd would make an otherwise ready
+        // successor impossible to commit when `daemon restart` is run outside
+        // an adopted workspace.
+        let result = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+            .and_then(|mut client| {
+                client.request(DaemonRequest::Rollover {
+                    operation_id: operation.0.clone(),
+                })
+            });
         match result {
             Ok(_) => Ok(format!(
                 "daemon authority handed off (operation {})",
@@ -11147,18 +11245,34 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<
         .map_err(|error| std::io::Error::other(format!("{error:?}")))
 }
 
-/// The state subtree of an already adopted `workspace_root`, without creating
+/// The state subtree a standby uses as its initial workspace, without creating
 /// one.
 ///
 /// A standby hydrates read-only — every write belongs to the active generation —
-/// so an unadopted workspace is reported as uninitialized rather than adopted
-/// here.
-fn adopted_workspace_state_dir(
+/// so it never adopts the command's current directory. If that directory is
+/// already inside an adopted workspace, that workspace remains the preferred
+/// initial tenant. Otherwise a deterministic existing subtree is used: daemon
+/// replacement is machine-wide and must not depend on which unrelated directory
+/// the operator happened to run `daemon restart` from.
+fn standby_workspace_state_dir(
     daemon_dir: &Path,
     workspace_root: &Path,
 ) -> std::io::Result<PathBuf> {
-    workspace_state::owner(daemon_dir, workspace_root)
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))?
+    let adopted = workspace_state::adopted(daemon_dir)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let initialized = adopted
+        .iter()
+        .filter_map(|state| match lifecycle_state_initialized(state.dir()) {
+            Ok(true) => Some(Ok(state)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    initialized
+        .iter()
+        .filter(|state| workspace_root.starts_with(state.root()))
+        .max_by_key(|state| state.root().components().count())
+        .or_else(|| initialized.first())
         .map(|state| state.dir().to_path_buf())
         .ok_or_else(|| {
             std::io::Error::new(
@@ -11166,6 +11280,27 @@ fn adopted_workspace_state_dir(
                 "durable runtime state is not initialized; a standby hydrates it read-only",
             )
         })
+}
+
+/// Whether an adopted subtree has the lifecycle document a read-only standby
+/// can hydrate.
+///
+/// `workspace_state::resolve` records `root.json` before the tenant opener
+/// initializes `sessions.json`. A failed open may therefore leave an adopted
+/// but uninitialized subtree behind. Absence is a candidate miss; every other
+/// node or metadata failure is corruption and remains fail-closed.
+fn lifecycle_state_initialized(state_dir: &Path) -> std::io::Result<bool> {
+    let path = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(state_dir)
+        .state_path();
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("lifecycle state is not a regular file: {}", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// The workspace this process opened, once a surface has selected one.
@@ -11598,6 +11733,69 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
 }
 
+/// Connect a resilient per-request client to the already-running generation
+/// without applying bootstrap's artifact replacement decision.
+///
+/// The rollover controller is itself consuming that decision: asking its
+/// control connection to reject the incumbent build would return
+/// `RolloverRequired` before it could send the request that performs the
+/// rollover.
+fn existing_policy_client(
+    policy: ClientPolicy,
+    workspace: ClientWorkspace,
+) -> Result<impl DaemonClient, ClientError> {
+    let clock = SystemClock::new();
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let build = current_build();
+    let initial = connect_client(
+        &data_dir,
+        policy,
+        build.clone(),
+        workspace.clone(),
+        |stream| deadline_transport(clock, stream, policy.timeout_ms),
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let reconnect = move |clock: SystemClock, budget_ms: u64| {
+        connect_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            |stream| deadline_transport(clock, stream, budget_ms),
+        )
+        .map_err(|error| ClientError::Unavailable(error.to_string()))
+    };
+    Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
+}
+
+/// Connects to the currently published daemon without applying the build
+/// replacement policy. Doctor uses this narrow lane to ask an older compatible
+/// daemon to stop the Agent processes it still owns before rollover transfers
+/// control to the current binary.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+pub(crate) fn diagnostic_client(policy: ClientPolicy) -> Result<LaneClient, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    connect_deadline_client(
+        &data_dir,
+        policy,
+        current_build(),
+        client_workspace(),
+        SystemClock::new(),
+        policy.timeout_ms,
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))
+}
+
+/// Whether a daemon current locator is published. Doctor uses this only to
+/// distinguish a normal cold start from a failed connection to an existing
+/// owner; it is not process-liveness or signal authority.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+pub(crate) fn has_published_daemon() -> bool {
+    paths::data_dir().is_ok_and(|data_dir| data_dir.join("daemon").join("current.json").is_file())
+}
+
 /// A workspace-bound daemon client for a background observation lane.
 ///
 /// It is [`policy_client`] without the bootstrap: same declared workspace, same
@@ -11668,7 +11866,7 @@ fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_rou
 /// generation. That is the evidence this turns into a re-read, which keeps the
 /// read off the per-request path without letting the snapshot outlive a
 /// generation change indefinitely.
-fn invalidate_routes() {
+pub(crate) fn invalidate_routes() {
     let Ok(data_dir) = paths::data_dir() else {
         return;
     };
@@ -11962,7 +12160,7 @@ fn recover_stale_client_endpoint_with(
     }
 }
 
-fn current_build() -> BuildIdentity {
+pub(crate) fn current_build() -> BuildIdentity {
     // The artifact identity is a compile-time constant baked in by `build.rs`
     // from this binary's source/tree, profile, and target. It is therefore
     // immutable for the process lifetime and never re-read from disk, so an
@@ -13063,6 +13261,13 @@ mod tests {
             bound_workspace_root(&daemon, &workspace.path().join(".")).unwrap(),
             paths::canonical_workspace_root(workspace.path()).unwrap()
         );
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, workspace.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "a standby never initializes the first durable workspace"
+        );
 
         // A startup directory that no longer resolves is a startup failure, not a
         // fence that silently keys some other path.
@@ -13597,7 +13802,7 @@ mod tests {
         std::fs::write(&container, "").unwrap();
         for error in [
             bound_workspace_root(&daemon, workspace.path()).unwrap_err(),
-            adopted_workspace_state_dir(&daemon, &canonical).unwrap_err(),
+            standby_workspace_state_dir(&daemon, &canonical).unwrap_err(),
         ] {
             assert!(error.to_string().contains("could not"), "{error}");
         }
@@ -13640,16 +13845,77 @@ mod tests {
         // daemon started there fences what it will actually own rather than
         // adopting the subdirectory as a second workspace.
         assert_eq!(
-            adopted_workspace_state_dir(&daemon, &canonical).unwrap(),
+            standby_workspace_state_dir(&daemon, &canonical).unwrap(),
             state_dir
         );
         let unadopted = tempfile::tempdir_in("/tmp").unwrap();
-        let error = adopted_workspace_state_dir(
-            &daemon,
-            &paths::canonical_workspace_root(unadopted.path()).unwrap(),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            standby_workspace_state_dir(
+                &daemon,
+                &paths::canonical_workspace_root(unadopted.path()).unwrap(),
+            )
+            .unwrap(),
+            state_dir,
+            "a machine-wide restart falls back to durable state instead of its cwd"
+        );
+    }
+
+    #[test]
+    fn standby_workspace_selection_skips_partial_adoptions_and_rejects_corruption() {
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = temporary.path().join("data/daemon");
+        ensure_private_dir_all(&daemon).unwrap();
+
+        // `resolve` publishes root.json before the tenant opener initializes
+        // sessions.json. A failed open can leave exactly this partial subtree,
+        // and it must not shadow an initialized workspace during replacement.
+        let partial_root = temporary.path().join("a-partial");
+        let initialized_root = temporary.path().join("z-initialized");
+        std::fs::create_dir_all(&partial_root).unwrap();
+        std::fs::create_dir_all(&initialized_root).unwrap();
+        let partial_root = paths::canonical_workspace_root(&partial_root).unwrap();
+        let initialized_root = paths::canonical_workspace_root(&initialized_root).unwrap();
+        workspace_state::resolve(&daemon, &partial_root).unwrap();
+        let initialized = workspace_state::resolve(&daemon, &initialized_root).unwrap();
+        drop(
+            open_session_runtime(
+                initialized_root,
+                initialized.dir(),
+                temporary.path(),
+                usagi_core::domain::id::DaemonGeneration::new(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, &partial_root).unwrap(),
+            initialized.dir(),
+            "an absent sessions.json is skipped even when the cwd names that subtree"
+        );
+
+        // A present node with the wrong type is corruption, not another miss
+        // that may be hidden by selecting a different workspace.
+        let corrupt_root = temporary.path().join("0-corrupt");
+        std::fs::create_dir_all(&corrupt_root).unwrap();
+        let corrupt_root = paths::canonical_workspace_root(&corrupt_root).unwrap();
+        let corrupt = workspace_state::resolve(&daemon, &corrupt_root).unwrap();
+        std::fs::create_dir(corrupt.dir().join("sessions.json")).unwrap();
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, temporary.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        // Metadata failures other than absence also remain errors. A plain file
+        // used as the state directory produces NotADirectory on every Unix host.
+        let not_directory = temporary.path().join("not-directory");
+        std::fs::write(&not_directory, "not a directory").unwrap();
+        assert_ne!(
+            lifecycle_state_initialized(&not_directory)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use super::runtime::{
 #[cfg(test)]
 mod fixture;
 
-const PROFILE_REVISION: u32 = 1;
+pub const PROFILE_REVISION: u32 = 2;
 
 /// The non-secret outcome that the renderer may use to build a durable plan.
 pub struct CodexProvision {

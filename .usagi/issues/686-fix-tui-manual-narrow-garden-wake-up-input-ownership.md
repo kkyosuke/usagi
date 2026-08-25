@@ -1,7 +1,7 @@
 ---
 number: 686
 title: fix(tui): manual narrow Garden と wake-up input ownership を一致させる
-status: todo
+status: done
 priority: medium
 labels: [review, v2, tui, garden, input, bug]
 dependson: []
@@ -52,13 +52,13 @@ live Closeup を背面に持つ場合も `wants_live_input()` は overlay によ
 
 ## 受入条件
 
-- [ ] 63×14 / 64×13で手動 `garden` を実行しても Garden stateを残さず、次のkeyが通常Homeへ届く。
-- [ ] 64×14以上では手動表示とautomatic表示の既存renderer / hitbox / click-to-Closeupを維持する。
-- [ ] live terminalを背面に持つGardenで文字、paste、Ctrl-C、Ctrl-Q、Ctrl-D、terminal copy、raw passthroughを入力すると、PTY bytes / quit effectは0でGardenだけが閉じる。
-- [ ] wheelはscroll offsetを変えずGardenだけを閉じる。
-- [ ] click / drag / releaseは1 gestureとしてGardenが所有し、背面selection・sidebar・link-openを変更しない。うさぎのDownだけは既存どおり対応sessionをvisitする。
-- [ ] resizeはGardenを閉じ、new sizeをstateへ保存する。
-- [ ] productionと同じrouting順（foreground owner → PTY → pane controls → reducer）のmatrix testで全`Key` vocabularyを固定する。
+- [x] 63×14 / 64×13で手動 `garden` を実行しても Garden stateを残さず、次のkeyが通常Homeへ届く。
+- [x] 64×14以上では手動表示とautomatic表示の既存renderer / hitbox / click-to-Closeupを維持する。
+- [x] live terminalを背面に持つGardenで文字、paste、Ctrl-C、Ctrl-Q、Ctrl-D、terminal copy、raw passthroughを入力すると、PTY bytes / quit effectは0でGardenだけが閉じる。
+- [x] wheelはscroll offsetを変えずGardenだけを閉じる。
+- [x] click / drag / releaseは1 gestureとしてGardenが所有し、背面selection・sidebar・link-openを変更しない。うさぎのDownだけは既存どおり対応sessionをvisitする。
+- [x] resizeはGardenを閉じ、new sizeをstateへ保存する。
+- [x] productionと同じrouting順（foreground owner → PTY → pane controls → reducer）のmatrix testで全`Key` vocabularyを固定する。
 
 ## 根拠箇所
 

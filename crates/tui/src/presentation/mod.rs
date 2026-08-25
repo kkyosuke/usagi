@@ -810,8 +810,82 @@ fn retarget_director_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
 #[derive(Debug, PartialEq, Eq)]
 enum WorkspaceInputRoute {
     Drawer(Vec<Effect>),
+    Garden(Vec<Effect>),
     Forwarded,
     Unhandled,
+}
+
+/// Give an open Garden exclusive ownership of the next user interaction.
+/// Backend/frame ticks are not user activity and keep the screen saver open.
+/// A pointer press also fences the rest of its drag/release gesture so closing
+/// the Garden cannot leak that tail into the terminal selection underneath.
+fn route_garden_input(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    material: Option<&HomeFrameMaterial>,
+    key: &Key,
+    pointer_gesture: &mut bool,
+) -> Option<Vec<Effect>> {
+    if *pointer_gesture && matches!(key, Key::Pointer(_)) {
+        if matches!(
+            key,
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Up,
+                ..
+            })
+        ) {
+            *pointer_gesture = false;
+        }
+        return Some(Vec::new());
+    }
+    if runtime.state().overlay() != Some(Overlay::Garden) || !is_user_activity(key) {
+        return None;
+    }
+
+    let pointer = match key {
+        Key::Click { column, row } => material
+            .and_then(|material| {
+                garden_click_at(
+                    material.height,
+                    material.width,
+                    &material.projection,
+                    material.now,
+                    *column,
+                    *row,
+                )
+            })
+            .unwrap_or(GardenClick::Dismiss),
+        Key::Pointer(PointerEvent {
+            kind: PointerKind::Down,
+            column,
+            row,
+        }) => {
+            *pointer_gesture = true;
+            material
+                .and_then(|material| {
+                    garden_click_at(
+                        material.height,
+                        material.width,
+                        &material.projection,
+                        material.now,
+                        *column,
+                        *row,
+                    )
+                })
+                .unwrap_or(GardenClick::Dismiss)
+        }
+        Key::Pointer(PointerEvent {
+            kind: PointerKind::Drag,
+            ..
+        }) => {
+            *pointer_gesture = true;
+            GardenClick::Dismiss
+        }
+        _ => GardenClick::Dismiss,
+    };
+    let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
+    visit_garden_agent(ui, runtime, pointer);
+    Some(effects)
 }
 
 fn route_workspace_input_before_reducer(
@@ -5742,6 +5816,10 @@ fn drive_workspace_controller(
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
+    // A Garden pointer press owns its complete gesture even though the press
+    // itself dismisses the overlay. This prevents the following drag/release
+    // from selecting or opening content on the newly revealed Home.
+    let mut garden_pointer_gesture = false;
     // Seed the daemon-authoritative snapshots before the first frame so a
     // pending decision and another client's sessions are visible without
     // requiring a manual key binding. Both are wakes of a resident lane, not
@@ -5846,6 +5924,7 @@ fn drive_workspace_controller(
             width: u16::try_from(width).unwrap_or(u16::MAX),
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
+        let _ = runtime.apply_event(AppEvent::GardenAvailability(garden_fits(height, width)));
         let geometry =
             foreground_terminal_geometry(height, width, runtime.state().director_drawer_open());
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
@@ -6037,8 +6116,25 @@ fn drive_workspace_controller(
         // A tick and a resize therefore cost exactly one redraw each, and the
         // only wake left is the explicit one a lifecycle action asks for through
         // `ControllerHostAction`.
-        let input_route =
-            route_workspace_input_before_reducer(&mut ui, &mut runtime, &mut controls, term, &key);
+        let input_route = route_garden_input(
+            &mut ui,
+            &mut runtime,
+            drawn_material.as_ref(),
+            &key,
+            &mut garden_pointer_gesture,
+        )
+        .map_or_else(
+            || {
+                route_workspace_input_before_reducer(
+                    &mut ui,
+                    &mut runtime,
+                    &mut controls,
+                    term,
+                    &key,
+                )
+            },
+            WorkspaceInputRoute::Garden,
+        );
         if input_route == WorkspaceInputRoute::Forwarded {
             continue;
         }
@@ -6063,25 +6159,13 @@ fn drive_workspace_controller(
             continue;
         }
         let daemon_overlay_was_open = runtime.state().overlay() == Some(Overlay::Daemon);
-        let effects = if let WorkspaceInputRoute::Drawer(effects) = input_route {
+        let effects = if let WorkspaceInputRoute::Drawer(effects)
+        | WorkspaceInputRoute::Garden(effects) = input_route
+        {
             effects
         } else if is_director_new_click(&key, &runtime, height, width) {
             runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
-            // The garden owns the whole frame while it is up, and it resolves
-            // its own clicks: the layout call that drew the rabbits returns the
-            // `SessionId`-tagged plots, so the shell hit-tests the frame the
-            // user actually saw instead of re-deriving session order from cells.
-            let garden_click = drawn_material.as_ref().and_then(|material| {
-                garden_click_at(
-                    material.height,
-                    material.width,
-                    &material.projection,
-                    material.now,
-                    column,
-                    row,
-                )
-            });
             // Header rendering and hit-testing share one layout projection, so
             // CJK breadcrumbs, notice presence, and narrow clipping cannot move
             // an action away from its clickable cells.
@@ -6102,27 +6186,18 @@ fn drive_workspace_controller(
                     })
                 })
                 .flatten();
-            match (garden_click, header_action, pane_tab) {
-                (Some(click), _, _) => {
-                    let effects = runtime.apply_event(AppEvent::GardenClick(click));
-                    // The activation this event performed made the clicked
-                    // session's pane the active one, so the rabbit's own tab can
-                    // be selected now. A rabbit whose tab has meanwhile gone
-                    // leaves the plain session Closeup as it is.
-                    visit_garden_agent(&mut ui, &mut runtime, click);
-                    effects
-                }
-                (None, Some(HomeHeaderAction::Director), _) => {
+            match (header_action, pane_tab) {
+                (Some(HomeHeaderAction::Director), _) => {
                     runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
                 }
-                (None, Some(HomeHeaderAction::Decisions), _) => {
+                (Some(HomeHeaderAction::Decisions), _) => {
                     runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
                 }
-                (None, None, Some(index)) => {
+                (None, Some(index)) => {
                     select_right_pane_tab(&mut ui, &mut runtime, index);
                     Vec::new()
                 }
-                (None, None, None) => {
+                (None, None) => {
                     runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
                 }
             }
@@ -7234,8 +7309,9 @@ mod tests {
         is_user_activity, key_to_terminal_bytes, new_project_notice, play_startup_splash,
         poll_and_project_terminals, projection_build_counts, render_controller_frame,
         render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
+        restore_open_panes, retarget_director_chords, route_garden_input,
+        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -7501,7 +7577,7 @@ mod tests {
     }
 
     #[test]
-    fn closeup_live_pr_action_opens_the_active_sessions_modal() {
+    fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_modal() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let target = Target::Session(session);
@@ -7527,7 +7603,7 @@ mod tests {
             crate::usecase::application::controller::update(&mut state, event),
             vec![Effect::LoadPullRequests { target }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
         assert_eq!(state.pr_overlay().unwrap().target(), target);
     }
 
@@ -7590,12 +7666,8 @@ mod tests {
         );
     }
 
-    /// The screen saver's deadline must survive an Agent working all night and
-    /// end the moment a person touches the terminal, so the classification of
-    /// "was that a user?" is pinned over the whole key vocabulary.
-    #[test]
-    fn only_a_real_interaction_postpones_the_screen_saver() {
-        let interactions = [
+    fn user_interactions() -> Vec<Key> {
+        vec![
             Key::Up,
             Key::Down,
             Key::Left,
@@ -7634,8 +7706,15 @@ mod tests {
             // A resize is the user dragging a window edge, and the design has it
             // both close the garden and restart the timer.
             Key::Resize,
-        ];
-        for key in interactions {
+        ]
+    }
+
+    /// The screen saver's deadline must survive an Agent working all night and
+    /// end the moment a person touches the terminal, so the classification of
+    /// "was that a user?" is pinned over the whole key vocabulary.
+    #[test]
+    fn only_a_real_interaction_postpones_the_screen_saver() {
+        for key in user_interactions() {
             assert!(is_user_activity(&key), "{key:?} should postpone the garden");
         }
         // The one wake-up that is not a person: frame ticks, drained daemon
@@ -7786,6 +7865,83 @@ mod tests {
         assert!(!after.contains("any key to return"));
     }
 
+    #[test]
+    fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let record = SessionRecord {
+            name: "alpha".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("/tmp/demo/alpha"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let sessions = vec![ProjectedSession::from_record(session, &record)];
+        let root = PathBuf::from("/tmp/demo");
+        let no_diffs = BTreeMap::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pointer_gesture = false;
+
+        for key in [
+            Key::Click { column: 0, row: 23 },
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 0,
+                row: 23,
+            }),
+        ] {
+            let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+            let material = home_frame_material(
+                24,
+                80,
+                &runtime,
+                "demo",
+                &root,
+                &sessions,
+                None,
+                health(),
+                &no_diffs,
+                None,
+                None,
+                now(),
+            );
+            assert_eq!(
+                route_garden_input(
+                    &mut ui,
+                    &mut runtime,
+                    Some(&material),
+                    &key,
+                    &mut pointer_gesture,
+                ),
+                Some(Vec::new()),
+            );
+            assert_eq!(runtime.state().overlay(), None);
+            if pointer_gesture {
+                assert_eq!(
+                    route_garden_input(
+                        &mut ui,
+                        &mut runtime,
+                        None,
+                        &Key::Pointer(PointerEvent {
+                            kind: PointerKind::Up,
+                            column: 0,
+                            row: 23,
+                        }),
+                        &mut pointer_gesture,
+                    ),
+                    Some(Vec::new()),
+                );
+            }
+        }
+        assert!(!pointer_gesture);
+    }
+
     /// Any other press is the documented wake-up: it is consumed, and the Home
     /// from before the screen saver comes back with no target changed.
     #[test]
@@ -7800,6 +7956,143 @@ mod tests {
         let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
         assert_eq!(runtime.state().overlay(), None);
         assert_eq!(runtime.state().active(), before);
+    }
+
+    #[test]
+    fn garden_consumes_every_kind_of_user_input_before_the_terminal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let mut pointer_gesture = false;
+        for key in user_interactions() {
+            let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+            assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+            assert_eq!(
+                route_garden_input(&mut ui, &mut runtime, None, &key, &mut pointer_gesture,),
+                Some(Vec::new()),
+                "Garden did not consume {key:?}",
+            );
+            assert_eq!(runtime.state().overlay(), None);
+            if pointer_gesture {
+                assert_eq!(
+                    route_garden_input(
+                        &mut ui,
+                        &mut runtime,
+                        None,
+                        &Key::Pointer(PointerEvent {
+                            kind: PointerKind::Up,
+                            column: 0,
+                            row: 0,
+                        }),
+                        &mut pointer_gesture,
+                    ),
+                    Some(Vec::new()),
+                );
+            }
+            assert!(!pointer_gesture);
+        }
+
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &Key::Other,
+                &mut pointer_gesture,
+            ),
+            None,
+        );
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+    }
+
+    #[test]
+    fn garden_pointer_press_owns_its_drag_and_release_after_dismissal() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let mut pointer_gesture = false;
+        let pointer = |kind| {
+            Key::Pointer(PointerEvent {
+                kind,
+                column: 4,
+                row: 9,
+            })
+        };
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Drag),
+                &mut pointer_gesture,
+            ),
+            Some(Vec::new()),
+        );
+        assert!(pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Up),
+                &mut pointer_gesture,
+            ),
+            Some(Vec::new()),
+        );
+        assert!(!pointer_gesture);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Down),
+                &mut pointer_gesture,
+            ),
+            Some(Vec::new()),
+        );
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Drag),
+                &mut pointer_gesture,
+            ),
+            Some(Vec::new()),
+        );
+        assert!(pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Up),
+                &mut pointer_gesture,
+            ),
+            Some(Vec::new()),
+        );
+        assert!(!pointer_gesture);
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                None,
+                &pointer(PointerKind::Up),
+                &mut pointer_gesture,
+            ),
+            None,
+        );
     }
 
     /// うさぎの click は session を訪問したうえで、その agent 自身の tab を開く。
