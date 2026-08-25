@@ -1273,12 +1273,16 @@ mod tests {
         assert!(output.status.success(), "git {args:?} failed: {stderr}");
     }
 
-    fn wait_for_emulator_release(ready_env: &str, release_env: &str, timeout_message: &str) {
-        let Some(ready) = std::env::var_os(ready_env).map(PathBuf::from) else {
+    fn wait_for_emulator_release(
+        ready: Option<PathBuf>,
+        release: Option<PathBuf>,
+        timeout_message: &str,
+    ) {
+        let Some(ready) = ready else {
             return;
         };
         fs::write(&ready, b"ready\n").unwrap();
-        let release = PathBuf::from(std::env::var_os(release_env).unwrap());
+        let release = release.expect("release path must accompany a ready path");
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             assert!(Instant::now() < deadline, "{timeout_message}");
@@ -2208,6 +2212,36 @@ mod tests {
             migration_before
         );
         assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
+
+        let error = authority.reserve(|| Ok(0)).unwrap_err();
+        assert!(error.to_string().contains("u32 range is exhausted"));
+    }
+
+    #[test]
+    fn exhausted_non_git_sequence_converges_without_a_migration_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let authority = sequence(tmp.path());
+        let legacy = only_legacy(&authority);
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, format!("{}\n", u32::MAX)).unwrap();
+        seed_sequence(&authority, u32::MAX);
+
+        for _ in 0..2 {
+            let error = authority.reserve(|| Ok(0)).unwrap_err();
+            assert!(error.to_string().contains("u32 range is exhausted"));
+        }
+        assert_eq!(authority.read_sequence().unwrap(), u32::MAX);
+        assert_eq!(
+            fs::read_to_string(&legacy).unwrap(),
+            legacy_sentinel(u32::MAX)
+        );
+        assert!(!authority.legacy_v2_migration_path().exists());
+        assert!(!authority.reservations_dir().exists());
+    }
+
+    #[test]
+    fn emulator_release_wait_is_optional() {
+        wait_for_emulator_release(None, None, "unused timeout");
     }
 
     #[test]
@@ -3073,8 +3107,8 @@ mod tests {
         write_text_atomic(&sequence, &format!("{}\n", current.checked_add(1).unwrap())).unwrap();
 
         wait_for_emulator_release(
-            OLD_READY_ENV,
-            OLD_RELEASE_ENV,
+            std::env::var_os(OLD_READY_ENV).map(PathBuf::from),
+            std::env::var_os(OLD_RELEASE_ENV).map(PathBuf::from),
             "parent never released old allocator",
         );
     }
@@ -3114,8 +3148,8 @@ mod tests {
         .unwrap();
 
         wait_for_emulator_release(
-            OLD_V2_EMULATOR_READY_ENV,
-            OLD_V2_EMULATOR_RELEASE_ENV,
+            std::env::var_os(OLD_V2_EMULATOR_READY_ENV).map(PathBuf::from),
+            std::env::var_os(OLD_V2_EMULATOR_RELEASE_ENV).map(PathBuf::from),
             "parent never released old-v2 compatibility emulator",
         );
     }
