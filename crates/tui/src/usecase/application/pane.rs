@@ -446,6 +446,7 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         PaneEvent::Select(PaneSelection::Tab(_))
         | PaneEvent::Resolved { .. }
         | PaneEvent::Failed { .. }
+        | PaneEvent::Feedback { .. }
         | PaneEvent::ReorderSelected(_)
         | PaneEvent::CloseSelected
         | PaneEvent::ResumeStarted { .. }
@@ -503,6 +504,11 @@ pub enum PaneEvent {
         /// 完了した operation。
         operation: OperationId,
         /// 画面へ出せる safe error。
+        message: String,
+    },
+    /// Surface display-safe feedback without changing tab membership or selection.
+    Feedback {
+        /// Message rendered in the active pane's fixed feedback row.
         message: String,
     },
     /// daemon が terminal exit を通知した。
@@ -587,6 +593,10 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
         } => succeed(state, operation, terminal),
         PaneEvent::Resolved { operation } => resolve(state, operation),
         PaneEvent::Failed { operation, message } => fail(state, operation, message),
+        PaneEvent::Feedback { message } => {
+            state.error = Some(message);
+            Vec::new()
+        }
         PaneEvent::Exited(terminal) => exit(state, &terminal),
         PaneEvent::Restore(pane) => restore(state, pane),
         PaneEvent::RestoreBatch {

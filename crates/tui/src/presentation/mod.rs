@@ -3925,6 +3925,8 @@ fn controller_terminal_view(
     let mut projection = controls.project_window(rows, range.start, total_rows);
     if let Some(error) = ui.terminal_error(&terminal) {
         projection.feedback = Some(error.to_owned());
+    } else if let Some(error) = runtime.active_pane().error() {
+        projection.feedback = Some(error.to_owned());
     }
     Some(projection)
 }
@@ -4637,18 +4639,16 @@ fn close_focused_terminal_pane(
         let ctrl_d = key_to_terminal_bytes(Key::CtrlD)
             .expect("Ctrl-D always has a live-terminal byte encoding");
         if let Err(message) = ui.send_terminal_bytes(&terminal, &ctrl_d) {
-            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                message,
-            ))));
+            runtime.surface_focused_pane_feedback(message);
         }
         return;
     }
     // An interrupted Agent owns no live PTY to receive Ctrl-D. Keep the history
     // visible and tell the user how to re-establish an exit-capable runtime.
     if runtime.focused_interrupted().is_some() {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+        runtime.surface_focused_pane_feedback(
             "Interrupted Agent has no live process; resume it before closing",
-        ))));
+        );
         return;
     }
     let outcome = runtime.close_focused_pane();
@@ -14353,6 +14353,78 @@ mod tests {
     }
 
     #[test]
+    fn close_tab_live_action_surfaces_a_safe_delivery_failure() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(WheelRecordingPort {
+                terminal,
+                replay: b"retained".to_vec(),
+                inputs: Arc::clone(&inputs),
+                input_error: true,
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert!(inputs.lock().unwrap().is_empty());
+        assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some("daemon unavailable; keystroke not delivered")
+        );
+        assert!(runtime.state().notice().is_none());
+    }
+
+    #[test]
+    fn focused_pane_feedback_is_visible_in_a_live_terminal_footer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let (ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            terminal.clone(),
+            Box::new(WheelRecordingPort {
+                terminal,
+                replay: b"retained".to_vec(),
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                input_error: false,
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+
+        runtime.surface_focused_pane_feedback("Agent close input was not delivered");
+        let view = controller_terminal_view(&ui, &runtime, &mut controls, 10).unwrap();
+
+        assert_eq!(
+            view.feedback.as_deref(),
+            Some("Agent close input was not delivered")
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One fixture covers every wheel route with shared pane geometry.
     fn physical_wheel_follows_full_screen_program_input_modes() {
         let cases = [
@@ -18120,12 +18192,10 @@ mod tests {
             bytes_before
         );
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
+            runtime.active_pane().error(),
             Some("terminal session is no longer available")
         );
+        assert!(runtime.state().notice().is_none());
 
         let mut closed_intent = durable.lock().unwrap().clone();
         closed_intent.apply(AgentTabIntentMutation::Dismiss { continuation });
@@ -18585,12 +18655,10 @@ mod tests {
         assert!(durable.lock().unwrap().dismissed.is_empty());
         assert!(durable.lock().unwrap().dismissed_terminals.is_empty());
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
+            runtime.active_pane().error(),
             Some("terminal session is no longer available")
         );
+        assert!(runtime.state().notice().is_none());
     }
 
     #[test]
@@ -23470,12 +23538,10 @@ mod tests {
         assert!(runtime.active_pane().has_tabs());
         assert!(WorkspaceUi::agent_dismissed().is_empty());
         assert_eq!(
-            runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
+            runtime.active_pane().error(),
             Some("Interrupted Agent has no live process; resume it before closing")
         );
+        assert!(runtime.state().notice().is_none());
         assert!(requests.lock().unwrap().is_empty());
         assert!(ui.pane_launches.is_empty());
     }

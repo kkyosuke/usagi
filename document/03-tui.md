@@ -1233,7 +1233,7 @@ detach するだけで daemon-owned terminal を停止しない。pending launch
 live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、client-side の detach だけでは非表示にしない。
 live Agent で `Ctrl-O x` / `Ctrl-O Ctrl-X` を入力すると、対象 CLI へ `Ctrl-D` と同じ EOT (`0x04`) を送り、runtime の終了を
 要求する。tab は入力直後に推測で消さず、daemon が終了を観測した時点で閉じ、同じ観測で sidebar・Garden の membership と
-実行枠を更新する。終了入力を配送できなかった場合は tab を残して safe notice を表示する。interrupted Agent は live PTY を
+実行枠を更新する。終了入力を配送できなかった場合は tab を残して pane の safe feedback を表示する。interrupted Agent は live PTY を
 持たないため chord では閉じず、`Interrupted Agent has no live process; resume it before closing` を表示する。必要なら
 `Ctrl-O r` で明示 resume してから閉じる。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
 
