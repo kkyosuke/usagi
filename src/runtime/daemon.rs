@@ -8855,7 +8855,7 @@ impl<'a> StandbyIpc<'a> {
     /// that initializes it is by definition the one that owns it.
     fn hydrate(&self) -> std::io::Result<(PathBuf, u64)> {
         let store = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(
-            &adopted_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
+            &standby_workspace_state_dir(&self.data_dir.join("daemon"), &self.workspace_root)?,
         );
         let (root, state) = store
             .load_with_workspace()
@@ -10576,11 +10576,16 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             Self::stop_standby(pid);
             return Err(error);
         }
-        let result = policy_client(ClientPolicy::cli()).and_then(|mut client| {
-            client.request(DaemonRequest::Rollover {
-                operation_id: operation.0.clone(),
-            })
-        });
+        // Rollover is a machine-wide lifecycle request. Binding this control
+        // connection to the command's cwd would make an otherwise ready
+        // successor impossible to commit when `daemon restart` is run outside
+        // an adopted workspace.
+        let result = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
+            .and_then(|mut client| {
+                client.request(DaemonRequest::Rollover {
+                    operation_id: operation.0.clone(),
+                })
+            });
         match result {
             Ok(_) => Ok(format!(
                 "daemon authority handed off (operation {})",
@@ -11147,18 +11152,34 @@ fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<
         .map_err(|error| std::io::Error::other(format!("{error:?}")))
 }
 
-/// The state subtree of an already adopted `workspace_root`, without creating
+/// The state subtree a standby uses as its initial workspace, without creating
 /// one.
 ///
 /// A standby hydrates read-only — every write belongs to the active generation —
-/// so an unadopted workspace is reported as uninitialized rather than adopted
-/// here.
-fn adopted_workspace_state_dir(
+/// so it never adopts the command's current directory. If that directory is
+/// already inside an adopted workspace, that workspace remains the preferred
+/// initial tenant. Otherwise a deterministic existing subtree is used: daemon
+/// replacement is machine-wide and must not depend on which unrelated directory
+/// the operator happened to run `daemon restart` from.
+fn standby_workspace_state_dir(
     daemon_dir: &Path,
     workspace_root: &Path,
 ) -> std::io::Result<PathBuf> {
-    workspace_state::owner(daemon_dir, workspace_root)
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))?
+    let adopted = workspace_state::adopted(daemon_dir)
+        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+    let initialized = adopted
+        .iter()
+        .filter_map(|state| match lifecycle_state_initialized(state.dir()) {
+            Ok(true) => Some(Ok(state)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    initialized
+        .iter()
+        .filter(|state| workspace_root.starts_with(state.root()))
+        .max_by_key(|state| state.root().components().count())
+        .or_else(|| initialized.first())
         .map(|state| state.dir().to_path_buf())
         .ok_or_else(|| {
             std::io::Error::new(
@@ -11166,6 +11187,27 @@ fn adopted_workspace_state_dir(
                 "durable runtime state is not initialized; a standby hydrates it read-only",
             )
         })
+}
+
+/// Whether an adopted subtree has the lifecycle document a read-only standby
+/// can hydrate.
+///
+/// `workspace_state::resolve` records `root.json` before the tenant opener
+/// initializes `sessions.json`. A failed open may therefore leave an adopted
+/// but uninitialized subtree behind. Absence is a candidate miss; every other
+/// node or metadata failure is corruption and remains fail-closed.
+fn lifecycle_state_initialized(state_dir: &Path) -> std::io::Result<bool> {
+    let path = usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(state_dir)
+        .state_path();
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("lifecycle state is not a regular file: {}", path.display()),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// The workspace this process opened, once a surface has selected one.
@@ -11592,6 +11634,42 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
             workspace.clone(),
             clock,
             budget_ms,
+        )
+        .map_err(|error| ClientError::Unavailable(error.to_string()))
+    };
+    Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
+}
+
+/// Connect a resilient per-request client to the already-running generation
+/// without applying bootstrap's artifact replacement decision.
+///
+/// The rollover controller is itself consuming that decision: asking its
+/// control connection to reject the incumbent build would return
+/// `RolloverRequired` before it could send the request that performs the
+/// rollover.
+fn existing_policy_client(
+    policy: ClientPolicy,
+    workspace: ClientWorkspace,
+) -> Result<impl DaemonClient, ClientError> {
+    let clock = SystemClock::new();
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let build = current_build();
+    let initial = connect_client(
+        &data_dir,
+        policy,
+        build.clone(),
+        workspace.clone(),
+        |stream| deadline_transport(clock, stream, policy.timeout_ms),
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let reconnect = move |clock: SystemClock, budget_ms: u64| {
+        connect_client(
+            &data_dir,
+            policy,
+            build.clone(),
+            workspace.clone(),
+            |stream| deadline_transport(clock, stream, budget_ms),
         )
         .map_err(|error| ClientError::Unavailable(error.to_string()))
     };
@@ -13063,6 +13141,13 @@ mod tests {
             bound_workspace_root(&daemon, &workspace.path().join(".")).unwrap(),
             paths::canonical_workspace_root(workspace.path()).unwrap()
         );
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, workspace.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "a standby never initializes the first durable workspace"
+        );
 
         // A startup directory that no longer resolves is a startup failure, not a
         // fence that silently keys some other path.
@@ -13597,7 +13682,7 @@ mod tests {
         std::fs::write(&container, "").unwrap();
         for error in [
             bound_workspace_root(&daemon, workspace.path()).unwrap_err(),
-            adopted_workspace_state_dir(&daemon, &canonical).unwrap_err(),
+            standby_workspace_state_dir(&daemon, &canonical).unwrap_err(),
         ] {
             assert!(error.to_string().contains("could not"), "{error}");
         }
@@ -13640,16 +13725,77 @@ mod tests {
         // daemon started there fences what it will actually own rather than
         // adopting the subdirectory as a second workspace.
         assert_eq!(
-            adopted_workspace_state_dir(&daemon, &canonical).unwrap(),
+            standby_workspace_state_dir(&daemon, &canonical).unwrap(),
             state_dir
         );
         let unadopted = tempfile::tempdir_in("/tmp").unwrap();
-        let error = adopted_workspace_state_dir(
-            &daemon,
-            &paths::canonical_workspace_root(unadopted.path()).unwrap(),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            standby_workspace_state_dir(
+                &daemon,
+                &paths::canonical_workspace_root(unadopted.path()).unwrap(),
+            )
+            .unwrap(),
+            state_dir,
+            "a machine-wide restart falls back to durable state instead of its cwd"
+        );
+    }
+
+    #[test]
+    fn standby_workspace_selection_skips_partial_adoptions_and_rejects_corruption() {
+        let temporary = tempfile::tempdir_in("/tmp").unwrap();
+        let daemon = temporary.path().join("data/daemon");
+        ensure_private_dir_all(&daemon).unwrap();
+
+        // `resolve` publishes root.json before the tenant opener initializes
+        // sessions.json. A failed open can leave exactly this partial subtree,
+        // and it must not shadow an initialized workspace during replacement.
+        let partial_root = temporary.path().join("a-partial");
+        let initialized_root = temporary.path().join("z-initialized");
+        std::fs::create_dir_all(&partial_root).unwrap();
+        std::fs::create_dir_all(&initialized_root).unwrap();
+        let partial_root = paths::canonical_workspace_root(&partial_root).unwrap();
+        let initialized_root = paths::canonical_workspace_root(&initialized_root).unwrap();
+        workspace_state::resolve(&daemon, &partial_root).unwrap();
+        let initialized = workspace_state::resolve(&daemon, &initialized_root).unwrap();
+        drop(
+            open_session_runtime(
+                initialized_root,
+                initialized.dir(),
+                temporary.path(),
+                usagi_core::domain::id::DaemonGeneration::new(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, &partial_root).unwrap(),
+            initialized.dir(),
+            "an absent sessions.json is skipped even when the cwd names that subtree"
+        );
+
+        // A present node with the wrong type is corruption, not another miss
+        // that may be hidden by selecting a different workspace.
+        let corrupt_root = temporary.path().join("0-corrupt");
+        std::fs::create_dir_all(&corrupt_root).unwrap();
+        let corrupt_root = paths::canonical_workspace_root(&corrupt_root).unwrap();
+        let corrupt = workspace_state::resolve(&daemon, &corrupt_root).unwrap();
+        std::fs::create_dir(corrupt.dir().join("sessions.json")).unwrap();
+        assert_eq!(
+            standby_workspace_state_dir(&daemon, temporary.path())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        // Metadata failures other than absence also remain errors. A plain file
+        // used as the state directory produces NotADirectory on every Unix host.
+        let not_directory = temporary.path().join("not-directory");
+        std::fs::write(&not_directory, "not a directory").unwrap();
+        assert_ne!(
+            lifecycle_state_initialized(&not_directory)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

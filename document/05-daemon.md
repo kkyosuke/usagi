@@ -1993,8 +1993,16 @@ wall clock・PID 由来の値は identity にしない。観測結果は `exact`
 ### standby hydrate と activation
 
 standby readiness が hydrate するのは single-writer lifecycle store（`sessions.json`）だけである。読むのは 1 回で、
-active が authority を取った workspace root と state revision を得る。readiness 中は reconcile / save、
-worker / tick、spawn を行わず、未初期化の store は「初期化するのは所有者だけ」として拒否する。
+active が authority を取った workspace root と state revision を得る。`daemon restart` の実行 directory が初期化済み
+workspace 内ならその subtree を使い、採用外または root 記録だけの partial adoption なら `sessions.json` を持つ
+初期化済み subtree を root 順で選ぶ。壊れた lifecycle node は別 subtree へ読み飛ばさず fail closed にする。
+replacement は machine-wide なので、standby の hydrate と active へ送る `rollover` control connection は無関係な
+実行 directory を新規 workspace として採用せず、readiness と handoff の成否もそこへ依存させない。control
+connection は locator・owner record・peer PID・process-start identity・generation を一致させて既存 active へ直接
+接続し、通常 client bootstrap の build mismatch 判定を再実行しない。handoff 自体がその判定を消費する replacement
+operation であり、ここで再判定すると `RolloverRequired` が自分自身を再帰的に要求するためである。
+readiness 中は reconcile / save、worker / tick、spawn を行わず、初期化済み subtree が 1 つも無い場合は
+「初期化するのは所有者だけ」として拒否する。
 
 handoff commit 後は readiness-only accept loop を止めて listener を回収し、同じ generation の空 owner shard と
 global allocator を active writer として開く。retained shard は owner routing で旧 generation 自身が serve するため、
