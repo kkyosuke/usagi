@@ -428,11 +428,12 @@ system / global config は**意図的に残す**。private repository の clone 
 必要とし、それは「repository が指定する任意コマンド」とは別物である。root Agent に渡す read-only git はこれに加えて
 system / global config も落とす（remote に到達する理由がないため）。
 
-`filter.<driver>.smudge` は driver 名を tracked `.gitattributes` が任意に選べるため、固定 key の上書きでは
-無効化できない。session worktree 作成は base ref を先に commit object ID へ固定し、その tree 内の全
-`.gitattributes` を blob として検査する。`filter` / `filter=*` / `-filter` / `!filter` が1つでもあれば checkout を
-開始せず拒否し、検査した commit IDそのものだけを `git worktree add` へ渡す。したがって検査と materialize の間に
-branch が動いても、未検査の filter process は起動しない。
+`filter.<driver>.smudge` / `filter.<driver>.process` は attribute が任意の driver 名を選べるため、固定 key の
+上書きでは無効化できない。session worktree 作成は base ref を先に commit object ID へ固定し、その tree 内の全
+`.gitattributes` を blob として検査する。tracked tree に filter attribute があれば checkout 前に拒否する。次に
+branch と `git worktree add --no-checkout` の metadata だけを作り、新worktreeの実効設定にある全 filter driverを
+command scope で無効化した `git read-tree -u` だけでmaterializeする。これによりGit local/global attributeも
+filter processを起動できず、途中失敗時はこの呼び出しが所有するworktreeとbranchだけを補償削除する。
 
 session の Git effect（create、mirror した tree の nested worktree、remove）は全て daemon の
 `GitRunner` 実装 1 か所を通るため、confine もそこで 1 回だけ適用する。
