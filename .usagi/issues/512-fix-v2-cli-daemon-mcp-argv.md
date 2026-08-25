@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, cli, daemon, mcp]
 dependson: []
-related: [481]
+related: []
 parent: 453
 created_at: 2026-07-21T21:34:02.710474+00:00
 updated_at: 2026-07-21T21:46:19.564076+00:00

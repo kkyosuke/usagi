@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, tui, agent, lifecycle, correctness]
 dependson: []
-related: [506, 599, 600]
+related: [506, 599]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-08-01T01:21:46.596919+00:00
 ---

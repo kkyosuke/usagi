@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [tui, input, widget, ux]
 dependson: []
-related: [42, 257, 287]
+related: [42]
 created_at: 2026-07-20T04:25:28.639907+00:00
 updated_at: 2026-07-20T06:46:29.158782+00:00
 ---

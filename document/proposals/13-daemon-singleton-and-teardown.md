@@ -9,11 +9,7 @@
 [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker)、
 [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) に移った。
 本書に残るのは、その採用理由と却下した代替案である。
-実地調査で 3 つの独立した欠陥を確認し、実装 issue
-[#540](../../.usagi/issues/540-fix-daemon-daemon-serve-self-shutdown-test-fixture-workspace.md) /
-[#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md) /
-[#543](../../.usagi/issues/543-fix-daemon-session-remove-worktree-teardown-worker-ipc.md)
-に分割した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
+実地調査で 3 つの独立した欠陥を確認した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
 部分は [5. daemon](../05-daemon.md) と [7. MCP サーバ](../07-mcp.md) へ畳み込む（[docs 畳み込み先](#docs-畳み込み先)）。
 
 ## 目次

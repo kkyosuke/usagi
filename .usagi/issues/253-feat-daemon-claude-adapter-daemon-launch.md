@@ -4,7 +4,7 @@ title: feat(daemon): Claude adapter を daemon launch に接続する
 status: done
 priority: high
 labels: [daemon, agent, claude]
-dependson: [250, 251]
+dependson: [251]
 related: [142, 145, 146]
 created_at: 2026-07-12T22:33:12.438314+00:00
 updated_at: 2026-07-12T23:04:37.483270+00:00

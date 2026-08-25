@@ -4,7 +4,7 @@ title: feat(tui): Overview の completion/history/help と top-level UX を追�
 status: done
 priority: medium
 labels: [tui, parity-b]
-dependson: [226, 230]
+dependson: [230]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.836768+00:00

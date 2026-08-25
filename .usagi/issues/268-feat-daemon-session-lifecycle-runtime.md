@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [daemon, session, lifecycle, ipc]
 dependson: [217, 219, 220]
-related: [257, 263, 264, 265]
+related: [263, 264]
 parent: 213
 created_at: 2026-07-13T00:30:00.000000+00:00
 updated_at: 2026-07-13T01:35:47.126081+00:00

@@ -137,7 +137,7 @@ TUI 面はクレート内でクリーンアーキテクチャの層を切る（�
 
 | 層（`crates/tui/src/`） | 置くもの |
 |---|---|
-| `presentation/` | 画面描画・キー入力マッピング。描画は legacy と同じく自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分け、view が layout で領域を割りそこへ widget を配置する。色は `theme`（意味的な役割 accent / success / danger … を具体色へ写す単一情報源。ANSI SGR を直接吐き外部クレートに依存しない）で一元管理する。対話ループもここに置く（`run_with_settings` は `Terminal`、`WorkspaceLoader`、`SettingsPort` を注入し、Welcome ⇄ Open / New / Config、Open ⇄ Workspace の画面グラフを回す。Config は scope ごとの draft を持ち、保存失敗時も保持する。Workspace 内では Switch / Closeup の mode と Overview / PR の最前面 modal を状態機械で dispatch し、modal widget が組み立て済み workspace frame に枠を合成する。Recent は Welcome から Workspace へ直接進み、Esc で Welcome へ戻る） |
+| `presentation/` | 画面描画・キー入力マッピング。描画は自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分け、view が layout で領域を割りそこへ widget を配置する。色は `theme`（意味的な役割 accent / success / danger … を具体色へ写す単一情報源。ANSI SGR を直接吐き外部クレートに依存しない）で一元管理する。対話ループもここに置く（`run_with_settings` は `Terminal`、`WorkspaceLoader`、`SettingsPort` を注入し、Welcome ⇄ Open / New / Config、Open ⇄ Workspace の画面グラフを回す。Config は scope ごとの draft を持ち、保存失敗時も保持する。Workspace 内では Switch / Closeup の mode と Overview / PR の最前面 modal を状態機械で dispatch し、modal widget が組み立て済み workspace frame に枠を合成する。Recent は Welcome から Workspace へ直接進み、Esc で Welcome へ戻る） |
 | `usecase/` | TUI に閉じた application ロジック。起動画面の `EntryScreen`、それを具体的な描画・入力実装へ委譲する `ScreenRunner` 境界、管理画面用の端末ポート `Terminal` と入力語彙 `Key`、live pane 専用の端末非依存入力語彙・bytes encoder・`Ctrl-O` classifier、Welcome / Open / Recent の typed attach と Home の純粋 controller（state / event / effect reducer、TUI-local backend port と fake backend）。controller が返した全 `Effect` を daemon 所有のポート群（session command / agent / notes・environment store / workspace command / decision / PR・preview・browser）へ振り分ける本番 executor `daemon_backend`。実 IO ポートは合成ルートが 1 つの backend factory から注入し、`effect → 実行 → event → update()` の単方向ループを閉じる。Home は runtime ごとの phase を保持し、target ごとに `done > waiting > running > ready > absent` で集約する。progress・operation / terminal error・disconnect / reconnect / resync は safe message と error ID だけを TUI-local feedback として保持する。stable `TerminalRef` で tab / pending placeholder / attach policy を扱う Closeup pane reducer と、その reducer を daemon inventory / stream / resume / geometry dedupe へ結合する `pane_runtime`、Agent tab の order / selection を還元し legacy dismissal を移行する TUI-local `AgentTabIntent` domain と persistence port、Overview / Closeup コマンドの解釈・dispatch、画面グラフの遷移、イベント処理の状態機械 |
 | `infrastructure/` | daemon 端末へ attach する IPC クライアント側と端末バックエンド（raw mode・端末制御・キー/ホイール読み取り・クリップボード）。daemon push adapter は phase、safe error、connection feedback を TUI-local projection に変換し、wire の detail を越境させない |
 
@@ -254,16 +254,14 @@ create の再送は、初期 status と request fields が一致する committed
 重複していれば既存番号を任意に返さず ambiguity error になる。したがって derived failure や応答
 消失の後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
 
-issue number の採番 authority も本節を正本とする。Git repository では legacy / v2 が共有する
+issue number の採番 authority も本節を正本とする。Git repository では
 `<git-common-dir>/usagi/issue-numbers/`、非 Git workspace では
 `<workspace>/.usagi/issue-numbers/` にだけ authoritative state を置く。
 
 ```text
 <git-common-dir>/usagi/issue-numbers/
 ├── .lock
-├── sequence.json                         # normal: { "version": 1, "last_reserved": N }
-│                                         # blocker: last_reserved = u32::MAX,
-│                                         #          migration_floor = F
+├── sequence.json                         # { "version": 1, "last_reserved": N }
 ├── legacy-v2-migrated                    # Git migration commit: canonical body "N\n"
 └── reservations/
     └── 0000000516.reserved               # body: "516\n"
@@ -275,11 +273,11 @@ issue number の採番 authority も本節を正本とする。Git repository �
 
 <observed-issue-store>/usagi-issue-sequence/
 ├── .lock                                 # nested/non-Git の pre-fix store-local lock
-└── next                                  # common legacy と同じ active / fenced format
+└── next                                  # shared old-v2 と同じ active / fenced format
 ```
 
 raw cwd が repository 内の深い path でも、最寄り ancestor の `.git` まで遡って worktree boundary を決める。
-authority は legacy と同じく、[Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
+authority は [Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
 `git -C <worktree-root> rev-parse --path-format=absolute --git-common-dir` の成功結果だけを canonical existing
 directory として採用する。valid separate-git-dir / submodule で `commondir` が無い場合は Git が返す git dir
 自体を使う。empty / non-repository `.git`、stale / dangling gitfile・`commondir`、non-UTF-8 / empty output、
@@ -292,7 +290,7 @@ atomicに切り替えられないため、cached non-Git allocatorを停止し�
 offlineでGit authorityへreconcileしてから旧fallbackを取り除く。absence checkだけはcached processをfenceしないので、
 quiescenceは必須の外部gateである。Git→non-Gitへのclassification変更も同じoffline reconciliationなしで行わない。
 
-lock 順序は new authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
+lock 順序は current authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
 `sequence.json`、`legacy-v2-migrated`、全 reservation marker、旧 `next`、workspace root と
 登録済み全Git worktree root、それぞれの`.usagi/sessions/<name>/`、および登録済み全Git worktreeでtracked / untracked / ignoredとしてmaterialize済みの
 arbitrary nested issue storeにある全sourceのfilename prefix / parse可能なfrontmatter宣言の最大値を最初に検証する。activeな旧`next`は
@@ -300,82 +298,47 @@ plain `u32` として high-water へ fold する。observed path のうち senti
 相互に独立した旧 writer を atomic に止められないため、authoritative file を書く前に停止する。
 
 ```text
-fresh Normal sequence + sole unfenced legacy:
-  legacy-visible floor A == durable floor F:
-    legacy next = sentinel(F)（atomic; 旧 v2 を最初に停止）
-  sole live legacy floor B == durable floor F:
-    sequence blocker(F)（atomic; 旧 legacy を一時停止）
-  A < F and B < F:
-    fail-closed（1 writeで安全にbridgeできない）
-no unfenced legacy:
-  sequence blocker(F)
-pre-existing blocker + unfenced legacy:
-  legacy next = sentinel(F)（旧 legacy は既に停止済み）
+F = max(sequence, reservation journal, source claims,
+        optional migration marker, every old-v2 next/sentinel)
 
-  → sequence blocker(F) を保証
-  → all observed legacy next = "migrated-to-usagi-issue-numbers:N\n"
+migration required:
+  → all observed old-v2 next = "migrated-to-usagi-issue-numbers:N\n"
   → reservation marker
   → legacy-v2-migrated = "N\n"（Git のみ）
-  → normal sequence.json
+  → sequence.json
+  → source Markdown
+
+migration complete:
+  → reservation marker
+  → sequence.json
   → source Markdown
 ```
 
-ここで `A` は全旧legacy callerが共有して見えるNormal sequence / reservation journalの最大、`B` はsole unfenced legacy
-floor、`F` はこれらに全worktree source / blocker recovery floor / optional migration watermark / 全fenced legacy floorも加えたdurable最大、
-`N = F + 1` である。異なる2 authority を1回でatomic updateできないため、fresh migrationの最初の成功writeは、もう片側に
-全durable floorが見える場合にだけlive allocatorを1つへ減らす。sentinelは旧v2を恒久的にfenceし、blockerはnormal sequenceを
-最後に戻すまで旧legacyを一時停止する。両live sideがfenced watermarkより低ければ、どちらを先に止めても他方が番号を再利用するため、
-write前にoffline reconciliationを要求する。source visibilityはcallerのworkspace rootによって異なるため、first-write判定で
-`A`へ加えない。
+ここで `N = F + 1` である。sentinel は旧 v2 writer を恒久的に fence する。現行 allocator は旧 v2 の lock を保持して sentinel を先に公開するため、待機していた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。複数の独立した active / missing 旧 authority がある場合は、安全な停止順を証明できないため write 前に offline reconciliation を要求する。
 
-blocker は `{ "version": 1, "last_reserved": 4294967295, "migration_floor": F }` を1回の atomic write で公開する。
-旧 legacy は追加 field を無視するが `u32::MAX` の checked increment で停止し、fixed v2 は `F` から本来の high-water を
-回復する。`migration_floor` が無い `last_reserved = u32::MAX` は最終番号を正常予約した exhausted state である。
-blocker 以外で `migration_floor` が存在する、または floor 自体が `u32::MAX` の JSON は破損として拒否する。
-
-旧 writer が先に列挙済み旧 lock を保持していれば、その writer が更新した最新 `u32` を fixed allocator が fold する。
-fixed allocator を待っていた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。non-exhaustedなnormal sequence
-は全 sentinel / reservation / Git marker より後、かつ最後に公開するため、正常終了後は旧 legacyも同じ authority の次番号へ
-進める。Git の sentinel と `legacy-v2-migrated` は migration watermark であり通常採番の live high-water ではない。
-通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発 legacy path を
-再移行するときだけ全 observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。interrupted
-development buildが残した既存markerだけをcanonical検証してrecovery floorへfoldし、legacy列挙を抑止する用途には使わない。
+Git の sentinel と `legacy-v2-migrated` は migration watermark であり、通常採番の live high-water ではない。通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発の旧 v2 path を再移行するときだけ observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。
 
 crash recovery は次の境界で固定する。atomic write の Write / Rename failure は old / new の完全な片方だけを露出する。
 
-| 最後に durable になった境界 | crash 後に進める旧 allocator | retry |
-| --- | --- | --- |
-| first sentinel / blocker が未commit | 変更前の旧state（fixed予約なし） | 元のfloorからfirst writeを再試行 |
-| sentinel-first(F), blockerなし | legacy のみ | legacyのsequence / journal進捗をfold |
-| blockerのみ | 高水位を持つsole unfenced legacy v2（存在時）のみ | その`next`の進捗をfold |
-| blocker after sentinel-first, sentinel(N)なし | なし | blocker floorからF+1を予約 |
-| first / partial / all sentinel(N) | なし | Nを消費し、retryはN+1へ進む |
-| reservation marker | なし | journal を fold して次番号へ進む |
-| Git migration marker | なし | blocker / journal / marker を fold |
-| normal sequence, source 未作成 | legacy のみ（旧 v2 は fenced） | 予約済み gap を再利用しない |
-| exhausted safe-first sentinel(MAX) | legacyのみ（MAXで停止） | normal sequence(MAX)をrecovery tagとして公開 |
-| exhausted safe-first sequence(MAX) | legacyはMAXで既に停止 | 全sentinel(MAX)へ収束 |
-| exhausted normal(MAX) + partial sentinel / old Git marker | なし | 残りsentinel → marker(MAX) → final normal(MAX) |
-| exhausted Git marker(MAX), final sequence failure | なし | blocker / journal / marker MAXをfoldしnormal(MAX)へ収束 |
+| 最後に durable になった境界 | retry |
+| --- | --- |
+| sentinel が未commit | 元の floor から migration を再試行 |
+| first / partial / all sentinel(N) | N を fold し、N+1 から再試行 |
+| reservation marker | journal を fold して次番号へ進む |
+| Git migration marker | journal / marker / sentinel を fold |
+| sequence、source 未作成 | 予約済み gap を再利用しない |
+| exhausted partial sentinel(MAX) | 残り sentinel → marker(MAX) → sequence(MAX) へ収束 |
 
-sequence は strict な schema / version / blocker semantics、sentinel、migration marker、reservation marker は canonical な
-filename/body を検証する。active legacy numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid state、read
-failure、および non-exhausted normal sequence 下の Git marker / shared sentinel mismatch は新しい write より前に fail-closed になる。
-marker 未作成の sentinel-first 境界、または blocker 下で crash が残した valid sentinel / reservation / marker floor の差だけは
-最大値を fold して回復する。`Normal(u32::MAX)`は旧legacyの停止をdurableに証明するterminal recovery tagなので、
-その下でのshared sentinel(MAX) / 旧Git markerの差だけもpartial exhausted migrationとして回復する。
+sequence は strict な schema / version、sentinel、migration marker、reservation marker は canonical な filename/body を検証する。active old-v2 numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid stateとread failureは新しいwriteより前にfail-closedになる。Git migration markerがある場合、shared sentinelはmarker以上のfenced floorでなければならない。markerより新しいsentinelはpartial migrationとして最大値へfoldする。
 
 source high-waterはfilename prefixだけでなく、parse可能なfrontmatterの`number`も含む。
 `007-*.md`が`number: 800`を宣言する場合も、prefixの無いsourceが`number: 900`を宣言する場合も、
 宣言側を再採番しない。allocation時のsource read / parse failureは宣言high-waterを証明できないため
 lenient listingのようにskipせずfail-closedにする。
 
-durable floorが`u32::MAX`の場合も、safe first-write条件を満たすならallocation errorを即時返してnumericな旧`next`を残さない。
-旧legacyがMAXのsequence / journal / blockerを見る場合はsentinel(MAX)を先に公開し、sole legacyがMAXを持つ場合は
-normal sequence(MAX)を先に公開する。旧v2が既にsentinelで停止している場合もsequence(MAX)を先に公開できる。
-どちらのlive側もMAXを見ないsource-only exhaustionはwrite前に停止する。safeなfirst write後は
-normal sequence(MAX)をrecovery tagとして直ちに公開し、全sentinel(MAX) → Git marker(MAX) →
-final normal sequence(MAX)と収束する。reservationやsourceを追加せずexhaustion errorを返す。
+durable floorが`u32::MAX`の場合は、全old-v2 pathをsentinel(MAX)へfenceし、Git marker(MAX)と
+sequence(MAX)へ収束させる。途中のatomic writeが失敗しても、既存sequence、active `next`、または先に
+公開済みのsentinel(MAX)からfloorを回復する。reservationやsourceを追加せずexhaustion errorを返す。
 
 Git は common legacy を常時、normalized worktree より深い caller の current store-local path を `next` 未作成でも列挙する。
 normalized workspace と登録済み全 Git worktree の各 `.usagi/sessions/` を毎回走査し、通常の direct-session child は
@@ -389,24 +352,19 @@ fail-closed になる。child 側から起動した場合も、conventional work
 対象へ加える。source high-water も normalized workspace と登録済み全 worktree の root / direct-session child、および
 materialize 済み nested source という同じ親集合から走査する。registered worktree root自身は旧v2も`.git`経由でcommon legacyを使うためstore-local pathを追加しない。
 非 Git は workspace root / current と存在する全 direct-session root を `next` 未作成でも列挙する。`Active` と `Missing` は
-ともに未封鎖で、列挙済み authority のうち2件以上なら blocker 前に停止する。dangling sessions / issue store / authority pathも
+ともに未封鎖で、列挙済み authority のうち2件以上なら authoritative write 前に停止する。dangling sessions / issue store / authority pathも
 「missing」と推測せず、session symlinkも暗黙に追わずfail-closedになる。非 Git は global completion marker を公開しないため、後発 direct session を
 既存 marker で隠さない。
 
 ただし、Gitでまだ legacy fileを作っていない arbitrary nested cwd、非Gitのroot/current/direct-session外の
 arbitrary nested cwd、および列挙snapshot後に初めてmaterializeするpathは有限に封鎖できない。sentinel markerだけで
-その未知 process の将来 write を防げるとは主張しない。最初の fixed reservation 前に全
+その未知 process の将来 write を防げるとは主張しない。最初の current reservation 前に全
 pre-fix process の cwd / legacy path を inventory し、列挙対象へ materializeして fenceするか停止して再起動を禁止することが
 safe rollout の外部 compatibility gate である。複数の未封鎖 file が見つかった場合は、全 pre-fix writer を停止し、最大
 floor を失わず1つの authorityへオフラインで整理するまで allocationを再開しない。
 並行回帰では、HEAD直前のraw-cwd resolver / filename floor / plain-u32 increment / StoreLockと同じロジックを
-別processで実行するold-v2 compatibility emulatorを用いる。これはhistorical binaryそのものとは呼ばず、
-旧側先行予約のfoldとfixed側先行sentinel parse failureを実OS process / file lockで固定する互換fixtureである。
-release acceptanceではこれと分けて、pre-fix commit `677405d31267e9205b76a26fe8b31098b6086852`からbuildした
-実`usagi 2.6.0` MCPを同一processのまま維持するrollout試験も行う。旧MCP create、fixed MCP createによるfold / fence、
-同じ旧MCP processの再createという順で、最後がsentinelのplain-`u32` parse errorになり、source / derived / authority
-artifactがbyte-for-byte不変であることを確認する。この実binary試験はrelease時の証拠であり、CIで常時動かす
-deterministicなlock / crash境界の保証は上記emulator回帰が担う。
+別processで実行するold-v2 compatibility emulatorを用いる。旧側先行予約のfoldとcurrent側先行sentinel parse failureを
+実OS process / file lockで固定する。
 
 issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
 point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed

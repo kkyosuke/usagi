@@ -4,7 +4,7 @@ title: feat(tui): SessionLifecycle pending と safe landing reducer を実装す
 status: done
 priority: high
 labels: [tui, lifecycle]
-dependson: [223, 225, 226]
+dependson: [223, 225]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:18.263928+00:00

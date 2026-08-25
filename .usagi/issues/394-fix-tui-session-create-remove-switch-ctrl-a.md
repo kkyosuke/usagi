@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, session, bug, parity]
 dependson: []
-related: [287]
+related: []
 parent: 227
 created_at: 2026-07-20T03:57:18.717441+00:00
 updated_at: 2026-07-20T04:24:29.429293+00:00

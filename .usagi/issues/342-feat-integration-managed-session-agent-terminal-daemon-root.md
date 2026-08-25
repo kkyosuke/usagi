@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [integration, daemon, session, agent, terminal, e2e]
 dependson: [263, 264, 268]
-related: [251, 252, 253, 255, 265]
+related: [251, 252, 253, 255]
 parent: 227
 created_at: 2026-07-13T01:35:00+00:00
 updated_at: 2026-07-18T02:38:45.514688+00:00

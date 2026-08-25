@@ -1,9 +1,9 @@
 //! Workspace-global, crash-durable issue number reservations.
 //!
 //! Issue Markdown lives in each Git worktree, so a per-store lock cannot
-//! serialize allocation across sibling worktrees. The one authority shared
-//! with the production legacy allocator lives below Git's common directory and
-//! combines a high-water sequence with durable per-number reservation markers.
+//! serialize allocation across sibling worktrees. The authority lives below
+//! Git's common directory and combines a high-water sequence with durable
+//! per-number reservation markers.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,33 +32,6 @@ const LEGACY_V2_SENTINEL_PREFIX: &str = "migrated-to-usagi-issue-numbers:";
 struct SequenceFile {
     version: u32,
     last_reserved: u32,
-    /// Present only while `last_reserved == u32::MAX`. Old legacy ignores this
-    /// additional field and fails its checked increment, while fixed v2 uses
-    /// it to recover the real high-water after a crash.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    migration_floor: Option<u32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SequenceState {
-    Normal(u32),
-    MigrationBlocked(u32),
-}
-
-impl SequenceState {
-    fn floor(self) -> u32 {
-        match self {
-            Self::Normal(floor) | Self::MigrationBlocked(floor) => floor,
-        }
-    }
-
-    fn is_blocked(self) -> bool {
-        matches!(self, Self::MigrationBlocked(_))
-    }
-
-    fn stops_old_legacy(self) -> bool {
-        self.is_blocked() || self == Self::Normal(u32::MAX)
-    }
 }
 
 struct GitRepository {
@@ -106,29 +79,9 @@ pub(crate) struct IssueNumberSequence {
     legacy_scope: LegacyScope,
 }
 
-/// Source maxima observed by fixed v2 and, only when proven by a controlled
-/// caller, by every compatible old-legacy allocator. Production Git callers set
-/// `legacy_visible` to zero because no source tree is visible from every possible
-/// linked-worktree cwd sharing the common authority.
-#[derive(Debug)]
-pub(crate) struct ExistingIssueFloors {
-    pub(crate) all: u32,
-    pub(crate) legacy_visible: u32,
-}
-
-impl ExistingIssueFloors {
-    #[cfg(test)]
-    fn shared(floor: u32) -> Self {
-        Self {
-            all: floor,
-            legacy_visible: floor,
-        }
-    }
-}
-
 impl IssueNumberSequence {
-    /// Resolve the legacy-compatible authority and every old-v2 authority that must
-    /// be folded and fenced.
+    /// Resolve the current authority and every old-v2 authority that must be
+    /// folded and fenced.
     ///
     /// Git repositories use the nearest ancestor worktree boundary and Git's
     /// validated common directory. Non-Git workspaces use `.usagi` and retain
@@ -230,68 +183,42 @@ impl IssueNumberSequence {
         matches!(self.legacy_scope, LegacyScope::Git { .. })
     }
 
-    /// Reserve one number while holding both the new authority lock and every
-    /// relevant old-v2 lock in that fixed order.
+    /// Reserve one number while holding both the current authority lock and
+    /// every relevant old-v2 lock in that fixed order.
     ///
-    /// For a fresh migration, the first write fences old v2 when old legacy can see
-    /// every durable floor, or blocks old legacy when the sole live legacy path can
-    /// see every durable floor. If neither side can, migration fails before an
-    /// authoritative write. Every legacy path is then fenced and the
-    /// reservation is committed before the normal legacy sequence is restored.
+    /// A fresh migration fences every old-v2 authority before committing the
+    /// reservation. Holding both lock sets keeps the transition atomic with
+    /// respect to current and old-v2 writers.
     #[cfg(test)]
     pub(crate) fn reserve<F>(&self, max_existing: F) -> Result<u32>
     where
         F: FnMut() -> Result<u32>,
     {
-        self.reserve_observing(max_existing, || {})
+        self.reserve_observing(max_existing)
     }
 
-    pub(crate) fn reserve_with_floors<F>(&self, existing_floors: F) -> Result<u32>
+    pub(crate) fn reserve_with_max<F>(&self, mut max_existing: F) -> Result<u32>
     where
-        F: FnMut() -> Result<ExistingIssueFloors>,
+        F: FnMut() -> Result<u32>,
     {
-        self.reserve_observing_floors(existing_floors, || {})
+        self.reserve_observing_dyn(&mut max_existing)
     }
 
     #[cfg(test)]
-    fn reserve_observing<F, O>(&self, mut max_existing: F, migration_blocked: O) -> Result<u32>
+    fn reserve_observing<F>(&self, mut max_existing: F) -> Result<u32>
     where
         F: FnMut() -> Result<u32>,
-        O: FnMut(),
     {
-        self.reserve_observing_floors(
-            || max_existing().map(ExistingIssueFloors::shared),
-            migration_blocked,
-        )
+        self.reserve_observing_dyn(&mut max_existing)
     }
 
-    fn reserve_observing_floors<F, O>(
-        &self,
-        mut existing_floors: F,
-        mut migration_blocked: O,
-    ) -> Result<u32>
-    where
-        F: FnMut() -> Result<ExistingIssueFloors>,
-        O: FnMut(),
-    {
-        self.reserve_observing_floors_dyn(&mut existing_floors, &mut migration_blocked)
-    }
-
-    fn reserve_observing_floors_dyn(
-        &self,
-        existing_floors: &mut dyn FnMut() -> Result<ExistingIssueFloors>,
-        migration_blocked: &mut dyn FnMut(),
-    ) -> Result<u32> {
+    fn reserve_observing_dyn(&self, max_existing: &mut dyn FnMut() -> Result<u32>) -> Result<u32> {
         let _authority_lock = StoreLock::acquire(&self.dir)?;
         let legacy_paths = self.legacy_v2_sequences()?;
         let _legacy_locks = acquire_legacy_locks(&legacy_paths)?;
 
         // Validate every authority input before the first authoritative write.
-        let existing = existing_floors()?;
-        ensure!(
-            existing.legacy_visible <= existing.all,
-            "legacy-visible issue floor exceeds the complete source floor"
-        );
+        let existing = max_existing()?;
         let sequence = self.read_sequence()?;
         let migration = self.read_legacy_v2_migration()?;
         let journal = self.max_reservation()?;
@@ -301,7 +228,7 @@ impl IssueNumberSequence {
             .collect::<Result<Vec<_>>>()?;
 
         if self.is_git_shared()
-            && let Some(migration_floor) = migration
+            && let Some(marker_floor) = migration
         {
             let shared = self
                 .shared_legacy_sequence()
@@ -311,7 +238,7 @@ impl IssueNumberSequence {
                 .find_map(|(path, state)| (*path == shared).then_some(*state))
                 .context("Git issue allocation did not inspect its shared legacy authority")?;
             ensure!(
-                shared_state == LegacyState::Fenced(migration_floor) || sequence.stops_old_legacy(),
+                matches!(shared_state, LegacyState::Fenced(floor) if floor >= marker_floor),
                 "shared legacy v2 issue sequence fence disagrees with migration marker: {}",
                 shared.display()
             );
@@ -322,28 +249,19 @@ impl IssueNumberSequence {
             .map(|(_, state)| state.floor())
             .max()
             .unwrap_or(0);
-        let legacy_visible_floor = existing
-            .legacy_visible
-            .max(match sequence {
-                SequenceState::Normal(floor) => floor,
-                SequenceState::MigrationBlocked(_) => 0,
-            })
-            .max(journal);
         let floor = existing
-            .all
-            .max(legacy_visible_floor)
-            .max(sequence.floor())
+            .max(sequence)
+            .max(journal)
             .max(migration.unwrap_or(0))
             .max(legacy_floor);
 
         let git_marker_incomplete = self.is_git_shared() && migration.is_none();
-        let fences_match_git_marker = migration.is_some_and(|migration_floor| {
+        let fences_match_git_marker = migration.is_some_and(|marker_floor| {
             legacy_states
                 .iter()
-                .all(|(_, state)| *state == LegacyState::Fenced(migration_floor))
+                .all(|(_, state)| *state == LegacyState::Fenced(marker_floor))
         });
-        let needs_migration = sequence.is_blocked()
-            || git_marker_incomplete
+        let needs_migration = git_marker_incomplete
             || if self.is_git_shared() {
                 !fences_match_git_marker
             } else {
@@ -353,7 +271,7 @@ impl IssueNumberSequence {
             };
 
         let terminal_exhaustion = floor == u32::MAX
-            && sequence == SequenceState::Normal(u32::MAX)
+            && sequence == u32::MAX
             && legacy_states
                 .iter()
                 .all(|(_, state)| *state == LegacyState::Fenced(u32::MAX))
@@ -363,7 +281,7 @@ impl IssueNumberSequence {
         }
 
         if floor == u32::MAX {
-            self.finish_exhausted_migration(sequence, legacy_visible_floor, &legacy_states)?;
+            self.finish_exhausted_migration(&legacy_states)?;
             bail!("cannot allocate another issue number because the u32 range is exhausted");
         }
 
@@ -375,39 +293,11 @@ impl IssueNumberSequence {
             return Ok(number);
         }
 
-        self.migrate_and_reserve(
-            floor,
-            sequence,
-            legacy_visible_floor,
-            &legacy_states,
-            migration_blocked,
-        )
+        self.migrate_and_reserve(floor, &legacy_states)
     }
 
-    fn finish_exhausted_migration(
-        &self,
-        sequence: SequenceState,
-        legacy_visible_floor: u32,
-        legacy_states: &[(&PathBuf, LegacyState)],
-    ) -> Result<()> {
-        let unfenced = single_unfenced_legacy(legacy_states)?;
-        if let Some((path, state)) = unfenced {
-            if sequence.is_blocked() || legacy_visible_floor == u32::MAX {
-                write_legacy_sentinel(path, u32::MAX)?;
-            } else {
-                ensure!(
-                    state.floor() == u32::MAX,
-                    "neither live legacy v2 nor legacy can see the durable issue floor; stop old writers and reconcile every authority before retrying"
-                );
-                self.write_sequence(u32::MAX)?;
-            }
-        } else if !sequence.is_blocked() && legacy_visible_floor != u32::MAX {
-            self.write_sequence(u32::MAX)?;
-        }
-
-        // This terminal sequence is the recovery tag for any following partial
-        // sentinel/marker write as well as an old-legacy stop.
-        self.write_sequence(u32::MAX)?;
+    fn finish_exhausted_migration(&self, legacy_states: &[(&PathBuf, LegacyState)]) -> Result<()> {
+        single_unfenced_legacy(legacy_states)?;
         for (path, _) in legacy_states {
             write_legacy_sentinel(path, u32::MAX)?;
         }
@@ -420,33 +310,12 @@ impl IssueNumberSequence {
     fn migrate_and_reserve(
         &self,
         floor: u32,
-        sequence: SequenceState,
-        legacy_visible_floor: u32,
         legacy_states: &[(&PathBuf, LegacyState)],
-        migration_blocked: &mut dyn FnMut(),
     ) -> Result<u32> {
         let number = floor
             .checked_add(1)
             .context("a non-exhausted issue floor must have a following number")?;
-        let unfenced = single_unfenced_legacy(legacy_states)?;
-
-        if sequence.is_blocked() {
-            if let Some((path, _)) = unfenced {
-                write_legacy_sentinel(path, floor)?;
-            }
-        } else if let Some((path, state)) = unfenced {
-            if legacy_visible_floor == floor {
-                write_legacy_sentinel(path, floor)?;
-            } else {
-                ensure!(
-                    state.floor() == floor,
-                    "neither live legacy v2 nor legacy can see the durable issue floor; stop old writers and reconcile every authority before retrying"
-                );
-            }
-        }
-
-        self.write_migration_blocker(floor)?;
-        migration_blocked();
+        single_unfenced_legacy(legacy_states)?;
         let mut fence_paths: Vec<_> = legacy_states.iter().collect();
         fence_paths.sort_by_key(|(path, state)| {
             let priority = match state {
@@ -487,23 +356,6 @@ impl IssueNumberSequence {
             &SequenceFile {
                 version: SEQUENCE_VERSION,
                 last_reserved: number,
-                migration_floor: None,
-            },
-        )
-    }
-
-    fn write_migration_blocker(&self, floor: u32) -> Result<()> {
-        ensure!(
-            floor < u32::MAX,
-            "cannot block issue sequence migration after the u32 range is exhausted"
-        );
-        json_file::write_atomic(
-            &self.dir,
-            &self.sequence_path(),
-            &SequenceFile {
-                version: SEQUENCE_VERSION,
-                last_reserved: u32::MAX,
-                migration_floor: Some(floor),
             },
         )
     }
@@ -511,10 +363,10 @@ impl IssueNumberSequence {
     /// Missing means an uninitialized/migration state. Existing malformed or
     /// unreadable data is never guessed around because it may be the high-water
     /// mark that prevents a duplicate allocation.
-    fn read_sequence(&self) -> Result<SequenceState> {
+    fn read_sequence(&self) -> Result<u32> {
         let path = self.sequence_path();
         let Some(text) = read_optional_text(&path, "issue sequence")? else {
-            return Ok(SequenceState::Normal(0));
+            return Ok(0);
         };
         let sequence: SequenceFile =
             serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
@@ -524,20 +376,7 @@ impl IssueNumberSequence {
             sequence.version,
             path.display()
         );
-        match (sequence.last_reserved, sequence.migration_floor) {
-            (u32::MAX, Some(floor)) if floor < u32::MAX => {
-                Ok(SequenceState::MigrationBlocked(floor))
-            }
-            (u32::MAX, Some(_)) => bail!(
-                "issue sequence has an invalid migration floor: {}",
-                path.display()
-            ),
-            (last_reserved, None) => Ok(SequenceState::Normal(last_reserved)),
-            (_, Some(_)) => bail!(
-                "issue sequence has a migration floor without the u32::MAX blocker: {}",
-                path.display()
-            ),
-        }
+        Ok(sequence.last_reserved)
     }
 
     fn read_legacy_v2_sequence(path: &Path) -> Result<LegacyState> {
@@ -1296,9 +1135,9 @@ fn git_repository(start: &Path) -> Result<Option<GitRepository>> {
     let root_error = format!("failed to canonicalize Git worktree root {worktree_root_display}");
     let worktree_root = fs::canonicalize(&worktree_root).context(root_error)?;
 
-    // Match the production legacy resolver instead of accepting a merely existing
-    // `.git` directory or gitfile target. Environment overrides are removed so
-    // validation is anchored to the ancestor boundary inspected above.
+    // Validate the nearest repository boundary instead of accepting a merely
+    // existing `.git` directory or gitfile target. Environment overrides are
+    // removed so validation is anchored to the ancestor inspected above.
     let mut command = confined_git_command(&worktree_root);
     command.args(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
     let validation_error = format!("failed to validate Git repository {worktree_root_display}");
@@ -1356,8 +1195,6 @@ mod tests {
     const OLD_SEQUENCE_ENV: &str = "USAGI_TEST_OLD_V2_SEQUENCE";
     const OLD_READY_ENV: &str = "USAGI_TEST_OLD_V2_READY";
     const OLD_RELEASE_ENV: &str = "USAGI_TEST_OLD_V2_RELEASE";
-    const OLD_V1_ROOT_ENV: &str = "USAGI_TEST_OLD_V1_ROOT";
-    const OLD_V1_RESULT_ENV: &str = "USAGI_TEST_OLD_V1_RESULT";
     const OLD_V2_EMULATOR_RESULT_ENV: &str = "USAGI_TEST_OLD_V2_EMULATOR_RESULT";
     const OLD_V2_EMULATOR_RESOLVED_ENV: &str = "USAGI_TEST_OLD_V2_EMULATOR_RESOLVED";
     const OLD_V2_EMULATOR_READY_ENV: &str = "USAGI_TEST_OLD_V2_EMULATOR_READY";
@@ -1673,76 +1510,9 @@ mod tests {
             &SequenceFile {
                 version: SEQUENCE_VERSION,
                 last_reserved,
-                migration_floor: None,
             },
         )
         .unwrap();
-    }
-
-    fn seed_migration_blocker(authority: &IssueNumberSequence, floor: u32) {
-        json_file::write_atomic(
-            authority.dir(),
-            &authority.sequence_path(),
-            &SequenceFile {
-                version: SEQUENCE_VERSION,
-                last_reserved: u32::MAX,
-                migration_floor: Some(floor),
-            },
-        )
-        .unwrap();
-    }
-
-    fn legacy_reserve(authority: &IssueNumberSequence) -> Result<u32> {
-        #[derive(Deserialize, Serialize)]
-        struct V1Sequence {
-            last_reserved: u32,
-        }
-
-        let _lock = StoreLock::acquire(authority.dir())?;
-        let sequence = match fs::read_to_string(authority.sequence_path()) {
-            Ok(text) => serde_json::from_str::<V1Sequence>(&text)
-                .ok()
-                .map_or(0, |sequence| sequence.last_reserved),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(error.into()),
-        };
-        let reservations = authority.reservations_dir();
-        let mut journal = 0;
-        match fs::read_dir(&reservations) {
-            Ok(entries) => {
-                for entry in entries {
-                    let path = entry?.path();
-                    let Some(number) = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .and_then(|name| name.strip_suffix(RESERVATION_SUFFIX))
-                        .and_then(|number| number.parse::<u32>().ok())
-                    else {
-                        continue;
-                    };
-                    journal = journal.max(number);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let number = sequence
-            .max(journal)
-            .checked_add(1)
-            .context("issue number space is exhausted")?;
-        fs::create_dir_all(&reservations)?;
-        write_text_atomic(
-            &reservations.join(reservation_name(number)),
-            &format!("{number}\n"),
-        )?;
-        json_file::write_versioned(
-            authority.dir(),
-            &authority.sequence_path(),
-            &V1Sequence {
-                last_reserved: number,
-            },
-        )?;
-        Ok(number)
     }
 
     fn seed_reservation(authority: &IssueNumberSequence, number: u32) {
@@ -1755,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sequence_preseed_allocates_the_following_number() {
+    fn sequence_preseed_allocates_the_following_number() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
         seed_sequence(&authority, 515);
@@ -1766,51 +1536,10 @@ mod tests {
             .unwrap();
         assert_eq!(persisted.version, 1);
         assert_eq!(persisted.last_reserved, 516);
-        assert_eq!(persisted.migration_floor, None);
         assert_eq!(
             fs::read_to_string(authority.reservations_dir().join("0000000516.reserved")).unwrap(),
             "516\n"
         );
-    }
-
-    #[test]
-    fn legacy_emulator_propagates_journal_and_atomic_write_failures() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        fs::create_dir_all(authority.reservations_dir()).unwrap();
-        fs::write(authority.reservations_dir().join("README"), b"ignored\n").unwrap();
-        assert_eq!(legacy_reserve(&authority).unwrap(), 1);
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        fs::create_dir_all(authority.sequence_path()).unwrap();
-        assert!(legacy_reserve(&authority).is_err());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        seed_sequence(&authority, 1);
-        fs::write(authority.reservations_dir(), b"not a directory\n").unwrap();
-        assert!(legacy_reserve(&authority).is_err());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        let marker = authority.reservations_dir().join(reservation_name(1));
-        fail_next_atomic_write(&marker, AtomicWriteStage::Write);
-        assert!(legacy_reserve(&authority).is_err());
-        assert!(!marker.exists());
-        assert!(!authority.sequence_path().exists());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        fail_next_atomic_write(&authority.sequence_path(), AtomicWriteStage::Write);
-        assert!(legacy_reserve(&authority).is_err());
-        assert!(
-            authority
-                .reservations_dir()
-                .join(reservation_name(1))
-                .exists()
-        );
-        assert!(!authority.sequence_path().exists());
     }
 
     #[test]
@@ -1840,37 +1569,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_migration_remains_bidirectionally_compatible_with_legacy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = git_sequence(tmp.path());
-        let legacy = only_legacy(&authority);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, "515\n").unwrap();
-
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 516);
-        let fence = fs::read(&legacy).unwrap();
-        let migration = fs::read(authority.legacy_v2_migration_path()).unwrap();
-
-        assert_eq!(legacy_reserve(&authority).unwrap(), 517);
-        assert_eq!(fs::read(&legacy).unwrap(), fence);
-        assert_eq!(
-            fs::read(authority.legacy_v2_migration_path()).unwrap(),
-            migration
-        );
-        assert!(
-            authority
-                .reservations_dir()
-                .join("0000000517.reserved")
-                .is_file()
-        );
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 518);
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(518)
-        );
-    }
-
-    #[test]
     fn migration_marker_requires_the_matching_legacy_fence() {
         for contents in [
             "900\n".to_string(),
@@ -1888,308 +1586,6 @@ mod tests {
             assert!(authority.reserve(|| Ok(999)).is_err());
             assert!(!authority.reservations_dir().exists());
             assert!(!authority.sequence_path().exists());
-        }
-    }
-
-    #[test]
-    fn migration_fails_when_both_live_allocators_trail_a_fenced_floor() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        git(root, &["init", "-q"]);
-        let nested = root.join("crates/core");
-        let local_store = nested.join(".usagi/issues");
-        let authority = IssueNumberSequence::new(&nested, root, &local_store).unwrap();
-        let shared = root.join(".git/usagi-issue-sequence/next");
-        let local = legacy_sequence_for_store(&local_store);
-        for path in [&shared, &local] {
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-        }
-        fs::write(&shared, legacy_sentinel(700)).unwrap();
-        fs::write(&local, "100\n").unwrap();
-        seed_sequence(&authority, 500);
-        fs::write(authority.legacy_v2_migration_path(), "700\n").unwrap();
-        let sequence_before = fs::read(authority.sequence_path()).unwrap();
-        let shared_before = fs::read(&shared).unwrap();
-        let local_before = fs::read(&local).unwrap();
-
-        let error = authority.reserve(|| Ok(0)).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("neither live legacy v2 nor legacy")
-        );
-        assert_eq!(
-            fs::read(authority.sequence_path()).unwrap(),
-            sequence_before
-        );
-        assert_eq!(fs::read(&shared).unwrap(), shared_before);
-        assert_eq!(fs::read(&local).unwrap(), local_before);
-        assert!(!authority.reservations_dir().exists());
-
-        // If the legacy blocker was already durable, legacy is no longer live. The
-        // fixed allocator can safely fence the stale legacy path and recover.
-        seed_migration_blocker(&authority, 700);
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 701);
-        assert_eq!(fs::read_to_string(&shared).unwrap(), legacy_sentinel(701));
-        assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(701));
-    }
-
-    #[test]
-    fn fixed_only_source_floor_blocks_legacy_before_fencing_legacy() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let root = tmp.path();
-            git(root, &["init", "-q"]);
-            let nested = root.join("crates/core");
-            let local_store = nested.join(".usagi/issues");
-            let authority = IssueNumberSequence::new(&nested, root, &local_store).unwrap();
-            let shared = root.join(".git/usagi-issue-sequence/next");
-            let local = legacy_sequence_for_store(&local_store);
-            for path in [&shared, &local] {
-                fs::create_dir_all(path.parent().unwrap()).unwrap();
-            }
-            fs::write(&shared, legacy_sentinel(500)).unwrap();
-            fs::write(&local, "800\n").unwrap();
-            seed_sequence(&authority, 500);
-            fs::write(authority.legacy_v2_migration_path(), "500\n").unwrap();
-            let local_write_path = observed_legacy_path(&authority, &local);
-            fail_next_atomic_write(&local_write_path, stage);
-
-            let error = authority
-                .reserve_observing_floors(
-                    || {
-                        Ok(ExistingIssueFloors {
-                            all: 800,
-                            legacy_visible: 0,
-                        })
-                    },
-                    || {},
-                )
-                .unwrap_err();
-            assert!(
-                error.to_string().contains("injected atomic"),
-                "unexpected migration error: {error:#}"
-            );
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::MigrationBlocked(800)
-            );
-            assert_eq!(fs::read_to_string(&local).unwrap(), "800\n");
-
-            let result = root.join("blocked-old-legacy-result");
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_legacy_emulator_process_helper", "--nocapture"])
-                .env(OLD_V1_ROOT_ENV, root)
-                .env(OLD_V1_RESULT_ENV, &result)
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert!(!result.exists());
-
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &local)
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            assert_eq!(fs::read_to_string(&local).unwrap(), "801\n");
-
-            assert_eq!(
-                authority
-                    .reserve_observing_floors(
-                        || {
-                            Ok(ExistingIssueFloors {
-                                all: 800,
-                                legacy_visible: 0,
-                            })
-                        },
-                        || {},
-                    )
-                    .unwrap(),
-                802
-            );
-        }
-    }
-
-    #[test]
-    fn every_migration_crash_boundary_advances_without_reusing_a_floor() {
-        for boundary in 0..5 {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            if boundary >= 1 {
-                fs::write(&legacy, legacy_sentinel(701)).unwrap();
-            } else {
-                fs::write(&legacy, "700\n").unwrap();
-            }
-            seed_migration_blocker(&authority, 700);
-            if boundary >= 2 {
-                seed_reservation(&authority, 701);
-            }
-            if boundary >= 3 {
-                fs::write(authority.legacy_v2_migration_path(), "701\n").unwrap();
-            }
-            if boundary >= 4 {
-                seed_sequence(&authority, 701);
-            }
-
-            let expected = if boundary == 0 { 701 } else { 702 };
-            assert_eq!(
-                authority.reserve(|| Ok(0)).unwrap(),
-                expected,
-                "boundary {boundary}"
-            );
-            let expected_fence = if boundary == 4 { 701 } else { expected };
-            assert_eq!(
-                fs::read_to_string(&legacy).unwrap(),
-                legacy_sentinel(expected_fence)
-            );
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                format!("{expected_fence}\n")
-            );
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn sentinel_write_failure_keeps_legacy_blocked_and_folds_later_old_v2_progress() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, "700\n").unwrap();
-            fail_next_atomic_write(&legacy, stage);
-
-            assert!(authority.reserve(|| Ok(0)).is_err());
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), "700\n");
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::MigrationBlocked(700)
-            );
-            assert!(!authority.reservations_dir().exists());
-            assert!(!authority.legacy_v2_migration_path().exists());
-            let blocker_before = fs::read(authority.sequence_path()).unwrap();
-            let legacy_before = fs::read(&legacy).unwrap();
-            assert!(legacy_reserve(&authority).is_err());
-            assert_eq!(fs::read(authority.sequence_path()).unwrap(), blocker_before);
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-            assert!(!authority.reservations_dir().exists());
-
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &legacy)
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), "701\n");
-
-            assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 702);
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(702));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(702)
-            );
-        }
-    }
-
-    #[test]
-    fn migration_marker_write_failure_consumes_the_reservation_and_retry_advances() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, "700\n").unwrap();
-            fail_next_atomic_write(&authority.legacy_v2_migration_path(), stage);
-
-            assert!(authority.reserve(|| Ok(0)).is_err());
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(701));
-            assert!(
-                authority
-                    .reservations_dir()
-                    .join("0000000701.reserved")
-                    .is_file()
-            );
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::MigrationBlocked(700)
-            );
-            assert!(!authority.legacy_v2_migration_path().exists());
-
-            assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 702);
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(702));
-        }
-    }
-
-    #[test]
-    fn migration_reservation_failure_keeps_both_old_allocators_blocked() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, "515\n").unwrap();
-            let marker = authority.reservations_dir().join("0000000516.reserved");
-            fs::create_dir_all(authority.reservations_dir()).unwrap();
-            fail_next_atomic_write(&marker, stage);
-
-            assert!(authority.reserve(|| Ok(0)).is_err());
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::MigrationBlocked(515)
-            );
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(516));
-            assert!(!marker.exists());
-            assert!(legacy_reserve(&authority).is_err());
-
-            assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 517);
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(517));
-        }
-    }
-
-    #[test]
-    fn migration_sequence_failure_leaves_the_marker_and_blocker_as_journal() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, "515\n").unwrap();
-            let sequence_path = authority.sequence_path();
-
-            assert!(
-                authority
-                    .reserve_observing(|| Ok(0), || fail_next_atomic_write(&sequence_path, stage),)
-                    .is_err()
-            );
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::MigrationBlocked(515)
-            );
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(516));
-            assert!(
-                authority
-                    .reservations_dir()
-                    .join("0000000516.reserved")
-                    .is_file()
-            );
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                "516\n"
-            );
-            assert!(legacy_reserve(&authority).is_err());
-
-            assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 517);
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(517)
-            );
         }
     }
 
@@ -2510,81 +1906,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_sentinel_failure_stays_blocked_and_retry_advances() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        git(root, &["init", "-q"]);
-        let root_authority = sequence(root);
-        assert_eq!(root_authority.reserve(|| Ok(499)).unwrap(), 500);
-        let common = only_legacy(&root_authority);
-        assert_eq!(fs::read_to_string(&common).unwrap(), legacy_sentinel(500));
-
-        let nested = root.join("crates/core");
-        let local_store = nested.join(".usagi/issues");
-        let local = legacy_sequence_for_store(&local_store);
-        fs::create_dir_all(local.parent().unwrap()).unwrap();
-        fs::write(&local, "515\n").unwrap();
-        let authority = IssueNumberSequence::new(&nested, root, &local_store).unwrap();
-        fail_next_atomic_write(&common, AtomicWriteStage::Rename);
-
-        assert!(authority.reserve(|| Ok(0)).is_err());
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::MigrationBlocked(515)
-        );
-        assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(516));
-        assert_eq!(fs::read_to_string(&common).unwrap(), legacy_sentinel(500));
-
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 517);
-        assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(517));
-        assert_eq!(fs::read_to_string(&common).unwrap(), legacy_sentinel(517));
-        assert_eq!(
-            fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-            "517\n"
-        );
-    }
-
-    #[test]
-    fn blocked_remigration_recovers_an_old_marker_after_marker_update_failure() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let root = tmp.path();
-            git(root, &["init", "-q"]);
-            let root_authority = sequence(root);
-            assert_eq!(root_authority.reserve(|| Ok(499)).unwrap(), 500);
-            let common = only_legacy(&root_authority);
-
-            let nested = root.join("crates/core");
-            let local_store = nested.join(".usagi/issues");
-            let local = legacy_sequence_for_store(&local_store);
-            fs::create_dir_all(local.parent().unwrap()).unwrap();
-            fs::write(&local, "515\n").unwrap();
-            let authority = IssueNumberSequence::new(&nested, root, &local_store).unwrap();
-            fail_next_atomic_write(&authority.legacy_v2_migration_path(), stage);
-
-            assert!(authority.reserve(|| Ok(0)).is_err());
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::MigrationBlocked(515)
-            );
-            assert_eq!(fs::read_to_string(&common).unwrap(), legacy_sentinel(516));
-            assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(516));
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                "500\n"
-            );
-
-            assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 517);
-            assert_eq!(fs::read_to_string(&common).unwrap(), legacy_sentinel(517));
-            assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(517));
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                "517\n"
-            );
-        }
-    }
-
-    #[test]
     fn abandoned_marker_survives_a_missing_sequence_and_is_never_reused() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = sequence(tmp.path());
@@ -2611,72 +1932,10 @@ mod tests {
     }
 
     #[test]
-    fn blocker_write_failure_preserves_both_usable_authorities() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, "515\n").unwrap();
-            seed_sequence(&authority, 500);
-            let sequence_before = fs::read(authority.sequence_path()).unwrap();
-            let legacy_before = fs::read(&legacy).unwrap();
-            fail_next_atomic_write(&authority.sequence_path(), stage);
-
-            assert!(authority.reserve(|| Ok(0)).is_err());
-            assert_eq!(
-                fs::read(authority.sequence_path()).unwrap(),
-                sequence_before
-            );
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-            assert!(!authority.reservations_dir().exists());
-            assert!(!authority.legacy_v2_migration_path().exists());
-        }
-    }
-
-    #[test]
-    fn legacy_leading_migration_fences_old_v2_before_a_blocker_failure() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, "500\n").unwrap();
-            seed_sequence(&authority, 800);
-            let sequence_before = fs::read(authority.sequence_path()).unwrap();
-            fail_next_atomic_write(&authority.sequence_path(), stage);
-
-            assert!(authority.reserve(|| Ok(0)).is_err());
-            assert_eq!(
-                fs::read(authority.sequence_path()).unwrap(),
-                sequence_before
-            );
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(800));
-            assert!(!authority.reservations_dir().exists());
-            assert!(!authority.legacy_v2_migration_path().exists());
-
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &legacy)
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-
-            // The compatible legacy side is the only old allocator still able to
-            // progress after this first-boundary failure. A retry folds it.
-            assert_eq!(legacy_reserve(&authority).unwrap(), 801);
-            assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 802);
-            assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(802));
-        }
-    }
-
-    #[test]
     fn corrupt_authority_state_fails_without_a_new_reservation() {
         for sequence_contents in [
             "not json\n",
             r#"{"version":2,"last_reserved":8}"#,
-            r#"{"version":1,"last_reserved":4294967295,"migration_floor":4294967295}"#,
-            r#"{"version":1,"last_reserved":8,"migration_floor":7}"#,
             r#"{"version":1,"last_reserved":8,"unknown":7}"#,
         ] {
             let tmp = tempfile::tempdir().unwrap();
@@ -2910,66 +2169,6 @@ mod tests {
     }
 
     #[test]
-    fn number_space_exhaustion_is_reported_after_compatible_allocators_are_fenced() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        let error = authority.reserve(|| Ok(u32::MAX)).unwrap_err();
-        assert!(error.to_string().contains("u32 range is exhausted"));
-        assert!(!authority.reservations_dir().exists());
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(u32::MAX)
-        );
-        let legacy = only_legacy(&authority);
-        assert_eq!(
-            fs::read_to_string(legacy).unwrap(),
-            legacy_sentinel(u32::MAX)
-        );
-        assert!(!authority.legacy_v2_migration_path().exists());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        seed_sequence(&authority, u32::MAX - 1);
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), u32::MAX);
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(u32::MAX)
-        );
-        let sequence_before = fs::read(authority.sequence_path()).unwrap();
-        let marker_before = fs::read(
-            authority
-                .reservations_dir()
-                .join(reservation_name(u32::MAX)),
-        )
-        .unwrap();
-        assert!(authority.reserve(|| Ok(0)).is_err());
-        assert_eq!(
-            fs::read(authority.sequence_path()).unwrap(),
-            sequence_before
-        );
-        assert_eq!(
-            fs::read(
-                authority
-                    .reservations_dir()
-                    .join(reservation_name(u32::MAX))
-            )
-            .unwrap(),
-            marker_before
-        );
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        seed_sequence(&authority, u32::MAX - 1);
-        assert_eq!(legacy_reserve(&authority).unwrap(), u32::MAX);
-        assert!(authority.reserve(|| Ok(0)).is_err());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = sequence(tmp.path());
-        assert!(authority.write_migration_blocker(u32::MAX).is_err());
-        assert!(!authority.sequence_path().exists());
-    }
-
-    #[test]
     fn exhausted_git_sequence_durably_fences_an_old_v2_emulator_process() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = git_sequence(tmp.path());
@@ -2980,10 +2179,7 @@ mod tests {
 
         let error = authority.reserve(|| Ok(0)).unwrap_err();
         assert!(error.to_string().contains("u32 range is exhausted"));
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(u32::MAX)
-        );
+        assert_eq!(authority.read_sequence().unwrap(), u32::MAX);
         assert_eq!(
             fs::read_to_string(&legacy).unwrap(),
             legacy_sentinel(u32::MAX)
@@ -3015,264 +2211,6 @@ mod tests {
     }
 
     #[test]
-    fn source_only_exhaustion_requires_a_live_allocator_to_see_the_floor() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = git_sequence(tmp.path());
-        let legacy = only_legacy(&authority);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, b"600\n").unwrap();
-        seed_sequence(&authority, 500);
-        let sequence_before = fs::read(authority.sequence_path()).unwrap();
-        let legacy_before = fs::read(&legacy).unwrap();
-
-        let error = authority
-            .reserve_observing_floors(
-                || {
-                    Ok(ExistingIssueFloors {
-                        all: u32::MAX,
-                        legacy_visible: 0,
-                    })
-                },
-                thread::yield_now,
-            )
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("neither live legacy v2 nor legacy")
-        );
-        assert_eq!(
-            fs::read(authority.sequence_path()).unwrap(),
-            sequence_before
-        );
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-        assert!(!authority.legacy_v2_migration_path().exists());
-        assert!(!authority.reservations_dir().exists());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = git_sequence(tmp.path());
-        let legacy = only_legacy(&authority);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, legacy_sentinel(500)).unwrap();
-        seed_sequence(&authority, 500);
-        fs::write(authority.legacy_v2_migration_path(), b"500\n").unwrap();
-
-        let error = authority
-            .reserve_observing_floors(
-                || {
-                    Ok(ExistingIssueFloors {
-                        all: u32::MAX,
-                        legacy_visible: 0,
-                    })
-                },
-                thread::yield_now,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("u32 range is exhausted"));
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(u32::MAX)
-        );
-        assert!(matches!(
-            IssueNumberSequence::read_legacy_v2_sequence(&legacy).unwrap(),
-            LegacyState::Fenced(_)
-        ));
-        assert!(authority.read_legacy_v2_migration().unwrap().is_some());
-        assert!(!authority.reservations_dir().exists());
-
-        let legacy_before = fs::read(&legacy).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-            .env(OLD_SEQUENCE_ENV, &legacy)
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-    }
-
-    #[test]
-    fn exhausted_legacy_leading_sentinel_failures_recover_without_a_reservation() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, b"515\n").unwrap();
-            seed_sequence(&authority, u32::MAX);
-            let sequence_before = fs::read(authority.sequence_path()).unwrap();
-            let legacy_before = fs::read(&legacy).unwrap();
-            fail_next_atomic_write(&legacy, stage);
-
-            let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("injected atomic"));
-            assert_eq!(
-                fs::read(authority.sequence_path()).unwrap(),
-                sequence_before
-            );
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-            assert!(!authority.legacy_v2_migration_path().exists());
-            assert!(!authority.reservations_dir().exists());
-            assert!(legacy_reserve(&authority).is_err());
-            assert_eq!(
-                fs::read(authority.sequence_path()).unwrap(),
-                sequence_before
-            );
-
-            let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("u32 range is exhausted"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(&legacy).unwrap(),
-                legacy_sentinel(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                format!("{}\n", u32::MAX)
-            );
-            assert!(!authority.reservations_dir().exists());
-            assert!(legacy_reserve(&authority).is_err());
-
-            let legacy_before = fs::read(&legacy).unwrap();
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &legacy)
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-        }
-    }
-
-    #[test]
-    fn exhausted_legacy_leading_sequence_failures_recover_without_a_reservation() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, format!("{}\n", u32::MAX)).unwrap();
-            seed_sequence(&authority, 500);
-            let sequence_before = fs::read(authority.sequence_path()).unwrap();
-            let legacy_before = fs::read(&legacy).unwrap();
-            fail_next_atomic_write(&authority.sequence_path(), stage);
-
-            let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("injected atomic"));
-            assert_eq!(
-                fs::read(authority.sequence_path()).unwrap(),
-                sequence_before
-            );
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-            assert!(!authority.legacy_v2_migration_path().exists());
-            assert!(!authority.reservations_dir().exists());
-
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &legacy)
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-
-            let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("u32 range is exhausted"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(&legacy).unwrap(),
-                legacy_sentinel(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                format!("{}\n", u32::MAX)
-            );
-            assert!(!authority.reservations_dir().exists());
-            assert!(legacy_reserve(&authority).is_err());
-        }
-    }
-
-    #[test]
-    fn exhausted_marker_failures_recover_from_terminal_sequence_and_sentinel() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, legacy_sentinel(500)).unwrap();
-            seed_sequence(&authority, 500);
-            fs::write(authority.legacy_v2_migration_path(), b"500\n").unwrap();
-            fail_next_atomic_write(&authority.legacy_v2_migration_path(), stage);
-
-            let error = authority
-                .reserve_observing_floors(
-                    || {
-                        Ok(ExistingIssueFloors {
-                            all: u32::MAX,
-                            legacy_visible: 0,
-                        })
-                    },
-                    thread::yield_now,
-                )
-                .unwrap_err();
-            assert!(error.to_string().contains("injected atomic"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(&legacy).unwrap(),
-                legacy_sentinel(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                "500\n"
-            );
-            assert!(!authority.reservations_dir().exists());
-            assert!(legacy_reserve(&authority).is_err());
-
-            let legacy_before = fs::read(&legacy).unwrap();
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &legacy)
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-
-            let error = authority
-                .reserve_observing_floors(
-                    || {
-                        Ok(ExistingIssueFloors {
-                            all: u32::MAX,
-                            legacy_visible: 0,
-                        })
-                    },
-                    thread::yield_now,
-                )
-                .unwrap_err();
-            assert!(error.to_string().contains("u32 range is exhausted"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(&legacy).unwrap(),
-                legacy_sentinel(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                format!("{}\n", u32::MAX)
-            );
-            assert!(!authority.reservations_dir().exists());
-        }
-    }
-
-    #[test]
     fn exhausted_multi_legacy_sentinel_failures_converge_without_a_reservation() {
         for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
             let tmp = tempfile::tempdir().unwrap();
@@ -3301,10 +2239,7 @@ mod tests {
 
             let error = authority.reserve(|| Ok(0)).unwrap_err();
             assert!(error.to_string().contains("injected atomic"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
-            );
+            assert_eq!(authority.read_sequence().unwrap(), 500);
             assert_eq!(
                 fs::read_to_string(&shared).unwrap(),
                 legacy_sentinel(u32::MAX)
@@ -3324,83 +2259,14 @@ mod tests {
             );
 
             let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("u32 range is exhausted"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
+            assert!(
+                error.to_string().contains("u32 range is exhausted"),
+                "unexpected retry error: {error:#}"
             );
+            assert_eq!(authority.read_sequence().unwrap(), u32::MAX);
             for path in [&shared, &local] {
                 assert_eq!(fs::read_to_string(path).unwrap(), legacy_sentinel(u32::MAX));
             }
-            assert_eq!(
-                fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-                format!("{}\n", u32::MAX)
-            );
-            assert_eq!(fs::read(&reservation).unwrap(), reservation_before);
-            assert_eq!(
-                fs::read_dir(authority.reservations_dir()).unwrap().count(),
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn exhausted_final_sequence_failures_recover_from_the_blocked_journal_state() {
-        for stage in [AtomicWriteStage::Write, AtomicWriteStage::Rename] {
-            let tmp = tempfile::tempdir().unwrap();
-            let authority = git_sequence(tmp.path());
-            let legacy = only_legacy(&authority);
-            fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-            fs::write(&legacy, legacy_sentinel(u32::MAX)).unwrap();
-            seed_migration_blocker(&authority, u32::MAX - 1);
-            seed_reservation(&authority, u32::MAX);
-            fs::write(
-                authority.legacy_v2_migration_path(),
-                format!("{}\n", u32::MAX),
-            )
-            .unwrap();
-            let blocker_before = fs::read(authority.sequence_path()).unwrap();
-            let legacy_before = fs::read(&legacy).unwrap();
-            let marker_before = fs::read(authority.legacy_v2_migration_path()).unwrap();
-            let reservation = authority
-                .reservations_dir()
-                .join(reservation_name(u32::MAX));
-            let reservation_before = fs::read(&reservation).unwrap();
-            fail_next_atomic_write(&authority.sequence_path(), stage);
-
-            let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("injected atomic"));
-            assert_eq!(fs::read(authority.sequence_path()).unwrap(), blocker_before);
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-            assert_eq!(
-                fs::read(authority.legacy_v2_migration_path()).unwrap(),
-                marker_before
-            );
-            assert_eq!(fs::read(&reservation).unwrap(), reservation_before);
-            assert_eq!(
-                fs::read_dir(authority.reservations_dir()).unwrap().count(),
-                1
-            );
-            assert!(legacy_reserve(&authority).is_err());
-
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-                .env(OLD_SEQUENCE_ENV, &legacy)
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-
-            let error = authority.reserve(|| Ok(0)).unwrap_err();
-            assert!(error.to_string().contains("u32 range is exhausted"));
-            assert_eq!(
-                authority.read_sequence().unwrap(),
-                SequenceState::Normal(u32::MAX)
-            );
-            assert_eq!(
-                fs::read_to_string(&legacy).unwrap(),
-                legacy_sentinel(u32::MAX)
-            );
             assert_eq!(
                 fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
                 format!("{}\n", u32::MAX)
@@ -3520,7 +2386,7 @@ mod tests {
         let caller =
             IssueNumberSequence::new(&nested, &root, &nested.join(".usagi/issues")).unwrap();
         assert_eq!(caller.dir(), authority.dir());
-        assert_eq!(caller.read_sequence().unwrap(), SequenceState::Normal(516));
+        assert_eq!(caller.read_sequence().unwrap(), 516);
         assert!(
             caller
                 .reservations_dir()
@@ -4255,16 +3121,6 @@ mod tests {
     }
 
     #[test]
-    fn old_legacy_emulator_process_helper() {
-        let Some(root) = std::env::var_os(OLD_V1_ROOT_ENV).map(PathBuf::from) else {
-            return;
-        };
-        let result = PathBuf::from(std::env::var_os(OLD_V1_RESULT_ENV).unwrap());
-        let number = legacy_reserve(&sequence(&root)).unwrap();
-        fs::write(result, format!("{number}\n")).unwrap();
-    }
-
-    #[test]
     fn resolver_environment_process_helper() {
         let Some(root) = std::env::var_os(RESOLVER_ROOT_ENV).map(PathBuf::from) else {
             return;
@@ -4273,30 +3129,6 @@ mod tests {
         let authority =
             IssueNumberSequence::new(&root, &root, &root.join(".usagi/issues")).unwrap();
         fs::write(result, authority.dir().to_string_lossy().as_bytes()).unwrap();
-    }
-
-    #[test]
-    fn migrated_authority_is_usable_by_an_old_legacy_emulator_process_then_fixed_v2() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = git_sequence(tmp.path());
-        let legacy = only_legacy(&authority);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, "515\n").unwrap();
-
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 516);
-        let fence = fs::read(&legacy).unwrap();
-        let result = tmp.path().join("old-legacy-result");
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["old_legacy_emulator_process_helper", "--nocapture"])
-            .env(OLD_V1_ROOT_ENV, tmp.path())
-            .env(OLD_V1_RESULT_ENV, &result)
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "old legacy failed: {stderr}");
-        assert_eq!(fs::read_to_string(result).unwrap(), "517\n");
-        assert_eq!(fs::read(&legacy).unwrap(), fence);
-        assert_eq!(authority.reserve(|| Ok(0)).unwrap(), 518);
     }
 
     #[cfg(unix)]
@@ -4470,108 +3302,6 @@ mod tests {
     }
 
     #[test]
-    fn fixed_source_derived_fence_rejects_a_queued_nested_old_v2_emulator() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        git(root, &["init", "-q"]);
-        let nested = root.join("tools/nested");
-        let local_store = nested.join(STATE_DIR).join("issues");
-        fs::create_dir_all(&local_store).unwrap();
-        let source = local_store.join("515-materialized.md");
-        fs::write(
-            &source,
-            b"---\nnumber: 515\ntitle: Materialized nested source\nstatus: todo\npriority: medium\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-07-22T00:00:00+00:00\nupdated_at: 2026-07-22T00:00:00+00:00\n---\n\nCompatibility fixture.\n",
-        )
-        .unwrap();
-        let source_before = fs::read(&source).unwrap();
-        let local = legacy_sequence_for_store(&local_store);
-        assert!(!local.exists());
-
-        let authority = sequence(root);
-        seed_sequence(&authority, 515);
-        let common = authority.shared_legacy_sequence().unwrap().to_path_buf();
-        fs::create_dir_all(common.parent().unwrap()).unwrap();
-        fs::write(&common, legacy_sentinel(515)).unwrap();
-        fs::write(authority.legacy_v2_migration_path(), b"515\n").unwrap();
-
-        let root_for_thread = root.to_path_buf();
-        let (blocked_sender, blocked_receiver) = mpsc::channel();
-        let (release_sender, release_receiver) = mpsc::channel();
-        let reservation = thread::spawn(move || {
-            sequence(&root_for_thread).reserve_observing(
-                || Ok(515),
-                || {
-                    blocked_sender.send(()).unwrap();
-                    release_receiver.recv().unwrap();
-                },
-            )
-        });
-        blocked_receiver
-            .recv_timeout(Duration::from_secs(15))
-            .unwrap();
-        assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(515));
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::MigrationBlocked(515)
-        );
-
-        let result = root.join("queued-old-v2-emulator-result");
-        let resolved = root.join("queued-old-v2-emulator-resolved");
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "old_v2_compatibility_emulator_process_helper",
-                "--nocapture",
-            ])
-            .current_dir(&nested)
-            .env(OLD_V2_EMULATOR_RESULT_ENV, &result)
-            .env(OLD_V2_EMULATOR_RESOLVED_ENV, &resolved)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        // Force at least one completed poll before accepting the published file
-        // so this wait path remains covered even when the child publishes early.
-        let mut completed_one_poll = false;
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "queued old-v2 compatibility emulator did not resolve its local authority"
-            );
-            thread::sleep(Duration::from_millis(10));
-            if completed_one_poll && resolved.exists() {
-                break;
-            }
-            completed_one_poll = true;
-        }
-        assert!(child.try_wait().unwrap().is_none());
-        assert!(!result.exists());
-
-        release_sender.send(()).unwrap();
-        assert_eq!(reservation.join().unwrap().unwrap(), 516);
-        assert!(!child.wait().unwrap().success());
-        assert!(!result.exists());
-        let resolved_path: PathBuf = serde_json::from_slice(&fs::read(&resolved).unwrap()).unwrap();
-        assert_eq!(
-            fs::canonicalize(&resolved_path).unwrap(),
-            fs::canonicalize(&local).unwrap()
-        );
-        assert_eq!(fs::read(&source).unwrap(), source_before);
-        assert_eq!(fs::read_to_string(&local).unwrap(), legacy_sentinel(516));
-        assert_eq!(fs::read_to_string(&common).unwrap(), legacy_sentinel(516));
-        assert_eq!(
-            fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-            "516\n"
-        );
-        assert!(
-            authority
-                .reservations_dir()
-                .join(reservation_name(516))
-                .is_file()
-        );
-    }
-
-    #[test]
     fn migration_waits_for_and_then_fences_an_old_v2_emulator_process() {
         let tmp = tempfile::tempdir().unwrap();
         let authority = git_sequence(tmp.path());
@@ -4631,107 +3361,6 @@ mod tests {
             .unwrap();
         assert!(!output.status.success());
         assert_eq!(fs::read(&legacy).unwrap(), before);
-    }
-
-    #[test]
-    fn queued_old_allocator_process_fails_after_new_allocator_publishes_its_fence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = git_sequence(tmp.path());
-        let legacy = only_legacy(&authority);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, "515\n").unwrap();
-        let root = tmp.path().to_path_buf();
-        let (blocked_sender, blocked_receiver) = mpsc::channel();
-        let (release_sender, release_receiver) = mpsc::channel();
-        let reservation = thread::spawn(move || {
-            sequence(&root).reserve_observing(
-                || Ok(0),
-                || {
-                    blocked_sender.send(()).unwrap();
-                    release_receiver.recv().unwrap();
-                },
-            )
-        });
-        blocked_receiver
-            .recv_timeout(Duration::from_secs(15))
-            .unwrap();
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::MigrationBlocked(515)
-        );
-
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-            .env(OLD_SEQUENCE_ENV, &legacy)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        thread::sleep(Duration::from_millis(50));
-        assert!(child.try_wait().unwrap().is_none());
-
-        release_sender.send(()).unwrap();
-        assert_eq!(reservation.join().unwrap().unwrap(), 516);
-        assert!(!child.wait().unwrap().success());
-        assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(516));
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(516)
-        );
-        assert_eq!(
-            fs::read_to_string(authority.legacy_v2_migration_path()).unwrap(),
-            "516\n"
-        );
-    }
-
-    #[test]
-    fn legacy_leading_handshake_fences_a_queued_old_v2_emulator_process() {
-        let tmp = tempfile::tempdir().unwrap();
-        let authority = git_sequence(tmp.path());
-        let legacy = only_legacy(&authority);
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        fs::write(&legacy, "500\n").unwrap();
-        seed_sequence(&authority, 800);
-
-        let root = tmp.path().to_path_buf();
-        let (blocked_sender, blocked_receiver) = mpsc::channel();
-        let (release_sender, release_receiver) = mpsc::channel();
-        let reservation = thread::spawn(move || {
-            sequence(&root).reserve_observing(
-                || Ok(0),
-                || {
-                    blocked_sender.send(()).unwrap();
-                    release_receiver.recv().unwrap();
-                },
-            )
-        });
-        blocked_receiver
-            .recv_timeout(Duration::from_secs(15))
-            .unwrap();
-        assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(800));
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::MigrationBlocked(800)
-        );
-
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["old_v2_sequence_emulator_process_helper", "--nocapture"])
-            .env(OLD_SEQUENCE_ENV, &legacy)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        thread::sleep(Duration::from_millis(50));
-        assert!(child.try_wait().unwrap().is_none());
-
-        release_sender.send(()).unwrap();
-        assert_eq!(reservation.join().unwrap().unwrap(), 801);
-        assert!(!child.wait().unwrap().success());
-        assert_eq!(fs::read_to_string(&legacy).unwrap(), legacy_sentinel(801));
-        assert_eq!(
-            authority.read_sequence().unwrap(),
-            SequenceState::Normal(801)
-        );
     }
 
     #[test]

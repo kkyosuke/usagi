@@ -4,8 +4,8 @@ title: feat(tui): daemon-authoritative agent launch/attach を Closeup に接続
 status: done
 priority: high
 labels: [tui, agent, daemon, pty]
-dependson: [220, 232, 235, 250, 251, 252, 253, 254, 255, 256]
-related: [257, 246]
+dependson: [220, 232, 235, 251, 252, 253, 254, 255, 256]
+related: [246]
 parent: 227
 created_at: 2026-07-13T00:15:13.466360+00:00
 updated_at: 2026-07-13T01:14:52.094406+00:00

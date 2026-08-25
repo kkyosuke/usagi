@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, tui, ux, navigation]
 dependson: []
-related: [523, 542, 548, 551, 553, 554]
+related: [523, 548, 551, 553, 554]
 created_at: 2026-07-25T22:59:10.749919+00:00
 updated_at: 2026-07-26T07:32:58.442150+00:00
 ---
@@ -57,7 +57,7 @@ for frame in 0..splash::FRAMES {
 ## 既存 issue との境界
 
 - 本 issue は frame 予算の 3 件（[#551](551-fix-tui-home-frame-loop-daemon-rpc.md) / [#553](553-fix-ipc-tui-attach-input-lane-request-deadline-bootstrap-lock.md) / [#554](554-perf-tui-frame-io.md)）とは独立した **動線（UX）の欠落**である。ただし「workspace を抜けて Welcome に戻る」を実装すると、workspace controller が保持している daemon 接続・pump・restore worker の teardown 経路が必要になるため、それらの lane 設計を変える #551 / #553 と実装順序が干渉しうる（`related`）。
-- daemon 側の workspace 権威（1 daemon = 1 workspace root）は [#542](542-fix-daemon-fence-workspace-mode-home.md) / [#548](548-fix-ipc-handshake-client-workspace-root.md) が確定させている。**同一プロセス内で別 workspace を開くと、そのプロセスは別 workspace 権威の daemon へ接続する必要がある**。この制約は本 issue の設計論点であり、両 issue が正本である（`related`）。
+- daemon 側の workspace 権威（1 daemon = 1 workspace root）は [#548](548-fix-ipc-handshake-client-workspace-root.md) が確定させている。**同一プロセス内で別 workspace を開くと、そのプロセスは別 workspace 権威の daemon へ接続する必要がある**。
 
 ## やること
 
@@ -70,7 +70,7 @@ for frame in 0..splash::FRAMES {
 ## 設計上の判断が必要な点
 
 - **「戻る」の入力をどう与えるか**。現在 Home の Esc / q / Ctrl-Q は終了系に割り当たっている。`document/03-tui.md` の「画面と入力」と「Home と target」の既存割当を確認し、新しい binding を足すのか、既存の quit modal に「Welcome に戻る」を選択肢として足すのかを決める。**終了と離脱を同じキーに畳むと誤操作の意味が変わる**ため、ここは先に決める必要がある。
-- **daemon 権威との整合**。1 daemon = 1 workspace root（#542 / #548）なので、同一プロセスで workspace B を開くには B の daemon へ接続し直す必要がある。現在は entry 画面が `WorkspaceLoader::open` で refusal を notice にして留まる形になっている。プロセス内で切り替える場合に (a) 旧 workspace の daemon 接続を完全に閉じてから開くのか (b) 複数 daemon への接続を同時に持ちうるのか を決める。
+- **daemon 権威との整合**。1 daemon = 1 workspace root なので、同一プロセスで workspace B を開くには B の daemon へ接続し直す必要がある。現在は entry 画面が `WorkspaceLoader::open` で refusal を notice にして留まる形になっている。プロセス内で切り替える場合に (a) 旧 workspace の daemon 接続を完全に閉じてから開くのか (b) 複数 daemon への接続を同時に持ちうるのか を決める。
 - **live pane の扱い**。workspace を抜けるとき、その workspace で attach していた pane をどうするか。daemon 側の terminal は残る（それが detach の意味）が、`Detach` を明示的に送るのか、コネクションを閉じて daemon 側に解放させるのか（#523 の epoch 契約）を決める。
 - **splash のスキップ方針**。以下のいずれか、または組み合わせ。
   - 打鍵で中断: `wait` を「入力があれば早期に戻る」形に変える必要がある。`Terminal` port の契約変更になる。
@@ -84,7 +84,7 @@ for frame in 0..splash::FRAMES {
 - 戻ったあとに再度 workspace を開いても、前の workspace の terminal lane / pump / worker が残留しない。
 - 終了（プロセスを終わる）と離脱（Welcome へ戻る）が UI 上で区別でき、誤操作で意図しない側に落ちない。
 - splash が打鍵で中断できる、または 2 回目以降は表示されない（採用した方針に従う）。中断しても Welcome の初期状態は正しい。
-- 別 workspace を開いたときに daemon の workspace fence（#542 / #548）が正しく働き、refusal は notice として提示される（無言の fallback をしない）。
+- 別 workspace を開いたときに daemon の workspace fence が正しく働き、refusal は notice として提示される（無言の fallback をしない）。
 - カバレッジ 100% を維持する。`document/03-tui.md` の「画面と入力」「Home と target」「feedback と終了」を更新する（本 issue を実装する側が行う）。
 
 ## 必須回帰テスト・計測

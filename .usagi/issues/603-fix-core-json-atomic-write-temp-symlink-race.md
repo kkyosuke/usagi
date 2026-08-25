@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, core, persistence, security, filesystem]
 dependson: []
-related: [461, 511, 515]
+related: [515]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-07-31T22:23:12.740873+00:00
 ---

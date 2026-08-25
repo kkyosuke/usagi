@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, security, daemon, agent, claude, sandbox, session, filesystem]
 dependson: []
-related: [530, 537, 602, 629, 631, 632]
+related: [537, 602, 629, 631, 632]
 created_at: 2026-08-02T23:13:59.615604+00:00
 updated_at: 2026-08-03T00:09:45.239755+00:00
 ---

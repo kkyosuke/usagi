@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, tui, terminal, performance, rendering]
 dependson: []
-related: [389, 527, 535, 554, 587]
+related: [527, 535, 554, 587]
 created_at: 2026-08-02T23:42:45.638393+00:00
 updated_at: 2026-08-03T01:31:01.363451+00:00
 ---
@@ -67,7 +67,7 @@ tracked file を変更せず、`TerminalScreen` の公開 API を使う release 
 
 ## 既存 issue との境界
 
-- [#389](389-v2.md) は terminal 全体のリンク可視化・クリックを導入した。本 issue はその挙動を維持しつつ、リンク索引の invalidation 粒度を小さくする。
+- terminal 全体のリンク可視化・クリック挙動を維持しつつ、リンク索引の invalidation 粒度を小さくする。
 - [#527](527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md) は foreground `Resume` RPC を UI loop から分離した。本 issue は背景 completion を UI state に適用した後の同期 projection cost を扱う。
 - [#535](535-fix-tui-checkpoint-negotiation-screen-reconstruct-legacy-fail-closed.md) は attach/resync の semantic checkpoint reconstruct を扱う。checkpoint の完全 invalidation は必要だが、steady output の全 invalidation は別問題である。
 - [#554](554-perf-tui-frame-io.md) は material 不変 tick の render/draw を skip した。terminal output は material を変えるうえ、本件の cache rebuild は material 比較より前に実行される。

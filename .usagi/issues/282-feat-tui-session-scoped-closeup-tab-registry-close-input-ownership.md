@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, pane, terminal, closeup, design]
 dependson: []
-related: [265, 279]
+related: [279]
 parent: 227
 created_at: 2026-07-13T11:20:25.806247+00:00
 updated_at: 2026-07-13T11:31:34.203907+00:00

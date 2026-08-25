@@ -4,7 +4,7 @@ title: feat(tui): terminal と agent tab の pending pane reducer を実装す�
 status: done
 priority: high
 labels: [tui, pane]
-dependson: [223, 224, 226]
+dependson: [223, 224]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:18.347588+00:00

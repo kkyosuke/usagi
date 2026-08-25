@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, epic, tui, daemon, agent, recovery]
 dependson: [504]
-related: [209, 350, 388, 492, 503]
+related: [209, 350, 388, 503]
 created_at: 2026-07-21T21:20:29.599700+00:00
 updated_at: 2026-07-29T10:49:51.109315+00:00
 ---

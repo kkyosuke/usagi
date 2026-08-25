@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [tui, fix, ux, render]
 dependson: []
-related: [369, 370, 361]
+related: [369, 370]
 created_at: 2026-07-19T22:33:19.561183+00:00
 updated_at: 2026-07-19T22:48:17.192318+00:00
 ---

@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, terminal, ipc]
 dependson: []
-related: [265, 255, 264, 270, 235]
+related: [255, 264, 270, 235]
 created_at: 2026-07-14T22:35:02.676972+00:00
 updated_at: 2026-07-15T00:07:50.906672+00:00
 ---

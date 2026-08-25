@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, security, cli, update, release, supply-chain]
 dependson: []
-related: [461]
+related: []
 created_at: 2026-08-02T23:14:00.167300+00:00
 updated_at: 2026-08-03T01:26:58.709111+00:00
 ---

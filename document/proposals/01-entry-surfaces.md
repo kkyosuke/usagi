@@ -110,7 +110,7 @@ CLI コマンドと MCP tool は、実行を伴うかどうかで経路が 2 つ
 
 | 分類 | 対象 | 経路 | 理由 |
 |---|---|---|---|
-| store 系 | issue / memory の CRUD・検索 | cwd の `.usagi/{issues,memory}/` を core usecase で直接読み書き | git 追跡ファイルの編集であり実行を伴わない。session worktree 内ならブランチに乗って PR で `main` へ流れる（legacy と同じ）。daemon 不要 |
+| store 系 | issue / memory の CRUD・検索 | cwd の `.usagi/{issues,memory}/` を core usecase で直接読み書き | git 追跡ファイルの編集であり実行を伴わない。session worktree 内ならブランチに乗って PR で `main` へ流れる。daemon 不要 |
 | session 系 | `session_create` / `session_prompt` / `session_status` / `session_remove` / `session_delegate_*` と対応 CLI | daemon への IPC リクエスト。daemon が worktree 生成・`state.json` 記録・prompt 配送・破棄を実行する | 実行（PTY・autostart）と session 状態の権威が daemon にあるため。書き手の一本化で legacy のロック・watcher 競合を排す |
 | dispatch 系 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | daemon への IPC リクエスト。daemon が agent registry・run binding・durable inbox を操作する | worker は宛先を指定せず、保存済み binding を使うため取り違えない |
 

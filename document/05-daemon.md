@@ -1542,7 +1542,7 @@ count は `BackgroundWorker` が一元管理する。
 backpressure した byte 数も process-local counter として返す。counter と log は byte 数だけを扱い、
 terminal output、argv、environment、secret を含めない。
 
-TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の足元の右へ表示する。
+TUI は最新 snapshot を workspace の左ペイン下部にある usagi mascot の足元の右へ表示する。
 この観測値は操作対象ではないため、狭い terminal では session 一覧と footer を優先して mascot ごと省略される。
 
 ### agent concurrency projection
