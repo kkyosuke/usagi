@@ -45,6 +45,7 @@ jobs:
             --no-progress
             '*.md'
             'document/**/*.md'
+            '.agents/**/*.md'
             '.github/**/*.md'
           fail: true
         env:
