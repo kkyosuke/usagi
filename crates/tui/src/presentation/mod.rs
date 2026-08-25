@@ -7501,7 +7501,7 @@ mod tests {
     }
 
     #[test]
-    fn closeup_live_pr_action_opens_the_active_sessions_modal() {
+    fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_modal() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let target = Target::Session(session);
@@ -7527,7 +7527,7 @@ mod tests {
             crate::usecase::application::controller::update(&mut state, event),
             vec![Effect::LoadPullRequests { target }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
         assert_eq!(state.pr_overlay().unwrap().target(), target);
     }
 

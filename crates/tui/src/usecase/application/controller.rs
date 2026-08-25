@@ -3287,6 +3287,31 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     .min(overlay.prs.len().saturating_sub(1));
                 overlay.error = None;
             }
+            // An explicit `p` request is kept as a hidden pending overlay until
+            // its snapshot arrives. Only a non-empty projection may become a
+            // modal; an empty result closes an already-visible stale modal too.
+            if state
+                .pr_overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == *target)
+            {
+                if state
+                    .pr_overlay
+                    .as_ref()
+                    .is_some_and(|overlay| overlay.prs.is_empty())
+                {
+                    state.pr_overlay = None;
+                    if state.overlay == Some(Overlay::Prs) {
+                        state.overlay = None;
+                    }
+                } else if state.overlay.is_none() && !state.director_drawer_open {
+                    state.overlay = Some(Overlay::Prs);
+                } else if state.overlay != Some(Overlay::Prs) {
+                    // Do not let a delayed explicit request steal a newer
+                    // foreground interaction.
+                    state.pr_overlay = None;
+                }
+            }
             // A freshly discovered PR is the completion of work the user is
             // waiting for, so surface it immediately. Metadata-only refreshes,
             // duplicate snapshots, and deliberate dismissals stay quiet. An
@@ -3327,12 +3352,19 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             }
         }
         BackendEvent::PullRequestsError { target, error } => {
-            if let Some(overlay) = state
+            let matching_request = state
                 .pr_overlay
-                .as_mut()
-                .filter(|overlay| overlay.target == *target)
-            {
-                overlay.error = Some(error.clone());
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == *target);
+            if matching_request {
+                if state.overlay.is_none() && !state.director_drawer_open {
+                    state.overlay = Some(Overlay::Prs);
+                } else if state.overlay != Some(Overlay::Prs) {
+                    state.pr_overlay = None;
+                }
+                if let Some(overlay) = state.pr_overlay.as_mut() {
+                    overlay.error = Some(error.clone());
+                }
             }
         }
         BackendEvent::PreviewLoaded { target, lines } => {
@@ -4277,13 +4309,15 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
-    state.overlay = Some(Overlay::Prs);
     let mut overlay = PrOverlay::loading(target);
     if let Target::Session(session) = target
         && let Some(prs) = state.session_prs(session)
     {
         overlay.prs = filtered_prs(prs, PrFilter::All);
     }
+    // Keep the request state so a newly returned PR can still open immediately,
+    // but do not render an empty loading/empty-state modal.
+    state.overlay = (!overlay.prs.is_empty()).then_some(Overlay::Prs);
     state.pr_overlay = Some(overlay);
     state.preview_overlay = None;
     vec![Effect::LoadPullRequests { target }]
@@ -9232,12 +9266,12 @@ mod tests {
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
 
-        // `p` opens the PR overlay for the active target and requests its list.
+        // `p` requests the active target's list without showing an empty modal.
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('p'))),
             vec![Effect::LoadPullRequests { target }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
         assert!(state.pr_overlay().unwrap().prs().is_empty());
 
         // A list for another target is ignored; the matching one fills the overlay.
@@ -9259,6 +9293,7 @@ mod tests {
                 prs: prs.clone(),
             }),
         );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
         assert_eq!(state.pr_overlay().unwrap().selected(), 0);
         assert_eq!(state.session_prs(session), Some(prs.as_slice()));
@@ -9335,15 +9370,14 @@ mod tests {
     }
 
     #[test]
-    fn pr_overlay_enter_is_inert_while_empty_and_errors_stay_visible() {
+    fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-        // Enter with no entries emits nothing and keeps the overlay open.
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
-        // A safe fetch error surfaces on the open overlay.
+        assert_eq!(state.overlay(), None);
+        // A fetch error is not an authoritative empty snapshot, so its safe
+        // diagnostic remains visible in the PR modal.
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsError {
@@ -9351,6 +9385,7 @@ mod tests {
                 error: safe_error("gh unavailable"),
             }),
         );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(
             state
                 .pr_overlay()
@@ -9359,6 +9394,89 @@ mod tests {
                 .map(|error| error.message.as_str()),
             Some("gh unavailable")
         );
+
+        // An authoritative empty result discards the pending modal state.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+
+        // Reopening from the known-empty cache also stays hidden, and the
+        // duplicate revision returned by an explicit refresh clears its pending
+        // request instead of leaving it to misclassify a future discovery.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_some());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+    }
+
+    #[test]
+    fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // A foreground interaction opened after `p` wins over a delayed error.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pr_overlay().is_none());
+
+        // The same foreground interaction also wins over a delayed successful
+        // response, while the authoritative PR cache still advances.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let pr = pr_link(41);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pr_overlay().is_none());
+        assert_eq!(state.session_prs(session), Some(std::slice::from_ref(&pr)));
+
+        // A cached PR opens immediately. If a newer authoritative snapshot no
+        // longer contains any visible PR, the stale modal closes.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
     }
 
     #[test]
@@ -9799,7 +9917,8 @@ mod tests {
         // And the reverse: opening PRs discards the preview state.
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_some());
         assert!(state.preview_overlay().is_none());
     }
 
