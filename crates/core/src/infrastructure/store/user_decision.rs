@@ -219,6 +219,9 @@ impl UserDecisionStore {
         answer: UserDecisionAnswer,
         now: DateTime<Utc>,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
+        if let Err(error) = answer.validate_resource_policy() {
+            return Ok(Err(error));
+        }
         self.mutate(|state| {
             let Some(item) = state
                 .decisions
@@ -268,7 +271,19 @@ impl UserDecisionStore {
             && decision.expires_at.is_some_and(|deadline| deadline <= now)
     }
     fn load(&self) -> Result<State> {
-        Ok(json_file::read(&self.path())?.unwrap_or_default())
+        let state: State = json_file::read(&self.path())?.unwrap_or_default();
+        if state
+            .decisions
+            .iter()
+            .any(|decision| decision.validate_resource_policy().is_err())
+            || state
+                .events
+                .iter()
+                .any(|event| event.answer.validate_resource_policy().is_err())
+        {
+            anyhow::bail!("user decision document violates the resource policy");
+        }
+        Ok(state)
     }
     fn mutate<T>(&self, f: impl FnOnce(&mut State) -> T) -> Result<T> {
         let _lock = StoreLock::acquire(&self.dir)?;
@@ -331,7 +346,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         id::{AgentId, OperationId, SessionId},
-        user_decision::{UserDecisionOption, UserDecisionOwner},
+        user_decision::{UserDecisionOption, UserDecisionOwner, UserDecisionPolicy},
     };
     fn item() -> UserDecision {
         UserDecision {
@@ -619,6 +634,40 @@ mod tests {
             Err(UserDecisionError::InvalidRequest)
         );
         assert!(!store.path().exists());
+    }
+
+    #[test]
+    fn oversized_answer_is_effect_free_and_oversized_state_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut decision = item();
+        decision.allow_freeform = true;
+        decision.idempotency_key = None;
+        let workspace = decision.owner.workspace_id;
+        let id = decision.decision_id;
+        store.create(decision).unwrap().unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+
+        assert_eq!(
+            store
+                .resolve(
+                    workspace,
+                    id,
+                    UserDecisionAnswer::Freeform {
+                        text: "a".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES + 1),
+                    },
+                    Utc::now(),
+                )
+                .unwrap(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert!(store.events().unwrap().is_empty());
+
+        let mut state = store.load().unwrap();
+        state.decisions[0].title = "t".repeat(UserDecisionPolicy::TITLE_MAX_BYTES + 1);
+        std::fs::write(store.path(), serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(store.get(workspace, id).is_err());
     }
 
     #[test]

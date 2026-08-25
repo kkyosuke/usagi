@@ -20,6 +20,23 @@ pub const USER_DECISION_FREEFORM_MAX_BYTES: usize = 16 * 1024;
 pub const USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 pub const USER_DECISION_MAX_LIFETIME_HOURS: i64 = 7 * 24;
 
+/// Shared resource ceilings for caller-controlled decision data.
+///
+/// MCP schemas publish these same values, while the domain remains authoritative
+/// and measures UTF-8 bytes rather than Unicode scalar values.
+pub struct UserDecisionPolicy;
+
+impl UserDecisionPolicy {
+    pub const TITLE_MAX_BYTES: usize = USER_DECISION_TITLE_MAX_BYTES;
+    pub const PROMPT_MAX_BYTES: usize = USER_DECISION_PROMPT_MAX_BYTES;
+    pub const OPTION_COUNT_MAX: usize = USER_DECISION_OPTION_MAX_COUNT;
+    pub const OPTION_ID_MAX_BYTES: usize = USER_DECISION_OPTION_ID_MAX_BYTES;
+    pub const OPTION_LABEL_MAX_BYTES: usize = USER_DECISION_OPTION_LABEL_MAX_BYTES;
+    pub const OPTION_DESCRIPTION_MAX_BYTES: usize = USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES;
+    pub const IDEMPOTENCY_KEY_MAX_BYTES: usize = USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES;
+    pub const FREEFORM_ANSWER_MAX_BYTES: usize = USER_DECISION_FREEFORM_MAX_BYTES;
+}
+
 /// Immutable owner provenance captured from the authenticated execution context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionOwner {
@@ -132,12 +149,22 @@ impl UserDecision {
         Ok(())
     }
 
+    /// Revalidates every caller-controlled field loaded from durable storage.
+    pub fn validate_resource_policy(&self) -> Result<(), UserDecisionError> {
+        self.validate_request()?;
+        if let Some(answer) = &self.answer {
+            answer.validate_resource_policy()?;
+        }
+        Ok(())
+    }
+
     /// Validates an answer without changing durable state.
     pub fn validate_answer(
         &self,
         answer: &UserDecisionAnswer,
         now: DateTime<Utc>,
     ) -> Result<(), UserDecisionError> {
+        answer.validate_resource_policy()?;
         if self.status != UserDecisionStatus::Pending {
             return Err(UserDecisionError::Terminal);
         }
@@ -161,6 +188,22 @@ impl UserDecision {
             }
             UserDecisionAnswer::Freeform { .. } => Err(UserDecisionError::FreeformNotAllowed),
         }
+    }
+}
+
+impl UserDecisionAnswer {
+    /// Enforces the resource half of answer validation without mutating state.
+    pub fn validate_resource_policy(&self) -> Result<(), UserDecisionError> {
+        let bounded_nonempty = |value: &str, max: usize| {
+            !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
+        };
+        let valid = match self {
+            Self::Option { option_id } => {
+                bounded_nonempty(option_id, USER_DECISION_OPTION_ID_MAX_BYTES)
+            }
+            Self::Freeform { text } => bounded_nonempty(text, USER_DECISION_FREEFORM_MAX_BYTES),
+        };
+        valid.then_some(()).ok_or(UserDecisionError::InvalidRequest)
     }
 }
 
@@ -276,6 +319,25 @@ mod tests {
         item.options[0].description = Some("unsafe\0description".into());
         assert_eq!(
             item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn resource_policy_measures_utf8_bytes_for_requests_and_answers() {
+        let mut item = decision();
+        item.title = "界".repeat(UserDecisionPolicy::TITLE_MAX_BYTES / 3 + 1);
+        assert!(item.title.chars().count() < UserDecisionPolicy::TITLE_MAX_BYTES);
+        assert_eq!(
+            item.validate_resource_policy(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+
+        let answer = UserDecisionAnswer::Freeform {
+            text: "界".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES / 3 + 1),
+        };
+        assert_eq!(
+            answer.validate_resource_policy(),
             Err(UserDecisionError::InvalidRequest)
         );
     }

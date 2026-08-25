@@ -187,6 +187,9 @@ list、または同じ idempotency key の request で同じ decision を観測�
 decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
 2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
 NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
+MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開し、domain/store も UTF-8 byte 数で再検証する。
+上限超過は decision、outbox、waiter を作らず `InvalidArgument` になり、既存の durable document に違反があれば
+再起動後も巨大な値を再公開せず fail closed にする。
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。

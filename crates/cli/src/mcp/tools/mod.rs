@@ -211,6 +211,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
 mod tests {
     use super::{McpToolFamilies, descriptor, registry, registry_with_families, validate_registry};
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use usagi_core::domain::user_decision::UserDecisionPolicy;
     use usagi_core::usecase::client::SessionAction;
 
     struct FixtureTool(&'static str);
@@ -321,6 +322,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn user_decision_schemas_publish_and_enforce_the_domain_policy_ceilings() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["title"]["maxLength"],
+            UserDecisionPolicy::TITLE_MAX_BYTES
+        );
+        assert_eq!(
+            properties["title"]["x-maxUtf8Bytes"],
+            UserDecisionPolicy::TITLE_MAX_BYTES
+        );
+        assert_eq!(
+            properties["prompt"]["maxLength"],
+            UserDecisionPolicy::PROMPT_MAX_BYTES
+        );
+        assert_eq!(
+            properties["options"]["maxItems"],
+            UserDecisionPolicy::OPTION_COUNT_MAX
+        );
+        let option = &properties["options"]["items"]["properties"];
+        assert_eq!(
+            option["id"]["maxLength"],
+            UserDecisionPolicy::OPTION_ID_MAX_BYTES
+        );
+        assert_eq!(
+            option["label"]["maxLength"],
+            UserDecisionPolicy::OPTION_LABEL_MAX_BYTES
+        );
+        assert_eq!(
+            option["description"]["maxLength"],
+            UserDecisionPolicy::OPTION_DESCRIPTION_MAX_BYTES
+        );
+        assert_eq!(
+            properties["idempotency_key"]["maxLength"],
+            UserDecisionPolicy::IDEMPOTENCY_KEY_MAX_BYTES
+        );
+
+        let overlong = serde_json::json!({
+            "title": "t".repeat(UserDecisionPolicy::TITLE_MAX_BYTES + 1),
+            "prompt": "prompt",
+            "options": [],
+        });
+        assert!(request.validate(&overlong, &schema).is_err());
+        let multibyte = serde_json::json!({
+            "title": "界".repeat(UserDecisionPolicy::TITLE_MAX_BYTES / 3 + 1),
+            "prompt": "prompt",
+            "options": [],
+        });
+        assert!(request.validate(&multibyte, &schema).is_err());
+
+        let resolve = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_resolve")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let overlong = serde_json::json!({
+            "decision_id": "00000000-0000-0000-0000-000000000000",
+            "answer": {
+                "kind": "freeform",
+                "text": "a".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES + 1),
+            },
+        });
+        assert!(resolve.validate(&overlong, &schema).is_err());
     }
 
     /// 系統ごとの tool 数を固定する（IF の増減に気づけるように）。
