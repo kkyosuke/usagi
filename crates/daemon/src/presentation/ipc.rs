@@ -201,7 +201,13 @@ pub fn dispatch(
             .filter(|kind| {
                 matches!(
                     *kind,
-                    "rollover" | "session" | "agent" | "resume_agent" | "dispatch"
+                    "rollover"
+                        | "session"
+                        | "agent"
+                        | "restart_agents"
+                        | "resume_agent"
+                        | "resume_agent_with_current_integration"
+                        | "dispatch"
                 )
             })
             .and_then(|_| body.get("operation_id"))

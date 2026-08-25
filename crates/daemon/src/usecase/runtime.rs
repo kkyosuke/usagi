@@ -1093,6 +1093,54 @@ impl RuntimeCoordinator {
         Ok(closed)
     }
 
+    /// Stops the exact selected Agents while retaining provider resume metadata.
+    /// Selection and the user-confirmation policy belong to the Agent usecase;
+    /// this coordinator only performs fenced PTY termination.
+    pub fn interrupt_agents(
+        &mut self,
+        runtime_ids: &BTreeSet<String>,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<usize, RuntimeError> {
+        let targets = self
+            .records
+            .iter()
+            .filter(|(key, _)| runtime_ids.contains(*key))
+            .map(|(key, record)| (key.clone(), record.clone()))
+            .collect::<Vec<_>>();
+
+        let mut interrupted = 0;
+        for (key, record) in targets {
+            if !matches!(record.state, RuntimeState::Reserved | RuntimeState::Running) {
+                continue;
+            }
+            if record.process.is_some() && spawner.terminate_reap(&record.runtime.terminal).is_err()
+            {
+                self.records
+                    .get_mut(&key)
+                    .expect("selected runtime exists")
+                    .state = RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning);
+                self.persist(store)?;
+                return Err(RuntimeError::ReconcileRequired(
+                    ReconcileState::OrphanRunning,
+                ));
+            }
+            self.generation
+                .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
+                .map_err(RuntimeError::Generation)?;
+            let retained = self.records.get_mut(&key).expect("selected runtime exists");
+            retained.state = RuntimeState::Exited;
+            retained.process = None;
+            if let Some(provider) = &mut retained.provider_resume {
+                provider.last_known_status = ProviderResumeStatus::Interrupted;
+                provider.last_known_phase = Some(ProviderResumePhase::Interrupted);
+            }
+            interrupted += 1;
+        }
+        self.persist(store)?;
+        Ok(interrupted)
+    }
+
     /// The aggregate retention authority this owner shares with the generic
     /// terminal owner.
     #[must_use]

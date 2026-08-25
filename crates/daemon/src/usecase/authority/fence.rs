@@ -88,8 +88,8 @@ impl OwnedRuntime {
 /// | `terminal` with `action` `inventory` / `completed_inventory` | [`RequestClass::Inventory`] | no |
 /// | `terminal` with `action` `input_outcome` | [`RequestClass::Read`] | yes |
 /// | `terminal`, every other action | [`RequestClass::TerminalIo`] | yes |
-/// | `agent` / `resume_agent` | [`RequestClass::Spawn`] | no |
-/// | `agent_inventory` | [`RequestClass::Inventory`] | no |
+/// | `agent` / `resume_agent` / `resume_agent_with_current_integration` | [`RequestClass::Spawn`] | no |
+/// | `agent_inventory` / `diagnose_agents` | [`RequestClass::Inventory`] | no |
 /// | `metrics` / `pr` | [`RequestClass::Read`] | no |
 /// | anything else | [`RequestClass::Control`] | no |
 ///
@@ -106,8 +106,12 @@ pub fn classify_request(body: &Value, owned: OwnedRuntime) -> (RequestClass, Res
         // Creating a daemon-owned runtime is the effect a control barrier exists
         // to have already stopped, so it is named apart from the rest of the
         // control plane even though both take the same lease.
-        Some("agent" | "resume_agent") => (RequestClass::Spawn, ResourceOwner::Unscoped),
-        Some("agent_inventory") => (RequestClass::Inventory, ResourceOwner::Unscoped),
+        Some("agent" | "resume_agent" | "resume_agent_with_current_integration") => {
+            (RequestClass::Spawn, ResourceOwner::Unscoped)
+        }
+        Some("agent_inventory" | "diagnose_agents") => {
+            (RequestClass::Inventory, ResourceOwner::Unscoped)
+        }
         Some("metrics" | "pr") => (RequestClass::Read, ResourceOwner::Unscoped),
         _ => (RequestClass::Control, ResourceOwner::Unscoped),
     }
