@@ -562,7 +562,7 @@ path / provider を指定できず、daemon は credential から exact live run
 body を持たない。
 
 phase は wire に載る前に hook 側で検証する。usagi が配線した lifecycle event（`SessionStart` /
-`UserPromptSubmit` / `PreToolUse` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
+`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
 `hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
@@ -621,6 +621,21 @@ CLI の `resume-exact`、TUI の exact resume port、MCP `session_resume` は同
 CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。session ID / name だけを指定する resume request は受け付けない。
 
 daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
+
+Doctor の integration repair は同じ exact resume 境界を狭く拡張する。`diagnose_agents` は invoking binary が持つ
+code-defined profile revision と、live runtime の launch snapshot revision を比較し、古い hook / MCP integration
+だけを provider ID・argv・設定本文なしで返す。診断には exact resume metadata の準備可否も含み、1件でも準備できていなければ
+`restart_agents` は停止前に全件拒否する。`restart_agents` は利用者へ表示した診断集合の exact runtime ref を再送し、その集合だけを
+停止する非 retry mutation である。診断後に追加された Agent は停止せず、選択済み ref が差し替わった場合は全件停止前に stale として
+拒否する。reported phase が `running` の runtime は `force` なしで全件 effect-before-zero の `busy` となる。generic terminal は対象外である。
+
+停止後、client は daemon build policy を適用して seamless rollover を完了し、返された exact target を
+`resume_agent_with_current_integration` へ渡す。この repair-only request は source の旧 adapter revision を fence として
+保持したまま、active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope /
+lineage を変えずに hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
+旧 daemon がこの診断 vocabulary を実装していない場合、live Agent が無ければ通常 rollover を行う。live Agent がある場合は
+一覧を返して停止を保留し、`--restart-agents --force` が同時に指定された場合だけ既存の cold restart を使う。この互換経路は
+generic terminal も停止し得るが、再起動後も今回停止した runtime ID に対応する exact target だけを resume する。
 
 ## dispatch request
 

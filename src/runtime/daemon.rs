@@ -4722,7 +4722,7 @@ fn start_ipc_accept_loop(
                                         Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process.2, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -7397,7 +7397,18 @@ fn reconcile_orphan_delegations(
 enum AgentDispatchRequest {
     Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
     Inventory(WorkspaceId),
+    Diagnose(
+        WorkspaceId,
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+    ),
+    Restart(
+        WorkspaceId,
+        Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
+        Vec<usagi_core::domain::id::AgentRuntimeRef>,
+        bool,
+    ),
     Resume(String, usagi_core::domain::agent::AgentResumeTarget),
+    RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
 }
 
 fn admit_agent_dispatch_request(
@@ -7419,7 +7430,14 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.prepare_resume_readiness(operation_id, target)
             }
-            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => {
+                owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
+            }
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
         })?;
     run_agent_readiness(agent, preflight.as_ref())?;
     agent
@@ -7432,8 +7450,71 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Resume(operation_id, target) => {
                 owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
             }
-            AgentDispatchRequest::Inventory(_) => unreachable!("inventory is read-only"),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
+                .resume_with_current_integration_after_readiness(
+                    operation_id,
+                    target,
+                    *revision,
+                    scope,
+                    preflight.as_ref(),
+                ),
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
         })
+}
+
+fn dispatch_agent_maintenance(
+    agent: &SharedAgentRuntime,
+    request: &AgentDispatchRequest,
+) -> Option<Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError>> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    match request {
+        AgentDispatchRequest::Inventory(workspace) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .map(|agent| {
+                    serde_json::to_value(agent.inventory(*workspace))
+                        .expect("safe Agent inventory is serializable")
+                }),
+        ),
+        AgentDispatchRequest::Diagnose(workspace, expected) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.diagnose_integrations(*workspace, expected))
+                .map(|diagnosis| {
+                    serde_json::to_value(diagnosis).expect("safe Agent diagnosis is serializable")
+                }),
+        ),
+        AgentDispatchRequest::Restart(workspace, expected, runtimes, force) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|mut agent| {
+                    let (interrupted, diagnosis) =
+                        agent.interrupt_outdated_agents(*workspace, expected, runtimes, *force)?;
+                    Ok(serde_json::json!({
+                        "interrupted": interrupted,
+                        "diagnosis": diagnosis,
+                        "inventory": agent.inventory(*workspace)
+                    }))
+                }),
+        ),
+        AgentDispatchRequest::Launch(..)
+        | AgentDispatchRequest::Resume(..)
+        | AgentDispatchRequest::RepairResume(..) => None,
+    }
 }
 
 fn dispatch_agent(
@@ -7443,7 +7524,7 @@ fn dispatch_agent(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::infrastructure::ipc::ResponseOutcome;
     use usagi_core::usecase::client::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -7455,28 +7536,40 @@ fn dispatch_agent(
             DaemonRequest::AgentInventory { workspace } => {
                 Some(AgentDispatchRequest::Inventory(workspace))
             }
+            DaemonRequest::DiagnoseAgents {
+                workspace,
+                expected,
+            } => Some(AgentDispatchRequest::Diagnose(workspace, expected)),
+            DaemonRequest::RestartAgents {
+                workspace,
+                expected,
+                runtimes,
+                force,
+            } => Some(AgentDispatchRequest::Restart(
+                workspace, expected, runtimes, force,
+            )),
             DaemonRequest::ResumeAgent {
                 operation_id,
                 target,
             } => Some(AgentDispatchRequest::Resume(operation_id, target)),
+            DaemonRequest::ResumeAgentWithCurrentIntegration {
+                operation_id,
+                target,
+                expected_revision,
+            } => Some(AgentDispatchRequest::RepairResume(
+                operation_id,
+                target,
+                expected_revision,
+            )),
             _ => None,
         });
     let Some(request) = request else {
         return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
     };
     let scope = bound.scope_resolver();
-    if let AgentDispatchRequest::Inventory(workspace) = &request {
-        let result = agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"));
+    if let Some(result) = dispatch_agent_maintenance(agent, &request) {
         return match result {
-            Ok(agent) => envelope(
-                hello,
-                request_id,
-                ResponseOutcome::Ok,
-                serde_json::to_value(agent.inventory(*workspace))
-                    .expect("safe Agent inventory is serializable"),
-            ),
+            Ok(body) => envelope(hello, request_id, ResponseOutcome::Ok, body),
             Err(error) => envelope(
                 hello,
                 request_id,
@@ -11676,6 +11769,33 @@ fn existing_policy_client(
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
 }
 
+/// Connects to the currently published daemon without applying the build
+/// replacement policy. Doctor uses this narrow lane to ask an older compatible
+/// daemon to stop the Agent processes it still owns before rollover transfers
+/// control to the current binary.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+pub(crate) fn diagnostic_client(policy: ClientPolicy) -> Result<LaneClient, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    connect_deadline_client(
+        &data_dir,
+        policy,
+        current_build(),
+        client_workspace(),
+        SystemClock::new(),
+        policy.timeout_ms,
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))
+}
+
+/// Whether a daemon current locator is published. Doctor uses this only to
+/// distinguish a normal cold start from a failed connection to an existing
+/// owner; it is not process-liveness or signal authority.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=doctor_repair_plan_is_fail_closed
+pub(crate) fn has_published_daemon() -> bool {
+    paths::data_dir().is_ok_and(|data_dir| data_dir.join("daemon").join("current.json").is_file())
+}
+
 /// A workspace-bound daemon client for a background observation lane.
 ///
 /// It is [`policy_client`] without the bootstrap: same declared workspace, same
@@ -11746,7 +11866,7 @@ fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_rou
 /// generation. That is the evidence this turns into a re-read, which keeps the
 /// read off the per-request path without letting the snapshot outlive a
 /// generation change indefinitely.
-fn invalidate_routes() {
+pub(crate) fn invalidate_routes() {
     let Ok(data_dir) = paths::data_dir() else {
         return;
     };
@@ -12040,7 +12160,7 @@ fn recover_stale_client_endpoint_with(
     }
 }
 
-fn current_build() -> BuildIdentity {
+pub(crate) fn current_build() -> BuildIdentity {
     // The artifact identity is a compile-time constant baked in by `build.rs`
     // from this binary's source/tree, profile, and target. It is therefore
     // immutable for the process lifetime and never re-read from disk, so an
