@@ -3646,6 +3646,15 @@ fn recent_paths(recent: &Recent) -> Vec<PathBuf> {
     }
 }
 
+fn registry_contains_path(registry: &[Workspace], path: &Path) -> bool {
+    for workspace in registry {
+        if workspace.path == path {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 thread_local! {
     static SESSION_PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -7408,10 +7417,7 @@ pub fn run_screen_graph_with_backend(
             }
         }
         if let Some(snapshot) = created_snapshot {
-            if !registry
-                .iter()
-                .any(|workspace| workspace.path == snapshot.workspace.path)
-            {
+            if !registry_contains_path(&registry, &snapshot.workspace.path) {
                 registry.push(snapshot.workspace.clone());
             }
             welcome.record_opened(&snapshot.workspace);
@@ -7830,11 +7836,11 @@ mod tests {
         intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
         new_project_notice, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
-        prepare_workspace_deck, projection_build_counts, recent_paths, render_controller_frame,
-        render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_garden_input,
-        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
-        run_with_settings,
+        prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
+        render_controller_frame, render_home_material, render_home_snapshot,
+        reset_projection_build_counts, restore_open_panes, retarget_director_chords,
+        route_garden_input, route_workspace_input_before_reducer, run as run_from_start,
+        run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -24877,6 +24883,15 @@ mod tests {
     #[test]
     fn project_deck_composition_helpers_cover_safe_fallbacks() {
         let alpha = snapshot("alpha");
+        assert!(!registry_contains_path(&[], &alpha.workspace.path));
+        assert!(registry_contains_path(
+            std::slice::from_ref(&alpha.workspace),
+            &alpha.workspace.path,
+        ));
+        assert!(!registry_contains_path(
+            std::slice::from_ref(&alpha.workspace),
+            Path::new("/tmp/beta"),
+        ));
         assert!(!workspace_has_unsaved_surface(&WorkspaceRuntime::new(
             alpha.workspace_id,
             Vec::new(),
