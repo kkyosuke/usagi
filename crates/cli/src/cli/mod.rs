@@ -336,11 +336,6 @@ pub enum SessionCommand {
     Remove {
         name: String,
     },
-    /// Explicitly resume the retained provider conversation in a new daemon
-    /// Agent runtime. This command is never issued during startup/reconnect.
-    Resume {
-        name: String,
-    },
     /// Resume one exact target returned by `resume-inventory`. The target is a
     /// secret-free JSON object; provider-native IDs are never accepted.
     ResumeExact {
@@ -349,12 +344,6 @@ pub enum SessionCommand {
     /// List root and managed-session Agent resume targets for one workspace ID.
     ResumeInventory {
         workspace_id: String,
-    },
-    /// Validate legacy sessions without changing state unless `--apply` is set.
-    RecoverLegacy {
-        /// Persist the fully validated adoption plan.
-        #[arg(long)]
-        apply: bool,
     },
     Setup {
         name: String,
@@ -451,10 +440,6 @@ impl Run for Session {
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
-            SessionCommand::Resume { name } => (
-                SessionAction::ResumeAgent,
-                serde_json::json!({"name": name}),
-            ),
             SessionCommand::ResumeExact { target } => {
                 let target = serde_json::from_str(target).map_err(|_| {
                     io::Error::new(
@@ -479,10 +464,6 @@ impl Run for Session {
                     workspace,
                 }));
             }
-            SessionCommand::RecoverLegacy { apply } => (
-                SessionAction::RecoverLegacy,
-                serde_json::json!({"apply": apply}),
-            ),
             SessionCommand::Setup { name, command } => (
                 SessionAction::Setup,
                 serde_json::json!({"name": name, "command": command}),
@@ -754,14 +735,6 @@ mod tests {
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
                 usagi_core::usecase::client::SessionAction::Remove,
-            ),
-            (
-                ["usagi", "session", "resume", "a"].as_slice(),
-                usagi_core::usecase::client::SessionAction::ResumeAgent,
-            ),
-            (
-                ["usagi", "session", "recover-legacy", "--apply"].as_slice(),
-                usagi_core::usecase::client::SessionAction::RecoverLegacy,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),

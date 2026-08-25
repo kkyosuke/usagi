@@ -456,9 +456,8 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   TUI の attach 状態機械は socket 実装を参照せず、実 socket を束ねるのは合成ルートだけである。
 - managed session の lifecycle state は `usagi-core::domain::session_lifecycle` の pure reducer と
   `infrastructure::store::lifecycle::DaemonLifecycleStore` に分ける。後者を保持して reducer 結果を永続化するのは daemon の command handler
-  だけであり、TUI / CLI / MCP は IPC command を通じて要求する。legacy `state.json` は incarnation を持たないため、通常運用では
-  managed state として解釈しない。ただし shared lifecycle state の初期化時だけ、daemon が worktree と repository binding を検証した全 record を
-  stable ID 付き available session として一回だけ採用する。既存 shared state に対する adoption は daemon IPC の明示 recovery action だけが実行し、restart や UI refresh は実行しない。UI-only metadata は legacy store に残し、TUI が同名 record へ読み取り結合する。
+  だけであり、TUI / CLI / MCP は IPC command を通じて要求する。repository-local な `state.json` の session record は
+  managed state として解釈・採用せず、daemon lifecycle store だけを権威にする。notes 等の UI metadata は lifecycle とは独立して扱う。
 - supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
   `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と append-only event journal を保持し、
   lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の

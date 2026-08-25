@@ -28,18 +28,18 @@ create に失敗した session（`SessionLifecycle::Failed`）は durable state 
 | client 経路 | 現在の実装 | filter 撤去だけで直るか |
 |---|---|---|
 | MCP `session_list` | daemon の snapshot JSON をそのまま転送する（per-row 整形なし） | ○ Failed が即可視化される |
-| CLI `session` サブコマンド | **`list` サブコマンドが存在しない**（Create/Remove/Resume/RecoverLegacy/Setup/Prompt のみ） | 一覧自体が無いので別途新設が要る |
+| CLI `session` サブコマンド | **`list` サブコマンドが存在しない**（Create/Remove/ResumeExact/ResumeInventory/Setup/Prompt のみ） | 一覧自体が無いので別途新設が要る |
 | TUI sidebar | daemon snapshot ではなく **`SessionRecord`**（`crates/core/src/domain/session/`）に射影して描画。`SessionRecord` は `lifecycle` / capabilities を持たない | × lifecycle を運ぶ射影拡張が要る |
 
 加えて `LifecycleCapabilities`（`session_lifecycle.rs`）は serde を持たず wire に載らず、domain 外に呼び出し元が無い。client がアクションを capability で gate するには、`lifecycle` から client 側で capability を導出するか、capability を wire に載せるかの設計判断が要る。
 
 ## 対象責務
 
-1. **daemon: 一覧用 `snapshot()` を非 Available も投影する（中核修正）**。`sessions` から `Available` 限定フィルタを外し、durable な session record を（`lifecycle` / `failure` 付きで）client へ projection する。create / remove / replay / recover_legacy が返す list 表現もすべて同じ `snapshot()` を経由するため、一貫して可視化される。これで MCP `session_list` は追加変更なしで Failed を返す。
+1. **daemon: 一覧用 `snapshot()` を非 Available も投影する（中核修正）**。`sessions` から `Available` 限定フィルタを外し、durable な session record を（`lifecycle` / `failure` 付きで）client へ projection する。create / remove / replay が返す list 表現もすべて同じ `snapshot()` を経由するため、一貫して可視化される。これで MCP `session_list` は追加変更なしで Failed を返す。
 2. **`resolve_scope` は `Available` 限定を維持する**。attach / path 解決は使用可能な session だけを対象にするべきで、変更するのは一覧用 projection だけである。使えない session に attach させる退行を作らない。
 3. **TUI: sidebar が lifecycle と失敗理由を運んで描画する**。daemon snapshot → sidebar 射影（`SessionRecord` ベースの projection）に `lifecycle`（Failed の `failure.summary` を含む）を通し、Failed 行を状態付きで表示する。射影に lifecycle を載せる最小拡張で行い、未配線の別 lifecycle 経路（`SessionRow`）の全面採用には踏み込まない。
 4. **client: アクションを capability で gate する**。Failed 行は `can_use=false` なので attach / 使用を提示せず、`can_remove=true` なので remove を提示する。capability は `lifecycle` から client 側で導出する（wire surface を増やさない）方針を第一候補とし、既存の remove 経路（daemon の Remove operation）をそのまま Failed 行へ配線する。
-5. **recover は本 issue の非対象**。Failed の `can_recover` を満たす v2 recover 操作は現状存在しない（`RecoverLegacy` はレガシー state 採用専用で per-session recover ではない）。可視化 + remove で「気付けない・消せない」を解消するところまでを本 issue の範囲とする。
+5. **recover は本 issue の非対象**。Failed の `can_recover` を満たす recover 操作は現状存在しない。可視化 + remove で「気付けない・消せない」を解消するところまでを本 issue の範囲とする。
 
 ## 非対象
 

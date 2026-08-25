@@ -2062,25 +2062,28 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
     fn resume(
         &mut self,
-        _workspace: WorkspaceId,
+        workspace: WorkspaceId,
         session: usagi_core::domain::id::SessionId,
         operation_id: usagi_core::domain::id::OperationId,
     ) -> Result<AgentPaneAdmission, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(DaemonRequest::Session {
-                action: SessionAction::ResumeAgent,
-                operation_id: operation_id.to_string(),
-                payload: serde_json::json!({"session_id": session}),
-            })
-            .map_err(|_| "provider resume failed; inspect session status".to_owned())?
-        {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                decode_agent_admission(&body, "provider resume")
-            }
+        let inventory = self.resume_inventory(workspace)?;
+        let mut targets = inventory.resumable.into_iter().filter_map(|item| {
+            item.available
+                .then_some(item.target)
+                .flatten()
+                .filter(|target| target.session_id == Some(session))
+        });
+        let target = targets
+            .next()
+            .ok_or_else(|| "no exact Agent resume target is available".to_owned())?;
+        if targets.next().is_some() {
+            return Err("multiple exact Agent resume targets are available".to_owned());
         }
+        let resumed = self.resume_exact(target, operation_id)?;
+        Ok(AgentPaneAdmission {
+            terminal: resumed.terminal,
+            continuation: resumed.continuation,
+        })
     }
 
     fn resume_inventory(
