@@ -7130,8 +7130,8 @@ fn new_agent_selector(
 }
 
 /// Applies configured company-role authority before any delegated side effect.
-/// Catalogs without a `delegation` block keep version-1 compatibility; once a
-/// block is present the daemon, rather than the prompt, owns every decision.
+/// Catalogs without a `delegation` block keep their established permissive
+/// behavior; once a block is present the daemon owns every decision.
 fn authorize_delegation(
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,

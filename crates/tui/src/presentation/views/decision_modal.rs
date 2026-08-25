@@ -4,8 +4,8 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::DecisionOverlayState;
 
-const INNER_WIDTH: usize = 62;
-const BODY_HEIGHT: usize = 16;
+const INNER_WIDTH: usize = 70;
+const BODY_HEIGHT: usize = 18;
 // Leave room for the persistent footer and for a scroll indicator above and
 // below the viewport.  This keeps every decision field reachable even when a
 // prompt, option label, or description spans many rows.
@@ -79,6 +79,9 @@ fn editor_body(
             "",
             inner_width,
         ));
+        if editor.follows_freeform() {
+            selected_row = rows.len().saturating_sub(1);
+        }
     }
     if let Some(error) = editor.error() {
         rows.extend(
@@ -86,6 +89,9 @@ fn editor_body(
                 .into_iter()
                 .map(|line| Role::Danger.style().paint(&line)),
         );
+        if editor.follows_freeform() {
+            selected_row = rows.len().saturating_sub(1);
+        }
     }
 
     let (start, end) = editor.scroll_offset().map_or_else(
@@ -221,8 +227,14 @@ mod tests {
         );
         assert!(empty.join("\n").contains("(none)"));
 
-        let root = decision(workspace, None);
-        let scoped = decision(workspace, Some(session));
+        let mut root = decision(workspace, None);
+        root.allow_freeform = false;
+        let mut scoped = decision(workspace, Some(session));
+        scoped.prompt = (0..CONTENT_CAPACITY)
+            .map(|index| format!("context line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        scoped.prompt.insert(0, '\n');
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::Decisions {
@@ -235,13 +247,31 @@ mod tests {
             80,
             &[],
             state.decision_overlay().unwrap(),
-            &[root, scoped.clone()],
+            &[root.clone(), scoped.clone()],
         );
         assert!(list.join("\n").contains("workspace root"));
 
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let fixed_options = render_over(
+            24,
+            80,
+            &[],
+            state.decision_overlay().unwrap(),
+            &[root, scoped.clone()],
+        );
+        assert!(!fixed_options.join("\n").contains("freeform:"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         let _ = update(&mut state, AppEvent::Key(AppKey::DecisionNext));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+        let scrolled = render_over(
+            24,
+            80,
+            &[],
+            state.decision_overlay().unwrap(),
+            &[scoped.clone()],
+        );
+        assert!(scrolled.join("\n").contains("context line"));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
         let _ = update(
             &mut state,

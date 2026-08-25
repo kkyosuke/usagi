@@ -928,7 +928,7 @@ fn quit_from_switch(
     output: &Arc<Mutex<Vec<u8>>>,
     baseline: usize,
 ) -> ExitStatus {
-    wait_for_screen_since(output, baseline, "[switch]");
+    wait_for_screen_since(output, baseline, "[Switch] preview pane");
     send(master, b"\x11");
     wait_for_screen_since(output, baseline, "Leave this workspace?");
     send(master, b"\r");
@@ -1747,13 +1747,13 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 /// テストが指示した瞬間だけ大量出力する Codex fixture。
 ///
 /// `trigger` file が現れたら 1400 行（約 128 KiB）を吐き、終わったら `done` file を置く。
-/// テストは drawer を開いて root Agent を起動した**あと**に trigger を書くので、burst は
-/// 必ず detach 中に流れ、daemon の retained journal（`MAX_RETAINED_OUTPUT_BYTES` = 64 KiB）を
-/// 追い越す。実 agent CLI が裏で描画し続ける状況と同じく、drawer を閉じた再 attach は
-/// 必ず resync 経路を通る。固定 sleep ではなくこの 2 つの file が前提条件の観測点である。
+/// テストは drawer を開いて root Agent を起動した**あと**に trigger を書く。実 Agent CLI が
+/// drawer の背後で描画し続ける状況と同じ burst を作り、その末尾が drawer を閉じる前に
+/// dimmed managed pane へ届くことを観測する。固定 sleep ではなくこの 2 つの file が前提条件の
+/// 観測点である。
 fn write_bursting_codex(fixtures: &AgentFixtures, trigger: &Path, done: &Path) {
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\n(\n  while [ ! -f \"{trigger}\" ]; do sleep 0.05; done\n  i=0\n  while [ $i -lt 1400 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done\n  printf 'done\\n' > \"{done}\"\n) &\nwhile IFS= read input; do printf 'codex-input:%s\\n' \"$input\"; done\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\n(\n  while [ ! -f \"{trigger}\" ]; do sleep 0.05; done\n  i=0\n  while [ $i -lt 1400 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done\n  printf 'dim-live-done\\n'\n  printf 'done\\n' > \"{done}\"\n) &\nwhile IFS= read input; do printf 'codex-input:%s\\n' \"$input\"; done\n",
         count = fixtures.codex_count.display(),
         trigger = trigger.display(),
         done = done.display(),
@@ -1764,9 +1764,8 @@ fn write_bursting_codex(fixtures: &AgentFixtures, trigger: &Path, done: &Path) {
 }
 
 /// 実 daemon・実 PTY: 報告された操作列（session Agent → 指示モードで root Agent → drawer を
-/// 閉じる）を実キー・実クリックで通し、戻ってきた managed Agent tab が live のまま入力を
-/// 受け付けることを固定する。detach 中に daemon の retained journal を追い越させ、再 attach が
-/// resync 経路を通ることも合わせて通す。
+/// 閉じる）を実キー・実クリックで通し、managed Agent tab が drawer の背後でも live に動き、
+/// 戻ってきた後も入力を受け付けることを固定する。
 ///
 /// この E2E が固定するのは受け渡しそのものであり、daemon が attach / `Resume` を拒否したときの
 /// 回復ではない（refusal を実 daemon へ注入する経路が無いため）。その回復は
@@ -1844,17 +1843,18 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
         "root-hello",
         "claude-input:root-hello",
     );
-    // ここで初めて burst を起こす。managed pane は detach 済みなので、この出力は
-    // 必ず「detach 中に journal を追い越す」ことになる。
+    // 背景の right pane に Agent 出力を読める幅を残してから burst を起こす。
+    // root conversation は drawer geometry、managed pane は通常の right-pane geometry を
+    // それぞれ維持する。
+    resize_pty(&master, 160, 24).unwrap();
+    wait_for_screen_since(&captured, baseline, "♛ Director");
     fs::write(&burst_trigger, "go\n").unwrap();
     wait_for_file_lines(&burst_done, 1);
+    wait_for_screen_since(&captured, baseline, "dim-live-done");
 
-    // drawer を閉じると、元の managed session の Agent tab が foreground へ戻る。
+    // drawer を閉じると、live のまま更新されていた managed Agent が入力 owner へ戻る。
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "[closeup]");
-    // 再 attach は daemon の atomic snapshot から組み直すので、detach 中に流れた
-    // burst の末尾が見える。
-    wait_for_screen_since(&captured, baseline, "codex-noise:1399-");
     send_line_until_delivered(
         &mut master,
         &captured,
@@ -1862,7 +1862,6 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
         "session-after",
         "codex-input:session-after",
     );
-
     assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     stop_daemon(&home);
     drop(master);
