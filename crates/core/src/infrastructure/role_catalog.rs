@@ -146,9 +146,9 @@ fn load_team_template(data_home: &Path, workspace_root: &Path) -> TeamTemplate {
     let Ok(global) = Storage::new(data_home).load_settings() else {
         return TeamTemplate::None;
     };
-    let local = WorkspaceSettingsStore::new(workspace_root)
-        .load()
-        .unwrap_or_default();
+    let Ok(local) = WorkspaceSettingsStore::new(workspace_root).load() else {
+        return TeamTemplate::None;
+    };
     global.with_local(&local).team_template
 }
 
@@ -770,15 +770,9 @@ mod tests {
         let local = WorkspaceSettingsStore::new(&workspace);
         fs::create_dir_all(local.path().parent().unwrap()).unwrap();
         fs::write(local.path(), "{ broken").unwrap();
-        assert_eq!(
-            load_effective(&home, &workspace)
-                .unwrap()
-                .defaults
-                .session
-                .unwrap()
-                .as_str(),
-            "planner"
-        );
+        let catalog = load_effective(&home, &workspace).unwrap();
+        assert!(!catalog.configured);
+        assert!(catalog.roles.is_empty());
     }
 
     #[test]

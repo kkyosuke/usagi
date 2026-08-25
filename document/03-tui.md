@@ -74,7 +74,13 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Team・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
-`↑↓` で行を、`←→` で値を切り替える。未保存の値には `●` が付く。dirty な Save 行で `Enter` を押すと保存フローが始まり、
+`↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
+`←→` / `Tab` で階層型・フラット・パイプライン型と独立した `Use no template` actionを選ぶ。`Enter` は選択をdraftへ適用し、
+`Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
+
+![Team template picker](assets/team-template-picker.svg)
+
+dirty な Save 行で `Enter` を押すと保存フローが始まり、
 Save button 自体が **loading（`saving…`）** 表示に変わる。保存が成功すると同じ button が **`saved`** 表示へ変わり、
 短い確認表示ののち、ユーザー操作なしで呼び出し元へ自動的に戻る。Welcome の Config は Welcome へ戻る。
 Overview の Config は、その workspace を settings port に束縛し、live pane と session を背景に維持したまま Home へ戻る。

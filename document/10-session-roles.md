@@ -31,7 +31,8 @@ role を変える場合は別 session を作成する。
 ## catalog
 
 Config の `Team` は次の組み込み catalog を選ぶ。global の値は workspace 登録時の初期値になり、Workspace Config の値が
-その workspace で優先される。
+その workspace で優先される。Team 行で `Enter` を押すと3種類を構造図付きカードで比較でき、狭い端末では同じ候補を
+縦リストで表示する。`none` はカードとは別の `Use no template` actionで選択する。
 
 | 表示 | `team_template` | root default | session default | 許可する委譲経路 |
 |---|---|---|---|---|
@@ -40,7 +41,8 @@ Config の `Team` は次の組み込み catalog を選ぶ。global の値は wor
 | flat | `flat` | Director | Worker | Director → Worker |
 | pipeline | `pipeline` | Director | Planner | Director → Planner → Implementer → Tester |
 
-`none` は既定値であり、組み込み catalog を注入しない。未知の `team_template` token も `none` へ縮退する。
+`none` は既定値であり、組み込み catalog を注入しない。未知の `team_template` token、および読み取れないworkspace設定も
+委譲権限を暗黙に増やさないよう `none` へ縮退する。
 各テンプレートの委譲上限 `max_concurrency` は 4 である。パイプライン型は role と委譲経路によって工程順を制約し、
 独立した workflow engine や自動ステージ遷移は追加しない。各 Agent が role instruction に従って次工程へ dispatch する。
 

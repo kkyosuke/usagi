@@ -22,6 +22,33 @@ const SECTION_HEADING_WIDTH: usize = 41;
 const ENVIRONMENT_INNER_WIDTH: usize = 64;
 const ENVIRONMENT_MAX_ROWS: usize = 10;
 const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
+const TEAM_PICKER_INNER_WIDTH: usize = 76;
+const TEAM_CARD_INNER_WIDTH: usize = 20;
+const TEAM_PICKER_OPTIONS: [TeamTemplate; 4] = [
+    TeamTemplate::Hierarchical,
+    TeamTemplate::Flat,
+    TeamTemplate::Pipeline,
+    TeamTemplate::None,
+];
+
+#[derive(Clone, Copy)]
+enum TeamCard {
+    Hierarchical,
+    Flat,
+    Pipeline,
+}
+
+impl TeamCard {
+    const ALL: [Self; 3] = [Self::Hierarchical, Self::Flat, Self::Pipeline];
+
+    const fn template(self) -> TeamTemplate {
+        match self {
+            Self::Hierarchical => TeamTemplate::Hierarchical,
+            Self::Flat => TeamTemplate::Flat,
+            Self::Pipeline => TeamTemplate::Pipeline,
+        }
+    }
+}
 
 /// Time between frames while the Save button's highlight wave is moving.
 pub const SAVE_WAVE_TICK: Duration = Duration::from_millis(60);
@@ -97,6 +124,7 @@ pub struct Config {
     save_animation_frame: usize,
     environment_editor: Option<EnvironmentSourceEditor>,
     environment_error: Option<String>,
+    team_picker: Option<TeamTemplate>,
 }
 
 impl Config {
@@ -144,6 +172,7 @@ impl Config {
             save_animation_frame: 0,
             environment_editor: None,
             environment_error: None,
+            team_picker: None,
         }
     }
 
@@ -302,11 +331,50 @@ impl Config {
         self.notice = None;
     }
 
-    /// Select the adjacent built-in team structure.
-    pub fn cycle_team_template(&mut self, forward: bool) {
-        let template = &mut self.current_mut().draft.team_template;
-        *template = template.cycle(forward);
+    /// Whether the visual Team picker currently owns Config input.
+    #[must_use]
+    pub fn is_selecting_team(&self) -> bool {
+        self.team_picker.is_some()
+    }
+
+    /// Open the Team picker from its Config row without changing the draft.
+    pub fn open_team_picker(&mut self) -> bool {
+        if self.field != Field::TeamTemplate {
+            return false;
+        }
+        self.team_picker = Some(self.current().draft.team_template);
         self.notice = None;
+        true
+    }
+
+    /// Move focus across the three cards and the separate no-template action.
+    pub fn cycle_team_picker(&mut self, forward: bool) {
+        let Some(selected) = self.team_picker.as_mut() else {
+            return;
+        };
+        let index = TEAM_PICKER_OPTIONS
+            .iter()
+            .position(|candidate| candidate == selected)
+            .unwrap_or_default();
+        let next = if forward {
+            (index + 1) % TEAM_PICKER_OPTIONS.len()
+        } else {
+            (index + TEAM_PICKER_OPTIONS.len() - 1) % TEAM_PICKER_OPTIONS.len()
+        };
+        *selected = TEAM_PICKER_OPTIONS[next];
+    }
+
+    /// Apply the focused Team choice to the Config draft and close the picker.
+    pub fn apply_team_picker(&mut self) {
+        if let Some(selected) = self.team_picker.take() {
+            self.current_mut().draft.team_template = selected;
+            self.notice = None;
+        }
+    }
+
+    /// Close the Team picker without changing the Config draft.
+    pub fn cancel_team_picker(&mut self) {
+        self.team_picker = None;
     }
 
     /// Toggle availability of the issue MCP tool family.
@@ -330,10 +398,9 @@ impl Config {
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
-            Field::TeamTemplate => self.cycle_team_template(forward),
             Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
-            Field::Environment | Field::Save => return false,
+            Field::TeamTemplate | Field::Environment | Field::Save => return false,
         }
         true
     }
@@ -569,9 +636,12 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             .map(|line| mascot_screen::centered_line(width, &line, Style::new()))
             .collect()
     });
-    match config.environment_editor.as_ref() {
-        Some(editor) => render_environment_over(raw_height, raw_width, &base, config, editor),
-        None => base,
+    if let Some(editor) = config.environment_editor.as_ref() {
+        render_environment_over(raw_height, raw_width, &base, config, editor)
+    } else if let Some(selected) = config.team_picker {
+        render_team_picker_over(raw_height, raw_width, &base, selected)
+    } else {
+        base
     }
 }
 
@@ -602,12 +672,117 @@ pub fn render_over(
         MODAL_BODY_HEIGHT,
         lines,
     );
-    match config.environment_editor.as_ref() {
-        Some(editor) => {
-            render_environment_over(raw_height, raw_width, &config_base, config, editor)
-        }
-        None => config_base,
+    if let Some(editor) = config.environment_editor.as_ref() {
+        render_environment_over(raw_height, raw_width, &config_base, config, editor)
+    } else if let Some(selected) = config.team_picker {
+        render_team_picker_over(raw_height, raw_width, &config_base, selected)
+    } else {
+        config_base
     }
+}
+
+fn render_team_picker_over(
+    height: usize,
+    width: usize,
+    base: &[String],
+    selected: TeamTemplate,
+) -> Vec<String> {
+    let inner_width = modal::modal_inner_width(width, TEAM_PICKER_INNER_WIDTH);
+    let mut lines = vec![
+        modal::caption("Choose how Agents coordinate work"),
+        String::new(),
+    ];
+    if inner_width >= TEAM_PICKER_INNER_WIDTH {
+        let cards = TeamCard::ALL.map(|card| team_card(card, selected));
+        for row in 0..cards[0].len() {
+            lines.push(
+                cards
+                    .iter()
+                    .map(|card| card[row].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+    } else {
+        lines.extend([
+            team_picker_row(
+                TeamTemplate::Hierarchical,
+                selected,
+                "Director → Manager → Worker",
+            ),
+            team_picker_row(TeamTemplate::Flat, selected, "Director → Workers"),
+            team_picker_row(
+                TeamTemplate::Pipeline,
+                selected,
+                "Planner → Implementer → Tester",
+            ),
+        ]);
+    }
+    lines.push(String::new());
+    let marker = modal::selection_marker(selected == TeamTemplate::None);
+    lines.push(modal::content_line(
+        &format!("{marker} [ Use no template ]"),
+        inner_width,
+    ));
+    lines.push(String::new());
+    lines.push(modal::footer("←→/Tab: select   Enter: apply   Esc: cancel"));
+    modal::render_over(height, width, base, "Select a team", inner_width, &lines)
+}
+
+fn team_card(card: TeamCard, selected: TeamTemplate) -> Vec<String> {
+    let title = match card {
+        TeamCard::Hierarchical => "Hierarchical",
+        TeamCard::Flat => "Flat",
+        TeamCard::Pipeline => "Pipeline",
+    };
+    let marker = if card.template() == selected {
+        "› "
+    } else {
+        "  "
+    };
+    let title = if card.template() == selected {
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&format!("{marker}{title}"))
+    } else {
+        Style::new().dim().paint(&format!("{marker}{title}"))
+    };
+    let body = match card {
+        TeamCard::Hierarchical => [
+            "♛ Director",
+            "├ ◆ Manager",
+            "│ └ ● Worker",
+            "└ ● Worker",
+            "large / mixed work",
+        ],
+        TeamCard::Flat => [
+            "♛ Director",
+            "├ ● Worker",
+            "├ ● Worker",
+            "└ ● Worker",
+            "parallel work",
+        ],
+        TeamCard::Pipeline => [
+            "Director → Planner",
+            "          ↓",
+            "     Implementer",
+            "          ↓",
+            "        Tester",
+        ],
+    };
+    modal::compact_boxed(&title, TEAM_CARD_INNER_WIDTH, &body.map(str::to_owned))
+}
+
+fn team_picker_row(template: TeamTemplate, selected: TeamTemplate, description: &str) -> String {
+    let marker = modal::selection_marker(template == selected);
+    modal::content_line(
+        &format!(
+            "{marker} {:<12} {description}",
+            team_template_name(template)
+        ),
+        TEAM_PICKER_INNER_WIDTH,
+    )
 }
 
 fn form_rows(config: &Config) -> Vec<String> {
@@ -851,7 +1026,7 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
                 config.settings().default_model != config.current().saved.default_model,
             )
         },
-        select::render(
+        select::bracketed(
             "Team",
             team_template_name(config.settings().team_template),
             config.field() == Field::TeamTemplate,
@@ -1755,23 +1930,56 @@ mod tests {
     }
 
     #[test]
-    fn team_template_cycles_renders_and_saves_for_the_workspace() {
+    fn team_picker_renders_applies_cancels_and_saves_for_the_workspace() {
         let mut port = FakeSettingsPort::default();
         let mut config =
             Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        assert!(!config.open_team_picker());
+        config.cycle_team_picker(true);
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
         assert_eq!(config.settings().team_template, TeamTemplate::None);
+        assert!(!config.cycle_selected(true));
 
-        assert!(config.cycle_selected(true));
-        assert_eq!(config.settings().team_template, TeamTemplate::Hierarchical);
-        assert!(render(24, 80, &config).join("\n").contains("hierarchical"));
-        config.cycle_team_template(false);
+        assert!(config.open_team_picker());
+        assert!(config.is_selecting_team());
+        let cards = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(cards.contains("Select a team"));
+        assert!(cards.contains("Hierarchical"));
+        assert!(cards.contains("Flat"));
+        assert!(cards.contains("Pipeline"));
+        assert!(cards.contains("♛ Director"));
+        assert!(cards.contains("› [ Use no template ]"));
+        let base = vec!["home background".to_owned(); 24];
+        let overlay = strip_ansi(&render_over(24, 80, &base, &config).join("\n"));
+        assert!(overlay.contains("Select a team"));
+        config.apply_team_picker();
         assert_eq!(config.settings().team_template, TeamTemplate::None);
-        config.cycle_team_template(true);
-        config.cycle_team_template(true);
+        config.apply_team_picker();
+
+        assert!(config.open_team_picker());
+        config.cycle_team_picker(true);
+        config.cycle_team_picker(true);
+        config.apply_team_picker();
+        assert!(!config.is_selecting_team());
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+
+        assert!(config.open_team_picker());
+        config.cycle_team_picker(true);
+        config.cycle_team_picker(true);
+        let none = strip_ansi(&render(24, 80, &config).join("\n"));
+        assert!(none.contains("› [ Use no template ]"));
+        config.cancel_team_picker();
+        assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+
+        assert!(config.open_team_picker());
+        config.cycle_team_picker(false);
+        let narrow = strip_ansi(&render(18, 48, &config).join("\n"));
+        assert!(narrow.contains("hierarchical"));
+        assert!(narrow.contains("Director → Manager"));
+        config.cancel_team_picker();
+
         assert_eq!(team_template_name(TeamTemplate::Flat), "flat");
         assert_eq!(team_template_name(TeamTemplate::Pipeline), "pipeline");
         config.next_field();

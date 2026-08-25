@@ -213,7 +213,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 |---|---|
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
-| Team | `none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
+| Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
 | Roles | session / root ごとの追加 instruction と既定 role |
