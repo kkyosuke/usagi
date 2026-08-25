@@ -45,7 +45,7 @@ git -C "$tmp" init -q
 git -C "$tmp" config user.email tests@example.com
 git -C "$tmp" config user.name Tests
 mkdir -p "$tmp/scripts" "$tmp/crates"/{core,daemon,tui,cli}/src "$tmp/crates"/{core,daemon,tui}/tests
-mkdir -p "$tmp/crates/core/src/infrastructure/ipc" "$tmp/src/runtime" "$tmp/tests/support" "$tmp/v1/src" "$tmp/.github/workflows"
+mkdir -p "$tmp/crates/core/src/infrastructure/ipc" "$tmp/src/runtime" "$tmp/tests/support" "$tmp/.github/workflows"
 mkdir -p "$tmp/crates/core/src/domain" "$tmp/crates/core/src/usecase" "$tmp/crates/daemon/src/usecase"
 mkdir -p "$tmp/crates/tui/src/presentation" "$tmp/crates/cli/src/mcp"
 cp "$script" "$tmp/scripts/recommend-tests.sh"
@@ -56,7 +56,7 @@ touch "$tmp/crates/tui/src/lib.rs" "$tmp/crates/tui/tests/parity_suite.rs" "$tmp
 touch "$tmp/crates/core/src/domain/issue.rs" "$tmp/crates/core/src/usecase/issue.rs" "$tmp/crates/daemon/src/usecase/start.rs"
 touch "$tmp/crates/tui/src/presentation/frame.rs" "$tmp/crates/cli/src/mcp/serve.rs"
 touch "$tmp/src/runtime/cli.rs" "$tmp/src/runtime/daemon.rs" "$tmp/src/runtime/tui.rs" "$tmp/src/runtime/bootstrap.rs" "$tmp/tests/agent_ipc_e2e.rs"
-touch "$tmp/tests/support/mod.rs" "$tmp/v1/src/main.rs" "$tmp/.github/workflows/test.yml" "$tmp/unknown.file"
+touch "$tmp/tests/support/mod.rs" "$tmp/.github/workflows/test.yml" "$tmp/unknown.file"
 git -C "$tmp" add .
 git -C "$tmp" commit -qm fixture
 
@@ -85,8 +85,7 @@ for fixture in \
   "crates/core/tests/agent_contract.rs|cargo test -p usagi-core --test agent_contract" \
   "crates/daemon/tests/agent_real_pty.rs|cargo test -p usagi-daemon --test agent_real_pty" \
   "crates/tui/tests/parity_suite.rs|cargo test -p usagi-tui --test parity_suite" \
-  "tests/agent_ipc_e2e.rs|cargo test -p usagi --test agent_ipc_e2e" \
-  "v1/src/main.rs|cargo test --manifest-path v1/Cargo.toml --quiet"
+  "tests/agent_ipc_e2e.rs|cargo test -p usagi --test agent_ipc_e2e"
 do
   path=${fixture%%|*}; command=${fixture#*|}
   change "$path"

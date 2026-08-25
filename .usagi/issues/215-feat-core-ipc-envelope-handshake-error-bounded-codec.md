@@ -6,7 +6,6 @@ priority: high
 labels: [core, ipc, protocol]
 dependson: [214]
 related: []
-parent: 213
 created_at: 2026-07-12T11:38:29.898924+00:00
 updated_at: 2026-07-12T12:39:50.757788+00:00
 ---

@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [agent, daemon, sandbox, codex]
 dependson: []
-related: [530, 594, 629, 630]
+related: [629, 630]
 created_at: 2026-08-04T00:00:00+00:00
 updated_at: 2026-08-04T00:00:00+00:00
 ---

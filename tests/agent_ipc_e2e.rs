@@ -578,13 +578,41 @@ fn wait_for_agent_completion(
     body
 }
 
-fn resume(client: &mut impl DaemonClient, session_name: &str) -> (String, TerminalRef) {
+fn resume(
+    client: &mut impl DaemonClient,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> (
+    String,
+    TerminalRef,
+    usagi_core::domain::agent::AgentResumeTarget,
+) {
+    let inventory = client
+        .request(DaemonRequest::AgentInventory { workspace })
+        .expect("Agent inventory is available");
+    let body = match inventory {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+    };
+    let inventory: usagi_core::domain::agent::AgentInventory =
+        serde_json::from_value(body).expect("Agent inventory is valid");
+    let mut targets = inventory.resumable.into_iter().filter_map(|item| {
+        item.available
+            .then_some(item.target)
+            .flatten()
+            .filter(|target| target.session_id == Some(session))
+    });
+    let target = targets
+        .next()
+        .expect("one exact session target is available");
+    assert!(
+        targets.next().is_none(),
+        "resume target must be unambiguous"
+    );
     let operation = OperationId::new().to_string();
     let reply = client
-        .request(DaemonRequest::Session {
-            action: SessionAction::ResumeAgent,
+        .request(DaemonRequest::ResumeAgent {
             operation_id: operation.clone(),
-            payload: serde_json::json!({"name": session_name}),
+            target: target.clone(),
         })
         .expect("captured Codex conversation resumes through root IPC");
     let DaemonReply::Accepted { body, .. } = reply else {
@@ -593,17 +621,21 @@ fn resume(client: &mut impl DaemonClient, session_name: &str) -> (String, Termin
     (
         operation,
         serde_json::from_value(body["terminal"].clone()).unwrap(),
+        target,
     )
 }
 
-fn wait_for_resume_completion(client: &mut impl DaemonClient, operation: &str, session_name: &str) {
+fn wait_for_resume_completion(
+    client: &mut impl DaemonClient,
+    operation: &str,
+    target: &usagi_core::domain::agent::AgentResumeTarget,
+) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let reply = client
-            .request(DaemonRequest::Session {
-                action: SessionAction::ResumeAgent,
+            .request(DaemonRequest::ResumeAgent {
                 operation_id: operation.to_owned(),
-                payload: serde_json::json!({"name": session_name}),
+                target: target.clone(),
             })
             .expect("resume replay is available");
         let body = match reply {
@@ -837,7 +869,8 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     let durable = serde_json::to_string(&durable_records(&data_dir)).unwrap();
     assert!(durable.contains("provider_structured"), "{durable}");
 
-    let (resume_operation, resumed_terminal) = resume(&mut reattached, "agent-e2e");
+    let (resume_operation, resumed_terminal, resume_target) =
+        resume(&mut reattached, workspace, session);
     assert_ne!(terminal, resumed_terminal);
     let resumed_subscription = attach(&mut reattached, &resumed_terminal);
     reattached
@@ -854,7 +887,7 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
         })
         .unwrap();
     assert_ne!(operation, resume_operation);
-    wait_for_resume_completion(&mut reattached, &resume_operation, "agent-e2e");
+    wait_for_resume_completion(&mut reattached, &resume_operation, &resume_target);
     assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
 }
 

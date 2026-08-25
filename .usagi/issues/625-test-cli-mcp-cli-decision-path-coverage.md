@@ -4,8 +4,8 @@ title: test(cli): MCP・CLI decision path を coverage 対象へ戻す
 status: done
 priority: medium
 labels: [review, v2, test, coverage, cli, mcp]
-dependson: [484]
-related: [453]
+dependson: []
+related: []
 created_at: 2026-08-02T23:07:31.755387+00:00
 updated_at: 2026-08-03T01:32:45.773202+00:00
 ---

@@ -554,24 +554,23 @@ fn execute_tool(
         }
         ToolRoute::AgentResume => {
             let operation_id = usagi_core::domain::id::OperationId::new().as_str();
-            let request = if let Some(target) = arguments.get("target").cloned() {
-                let Ok(target) = serde_json::from_value(target) else {
-                    return protocol::error(
-                        id,
-                        error_code::INVALID_PARAMS,
-                        "target must be an exact Agent resume target",
-                    );
-                };
-                DaemonRequest::ResumeAgent {
-                    operation_id,
-                    target,
-                }
-            } else {
-                DaemonRequest::Session {
-                    action: usagi_core::usecase::client::SessionAction::ResumeAgent,
-                    operation_id,
-                    payload: arguments,
-                }
+            let Some(target) = arguments.get("target").cloned() else {
+                return protocol::error(
+                    id,
+                    error_code::INVALID_PARAMS,
+                    "target must be an exact Agent resume target",
+                );
+            };
+            let Ok(target) = serde_json::from_value(target) else {
+                return protocol::error(
+                    id,
+                    error_code::INVALID_PARAMS,
+                    "target must be an exact Agent resume target",
+                );
+            };
+            let request = DaemonRequest::ResumeAgent {
+                operation_id,
+                target,
             };
             daemon_body_response(id, client.request(request))
         }
@@ -1034,7 +1033,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 48);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1081,7 +1080,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 38);
+        assert_eq!(names.len(), 37);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -1175,6 +1174,14 @@ mod tests {
             None,
         );
         assert_eq!(invalid_target["error"]["code"], -32602);
+        let missing_target = execute_tool(
+            serde_json::json!(2),
+            resume,
+            serde_json::json!({}),
+            &mut client,
+            None,
+        );
+        assert_eq!(missing_target["error"]["code"], -32602);
 
         let unavailable = ToolDescriptor::new(
             Box::new(ErrorTool(|| ToolError::Unimplemented("unused"))),
@@ -1682,7 +1689,6 @@ mod tests {
                 "session_resume",
                 serde_json::json!({"target": target.clone()}),
             ),
-            ("session_resume", serde_json::json!({"name": "legacy"})),
         ] {
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
@@ -1701,15 +1707,6 @@ mod tests {
                     && matches!(actual, DaemonRequest::AgentInventory { workspace: actual } if *actual == workspace))
                     || (arguments.get("target").is_some()
                         && matches!(actual, DaemonRequest::ResumeAgent { target: actual, .. } if actual == &target))
-                    || (arguments.get("target").is_none()
-                        && matches!(
-                            actual,
-                            DaemonRequest::Session {
-                                action: usagi_core::usecase::client::SessionAction::ResumeAgent,
-                                payload,
-                                ..
-                            } if payload == &arguments
-                        ))
             );
             assert!(String::from_utf8(out).unwrap().contains("safe"));
         }

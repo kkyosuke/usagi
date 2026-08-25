@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [refactor, v2, core, tui, terminal, vt]
 dependson: []
-related: [524, 199]
+related: [524]
 parent: 524
 created_at: 2026-07-24T12:46:06.279910+00:00
 updated_at: 2026-07-24T13:53:44.555517+00:00

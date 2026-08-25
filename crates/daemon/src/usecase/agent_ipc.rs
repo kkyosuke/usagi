@@ -451,42 +451,6 @@ impl AgentRuntime {
         self.readiness_ticket(profile).map(Some)
     }
 
-    /// Captures readiness facts for the legacy session-scoped resume selector.
-    pub fn prepare_legacy_resume_readiness(
-        &self,
-        operation_id: &str,
-        workspace: WorkspaceId,
-        session: Option<SessionId>,
-    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
-        if self.operations.contains_key(operation_id) {
-            return Ok(None);
-        }
-        OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent resume operation id must be canonical",
-            )
-        })?;
-        let records = self.coordinator.snapshot().records;
-        let eligible = records
-            .iter()
-            .filter(|record| {
-                record.runtime.terminal.workspace_id == workspace
-                    && record.runtime.session_id == session
-                    && is_resume_source_state(record.state)
-                    && self.resume_source_availability(record, &records).0
-            })
-            .collect::<Vec<_>>();
-        let [source] = eligible.as_slice() else {
-            return Err(ProtocolError::new(
-                ErrorCode::Unavailable,
-                "legacy agent resume did not resolve one eligible exact target",
-            ));
-        };
-        self.readiness_ticket(source.launch.plan.profile_id.clone())
-            .map(Some)
-    }
-
     /// Admits only if the facts observed before readiness are still current.
     /// All ordinary generation, scope, concurrency, executable, and idempotency
     /// checks still run after this comparison and before reservation/spawn.
@@ -527,20 +491,6 @@ impl AgentRuntime {
         let current = self.prepare_dispatch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
         self.dispatch(operation_id, intent, session, scope)
-    }
-
-    /// Legacy resume counterpart of [`Self::launch_after_readiness`].
-    pub fn resume_legacy_after_readiness(
-        &mut self,
-        operation_id: &str,
-        workspace: WorkspaceId,
-        session: Option<SessionId>,
-        scope: &dyn SessionScopeResolver,
-        preflight: Option<&AgentReadinessPreflight>,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        let current = self.prepare_legacy_resume_readiness(operation_id, workspace, session)?;
-        self.validate_readiness(preflight, current.as_ref())?;
-        self.resume_legacy(operation_id, workspace, session, scope)
     }
 
     fn readiness_ticket(
@@ -1199,78 +1149,6 @@ impl AgentRuntime {
             ProviderKind::Codex,
             native_session_id,
         )
-    }
-
-    /// Compatibility path for the old session-scoped request. The daemon alone
-    /// resolves it, and only when exactly one eligible exact target exists.
-    pub fn resume_legacy(
-        &mut self,
-        operation_id: &str,
-        workspace: WorkspaceId,
-        session: Option<SessionId>,
-        scope: &dyn SessionScopeResolver,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent resume operation id must be canonical",
-            )
-        })?;
-        // The scope prefix comes from the same key authority as the exact-resume
-        // key, so recognizing a stored key never re-derives the format here.
-        let prefix = usagi_core::usecase::client::agent_resume_scope_prefix(workspace, session);
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing
-                .semantic_key
-                .as_ref()
-                .is_some_and(|key| key.starts_with(&prefix))
-            {
-                return existing.outcome.clone();
-            }
-            return Err(ProtocolError::new(
-                ErrorCode::IdempotencyConflict,
-                "operation id was reused with a different agent resume",
-            ));
-        }
-        let records = self.coordinator.snapshot().records;
-        let targets = records
-            .iter()
-            .filter(|record| {
-                record.runtime.terminal.workspace_id == workspace
-                    && record.runtime.session_id == session
-                    && is_resume_source_state(record.state)
-            })
-            .filter(|record| self.resume_source_availability(record, &records).0)
-            .filter_map(resume_target)
-            .collect::<Vec<_>>();
-        let target = match targets.as_slice() {
-            [] => {
-                return Err(ProtocolError::new(
-                    ErrorCode::Unavailable,
-                    "legacy agent resume resolved no eligible exact target",
-                ));
-            }
-            [target] => target,
-            _ => {
-                return Err(ProtocolError::new(
-                    ErrorCode::RevisionConflict,
-                    "legacy agent resume is ambiguous; select an exact target",
-                ));
-            }
-        };
-        self.resume_exact(operation_id, target, scope)
-    }
-
-    /// Temporary Rust API compatibility for session-scoped callers. Wire
-    /// clients should migrate to [`Self::resume_exact`].
-    pub fn resume(
-        &mut self,
-        operation_id: &str,
-        workspace: WorkspaceId,
-        session: SessionId,
-        scope: &dyn SessionScopeResolver,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        self.resume_legacy(operation_id, workspace, Some(session), scope)
     }
 
     /// Accepts only a provider session ID delivered by a documented structured
@@ -3860,29 +3738,11 @@ mod tests {
                 .code,
             ErrorCode::InvalidArgument
         );
-        assert_eq!(
-            runtime
-                .prepare_legacy_resume_readiness("invalid", WorkspaceId::new(), None)
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidArgument
-        );
-        assert_eq!(
-            runtime
-                .prepare_legacy_resume_readiness(
-                    &OperationId::new().to_string(),
-                    WorkspaceId::new(),
-                    None,
-                )
-                .unwrap_err()
-                .code,
-            ErrorCode::Unavailable
-        );
     }
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn readiness_admission_wrappers_cover_launch_exact_legacy_and_dispatch() {
+    fn readiness_admission_wrappers_cover_launch_exact_and_dispatch() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
         let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
@@ -3938,27 +3798,6 @@ mod tests {
             )
             .unwrap();
         runtime.exit(&resumed.terminal, 0).unwrap();
-        let legacy_operation = OperationId::new().to_string();
-        let legacy_ticket = runtime
-            .prepare_legacy_resume_readiness(&legacy_operation, workspace, Some(session))
-            .unwrap()
-            .unwrap();
-        runtime
-            .resume_legacy_after_readiness(
-                &legacy_operation,
-                workspace,
-                Some(session),
-                &FakeScope(Ok(resolved)),
-                Some(&legacy_ticket),
-            )
-            .unwrap();
-        assert!(
-            runtime
-                .prepare_legacy_resume_readiness(&legacy_operation, workspace, Some(session))
-                .unwrap()
-                .is_none()
-        );
-
         let worktree = tempfile::tempdir().unwrap();
         let mut dispatch_runtime =
             runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
@@ -4330,10 +4169,9 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .resume(
+                .resume_exact(
                     &initial_operation.to_string(),
-                    workspace,
-                    session,
+                    &target,
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -4406,18 +4244,6 @@ mod tests {
             runtime.session_resume_status(session),
             (false, ProviderResumeReason::AmbiguousProviderMetadata)
         );
-        assert_eq!(
-            runtime
-                .resume(
-                    &OperationId::new().to_string(),
-                    workspace,
-                    session,
-                    &FakeScope(Ok(resolved.clone())),
-                )
-                .unwrap_err()
-                .code,
-            ErrorCode::RevisionConflict
-        );
         runtime.coordinator = original_coordinator;
 
         let original_registry = std::mem::replace(&mut runtime.registry, AdapterRegistry::new());
@@ -4427,10 +4253,9 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .resume(
+                .resume_exact(
                     &OperationId::new().to_string(),
-                    workspace,
-                    session,
+                    &target,
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -4452,10 +4277,9 @@ mod tests {
         let original_registry = std::mem::replace(&mut runtime.registry, incompatible_registry);
         assert_eq!(
             runtime
-                .resume(
+                .resume_exact(
                     &OperationId::new().to_string(),
-                    workspace,
-                    session,
+                    &target,
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -4466,10 +4290,9 @@ mod tests {
 
         assert_eq!(
             runtime
-                .resume(
+                .resume_exact(
                     "not-an-operation-id",
-                    workspace,
-                    session,
+                    &target,
                     &FakeScope(Ok(resolved.clone()))
                 )
                 .unwrap_err()
@@ -4478,10 +4301,9 @@ mod tests {
         );
         assert_eq!(
             runtime
-                .resume(
+                .resume_exact(
                     &OperationId::new().to_string(),
-                    workspace,
-                    session,
+                    &target,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap_err()
@@ -4587,18 +4409,6 @@ mod tests {
         assert_eq!(
             runtime.session_resume_status(session),
             (false, ProviderResumeReason::ProviderMetadataUnavailable)
-        );
-        assert_eq!(
-            runtime
-                .resume(
-                    &OperationId::new().to_string(),
-                    workspace,
-                    session,
-                    &FakeScope(Ok(resolved)),
-                )
-                .unwrap_err()
-                .code,
-            ErrorCode::Unavailable
         );
         let item = &runtime.inventory(workspace).resumable[0];
         assert!(item.target.is_some());
@@ -4785,19 +4595,6 @@ mod tests {
         );
         let encoded = serde_json::to_string(&inventory).unwrap();
         assert!(!encoded.contains("inventory-codex-session"));
-        assert_eq!(
-            runtime
-                .resume(
-                    &OperationId::new().to_string(),
-                    workspace,
-                    session_a,
-                    &FakeScope(Ok(ambiguous_scope.clone())),
-                )
-                .unwrap_err()
-                .code,
-            ErrorCode::RevisionConflict
-        );
-
         let selected = inventory
             .resumable
             .iter()
@@ -5120,12 +4917,7 @@ mod tests {
         assert_eq!(target.continuation, continuation);
         let resume_operation = OperationId::new().to_string();
         let resumed = second
-            .resume(
-                &resume_operation,
-                workspace,
-                session,
-                &FakeScope(Ok(resolved.clone())),
-            )
+            .resume_exact(&resume_operation, &target, &FakeScope(Ok(resolved.clone())))
             .unwrap();
         assert_ne!(resumed.terminal, initial.terminal);
         assert_eq!(resumed.continuation, Some(continuation));
@@ -5162,12 +4954,7 @@ mod tests {
         assert_eq!(interrupted_again, 1);
         let mut third = hydrate_restart_runtime(reconciled_again);
         let replay = third
-            .resume(
-                &resume_operation,
-                workspace,
-                session,
-                &FakeScope(Ok(resolved.clone())),
-            )
+            .resume_exact(&resume_operation, &target, &FakeScope(Ok(resolved.clone())))
             .unwrap();
         assert_eq!(replay.terminal, resumed.terminal);
         assert_eq!(replay.continuation, Some(continuation));

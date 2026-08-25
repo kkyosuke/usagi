@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, tui, config, persistence, data-loss, correctness]
 dependson: []
-related: [241, 498, 499, 538]
+related: [241]
 created_at: 2026-07-31T15:00:00+09:00
 updated_at: 2026-08-01T06:52:16+09:00
 ---

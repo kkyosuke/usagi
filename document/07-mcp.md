@@ -163,7 +163,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 
 | tool | 実挙動 |
 |---|---|
-| `session_create` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
+| `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、handshake で fence した workspace と optional session が一致する次回 Agent launch 用 durable queue または live Agent PTY へ配送する |
@@ -189,7 +189,7 @@ payload を成功応答としてエコーしない。
 
 ### session lifecycle の受理契約
 
-`session_create` / `session_remove` / `session_recover_legacy --apply` の成功応答は
+`session_create` / `session_remove` の成功応答は
 `accepted operation <operation_id> (revision <revision>)` である。この文字列は **operation が受理され durable state に
 記録された**ことを意味する。
 
@@ -277,7 +277,7 @@ issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase �
 束縛する薄い adapter である。成功時は usecase の結果 JSON を MCP の text content に入れて
 返し、作成・更新・削除は応答前に cwd 配下の source Markdown へ永続化される。派生 index / TOC
 の refresh failure は committed source の成功応答を error に変えず、dirty marker により次の
-read で自己修復する。commit point、retry、v1 / v2 共通の issue number 採番 authority の正本は
+read で自己修復する。commit point、retry、issue number 採番 authority の正本は
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract)を参照。
 `issue_get` / `memory_get` は対象が無ければ `null`、delete は `deleted: boolean` を返す。
 検索は query 省略で全件を返し、issue には `ready` / `unmet_deps` を付与する。

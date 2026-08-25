@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, mcp, daemon, session, agent, correctness, lifecycle]
 dependson: []
-related: [502, 546, 547]
+related: [502]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-08-01T01:10:05.614002+00:00
 ---

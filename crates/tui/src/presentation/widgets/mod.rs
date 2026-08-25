@@ -1,4 +1,4 @@
-//! 画面をまたいで再利用する UI 部品（widget）。v1 の `widgets/` を引き継ぎ、
+//! 画面をまたいで再利用する UI 部品（widget）。
 //! `text_input`（キャレット編集付き 1 行入力）/ `icon`（うさぎ AA）/
 //! `loading`（スピナー・進捗バー・ローディングうさぎ）/ `modal`（枠付きダイアログ）
 //! を置く。特定の画面に固有の描画は [`super::views`] に置き、ここには複数 view から
@@ -56,7 +56,7 @@ impl Default for Shimmer {
     }
 }
 
-/// v1 の tab launch / session skeleton と同じ loading sweep。
+/// tab launch / session skeleton で共有する loading sweep。
 #[must_use]
 pub fn shimmer_text(text: &str, frame: usize) -> String {
     shimmer_text_with(text, frame, Shimmer::default())

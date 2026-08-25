@@ -2,7 +2,7 @@
 
 > [設計提案一覧](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [workspace open 時の pane 復元](11-workspace-restore-panes.md)
 
-本書は [#524](../../.usagi/issues/524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md)（P1 correctness）の設計記録である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、[#199](../../.usagi/issues/199-perf-daemon-vt100-scrollback-daemon.md) が定めた「daemon を terminal grid/scrollback の唯一の権威とする」契約を回復するための設計判断を確定した。
+本書は [#524](../../.usagi/issues/524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md)（P1 correctness）の設計記録である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、daemon を terminal grid/scrollback の唯一の権威とする設計判断を確定した。
 
 **この設計は実装済みであり、正本は [4. daemon IPC](../04-ipc.md#snapshot-payload-と-revision)（snapshot schema / capability / revision / geometry / offset / allocation 上限）と [3. TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示)（visible + primary/copy-history restore と legacy 限定表示）に移った**。本書は採用に至った判断（なぜ daemon が parser を持つ必要があるか、なぜ checkpoint + contiguous suffix に分けるか）の記録として残す。以降の記述は当時の設計判断であり、現在の挙動は上記の正本を参照する。
 
@@ -33,7 +33,7 @@
 | TUI | `TerminalSession::replace` が **blank `TerminalScreen` を作り** `screen.advance(&attach.replay)` で raw tail を先頭から VT parser へ流す | `crates/tui/src/usecase/application/terminal_session.rs` |
 | VT parser | `TerminalScreen`（grid / scrollback / cursor / SGR / scroll region / alternate buffer / saved cursor / UTF-8 decoder）は **TUI クレートにのみ存在** | `crates/tui/src/usecase/application/terminal_screen.rs` |
 
-**問題**: 64 KiB tail は任意 byte 境界で切られるため UTF-8 / CSI / OSC sequence の途中から始まり得る。さらに tail 以前に確立された cursor 位置、SGR、scroll region、alternate/saved buffer、消去・折返し状態を一切含まない。blank parser に流しても現在の screen state を再構成できず、trim 後の attach/reconnect で文字化け・escape 漏れ・cursor/画面/copy history 破損を起こす。これは daemon を grid authority とした #199 の shipping regression である。
+**問題**: 64 KiB tail は任意 byte 境界で切られるため UTF-8 / CSI / OSC sequence の途中から始まり得る。さらに tail 以前に確立された cursor 位置、SGR、scroll region、alternate/saved buffer、消去・折返し状態を一切含まない。blank parser に流しても現在の screen state を再構成できず、trim 後の attach/reconnect で文字化け・escape 漏れ・cursor/画面/copy history 破損を起こす。これは daemon を grid authority とする契約に対する shipping regression である。
 
 trim で失われた pre-window state を復元する方法は「**daemon が VT parser を実行して semantic な screen state を保持し、それを snapshot として送る**」以外に存在しない。raw byte only の設計を保ったまま pre-window の cursor/SGR/alt を再構成することは原理的に不可能である（情報が journal trim で消えている）。したがって daemon が parser を持つことは correctness 上の必須要件であり、本設計の起点とする。
 
@@ -49,14 +49,14 @@ trim で失われた pre-window state を復元する方法は「**daemon が VT
 3 つの判断で構成する。
 
 1. **VT parser authority を `usagi-core` へ移す**。daemon と TUI で parser を二重実装しないため、`TerminalScreen` の **VT state model + parser + serialize/deserialize** を `usagi-core`（pure・IO なし・`serde` derive 可）へ移す。TUI 側の**描画**（`rows_with_scrollback_and_cursor_selection` / link scan / selection / cursor marker）は presentation 語彙に依存するため TUI に残し、core が公開する read-only な cell API（`ch` / interned style / continuation / cursor / scrollback）の上に載せ替える。
-2. **daemon を grid authority にする**。daemon は terminal ごとに core の VT screen を 1 個保持し、`append_output` で受信 byte を feed、`resize` で screen を resize する。attach/resync snapshot は raw tail ではなく core screen の **semantic checkpoint** を返す。#199 の「daemon が viewport snapshot・cursor・attrs を送る」契約を回復する。
+2. **daemon を grid authority にする**。daemon は terminal ごとに core の VT screen を 1 個保持し、`append_output` で受信 byte を feed、`resize` で screen を resize する。attach/resync snapshot は raw tail ではなく core screen の **semantic checkpoint** を返し、daemon が viewport snapshot・cursor・attrs を送る契約を回復する。
 3. **checkpoint + contiguous suffix**。attach/resync は `output_offset` 時点の完全な semantic checkpoint を返す（`replay` raw tail は撤去）。増分は従来どおり `Resume { after_offset }` が `output_offset` 以降の **contiguous raw byte suffix** を返し、TUI は checkpoint から復元した parser にその suffix を feed する。checkpoint が「complete な再構築表現」、suffix が「checkpoint 以後の連続増分」を担う。
 
 ```text
                  raw PTY bytes
                       │
                       ▼
-         daemon: core::VtScreen (authority)  ── #199 grid/scrollback owner
+daemon: core::VtScreen (grid/scrollback authority)
           │ append_output → feed              │
           │ resize        → resize            │
           ▼                                   ▼

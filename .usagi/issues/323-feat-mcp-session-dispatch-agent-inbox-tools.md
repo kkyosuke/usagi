@@ -5,8 +5,7 @@ status: done
 priority: high
 labels: [mcp, cli, orchestration, agent]
 dependson: [321, 322]
-related: [97, 106, 109, 110, 146]
-parent: 105
+related: []
 created_at: 2026-07-18T00:00:00+00:00
 updated_at: 2026-07-18T00:00:00+00:00
 ---
@@ -48,7 +47,6 @@ tool 面を実装する。tool 定義は既存の `Tool` trait（name/descriptio
 
 ## 受け入れ条件
 
-- root ガード（#106）と両立し、dispatch/可視化 tool が daemon IPC 経由で動作する。
 - `session_dispatch` が session を upsert し、id 指定は既存 agent 再利用・runtime+model 指定は新規作成、
   併用はエラー、成功時に `run_id` を返す。
 - `session_get` / `agent_list` / `agent_get` が proposal §3 の shape を返す。
