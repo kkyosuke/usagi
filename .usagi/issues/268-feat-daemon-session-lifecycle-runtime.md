@@ -6,7 +6,6 @@ priority: high
 labels: [daemon, session, lifecycle, ipc]
 dependson: [217, 219, 220]
 related: [263, 264]
-parent: 213
 created_at: 2026-07-13T00:30:00.000000+00:00
 updated_at: 2026-07-13T01:35:47.126081+00:00
 ---
@@ -14,8 +13,6 @@ updated_at: 2026-07-13T01:35:47.126081+00:00
 ## 背景・根拠
 
 #219 は durable reducer、`DaemonLifecycleStore`、および pure control vocabulary を導入したが、実行中の daemon には接続していない。現在の `crates/daemon/src/presentation/ipc.rs` は `kind: session` の operation ID を見て `Accepted` を返し request body を echo するだけであり、lifecycle store の初期化・永続 operation・worktree effect・snapshot・reconcile worker を所有しない。合成 root の socket server もこの stateless dispatch を thread ごとに呼ぶだけである。
-
-そのため #257 の Overview/Ctrl+A create と #263 の Closeup agent launch は、有効な stable session/worktree scope を実 runtime から得られない。#264 は generic terminal IPC runtime を担当するため、terminal attach/stream/PTY ownership とその request vocabulary は本 issue の write-set に含めない。
 
 ## 目的
 
@@ -35,7 +32,6 @@ daemon を managed session lifecycle の唯一の実行時書き手にする。s
 ## 対象外
 
 - generic terminal launch、attach、input、resize、PTY stream、terminal subscription の runtime 接続（#264）。
-- Closeup の command UX / pane attach（#263, #265）、Ctrl+A フォーム UX（#257）の再実装。
 - agent adapter の argv、hook、MCP injection、PTY spawn。ここでは validated managed scope を渡す境界だけを実装する。
 - legacy `WorkspaceState` の managed state への自動移行。
 
@@ -54,4 +50,3 @@ daemon を managed session lifecycle の唯一の実行時書き手にする。s
 1. typed session snapshot/request/response と runtime port を `usagi-core` に定義し、state-store-backed fake integration test を置く。
 2. daemon session runtime に durable admission、worker、worktree adapter、reconcile、scope resolver を実装する。
 3. shared runtime を IPC server と composition root へ接続し、socket-level integration test を追加する。
-4. 実装済み契約を `document/04-ipc.md` と `document/05-daemon.md` に更新し、#257/#263 の fake client を real snapshot contract に切り替える。

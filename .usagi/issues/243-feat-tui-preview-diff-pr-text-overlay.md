@@ -6,7 +6,6 @@ priority: medium
 labels: [tui, parity-b, overlay]
 dependson: [228]
 related: []
-parent: 227
 created_at: 2026-07-12T21:12:33.941269+00:00
 updated_at: 2026-07-12T22:54:49.744493+00:00
 ---
@@ -28,8 +27,6 @@ Home 背景を保ったまま preview、diff、PR、長文 text overlay を安�
 - `B-OVERLAY-1`（preview/diff/PR/text の範囲）。
 
 ## 依存
-
-- #226 の overlay dispatch と #228 renderer。
 
 ## 検証
 

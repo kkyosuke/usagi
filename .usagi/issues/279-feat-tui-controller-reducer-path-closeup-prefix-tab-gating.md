@@ -12,8 +12,6 @@ updated_at: 2026-07-13T11:30:10.397500+00:00
 
 ## 目的
 
-#278 で live runtime を `LiveInputClassifier` prefix に統一した Closeup 操作 model を、forward-looking な controller reducer path（`AppState` / `render_home`、parity suite が駆動）へも投影し、両 path を完全に収束させる。
-
 ## 調査根拠
 
 - controller path は `AppKey::CtrlO` / `CtrlA` と `Overlay::Closeup` を持つが、tab/pane 認識・`render_home` での action overlay 描画・`Ctrl-O n`/`Ctrl-O p` の tab 巡回を持たない。
@@ -28,11 +26,9 @@ updated_at: 2026-07-13T11:30:10.397500+00:00
 
 ## 対象外
 
-- #278 が扱う live runtime 側の実装。
 - PTY passthrough 配線（別 issue）。
 
 ## 完了条件
 
-- controller path で #278 と同じ 6 挙動が成立する。
 - parity suite が両 path の Closeup 遷移一致を検証する。
 - 実装・`document/03-tui.md`・regression tests が同じ PR に含まれ coverage 100% を満たす。

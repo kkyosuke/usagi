@@ -14,8 +14,6 @@ updated_at: 2026-07-24T21:55:34.911106+00:00
 
 Claude 起動時の `--settings` フック配線と OS sandbox launcher（`usagi claude-sandbox`）を実装した際、`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd` の各ライフサイクル event と session 起動の `PreToolUse` に `usagi agent-phase <phase>` を配線した。
 
-ただし **`agent-phase` は現状スタブ**で、受け取った phase を破棄して正常終了するだけ（フック配線を壊さないためのシム）。#530 の完了条件のうち「`agent-phase` が phase を daemon へ報告する」は本 issue に切り出した。切り出しの理由: v2 の daemon は phase を PTY の `RuntimeState` から導出しており、エージェントが細粒度の phase を報告する IPC 経路が存在しない。これを入れるには新しい IPC contract・caller credential 束縛・daemon ハンドラ・runtime phase 状態が必要で、#530 の他 3 基準の合計に匹敵する規模になる。
-
 ## やること
 
 - **phase 報告 IPC**: `usagi-core::usecase::client` に phase 報告の `DaemonRequest`（仮 `AgentPhaseReport`）を追加する。`CodexSessionCapture` と同様、`McpCallerContext`（daemon が発行する不透明 credential。env `USAGI_MCP_CALLER_CREDENTIAL` で子へ継承）で報告元の runtime を束縛し、caller は runtime / session / path を名指しできない。

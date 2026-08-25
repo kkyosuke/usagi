@@ -6,7 +6,6 @@ priority: high
 labels: [daemon, agent, ipc, pty]
 dependson: [268]
 related: [263, 264, 251, 252, 253, 254]
-parent: 227
 created_at: 2026-07-13T01:33:06.174236+00:00
 updated_at: 2026-07-13T03:27:29.103002+00:00
 ---
@@ -38,7 +37,6 @@ daemon-owned `DaemonRequest::Agent` を、stable managed session scope から Co
 
 - managed session lifecycle、worktree create/remove、scope resolver 自体の実装・変更（#268）。
 - Closeup command UX、pending tab reducer、renderer、TUI-side attach policy の再実装（#263）。
-- generic shell terminal launch/attach の再設計（#264、#265）。
 - CLI/MCP の新しい Agent UX、client supplied raw command/argv/environment、daemon crash 後の PTY FD continuation。
 - Codex/Claude 以外の product adapter の追加、model allowlist や adapter private configuration の UI 化。
 
@@ -49,7 +47,6 @@ daemon-owned `DaemonRequest::Agent` を、stable managed session scope から Co
 | #268 | stable managed session scope を消費する唯一の hard dependency。本 issue は lifecycle runtime を変更しない。 |
 | #263 | TUI の launch intent / pending pane / fenced attach を consumer として検証し、TUI reducer/renderer を再実装しない。 |
 | #264 | terminal IPC ownership/attach vocabulary を再利用する。generic shell の launch policy は変更しない。 |
-| #250–#254 | Codex/Claude adapter と common runtime の既存 contract を実 runtime に組み立てる。adapter argv/provision contract の再設計はしない。 |
 
 ## 受け入れ条件
 

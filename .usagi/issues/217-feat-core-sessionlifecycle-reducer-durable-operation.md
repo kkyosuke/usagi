@@ -6,7 +6,6 @@ priority: high
 labels: [core, session, lifecycle]
 dependson: [214]
 related: []
-parent: 213
 created_at: 2026-07-12T11:38:56.295403+00:00
 updated_at: 2026-07-12T13:16:25.643862+00:00
 ---

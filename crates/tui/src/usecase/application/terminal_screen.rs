@@ -394,7 +394,7 @@ fn render_row_selected(
     links: Option<(usize, &HashSet<TerminalPoint>)>,
 ) -> String {
     // A cell sits on a detected link when its (row, column) is in the scanned
-    // set; such cells render underlined to mark them clickable (#389).
+    // set; such cells render underlined to mark them clickable.
     let is_link = |column: usize| {
         links.is_some_and(|(row, set)| set.contains(&TerminalPoint { row, column }))
     };

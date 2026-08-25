@@ -23,7 +23,7 @@ pre-commit:
     guard-root:
       run: |
         # backstop: 「変更は必ず session」を守る安価な最終防壁。
-        # 一次防壁は MCP 書き込み拒否 (#106) と guard-workspace root モード (#107) だが、
+  # 一次防壁は MCP 書き込み拒否と guard-workspace root モードだが、
         # フックが差し込まれない経路 (人手のコミット・別ツール) での root コミットは素通しするため、
         # ここでも workspace root (= .usagi/sessions/ 配下でない) からのコミットを拒否する。
         toplevel=$(git rev-parse --show-toplevel 2>/dev/null || echo .)

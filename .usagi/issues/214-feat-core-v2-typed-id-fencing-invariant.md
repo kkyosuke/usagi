@@ -6,7 +6,6 @@ priority: high
 labels: [core, ipc, domain]
 dependson: []
 related: []
-parent: 213
 created_at: 2026-07-12T11:38:17.560741+00:00
 updated_at: 2026-07-12T12:24:36.103658+00:00
 ---

@@ -37,5 +37,3 @@ Claudeのinitial prompt直前にproviderが保証するoption terminatorを置�
 `--version`、`--settings=/tmp/x`、`--dangerously-skip-permissions`、`-c` を各1個のopaque promptとしてfixtureへ渡し、option effectが無いことを確認する。interactive/headless/new/resumeのargv matrixも固定する。
 
 ## 既存 issue との差分
-
-#253 はClaude adapter初期実装、#594 はsystem promptとprovision argv順を扱う。untrusted initial promptのoption terminatorは対象外である。

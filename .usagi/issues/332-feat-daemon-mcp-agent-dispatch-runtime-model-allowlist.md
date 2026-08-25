@@ -6,14 +6,11 @@ priority: high
 labels: [daemon, mcp, agent, config]
 dependson: [322, 331]
 related: [323]
-parent: 105
 created_at: 2026-07-18T00:30:00+00:00
 updated_at: 2026-07-17T23:42:17.208879+00:00
 ---
 
 ## 目的
-
-`session_dispatch` の schema snapshot が古くなっていても、daemon が launch 前に current workspace allowlist と executable availability を再検証する。設計の正本は [document/proposals/08-agent-dispatch-mcp.md](../../document/proposals/08-agent-dispatch-mcp.md#9-runtimemodel-allowlist-schema-snapshot-と再検証) である。
 
 ## スコープ
 

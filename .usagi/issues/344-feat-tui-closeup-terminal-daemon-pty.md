@@ -12,8 +12,6 @@ updated_at: 2026-07-15T00:07:50.906672+00:00
 
 ## 背景
 
-`usagi v2` は daemon-owned generic shell terminal を安全に起動・所有する経路（#255 / #264 / #270）を実装済みで、Unix IPC 越しに実 PTY の `launch → attach → input → output → detach → reconnect` が動作する。TUI 側も #265 で Closeup の `terminal` action / command から daemon への **launch** intent 送出を接続した（`src/runtime/tui.rs::DaemonAgentCommandPort::launch_terminal`）。
-
 しかし実ユーザー操作としての「TUI から terminal を開き `ls` を実行して結果を見る」は**成立しない**。現行の実行時 TUI（`presentation::run_workspace…` が駆動する `WorkspaceView` ループ）で欠けているのは次の 3 点である。
 
 1. **attach / 出力取得がない**: launch 後に daemon terminal へ attach せず、出力を取得していない。
@@ -60,6 +58,5 @@ updated_at: 2026-07-15T00:07:50.906672+00:00
 
 ## 関連
 
-- #265（Closeup terminal を daemon attach runtime へ接続する）: launch のみ実装済み。本 issue はその attach/出力/入力の残りを実ユーザー操作として完成させる。
 - #255 / #264 / #270: daemon 側 generic terminal（実装済み・本 issue の消費先）。
 - #235: daemon terminal inventory/stream と pane reattach（実装済み）。

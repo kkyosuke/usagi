@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, tui, terminal, vt, replay, correctness, p1]
 dependson: []
-related: [199, 251, 472, 473]
+related: [251, 472, 473]
 created_at: 2026-07-22T11:41:58.106442+00:00
 updated_at: 2026-07-25T02:07:40.444765+00:00
 ---
@@ -19,10 +19,6 @@ PTY process自体は生存し続ける一方、trim後のattach/resyncで利用�
 #472 はterminal replayを最大64KiBのraw byte tailへbounded化した。shipping TUIの `TerminalSession::replace` はresync/attach時にblank `TerminalScreen` を作り、そのtailを先頭からVT parserへ流す。しかし任意byte境界のtailはUTF-8/CSI/OSC sequence途中から始まり、過去に設定されたcursor、SGR、scroll region、alternate buffer、消去/折返し状態も含まない。raw tail単独は現在screen stateを再構成できず、trim後のattach/reconnectで文字化け・escape漏れ・cursor/画面/copy history破損を起こす。
 
 ## 既存issueとの境界
-
-#199 はdaemonをterminal grid/scrollbackの唯一の権威とし、clientへviewport snapshot・cursor・attrsを送り、backlog eviction/alt-screen後も正しく復帰する契約を実装済みとした。しかし現shipping v2はclientのblank parserへraw tailを渡す構成を再導入しており、本件は#199のshipping regressionである。done issueを再利用せずcorrective issueとしてrelatedにする。
-
-#472 はend-to-end byte/frame boundを所有し、UI scrollbackとsemantic VT checkpointは明示的に対象外。#473 はexited PTY transport/FD回収とbounded final replayの分離。本issueはbounded windowを維持したまま#199の単一grid authority / VT semanticsを復元し、buffer上限やFD lifecycleを再実装しない。
 
 ## 対象責務
 

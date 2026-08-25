@@ -6,12 +6,9 @@ priority: medium
 labels: [mcp]
 dependson: [401]
 related: []
-parent: 400
 created_at: 2026-07-20T04:54:26.630615+00:00
 updated_at: 2026-07-20T09:29:34.607909+00:00
 ---
-
-親: #400。依存: #401。`SupervisorRuntime` を daemon production composition に配線し、`supervisor_*` tool を実処理へ接続する。
 
 ## 対象 tool（6）
 

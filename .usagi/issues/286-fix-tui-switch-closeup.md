@@ -16,8 +16,6 @@ live Workspace runtime で Switch / Closeup の遷移を一箇所に正規化し
 
 ## 調査根拠
 
-#278 は Closeup 内の tab/modal 入力所有を導入したが、Switch は `Key::Live(_)` を全て無視する。このため `Ctrl-O a` を Switch から実行しても Closeup が開かない。さらに Closeup 中の `PreviousSession` は sidebar の選択だけを移動し、Closeup modal の target label / action state が前の session のまま残る。
-
 ## やること
 
 - Switch / Closeup から利用する mode transition helper を `WorkspaceUi` に集約する。

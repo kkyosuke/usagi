@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, tui, clipboard, process, freeze, resource]
 dependson: []
 related: [307, 390, 662]
-parent: 671
 created_at: 2026-08-13T22:45:35.558571+00:00
 updated_at: 2026-08-13T22:45:35.558571+00:00
 ---

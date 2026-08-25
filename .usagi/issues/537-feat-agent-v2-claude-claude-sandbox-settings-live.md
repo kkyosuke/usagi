@@ -33,9 +33,6 @@ OS sandbox の**機構**を実装・ユニットテストした:
 
 ## 完了条件
 
-- session 起動の Claude が `usagi claude-sandbox --mode session -- claude …` 経由で起動し、`PreToolUse` に `guard-workspace` が配線される（#530 完了条件 1）。
-- root 起動の Claude が `--mode root` で起動し、project root と一時領域への書き込みだけが許可される（#530 完了条件 2）。
-- backend 不在・未対応 platform では無保護起動しない（#530 完了条件 3）。
 - 全 E2E テスト（上記 4 ファイル）が Linux CI で green。
 
 ## 参考

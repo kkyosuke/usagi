@@ -47,5 +47,3 @@ sandbox policy input が trusted source と証明できない、backend identity
 - session Bash → settings mutation → second dispatch の E2E で parent sentinel と credential が保護されることを確認する。
 
 ## 既存 issue との差分
-
-#530 / #537 は sandbox と TMPDIR 伝播の導入、#602 は保存済み session name の teardown escape、#608 は data-home の導出を扱う。workspace environment が launcher policy と backend identityを上書きする経路は未対応である。

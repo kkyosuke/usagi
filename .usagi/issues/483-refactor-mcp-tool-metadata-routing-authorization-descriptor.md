@@ -5,8 +5,7 @@ status: done
 priority: medium
 labels: [review, v2, mcp, architecture]
 dependson: []
-related: [60, 97, 120, 407]
-parent: 453
+related: [407]
 created_at: 2026-07-20T12:06:48.850492+00:00
 updated_at: 2026-07-21T12:55:06.329256+00:00
 ---

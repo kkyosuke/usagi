@@ -30,5 +30,4 @@ Overview modal の Tab 補完がトップレベル command 名だけを置換す
 
 ## 依存・境界
 
-- #226 の registry dispatch を拡張し、controller effect や daemon wire を増やさない。
 - 実行可能な session command の typed effect / lifecycle adapter 接続は #260 が所有する。

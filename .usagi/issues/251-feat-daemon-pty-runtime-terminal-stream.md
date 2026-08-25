@@ -12,15 +12,12 @@ updated_at: 2026-07-12T22:51:00.731841+00:00
 
 ## 目的
 
-#250 の product-neutral な `AgentProfile` / validated `LaunchRequest` / immutable `LaunchPlan` を daemon の一回の Agent runtime 実行へ接続する。daemon が runtime reservation、PTY lifecycle、terminal stream、durable snapshot、replay、reclaim に必要な基盤を一貫して所有し、client disconnect や daemon restart で起動を二重化しない。
-
 Claude/Codex 固有の renderer、hook、設定形式はこの issue に含めない。daemon は adapter 名を分岐せず、profile/plan port と PTY/process port を消費する。
 
 ## Architecture ownership
 
 | 層 | 所有する責務 |
 | --- | --- |
-| `usagi-core` | #250 の型・validation・typed failure を消費するだけ。CLI 文法、PTY、secret を追加しない |
 | `crates/daemon/src/usecase` | resolve-once 後の runtime/terminal reservation、operation と launch snapshot の対応、queue/autostart、replay/reclaim orchestration |
 | `crates/daemon/src/infrastructure` | injected process/PTY、runtime/terminal durable record、output journal、process identity/reclaim probe |
 | presentation / IPC | 既存 terminal/session command を runtime state・typed error に投影する。product 固有 wire を増やさない |
@@ -29,7 +26,6 @@ Claude/Codex 固有の renderer、hook、設定形式はこの issue に含め�
 
 - validated request を一度だけ profile/plan resolver へ渡し、runtime reservation と immutable launch snapshot を external spawn 前に durable に記録する。
 - `AgentRuntimeId`、`TerminalRef`、operation owner/attempt、profile ID、plan schema/revision を対応付ける。profile を restart 時に黙って再解決して別の意味へ変更しない。
-- PTY spawn、raw output journal、snapshot/replay、exit、detach/re-attach は #218/#248 の terminal contract を維持する。disconnect は runtime/PTY を停止しない。
 - spawn 後の crash、response loss、PID evidence 不足、orphan/identity unknown は replacement spawn を block し、typed reclaim/reconcile state に収束する。
 - verified process exit/reclaim 後だけ reservation・concurrency slot を解放する。old generation の terminal は trusted registry/cursor で replay/reconcile し、local fallback をしない。
 - unsupported profile、stale plan revision、ambiguous spawn/reclaim、terminal-generation mismatch は fail-closed な typed result にする。

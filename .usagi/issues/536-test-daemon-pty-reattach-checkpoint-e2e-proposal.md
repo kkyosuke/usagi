@@ -20,7 +20,6 @@ updated_at: 2026-07-25T02:06:51.185153+00:00
 ## 対象責務
 
 - 実 daemon + 実 PTY + fresh client/TUI E2E（`crates/daemon/tests/` の `agent_real_pty.rs` 隣接の新 target）で 64 KiB 超の unique output・long-running SGR・alternate screen・cursor save/restore・primary scrollback/copy marker を生成。
-- client disconnect → reattach/resync 後に **child PID / spawn count 不変**、visible cells/cursor/style・primary saved buffer・`cells_with_scrollback`/copy history が before/reference と一致することを assert（設計テスト #1、受入条件 8）。
 - Agent/generic・resize・resync・exit final snapshot で同一 contract を使うことを共通 fixture で確認。
 - 設計を正本へ畳み込む: [12-terminal-vt-snapshot.md](../../document/proposals/12-terminal-vt-snapshot.md) を README 一覧で「畳み込み済み」に落とし、[04-ipc.md](../../document/04-ipc.md) / [03-tui.md](../../document/03-tui.md) の最終整合を確認。
 

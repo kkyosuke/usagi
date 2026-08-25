@@ -103,10 +103,9 @@ fn tool_lines(families: McpToolFamilies) -> impl Iterator<Item = &'static str> {
 mod tests {
     use super::*;
 
-    /// The session boundary is still byte-identical to legacy. The root boundary
-    /// deliberately diverges: legacy named the issue store there, and that fact now
-    /// lives in the tools fragment, which knows whether the store is enabled.
-    const V1_SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
+    /// Stable session boundary. Tool availability lives in the separate tools
+    /// fragment so this text names no concrete tool.
+    const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
 
     const ALL: McpToolFamilies = McpToolFamilies {
         issue: true,
@@ -120,10 +119,10 @@ mod tests {
     };
 
     #[test]
-    fn the_session_boundary_is_byte_identical_to_legacy_and_names_no_tool() {
+    fn the_session_boundary_matches_its_stable_contract_and_names_no_tool() {
         assert_eq!(
             scope_prompt(PromptScope::Session).as_bytes(),
-            V1_SESSION_SCOPE.as_bytes()
+            SESSION_SCOPE_CONTRACT.as_bytes()
         );
         for scope in [PromptScope::Root, PromptScope::Session] {
             let boundary = scope_prompt(scope);
@@ -194,13 +193,13 @@ mod tests {
             Some((&id, "Review correctness.")),
         );
 
-        assert!(prompt.starts_with(V1_SESSION_SCOPE));
+        assert!(prompt.starts_with(SESSION_SCOPE_CONTRACT));
         assert!(prompt.ends_with("<role id=\"reviewer\">\nReview correctness.\n</role>"));
         assert_eq!(prompt.matches("<tools>").count(), 1);
         assert_eq!(prompt.matches("</tools>").count(), 1);
         assert_eq!(prompt.matches("<role id=").count(), 1);
 
-        let boundary = prompt.find(V1_SESSION_SCOPE).unwrap();
+        let boundary = prompt.find(SESSION_SCOPE_CONTRACT).unwrap();
         let tools = prompt.find("<tools>").unwrap();
         let role = prompt.find("<role id=").unwrap();
         assert!(boundary < tools && tools < role);

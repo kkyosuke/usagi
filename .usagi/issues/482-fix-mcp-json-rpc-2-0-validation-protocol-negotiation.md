@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, mcp, protocol]
 dependson: []
 related: [407]
-parent: 453
 created_at: 2026-07-20T12:06:48.514964+00:00
 updated_at: 2026-07-20T23:22:35.434494+00:00
 ---
@@ -20,8 +19,6 @@ root/v2 の `crates/cli/src/mcp/serve.rs::handle_line_with_client` は top-level
 array/scalar、欠落/異なる `jsonrpc`、不正 id/params、unsupported protocolVersion、initialize 前 `tools/call`、method 欠落 notification を stdio に送る。JSON-RPC/MCP 規定の error/lifecycle ではなく silent ignore、echo、tool execution が起こる。
 
 ## 対象責務と非対象
-
-JSON-RPC 2.0 request/notification validation、MCP initialize negotiation と server lifecycle gating を対象とする。個別 tool routing SSoT は #483、tool 実装内容は #400 系、transport encryption は非対象。
 
 ## 受入条件
 

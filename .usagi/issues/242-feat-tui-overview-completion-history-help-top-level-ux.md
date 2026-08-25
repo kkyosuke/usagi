@@ -6,7 +6,6 @@ priority: medium
 labels: [tui, parity-b]
 dependson: [230]
 related: []
-parent: 227
 created_at: 2026-07-12T21:12:33.836768+00:00
 updated_at: 2026-07-12T22:55:39.529965+00:00
 ---
@@ -29,8 +28,6 @@ Overview registry を基点に Tab completion、history recall、command help/lo
 - `B-OVERVIEW-1`（proposal の Overview 後回し項目）。
 
 ## 依存
-
-- #226、#230。
 
 ## 検証
 

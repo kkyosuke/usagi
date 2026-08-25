@@ -40,5 +40,3 @@ Workspace scope の Overview から、daemon を唯一の mutation owner とし�
 - 実装済み仕様 document を更新する。
 
 ## 依存・境界
-
-#257 の Home create と Closeup remove の typed effect を正本として再利用する。#259 は入力補完だけを先に扱い、本 issue の実行 semantics は持たない。
