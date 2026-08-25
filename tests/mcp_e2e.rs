@@ -28,10 +28,10 @@ use usagi_core::usecase::client::{
 };
 
 #[test]
-fn production_tools_list_fixes_the_49_tool_schema_contract() {
+fn production_tools_list_fixes_the_48_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 49);
+    assert_eq!(tools.len(), 48);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -52,7 +52,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 38);
+    assert_eq!(names.len(), 37);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
