@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, Theme, format_env_bindings,
+    DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
+    format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -56,6 +57,7 @@ pub enum Field {
     PrAutoOpen,
     Environment,
     DefaultModel,
+    TeamTemplate,
     Issue,
     Memory,
     Save,
@@ -83,7 +85,7 @@ impl ScopeSettings {
 
 /// Editable Config screen state. Global Config edits application preferences
 /// and workspace defaults; the Overview modal edits only the current
-/// workspace's Agent, Issue, and Memory choices.
+/// workspace's Agent, Team, Issue, and Memory choices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     scope: SettingsScope,
@@ -176,7 +178,8 @@ impl Config {
                 Field::Theme => Field::ModalSelectionMode,
                 Field::ModalSelectionMode => Field::Environment,
                 Field::Environment => Field::DefaultModel,
-                Field::DefaultModel => Field::Issue,
+                Field::DefaultModel => Field::TeamTemplate,
+                Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::PrAutoOpen,
                 Field::PrAutoOpen => Field::Save,
@@ -184,7 +187,8 @@ impl Config {
             },
             SettingsScope::Workspace => match self.field {
                 Field::DefaultModel => Field::Environment,
-                Field::Environment => Field::Issue,
+                Field::Environment => Field::TeamTemplate,
+                Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
                 Field::Save | Field::Theme | Field::ModalSelectionMode | Field::PrAutoOpen => {
@@ -194,7 +198,7 @@ impl Config {
         };
         if self.field == Field::DefaultModel && self.available_models.is_empty() {
             self.field = match self.scope {
-                SettingsScope::Global => Field::Issue,
+                SettingsScope::Global => Field::TeamTemplate,
                 SettingsScope::Workspace => Field::Environment,
             };
         }
@@ -209,14 +213,16 @@ impl Config {
                 Field::ModalSelectionMode => Field::Theme,
                 Field::Environment => Field::ModalSelectionMode,
                 Field::DefaultModel => Field::Environment,
-                Field::Issue => Field::DefaultModel,
+                Field::Issue => Field::TeamTemplate,
+                Field::TeamTemplate => Field::DefaultModel,
                 Field::Memory => Field::Issue,
                 Field::PrAutoOpen => Field::Memory,
                 Field::Save => Field::PrAutoOpen,
             },
             SettingsScope::Workspace => match self.field {
                 Field::Environment => Field::DefaultModel,
-                Field::Issue => Field::Environment,
+                Field::Issue => Field::TeamTemplate,
+                Field::TeamTemplate => Field::Environment,
                 Field::Memory => Field::Issue,
                 Field::Save => Field::Memory,
                 Field::DefaultModel
@@ -296,6 +302,13 @@ impl Config {
         self.notice = None;
     }
 
+    /// Select the adjacent built-in team structure.
+    pub fn cycle_team_template(&mut self, forward: bool) {
+        let template = &mut self.current_mut().draft.team_template;
+        *template = template.cycle(forward);
+        self.notice = None;
+    }
+
     /// Toggle availability of the issue MCP tool family.
     pub fn cycle_issue_enabled(&mut self) {
         let enabled = &mut self.current_mut().draft.issue_enabled;
@@ -317,6 +330,7 @@ impl Config {
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
+            Field::TeamTemplate => self.cycle_team_template(forward),
             Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
             Field::Environment | Field::Save => return false,
@@ -838,6 +852,12 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
             )
         },
         select::render(
+            "Team",
+            team_template_name(config.settings().team_template),
+            config.field() == Field::TeamTemplate,
+            config.settings().team_template != config.current().saved.team_template,
+        ),
+        select::render(
             "Issue",
             enabled_name(config.settings().issue_enabled),
             config.field() == Field::Issue,
@@ -850,6 +870,15 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
             config.settings().memory_enabled != config.current().saved.memory_enabled,
         ),
     ]
+}
+
+fn team_template_name(template: TeamTemplate) -> &'static str {
+    match template {
+        TeamTemplate::None => "none",
+        TeamTemplate::Hierarchical => "hierarchical",
+        TeamTemplate::Flat => "flat",
+        TeamTemplate::Pipeline => "pipeline",
+    }
 }
 
 fn section_heading(label: &str) -> String {
@@ -907,7 +936,7 @@ mod tests {
     };
     use std::io;
     use usagi_core::domain::settings::{
-        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, Theme,
+        DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
     };
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
@@ -1341,7 +1370,7 @@ mod tests {
             .unwrap();
         assert_eq!(column_of(&dirty, "●"), changed_column);
 
-        for _ in 0..7 {
+        for _ in 0..8 {
             config.next_field();
         }
         let save_frame = render(24, 80, &config)
@@ -1398,7 +1427,11 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Issue);
         config.previous_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        config.previous_field();
         assert_eq!(config.field(), Field::Environment);
+        config.next_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
         config.next_field();
         assert_eq!(config.field(), Field::Issue);
         config.next_field();
@@ -1493,7 +1526,7 @@ mod tests {
     fn pr_auto_open_cycles_all_safe_modes_from_global_config() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        for _ in 0..6 {
+        for _ in 0..7 {
             config.next_field();
         }
         assert_eq!(config.field(), Field::PrAutoOpen);
@@ -1526,9 +1559,11 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(!config.can_save());
 
+        config.previous_field();
         config.previous_field();
         config.previous_field();
         config.previous_field();
@@ -1542,6 +1577,7 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1572,6 +1608,8 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Issue);
         config.previous_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        config.previous_field();
         assert_eq!(config.field(), Field::DefaultModel);
         config.previous_field();
         assert_eq!(config.field(), Field::Environment);
@@ -1579,6 +1617,7 @@ mod tests {
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1611,6 +1650,7 @@ mod tests {
         assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1675,17 +1715,20 @@ mod tests {
         config.next_field();
         config.next_field();
         config.next_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        config.next_field();
         assert_eq!(config.field(), Field::Issue);
         config.previous_field();
-        assert_eq!(config.field(), Field::Environment);
+        assert_eq!(config.field(), Field::TeamTemplate);
         config.previous_field();
-        assert_eq!(config.field(), Field::ModalSelectionMode);
+        assert_eq!(config.field(), Field::Environment);
     }
 
     #[test]
     fn issue_and_memory_availability_toggle_independently() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1711,10 +1754,38 @@ mod tests {
         assert!(!port.global.memory_enabled);
     }
 
+    #[test]
+    fn team_template_cycles_renders_and_saves_for_the_workspace() {
+        let mut port = FakeSettingsPort::default();
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::TeamTemplate);
+        assert_eq!(config.settings().team_template, TeamTemplate::None);
+
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.settings().team_template, TeamTemplate::Hierarchical);
+        assert!(render(24, 80, &config).join("\n").contains("hierarchical"));
+        config.cycle_team_template(false);
+        assert_eq!(config.settings().team_template, TeamTemplate::None);
+        config.cycle_team_template(true);
+        config.cycle_team_template(true);
+        assert_eq!(config.settings().team_template, TeamTemplate::Flat);
+        config.next_field();
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert_eq!(port.workspace.team_template, TeamTemplate::Flat);
+    }
+
     /// Drive the Save row to the dirty state used by the phase tests.
     fn dirty_on_save_row(port: &mut FakeSettingsPort) -> Config {
         let mut config = Config::load(port);
         config.cycle_theme(true);
+        config.next_field();
         config.next_field();
         config.next_field();
         config.next_field();
@@ -1761,6 +1832,7 @@ mod tests {
         let mut config = {
             let mut base = Config::load(&mut port);
             base.cycle_theme(true);
+            base.next_field();
             base.next_field();
             base.next_field();
             base.next_field();

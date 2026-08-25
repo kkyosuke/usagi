@@ -7917,6 +7917,7 @@ mod tests {
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
             local_llm: usagi_core::domain::settings::LocalLlm {
                 enabled: true,
                 model: "qwen2.5-coder:3b".to_owned(),

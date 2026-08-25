@@ -122,6 +122,7 @@ mod tests {
             default_model: Some(DefaultModel::Claude),
             issue_enabled: Some(false),
             memory_enabled: Some(true),
+            team_template: Some(crate::domain::settings::TeamTemplate::Flat),
             env: [("PROJECT".to_owned(), "usagi".to_owned())]
                 .into_iter()
                 .collect(),

@@ -1,6 +1,6 @@
 //! Versioned global/workspace role-catalog reader.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,9 +10,12 @@ use serde::Deserialize;
 use super::persistence::json_file::write_text_atomic;
 
 use crate::domain::role::{
-    EffectiveRoleCatalog, MAX_ROLE_INSTRUCTIONS_BYTES, RoleDefaults, RoleDefinition, RoleId,
-    RoleScope,
+    DelegationPolicy, EffectiveRoleCatalog, MAX_ROLE_INSTRUCTIONS_BYTES, RoleDefaults,
+    RoleDefinition, RoleId, RoleScope,
 };
+use crate::domain::settings::TeamTemplate;
+use crate::infrastructure::store::settings::WorkspaceSettingsStore;
+use crate::infrastructure::store::workspace::Storage;
 
 const CATALOG_VERSION: u16 = 1;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
@@ -110,14 +113,18 @@ pub fn load_effective(
     let workspace_path = workspace_root.join(".usagi").join("roles.toml");
     let global = read_optional(&global_path)?;
     let workspace = read_optional(&workspace_path)?;
-    let configured = global.is_some() || workspace.is_some();
-    let mut effective = EffectiveRoleCatalog {
-        configured,
-        ..EffectiveRoleCatalog::default()
-    };
+    let template = load_team_template(data_home, workspace_root);
+    let mut effective = builtin_catalog(template);
+    effective.configured =
+        template != TeamTemplate::None || global.is_some() || workspace.is_some();
     if let Some(global) = global {
-        effective.defaults = global.defaults;
-        effective.roles = global.roles;
+        if global.defaults.root.is_some() {
+            effective.defaults.root = global.defaults.root;
+        }
+        if global.defaults.session.is_some() {
+            effective.defaults.session = global.defaults.session;
+        }
+        effective.roles.extend(global.roles);
     }
     if let Some(workspace) = workspace {
         if workspace.defaults.root.is_some() {
@@ -133,6 +140,169 @@ pub fn load_effective(
     validate_default(&effective, RoleScope::Root)?;
     validate_default(&effective, RoleScope::Session)?;
     Ok(effective)
+}
+
+fn load_team_template(data_home: &Path, workspace_root: &Path) -> TeamTemplate {
+    let Ok(global) = Storage::new(data_home).load_settings() else {
+        return TeamTemplate::None;
+    };
+    let local = WorkspaceSettingsStore::new(workspace_root)
+        .load()
+        .unwrap_or_default();
+    global.with_local(&local).team_template
+}
+
+/// Construct one trusted built-in team catalog.
+#[must_use]
+pub fn builtin_catalog(template: TeamTemplate) -> EffectiveRoleCatalog {
+    match template {
+        TeamTemplate::None => EffectiveRoleCatalog::default(),
+        TeamTemplate::Hierarchical => hierarchical_catalog(),
+        TeamTemplate::Flat => flat_catalog(),
+        TeamTemplate::Pipeline => pipeline_catalog(),
+    }
+}
+
+fn hierarchical_catalog() -> EffectiveRoleCatalog {
+    catalog(
+        defaults("director", "manager"),
+        [
+            built_in_role(
+                "director",
+                "全体方針と結果統合",
+                RoleScope::Root,
+                "要求を分解し、小さいタスクはWorkerへ、大きいタスクはManagerへ委譲して結果を統合する。",
+                &["manager", "worker"],
+                2,
+            ),
+            built_in_role(
+                "manager",
+                "タスクの分解と統合",
+                RoleScope::Session,
+                "担当範囲をWorkerへ委譲し、各結果を検証して直近のcallerへ報告する。",
+                &["worker"],
+                2,
+            ),
+            built_in_role(
+                "worker",
+                "実行と検証",
+                RoleScope::Session,
+                "依頼された作業を実行し、結果と検証内容をcallerへ報告する。",
+                &[],
+                2,
+            ),
+        ],
+    )
+}
+
+fn flat_catalog() -> EffectiveRoleCatalog {
+    catalog(
+        defaults("director", "worker"),
+        [
+            built_in_role(
+                "director",
+                "全体調整と結果統合",
+                RoleScope::Root,
+                "独立した作業をWorkerへ直接委譲し、結果を統合する。",
+                &["worker"],
+                1,
+            ),
+            built_in_role(
+                "worker",
+                "実行と検証",
+                RoleScope::Session,
+                "依頼された作業を自律的に実行し、結果と検証内容をDirectorへ報告する。",
+                &[],
+                1,
+            ),
+        ],
+    )
+}
+
+fn pipeline_catalog() -> EffectiveRoleCatalog {
+    catalog(
+        defaults("director", "planner"),
+        [
+            built_in_role(
+                "director",
+                "パイプライン全体の統合",
+                RoleScope::Root,
+                "要求をPlannerへ渡し、完了した工程の結果を統合する。",
+                &["planner"],
+                3,
+            ),
+            built_in_role(
+                "planner",
+                "計画と受入条件の定義",
+                RoleScope::Session,
+                "要求を実行可能な計画と受入条件にしてImplementerへ委譲し、工程結果を確認してcallerへ報告する。",
+                &["implementer"],
+                3,
+            ),
+            built_in_role(
+                "implementer",
+                "計画の実装",
+                RoleScope::Session,
+                "計画を実装して成果物と受入条件をTesterへ委譲し、検証結果を反映してcallerへ報告する。",
+                &["tester"],
+                3,
+            ),
+            built_in_role(
+                "tester",
+                "受入条件の検証",
+                RoleScope::Session,
+                "成果物を受入条件に照らして検証し、結果をcallerへ報告する。",
+                &[],
+                3,
+            ),
+        ],
+    )
+}
+
+fn catalog<const N: usize>(
+    defaults: RoleDefaults,
+    roles: [(RoleId, RoleDefinition); N],
+) -> EffectiveRoleCatalog {
+    EffectiveRoleCatalog {
+        configured: true,
+        defaults,
+        roles: BTreeMap::from(roles),
+    }
+}
+
+fn built_in_role(
+    id: &str,
+    summary: &str,
+    scope: RoleScope,
+    instructions: &str,
+    children: &[&str],
+    max_depth: usize,
+) -> (RoleId, RoleDefinition) {
+    (
+        role_id(id),
+        RoleDefinition {
+            summary: summary.to_owned(),
+            scopes: BTreeSet::from([scope]),
+            instructions: instructions.to_owned(),
+            delegation: Some(DelegationPolicy {
+                enabled: !children.is_empty(),
+                child_roles: children.iter().map(|child| role_id(child)).collect(),
+                max_depth,
+                max_concurrency: 4,
+            }),
+        },
+    )
+}
+
+fn role_id(value: &str) -> RoleId {
+    RoleId::new(value).expect("built-in role IDs are valid")
+}
+
+fn defaults(root: &str, session: &str) -> RoleDefaults {
+    RoleDefaults {
+        root: Some(role_id(root)),
+        session: Some(role_id(session)),
+    }
 }
 
 fn read_optional(path: &Path) -> Result<Option<RoleCatalogFile>, RoleCatalogError> {
@@ -289,13 +459,16 @@ pub fn write_layer_source(
     } else {
         read_optional(&workspace_path)?
     };
-    let mut effective = EffectiveRoleCatalog {
-        configured: true,
-        ..EffectiveRoleCatalog::default()
-    };
+    let mut effective = builtin_catalog(load_team_template(data_home, workspace_root));
+    effective.configured = true;
     if let Some(global) = global {
-        effective.defaults = global.defaults;
-        effective.roles = global.roles;
+        if global.defaults.root.is_some() {
+            effective.defaults.root = global.defaults.root;
+        }
+        if global.defaults.session.is_some() {
+            effective.defaults.session = global.defaults.session;
+        }
+        effective.roles.extend(global.roles);
     }
     if let Some(workspace) = workspace {
         if workspace.defaults.root.is_some() {
@@ -485,6 +658,127 @@ mod tests {
             load_effective(&root.path().join("home"), &root.path().join("workspace")).unwrap();
         assert!(!catalog.configured);
         assert!(catalog.roles.is_empty());
+    }
+
+    #[test]
+    fn built_in_templates_define_distinct_defaults_and_enforced_routes() {
+        let none = builtin_catalog(TeamTemplate::None);
+        assert!(none.roles.is_empty());
+
+        let hierarchical = builtin_catalog(TeamTemplate::Hierarchical);
+        assert_eq!(hierarchical.defaults.session.unwrap().as_str(), "manager");
+        assert_eq!(hierarchical.roles.len(), 3);
+        let director = &hierarchical.roles[&role_id("director")];
+        assert_eq!(
+            director
+                .delegation
+                .as_ref()
+                .unwrap()
+                .child_roles
+                .iter()
+                .map(RoleId::as_str)
+                .collect::<Vec<_>>(),
+            ["manager", "worker"]
+        );
+
+        let flat = builtin_catalog(TeamTemplate::Flat);
+        assert_eq!(flat.defaults.session.unwrap().as_str(), "worker");
+        assert_eq!(flat.roles.len(), 2);
+        assert_eq!(
+            flat.roles[&role_id("director")]
+                .delegation
+                .as_ref()
+                .unwrap()
+                .max_depth,
+            1
+        );
+
+        let pipeline = builtin_catalog(TeamTemplate::Pipeline);
+        assert_eq!(pipeline.defaults.session.unwrap().as_str(), "planner");
+        assert_eq!(pipeline.roles.len(), 4);
+        assert!(
+            pipeline.roles[&role_id("implementer")]
+                .delegation
+                .as_ref()
+                .unwrap()
+                .child_roles
+                .contains(&role_id("tester"))
+        );
+        assert!(
+            !pipeline.roles[&role_id("tester")]
+                .delegation
+                .as_ref()
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn config_selects_a_template_and_workspace_settings_override_global() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        Storage::new(&home)
+            .save_settings(&crate::domain::settings::Settings {
+                team_template: TeamTemplate::Hierarchical,
+                ..crate::domain::settings::Settings::default()
+            })
+            .unwrap();
+        write(
+            &home.join("roles.toml"),
+            "version = 1\n[roles.auditor]\nsummary = \"Custom audit\"\nscopes = [\"session\"]\ninstructions = \"audit\"\n",
+        );
+
+        let hierarchical = load_effective(&home, &workspace).unwrap();
+        assert!(hierarchical.configured);
+        assert_eq!(hierarchical.defaults.session.unwrap().as_str(), "manager");
+        assert!(hierarchical.roles.contains_key(&role_id("manager")));
+        assert!(hierarchical.roles.contains_key(&role_id("auditor")));
+
+        WorkspaceSettingsStore::new(&workspace)
+            .save(&crate::domain::settings::LocalSettings {
+                team_template: Some(TeamTemplate::Flat),
+                ..crate::domain::settings::LocalSettings::default()
+            })
+            .unwrap();
+        write(
+            &workspace.join(".usagi/roles.toml"),
+            "version = 1\n[roles.worker]\nsummary = \"Custom worker\"\nscopes = [\"session\"]\ninstructions = \"custom\"\n",
+        );
+        let flat = load_effective(&home, &workspace).unwrap();
+        assert_eq!(flat.defaults.session.unwrap().as_str(), "worker");
+        assert_eq!(flat.roles[&role_id("worker")].summary, "Custom worker");
+        assert!(!flat.roles.contains_key(&role_id("manager")));
+    }
+
+    #[test]
+    fn damaged_settings_fail_closed_without_granting_template_roles() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("settings.json"), "{ broken").unwrap();
+        assert!(load_effective(&home, &workspace).unwrap().roles.is_empty());
+
+        Storage::new(&home)
+            .save_settings(&crate::domain::settings::Settings {
+                team_template: TeamTemplate::Pipeline,
+                ..crate::domain::settings::Settings::default()
+            })
+            .unwrap();
+        let local = WorkspaceSettingsStore::new(&workspace);
+        fs::create_dir_all(local.path().parent().unwrap()).unwrap();
+        fs::write(local.path(), "{ broken").unwrap();
+        assert_eq!(
+            load_effective(&home, &workspace)
+                .unwrap()
+                .defaults
+                .session
+                .unwrap()
+                .as_str(),
+            "planner"
+        );
     }
 
     #[test]

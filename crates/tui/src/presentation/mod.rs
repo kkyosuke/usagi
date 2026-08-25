@@ -6161,6 +6161,12 @@ fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
+                // Team selection changes the effective role catalog immediately
+                // for the next session creation or Agent launch.
+                let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
+                let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
+                    role_catalog,
+                )));
                 continue;
             }
             // Both stops return from here, which is what performs the teardown:
@@ -20545,6 +20551,7 @@ mod tests {
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         // Enter on the dirty Save row begins the save flow (loading).
         assert!(matches!(
             step_config(&mut config, Key::Enter, &mut settings),
@@ -20603,6 +20610,7 @@ mod tests {
         keys.extend("config".chars().map(Key::Char));
         keys.extend([
             Key::Enter,
+            Key::Down,
             Key::Down,
             Key::Down,
             Key::Right,
@@ -20737,9 +20745,10 @@ mod tests {
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
-    // Save (Theme → Modal mode → Environment → Agent model → Issue → Memory → PR → Save).
-    const CONFIG_SAVE_KEYS: [Key; 9] = [
+    // Save (Theme → Modal mode → Environment → Agent model → Team → Issue → Memory → PR → Save).
+    const CONFIG_SAVE_KEYS: [Key; 10] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -20750,10 +20759,11 @@ mod tests {
         Key::Enter,
     ];
 
-    // Workspace Config starts on Agent and contains Agent → env → Issue →
-    // Memory → Save.
-    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 6] = [
+    // Workspace Config starts on Agent and contains Agent → env → Team →
+    // Issue → Memory → Save.
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 7] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
