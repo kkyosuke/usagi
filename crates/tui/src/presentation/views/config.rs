@@ -23,7 +23,10 @@ const ENVIRONMENT_INNER_WIDTH: usize = 64;
 const ENVIRONMENT_MAX_ROWS: usize = 10;
 const ENVIRONMENT_TEXTAREA_WIDTH: usize = ENVIRONMENT_INNER_WIDTH - 4;
 const TEAM_PICKER_INNER_WIDTH: usize = 76;
+const TEAM_PICKER_FOOTER: &str = "←→: card   ↑↓: template/none   Enter: apply   Esc: cancel";
+const TEAM_PICKER_COMPACT_FOOTER: &str = "←→ card  ↑↓ row  Enter apply  Esc cancel";
 const TEAM_CARD_INNER_WIDTH: usize = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TeamCard {
     Hierarchical,
@@ -762,9 +765,12 @@ fn render_team_picker_over(
         inner_width,
     ));
     lines.push(String::new());
-    lines.push(modal::footer(
-        "←→: card   ↑↓: template/none   Enter: apply   Esc: cancel",
-    ));
+    let footer = if inner_width >= TEAM_PICKER_INNER_WIDTH {
+        TEAM_PICKER_FOOTER
+    } else {
+        TEAM_PICKER_COMPACT_FOOTER
+    };
+    lines.push(modal::footer(footer));
     modal::render_over(height, width, base, "Select a team", inner_width, &lines)
 }
 
@@ -1141,7 +1147,8 @@ fn enabled_name(enabled: bool) -> &'static str {
 mod tests {
     use super::{
         AvailableAgentModels, Config, ENVIRONMENT_MAX_ROWS, ENVIRONMENT_TEXTAREA_WIDTH, Field,
-        environment_textarea, render, render_over, team_template_name,
+        TEAM_PICKER_COMPACT_FOOTER, TEAM_PICKER_FOOTER, environment_textarea, render, render_over,
+        team_template_name,
     };
     use crate::presentation::widgets::{display_width, modal, strip_ansi};
     use crate::usecase::application::environment_source::{
@@ -1990,6 +1997,7 @@ mod tests {
         assert!(cards.contains("Pipeline"));
         assert!(cards.contains("♛ Director"));
         assert!(cards.contains("› [ Use no template ]"));
+        assert!(cards.contains(TEAM_PICKER_FOOTER));
         let base = vec!["home background".to_owned(); 24];
         let overlay = strip_ansi(&render_over(24, 80, &base, &config).join("\n"));
         assert!(overlay.contains("Select a team"));
@@ -2031,6 +2039,8 @@ mod tests {
         let narrow = strip_ansi(&render(18, 48, &config).join("\n"));
         assert!(narrow.contains("hierarchical"));
         assert!(narrow.contains("Director → Manager"));
+        assert!(narrow.contains(TEAM_PICKER_COMPACT_FOOTER));
+        assert!(!narrow.contains(TEAM_PICKER_FOOTER));
         config.cancel_team_picker();
 
         assert_eq!(team_template_name(TeamTemplate::Flat), "flat");
