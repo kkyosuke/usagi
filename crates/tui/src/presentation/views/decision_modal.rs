@@ -227,7 +227,8 @@ mod tests {
         );
         assert!(empty.join("\n").contains("(none)"));
 
-        let root = decision(workspace, None);
+        let mut root = decision(workspace, None);
+        root.allow_freeform = false;
         let mut scoped = decision(workspace, Some(session));
         scoped.prompt = (0..CONTENT_CAPACITY)
             .map(|index| format!("context line {index}"))
@@ -246,10 +247,20 @@ mod tests {
             80,
             &[],
             state.decision_overlay().unwrap(),
-            &[root, scoped.clone()],
+            &[root.clone(), scoped.clone()],
         );
         assert!(list.join("\n").contains("workspace root"));
 
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let fixed_options = render_over(
+            24,
+            80,
+            &[],
+            state.decision_overlay().unwrap(),
+            &[root, scoped.clone()],
+        );
+        assert!(!fixed_options.join("\n").contains("freeform:"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         let _ = update(&mut state, AppEvent::Key(AppKey::DecisionNext));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
