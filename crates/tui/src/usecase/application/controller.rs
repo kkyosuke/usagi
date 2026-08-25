@@ -956,6 +956,10 @@ pub struct AppState {
     interaction_count: u64,
     mascot_tick: u64,
     size: Option<(u16, u16)>,
+    /// Whether presentation can currently draw the Garden without hiding Home
+    /// behind an invisible overlay. The renderer injects this layout fact; the
+    /// reducer uses it to admit both automatic and manual opening consistently.
+    garden_available: bool,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1097,6 +1101,7 @@ impl AppState {
             interaction_count: 0,
             mascot_tick: 0,
             size: None,
+            garden_available: true,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1822,6 +1827,8 @@ pub enum AppEvent {
     Key(AppKey),
     /// terminal size の変更。
     Resize { width: u16, height: u16 },
+    /// Presentation-level Garden layout availability for the current terminal.
+    GardenAvailability(bool),
     /// 定期 tick。
     Tick,
     /// backend snapshot / notice。
@@ -2965,6 +2972,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 state.overlay = None;
             }
             state.size = Some((width, height));
+            Vec::new()
+        }
+        AppEvent::GardenAvailability(available) => {
+            state.garden_available = available;
+            if !available && state.overlay == Some(Overlay::Garden) {
+                state.overlay = None;
+            }
             Vec::new()
         }
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
@@ -4493,8 +4507,15 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
-                state.overlay = Some(Overlay::Garden);
-                state.notice = None;
+                if state.garden_available {
+                    state.overlay = Some(Overlay::Garden);
+                    state.notice = None;
+                } else {
+                    state.overlay = None;
+                    state.notice = Some(Notice::new(
+                        "Garden needs a terminal at least 64 columns wide and 14 rows tall",
+                    ));
+                }
             } else {
                 state.notice = Some(Notice::new("garden takes no arguments (usage: garden)"));
             }
@@ -4811,7 +4832,7 @@ fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect
 /// entirely on a terminal too small to draw a garden (`presentation::views::
 /// workspace::garden_fits`).
 fn garden_may_auto_open(state: &AppState) -> bool {
-    state.overlay.is_none() && !state.director_drawer_open
+    state.garden_available && state.overlay.is_none() && !state.director_drawer_open
 }
 
 /// Reduce a click the presentation layer already resolved against the garden's
@@ -8528,6 +8549,36 @@ mod tests {
                 .notice()
                 .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
         );
+    }
+
+    #[test]
+    fn manual_garden_refuses_an_unavailable_layout_without_leaving_an_overlay() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+        state.overlay = Some(Overlay::Overview);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("garden".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| { notice.message.as_str().contains("at least 64 columns") })
+        );
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        assert!(update(&mut state, AppEvent::GardenAvailability(true)).is_empty());
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+        assert_eq!(state.overlay(), None);
     }
 
     /// Just under the threshold nothing happens; reaching it opens the garden.
