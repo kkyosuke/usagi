@@ -10797,6 +10797,21 @@ impl BrokerActivity {
         }
         self.signal.notify_all();
     }
+
+    /// Wait for the next idle poll unless shutdown was already requested.
+    ///
+    /// The predicate is checked while holding the same mutex that [`Self::stop`]
+    /// updates. This closes the stop-before-wait window: a notification may be
+    /// coalesced or arrive before this method locks, but the state transition
+    /// itself cannot be missed.
+    fn wait_for_poll(&self, poll: Duration) -> Option<Duration> {
+        let state = self.state.lock().ok()?;
+        let (state, _) = self
+            .signal
+            .wait_timeout_while(state, poll, |state| !state.stopped)
+            .ok()?;
+        (!state.stopped).then(|| state.last.elapsed())
+    }
 }
 
 /// Watch an idle broker and ask it to retire once nothing needs it.
@@ -10816,18 +10831,9 @@ fn spawn_broker_idle_watch(
     let data_dir = data_dir.to_path_buf();
     std::thread::spawn(move || {
         loop {
-            let Ok(state) = activity.state.lock() else {
+            let Some(idle_for) = activity.wait_for_poll(idle.poll) else {
                 return;
             };
-            let Ok((state, _)) = activity.signal.wait_timeout(state, idle.poll) else {
-                return;
-            };
-            if state.stopped {
-                return;
-            }
-            let idle_for = state.last.elapsed();
-            // The daemon probe is IO, so the lock is released before it runs.
-            drop(state);
             let daemon_live =
                 usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
             if broker_may_retire(idle_for, idle.timeout, daemon_live) {
@@ -17902,11 +17908,41 @@ instructions = "{instructions}"
 
         fixture.server.join().unwrap().unwrap();
         assert!(!fixture.address.socket.exists());
+        let replacement_lock = FileInstanceLock {
+            path: fixture.address.lock.clone(),
+            held: RefCell::new(None),
+        };
+        assert!(
+            replacement_lock.acquire().unwrap(),
+            "a retired broker still held its instance lock"
+        );
         assert!(
             std::os::unix::net::UnixStream::connect(&fixture.address.socket).is_err(),
             "a retired broker still answered"
         );
         fixture.workspace_dir.close().unwrap();
+    }
+
+    /// A condition-variable notification is not durable, so this regression
+    /// repeatedly puts `stop` before the waiter. The state predicate must make
+    /// every wait return immediately even though no later notification exists.
+    #[test]
+    fn broker_stop_before_wait_cannot_lose_shutdown() {
+        for _ in 0..128 {
+            let activity = Arc::new(BrokerActivity::started());
+            activity.stop();
+            let waiter = Arc::clone(&activity);
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let _ = finished_tx.send(waiter.wait_for_poll(Duration::from_secs(3600)));
+            });
+
+            assert_eq!(
+                finished_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                None
+            );
+            thread.join().unwrap();
+        }
     }
 
     /// With no daemon to outlive and no request to serve, the broker is holding
