@@ -5,9 +5,9 @@ status: done
 priority: high
 labels: [tui, agent, terminal, ipc, pty, integration, regression]
 dependson: []
-related: [284, 923, 934, 938, 941, 942, 943]
+related: [284]
 created_at: 2026-07-13T12:25:16.562041+00:00
-updated_at: 2026-07-13T23:04:04.102544+00:00
+updated_at: 2026-08-25T22:25:22.416639+00:00
 ---
 
 ## 背景・根拠
