@@ -710,6 +710,17 @@ impl VtScreen {
 
     fn print(&mut self, ch: char) {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        // A pane can legitimately shrink to one column. A glyph wider than
+        // the complete grid cannot be represented by a leading cell plus its
+        // continuation cells, so keep the grid/cursor invariant with a
+        // single-cell replacement glyph. In particular, Codex's update notice
+        // starts with the double-width `✨`; indexing its second cell used to
+        // panic as soon as that notice appeared in a one-column Agent pane.
+        let (ch, width) = if width > self.cols {
+            ('\u{fffd}', 1)
+        } else {
+            (ch, width)
+        };
         if self.cursor_col >= self.cols || self.cursor_col + width > self.cols {
             self.cursor_col = 0;
             self.line_feed();
@@ -1526,6 +1537,18 @@ mod tests {
         assert_eq!(grid[0][1].ch(), 'あ');
         assert!(!grid[0][1].continuation());
         assert!(grid[0][2].continuation());
+    }
+
+    #[test]
+    fn codex_update_notice_does_not_overflow_a_one_column_screen() {
+        let mut screen = VtScreen::new(1, 1);
+
+        screen.advance("✨ Update available!".as_bytes());
+
+        let retained = rows_with_scrollback(&screen);
+        assert_eq!(retained.first().map(String::as_str), Some("�"));
+        assert_eq!(retained.last().map(String::as_str), Some("!"));
+        assert_eq!(screen.cursor(), (0, 1));
     }
 
     #[test]
