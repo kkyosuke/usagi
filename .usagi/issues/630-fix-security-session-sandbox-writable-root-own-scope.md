@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, security, daemon, agent, claude, sandbox, session, filesystem]
 dependson: []
-related: [530, 537, 602, 629, 631, 632]
+related: [537, 602, 629, 631, 632]
 created_at: 2026-08-02T23:13:59.615604+00:00
 updated_at: 2026-08-03T00:09:45.239755+00:00
 ---
@@ -46,5 +46,3 @@ own session scope外を狙うfilesystem effectはsandbox/typed broker境界で�
 - absolute path、`..`、symlink alias、hardlinkを含むmatrixを固定する。
 
 ## 既存 issue との差分
-
-#530 / #537 は broad roots を導入したissue、#602 は保存値の再検証による特定teardown防御である。本issueはsession間・root・daemon authorityのwritable capabilityそのものを分離する。

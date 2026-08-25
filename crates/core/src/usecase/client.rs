@@ -478,12 +478,6 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
-    /// Explicitly starts a new Agent runtime for retained provider-native
-    /// conversation metadata. Startup/reconnect paths never issue this action.
-    ResumeAgent,
-    /// Explicitly validate and adopt legacy `state.json` sessions. This action
-    /// is never part of daemon startup or a normal session refresh.
-    RecoverLegacy,
     List,
     Status,
     Overview,
@@ -1656,13 +1650,10 @@ const fn session_action_is_read_only(action: SessionAction) -> bool {
 
 const fn session_action_is_durable_operation(action: SessionAction) -> bool {
     // The IPC contract documents durable, `OperationId`-keyed replay for these
-    // lifecycle mutations (create/remove/resume across daemon restarts). Other
+    // lifecycle mutations (create/remove across daemon restarts). Other
     // mutating actions stay fail-closed until their server-backed durable
     // contract is proven.
-    matches!(
-        action,
-        SessionAction::Create | SessionAction::Remove | SessionAction::ResumeAgent
-    )
+    matches!(action, SessionAction::Create | SessionAction::Remove)
 }
 
 const fn supervisor_action_is_read_only(action: SupervisorToolAction) -> bool {

@@ -6453,7 +6453,7 @@ fn dispatch_session(
         &operation_id,
         &payload,
     );
-    session_response_envelope(action, &payload, result, request_id, hello)
+    session_response_envelope(action, result, request_id, hello)
 }
 
 fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
@@ -6507,7 +6507,6 @@ fn dispatch_mcp_child_claim(
 
 fn session_response_envelope(
     action: usagi_core::usecase::client::SessionAction,
-    payload: &serde_json::Value,
     result: Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -6516,13 +6515,7 @@ fn session_response_envelope(
     use usagi_core::usecase::client::SessionAction;
     match result {
         Ok(reply) => {
-            let recovery_apply =
-                payload.get("apply").and_then(serde_json::Value::as_bool) == Some(true);
-            let outcome = if matches!(
-                action,
-                SessionAction::Create | SessionAction::Remove | SessionAction::ResumeAgent
-            ) || (action == SessionAction::RecoverLegacy && recovery_apply)
-            {
+            let outcome = if matches!(action, SessionAction::Create | SessionAction::Remove) {
                 ResponseOutcome::Accepted {
                     operation_id: usagi_core::infrastructure::ipc::OperationId(
                         reply.operation_id.clone(),
@@ -6541,10 +6534,7 @@ fn session_response_envelope(
             if let Some(kind) = match action {
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
-                SessionAction::ResumeAgent => Some("agent.resumed"),
-                SessionAction::RecoverLegacy if recovery_apply => Some("session.legacy_recovered"),
-                SessionAction::RecoverLegacy
-                | SessionAction::List
+                SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
                 | SessionAction::Setup
@@ -6715,59 +6705,6 @@ fn dispatch_session_action(
     };
 
     match action {
-        SessionAction::ResumeAgent => {
-            let exact_target = payload
-                .get("target")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|_| SessionRuntimeError::InvalidRequest)?;
-            let (name, id) = if let Some(id) = exact_target
-                .as_ref()
-                .and_then(|target: &usagi_core::domain::agent::AgentResumeTarget| target.session_id)
-            {
-                (None, id)
-            } else {
-                let supplied_id = payload
-                    .get("session_id")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|_| SessionRuntimeError::InvalidRequest)?;
-                if let Some(id) = supplied_id {
-                    (None, id)
-                } else {
-                    let name = string("name")?;
-                    (Some(name), named_session(name)?)
-                }
-            };
-            let target = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .session_scope_by_id(id)?;
-            let resolver = bound.scope_resolver();
-            let admission = resume_agent_after_preflight(
-                agent,
-                operation_id,
-                exact_target.as_ref(),
-                target.workspace_id,
-                Some(id),
-                &resolver,
-            )
-            .map_err(|error| SessionRuntimeError::AgentFailure {
-                code: error.code,
-                message: error.message,
-            })?;
-            reply(serde_json::json!({
-                "name": name,
-                "session_id": id,
-                "terminal": admission.terminal,
-                "continuation": admission.continuation,
-                "resume_relation": admission.resume_relation,
-                "completed": admission.completed,
-            }))
-        }
         SessionAction::List | SessionAction::Status | SessionAction::Overview => {
             let mut status = bound
                 .sessions()
@@ -7147,7 +7084,7 @@ fn dispatch_session_action(
                 merged_head_oid,
             )
         }
-        _ => bound
+        SessionAction::Setup => bound
             .sessions()
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?
@@ -7655,43 +7592,6 @@ fn dispatch_agent_after_preflight(
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
         .dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
-}
-
-fn resume_agent_after_preflight(
-    agent: &SharedAgentRuntime,
-    operation_id: &str,
-    target: Option<&usagi_core::domain::agent::AgentResumeTarget>,
-    workspace: WorkspaceId,
-    session: Option<SessionId>,
-    scope: &dyn SessionScopeResolver,
-) -> Result<
-    usagi_daemon::usecase::agent_ipc::AgentAdmission,
-    usagi_core::infrastructure::ipc::ProtocolError,
-> {
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-    let preflight = agent
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|owner| match target {
-            Some(target) => owner.prepare_resume_readiness(operation_id, target),
-            None => owner.prepare_legacy_resume_readiness(operation_id, workspace, session),
-        })?;
-    run_agent_readiness(agent, preflight.as_ref())?;
-    agent
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|mut owner| match target {
-            Some(target) => {
-                owner.resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref())
-            }
-            None => owner.resume_legacy_after_readiness(
-                operation_id,
-                workspace,
-                session,
-                scope,
-                preflight.as_ref(),
-            ),
-        })
 }
 
 fn dispatch_codex_session_capture(
@@ -16528,7 +16428,6 @@ mod tests {
         for action in [SessionAction::Create, SessionAction::Remove] {
             let response = session_response_envelope(
                 action,
-                &serde_json::json!({"name":"one"}),
                 Err(SessionRuntimeError::DurableFailure(
                     "durable session failure".into(),
                 )),
@@ -19104,7 +19003,6 @@ instructions = "{instructions}"
         let envelope_for = |reconcile: DelegationReconcile, code: ErrorCode| {
             session_response_envelope(
                 usagi_core::usecase::client::SessionAction::DelegateBrief,
-                &serde_json::json!({}),
                 Err(SessionRuntimeError::Delegation(DelegationFailure {
                     code,
                     message: "dispatch runtime executable is unavailable".into(),

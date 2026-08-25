@@ -757,8 +757,8 @@ impl VtScreen {
     fn scroll_region_up(&mut self, count: usize) {
         for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
             let row = self.grid.remove(self.scroll_top);
-            // Mirror v1's vt100 policy: a region anchored at row zero is
-            // transcript history; a lower region is a transient full-screen UI.
+            // A region anchored at row zero is transcript history; a lower
+            // region is a transient full-screen UI.
             if self.primary_screen.is_none()
                 && self.scroll_top == 0
                 && append_scrollback(&mut self.scrollback, row, SCROLLBACK_MAX)

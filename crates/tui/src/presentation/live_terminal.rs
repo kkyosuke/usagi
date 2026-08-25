@@ -305,7 +305,7 @@ impl LiveTerminalControls {
     /// browser, recording presentation-safe feedback on success or failure.
     ///
     /// The click cell is hit-tested against the snapshotted `cells` with the pure
-    /// #387 detector ([`url_at`]) and re-validated ([`validate_url`]) immediately
+    /// detector ([`url_at`]) and re-validation ([`validate_url`]) immediately
     /// before spawning, so an ANSI/control sequence can never reach a browser
     /// argument. A click that lands off any link is a silent no-op (`false`): it
     /// opens nothing and leaves feedback untouched, so it does not disturb the

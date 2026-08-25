@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [daemon, terminal, agent, ipc, restore]
 dependson: []
-related: [195, 254, 350, 365, 367]
+related: [254, 350, 365, 367]
 parent: 390
 created_at: 2026-07-20T01:42:10.613495+00:00
 updated_at: 2026-07-20T03:32:02.132279+00:00

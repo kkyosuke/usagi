@@ -18,13 +18,11 @@ readme=${1:-README.md}
 # non-empty lines that an emptied or fixture-stubbed README cannot pass.
 min_content_lines=20
 
-# Links the README must keep so readers can reach the v2 SSoT and the retired v1.
+# Links the README must keep so readers can reach the project SSoT.
 required_links=(
   document/01-overview.md
   document/02-architecture.md
   document/06-conventions.md
-  v1/README.md
-  v1/document/README.md
 )
 
 if [ ! -f "$readme" ]; then

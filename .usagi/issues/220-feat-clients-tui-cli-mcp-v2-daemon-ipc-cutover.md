@@ -6,7 +6,6 @@ priority: high
 labels: [tui, cli, ipc]
 dependson: [209, 219]
 related: []
-parent: 213
 created_at: 2026-07-12T11:40:00.006399+00:00
 updated_at: 2026-07-12T21:22:53.471170+00:00
 ---

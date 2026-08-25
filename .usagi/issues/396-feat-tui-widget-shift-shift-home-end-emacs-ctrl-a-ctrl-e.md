@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [tui, input, widget, ux]
 dependson: []
-related: [42, 257, 287]
+related: []
 created_at: 2026-07-20T04:25:28.639907+00:00
 updated_at: 2026-07-20T06:46:29.158782+00:00
 ---
@@ -23,8 +23,6 @@ TUI の 1 行入力欄（session 作成名・Open filter・Overview/Closeup pale
 ## 背景・調査結果
 
 ### 共通 widget は `TextInput`
-
-`crates/tui/src/presentation/widgets/text_input.rs` が端末非依存の 1 行編集バッファ（`value` + `char` 境界に乗る `cursor`）で、`insert` / `backspace` / `delete_forward` / `move_left` / `move_right` / `move_home` / `move_end` を持つ。マルチバイト（日本語）は `prev_boundary` / `next_boundary` で 1 文字単位に扱い、文字の途中に落ちない。`#42`（done）でこのキャレット移動が入った。**選択状態は未実装**。
 
 描画は `widgets/mod.rs` の `block_caret(value, cursor, base)` がキャレット直後の 1 セルを reverse-video で反転する。**範囲選択のハイライトは未対応**。
 
@@ -45,8 +43,6 @@ TUI の 1 行入力欄（session 作成名・Open filter・Overview/Closeup pale
 - legacy `Key` enum には `Home` / `End` / `Delete` / 選択拡張のバリアントが無い。`AppKey` にも同様。
 
 ### `Ctrl+A` は既にグローバル予約 — 文脈依存で解決する（設計判断）
-
-`Ctrl+A` は `+ new session` に予約済み（`src/runtime/tui.rs:1106`・`controller.rs:1199` の両経路、`document/03-tui.md:99` / `:155`）。`#287`（todo）は「create form 中の `Home`/`Ctrl+A` は caret 操作または no-op、フォームを再 submit しない」と規定しており、**文脈依存の `Ctrl+A` を既定方針としている**。
 
 本 issue の解決（triage 決定）:
 
@@ -76,7 +72,6 @@ TUI の 1 行入力欄（session 作成名・Open filter・Overview/Closeup pale
 - PTY / live terminal 出力側のドラッグ選択・コピー（`#390` 系。`TerminalSession` / shell が所有）。本 issue は**入力 widget のテキスト選択のみ**。
 - OS クリップボードへの選択コピー / 貼り付け（`copy_text` port の拡張）。将来別 issue。
 - 複数行入力・折り返し編集。`TextInput` は 1 行のまま。
-- navigation / Switch 文脈の `Ctrl+A`=`+ new session` の意味変更（`#287` / sibling session の担当領域を触らない）。
 - profile/model UX・mouse による入力欄内選択。
 
 ## 既存 UX との整合（受け入れ観点）
@@ -113,7 +108,4 @@ TUI の 1 行入力欄（session 作成名・Open filter・Overview/Closeup pale
 
 ## 関連
 
-- `#42` 入力フィールドのカーソル移動（done。本 issue の基盤）。
-- `#287` Switch の `Ctrl+A` から `+ new session`（todo。navigation 文脈の `Ctrl+A` 契約。本 issue は境界を尊重し触らない）。
-- `#257` Home の `Ctrl+A` session lifecycle。
 - sibling session `triage-session-colors-ctrla`（Switch/session 切替の `Ctrl+A`）。**編集フォーカスの有無で意味を切り分けて衝突回避**。

@@ -6,12 +6,9 @@ priority: medium
 labels: [mcp]
 dependson: [401]
 related: []
-parent: 400
 created_at: 2026-07-20T04:54:50.970575+00:00
 updated_at: 2026-07-20T10:02:04.212637+00:00
 ---
-
-親: #400。依存: #401。`user_decision_*` は store まで到達する部分実装だが、(1) 人間（TUI）が回答できない、(2) 回答が元 agent へ返らない、の 2 つの last-mile が断たれている。これを繋ぐ。
 
 ## 対象 tool（6）
 

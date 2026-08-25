@@ -33,9 +33,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 ## authority と lifecycle
 
 managed session の lifecycle vocabulary は daemon のために定義されている。CLI、MCP、TUI は command を
-提出し、legacy `state.json` を managed state として解釈・更新しない。shared lifecycle state の初期化時だけは、daemon が
-legacy record の name、canonical session path、linked worktree、repository と `usagi/<name>` branch binding を全件検証し、
-成功した全 record を stable ID 付き available session として一回だけ採用する。検証不能な record は partial adoption をせず起動を失敗させる。
+提出し、repository-local な `state.json` を managed state として解釈・更新しない。
 lifecycle state は `creating`、
 `initializing`、`available`、`deleting`、`failed` の closed vocabulary であり、Agent phase と branch
 status は別軸として保持する。
@@ -759,15 +757,10 @@ task daemon:dev -- restart --force   # live runtime を明示的に手放す col
 明示的に手放す cold transition である。`--` を省くと Task が `restart` を task 名として解釈するため、引数は必ず `--` の後ろに置く。
 
 managed session state は repository 内の `.usagi/` ではなく、この shared daemon directory に保存する。最初の
-起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。lifecycle
-state が無い場合は、検証済みの project runtime state（debug は `<repository>/.usagi/dev/state.json`）の session も available record として同じ atomic write で採用する。
-この adoption は worktree effect を実行せず、既存 `sessions.json` があれば legacy state を読まず、その durable state を変更しない。
-`state.json` に残る display name、origin、notes、PR、last-active は UI-only metadata であり、TUI は同名 managed session へ読み取り結合する。
+起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。
+repository-local な `state.json` の session record は採用せず、新しい lifecycle state は空の managed session 集合から始める。
+`state.json` に残る notes 等は managed lifecycle とは独立した UI metadata として扱う。
 以後の restart は起動 cwd に関係なく、同じ file に保存された trusted root を session runtime と generic terminal の `login-shell` profile の両方に使う。
-
-既存の `sessions.json` に legacy session を追加する必要がある場合だけ、operator は `usagi session recover-legacy` を実行する。これは dry-run で candidate 名と検証結果だけを表示し、`--apply` を付けた明示操作だけが adoption を永続化する。daemon restart、TUI sidebar refresh、通常の MCP session tool は recovery を呼ばない。MCP の `session_recover_legacy` も同じく `apply: true` がなければ dry-run である。
-
-apply は legacy record 全件の name、期待 path、linked worktree、canonical path、`git worktree list --porcelain` の `usagi/<name>` branch binding を検証する。legacy 内の重複、欠損・不正 record、Git 検証失敗、既存 v2 session との同名（available / creating / deleting / failed を問わない）、または revision 競合は fail-closed となり、`sessions.json` を変更しない。成功時は既存 v2 record と stable ID を保持したまま、検証済み全 record を fresh stable IDs の available session として単一 atomic write で追加する。legacy UI metadata は read-only のままである。
 
 `daemon.json` は `pid`、OS の `process_start_identity`、`started_at` を持つ。この lifecycle record は durable
 incarnation fence であり、stale cleanup と conditional clear は record 全体を比較する。identity field を持たない legacy
@@ -1263,8 +1256,7 @@ producer `OperationId` と target 全体を semantic key にして dedupe する
 後の replay は同じ durable final / relation / `TerminalRef` へ収束し、新しい spawn や capacity reservation を作らない。
 別 target への operation 再利用は idempotency conflict とする。同じ exact target を別 operation で再送した場合は
 `superseded_by` の replacement outcome を replay し、failed / in-flight / live / completed のいずれも最初の final から
-分岐させない。legacy session-scoped request は現 wire generation の互換期間だけ、eligible exact target が厳密に 1 件の
-場合に限って変換する。0 件または複数件を safe typed failure にし、「最新」や provider 種別で選ばない。
+分岐させない。resume request は daemon が発行した exact target を必須とし、「最新」や provider 種別で選ばない。
 
 daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude UUID、structured Codex capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
 
@@ -1564,7 +1556,7 @@ count は `BackgroundWorker` が一元管理する。
 backpressure した byte 数も process-local counter として返す。counter と log は byte 数だけを扱い、
 terminal output、argv、environment、secret を含めない。
 
-TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の足元の右へ表示する。
+TUI は最新 snapshot を workspace の左ペイン下部にある usagi mascot の足元の右へ表示する。
 この観測値は操作対象ではないため、狭い terminal では session 一覧と footer を優先して mascot ごと省略される。
 
 ### agent concurrency projection

@@ -4,8 +4,8 @@ title: feat(tui): Overview から daemon 管理 session を操作する
 status: done
 priority: high
 labels: [tui, overview, session, lifecycle]
-dependson: [217, 219, 220, 231, 234, 257]
-related: [226]
+dependson: [217, 219, 220, 231, 234]
+related: []
 created_at: 2026-07-13T00:09:23.746382+00:00
 updated_at: 2026-07-13T00:38:55.000000+00:00
 ---
@@ -40,5 +40,3 @@ Workspace scope の Overview から、daemon を唯一の mutation owner とし�
 - 実装済み仕様 document を更新する。
 
 ## 依存・境界
-
-#257 の Home create と Closeup remove の typed effect を正本として再利用する。#259 は入力補完だけを先に扱い、本 issue の実行 semantics は持たない。

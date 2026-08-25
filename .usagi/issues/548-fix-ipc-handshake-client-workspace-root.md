@@ -5,14 +5,14 @@ status: done
 priority: medium
 labels: [v2, ipc, daemon, cli, mcp, tui, correctness]
 dependson: []
-related: [542]
+related: []
 created_at: 2026-07-25T02:26:56.991011+00:00
 updated_at: 2026-07-25T07:10:09.781902+00:00
 ---
 
 ## 問題・根拠（コード調査で確定）
 
-IPC handshake は client がどの workspace にいるかを検証しない。[#542](542-fix-daemon-fence-workspace-mode-home.md) で「1 machine × 1 canonical workspace root に daemon は 1 つ」は成立したが、**client が意図しない workspace の daemon へ接続する経路**は fence では閉じない。
+IPC handshake は client がどの workspace にいるかを検証しない。「1 machine × 1 canonical workspace root に daemon は 1 つ」は成立しているが、**client が意図しない workspace の daemon へ接続する経路**は fence では閉じない。
 
 - `ClientHello`（`crates/core/src/infrastructure/ipc/mod.rs`）は `client_id` / `connection_nonce` / `expected_daemon_generation` / `supported_protocols` / `capabilities` / `required_capabilities` / `build` を持つが、**workspace の識別子を持たない**。`negotiate` が検証するのは generation・protocol・capability だけである。
 - client の接続先は data directory から解決する（`current.json` → generation socket）。data directory は `$USAGI_HOME` と runtime mode で決まり、**workspace に依存しない**。
@@ -28,7 +28,7 @@ IPC handshake は client がどの workspace にいるかを検証しない。[#
 
 ## 設計上の判断が必要な点
 
-**何を「一致」とみなすかを先に決める必要がある**。これが本 issue を #542 から分離した理由である。
+**何を「一致」とみなすかを先に決める必要がある**。
 
 - client は自分の workspace root を知らない。cwd は知っているが、それが repository root とは限らない（session worktree の中、subdirectory、workspace 外のいずれもあり得る）。
 - 「cwd が daemon の trusted root の配下か」を条件にすると実装は軽いが、**workspace 外から実行する正当な用途を壊す**可能性がある。現在は cwd に依らず daemon へ接続できるため、どの経路が実際に workspace 外から実行されるのかを先に洗い出す必要がある（`usagi mcp` は daemon が `USAGI_WORKSPACE_ROOT` を注入する。TUI・CLI は利用者の cwd 次第）。

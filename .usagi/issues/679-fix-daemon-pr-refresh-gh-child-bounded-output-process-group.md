@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, daemon, pr, process, resource, resilience]
 dependson: []
 related: [346, 493, 606, 656, 661]
-parent: 671
 created_at: 2026-08-13T22:45:35.398551+00:00
 updated_at: 2026-08-13T22:45:35.398551+00:00
 ---

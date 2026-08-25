@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, docs, mcp, tui, correctness]
 dependson: []
-related: [240, 341, 601]
+related: [240, 341]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-07-31T21:40:53.353133+00:00
 ---

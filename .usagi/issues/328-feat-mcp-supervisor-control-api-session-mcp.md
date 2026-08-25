@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [mcp, cli, orchestration, supervisor, docs]
 dependson: [323, 327]
-related: [97, 106, 109, 110, 182, 183, 187, 329, 330]
+related: [329, 330]
 parent: 324
 created_at: 2026-07-17T21:12:50.059083+00:00
 updated_at: 2026-07-17T21:12:50.059083+00:00
@@ -43,7 +43,6 @@ daemon IPC client として次を実装する。名前・JSON schema・wire shap
 | daemon Orchestrator | durable state、effect reservation、scheduler、fence、policy | 唯一の supervisor writer。MCP は client/adapter のみ |
 
 - feature rollout は opt-in の supervisor_* tool の追加から始め、既存 tool の名前・入力・既定挙動を変更しない。
-- 旧 #182/#183 orchestration plan と supervisor run は read/write store を共有しない。移行は新規 run の opt-in のみで、必要な相関は read-only related link に限る。
 - 実装完了時に限り、document/02-architecture.md、04-ipc.md、05-daemon.md、該当 command/MCP doc に責務表、API、migration、運用・テスト手順を反映する。未実装事項は proposal/issue に残し、正本仕様に混在させない。
 
 ## テスト戦略
