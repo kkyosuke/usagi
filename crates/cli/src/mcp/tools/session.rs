@@ -18,7 +18,6 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionRemove),
         Box::new(SessionResume),
         Box::new(AgentResumeInventory),
-        Box::new(SessionRecoverLegacy),
         Box::new(SessionNoteGet),
         Box::new(SessionNoteUpdate),
         Box::new(SessionTodoList),
@@ -218,21 +217,6 @@ impl Tool for SessionCreate {
     }
 }
 
-/// `session_recover_legacy` — explicitly validates legacy sessions and, only
-/// with `apply: true`, adopts the complete set into daemon lifecycle state.
-pub struct SessionRecoverLegacy;
-impl Tool for SessionRecoverLegacy {
-    fn name(&self) -> &'static str {
-        "session_recover_legacy"
-    }
-    fn description(&self) -> &'static str {
-        "legacy state.json session を検証する。既定は dry-run であり、永続化には apply: true を明示する。通常の daemon restart や sidebar refresh はこの操作を実行しない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"apply":{"type":"boolean","default":false}},"additionalProperties":false}"#
-    }
-}
-
 /// `session_resume` — explicitly starts a new daemon-owned Agent runtime for
 /// retained provider-native conversation metadata.
 pub struct SessionResume;
@@ -241,10 +225,10 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。互換用 name は eligible target が厳密に 1 件のときだけ daemon が解決する。"
+        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"oneOf":[{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}"#
     }
 }
 

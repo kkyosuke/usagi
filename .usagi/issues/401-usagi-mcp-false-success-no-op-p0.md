@@ -32,6 +32,6 @@ no-op の間は、これらの action に対して daemon が `ResponseOutcome::
 ## 完了条件
 
 - [ ] 上記 13 tool を新規ビルド `usagi mcp` stdio の `tools/call` に投げると **明示的な JSON-RPC エラー**（成功・エコーでない）を返す。
-- [ ] `session_create`/`session_remove`/`session_recover_legacy`（実装済み）と、`session`/`agent`/`dispatch` kind の Accepted 契約が回帰しない（既存 daemon test green）。
+- [ ] `session_create`/`session_remove` と、`session`/`agent`/`dispatch` kind の Accepted 契約が回帰しない（既存 daemon test green）。
 - [ ] 変更を固定する daemon/serve のユニットテスト（no-op action → Error）を追加。
 - [ ] 影響する docs（あれば）を同 PR で更新。coverage 100% 維持。

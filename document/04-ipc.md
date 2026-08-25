@@ -617,15 +617,10 @@ safe な typed failure となる。native ID は
 inventory、IPC、hook、error、log へ出さない。provider capture、fence、redaction、new PTY spawn の正本は
 [Provider-native conversation resume](05-daemon.md#provider-native-conversation-resume) とする。
 
-現 wire generation の互換期間だけ `SessionAction::ResumeAgent` の session ID / name 指定を受け付ける。
-daemon がその scope の eligible exact target を厳密に 1 件へ解決できる場合だけ exact request に変換し、0 件は
-`unavailable`、複数件は typed conflict で拒否する。最新 timestamp や provider 種別による暗黙選択はしない。
-この legacy form は次の incompatible wire generation で削除できる。CLI の `resume-exact`、TUI の exact
-resume port、MCP `session_resume` の `target` form は同じ exact contract を使い、inventory は CLI / TUI port と
-MCP `agent_resume_inventory` が共通 contract を使う。
+CLI の `resume-exact`、TUI の exact resume port、MCP `session_resume` は同じ exact contract を使い、inventory は
+CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。session ID / name だけを指定する resume request は受け付けない。
 
-daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。exact / legacy の
-いずれも利用者による明示操作だけが request を作る。
+daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
 
 ## dispatch request
 
