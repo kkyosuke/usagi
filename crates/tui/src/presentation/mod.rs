@@ -2519,8 +2519,10 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     if config.is_selecting_team() {
         match key {
-            Key::Left | Key::Char('h') => config.cycle_team_picker(false),
-            Key::Right | Key::Char('l') | Key::Tab => config.cycle_team_picker(true),
+            Key::Left | Key::Char('h') => config.cycle_team_card(false),
+            Key::Right | Key::Char('l') => config.cycle_team_card(true),
+            Key::Up | Key::Char('k') => config.move_team_picker_vertical(false),
+            Key::Down | Key::Char('j') => config.move_team_picker_vertical(true),
             Key::Enter => config.apply_team_picker(),
             Key::Escape => config.cancel_team_picker(),
             _ => {}
@@ -20494,12 +20496,16 @@ mod tests {
         assert!(config.is_selecting_team());
         step_config(&mut config, Key::Other, &mut settings);
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Up, &mut settings);
         step_config(&mut config, Key::Right, &mut settings);
         step_config(&mut config, Key::Enter, &mut settings);
         assert!(!config.is_selecting_team());
         assert_eq!(config.settings().team_template, TeamTemplate::Flat);
 
         step_config(&mut config, Key::Enter, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Up, &mut settings);
         step_config(&mut config, Key::Left, &mut settings);
         step_config(&mut config, Key::Tab, &mut settings);
         step_config(&mut config, Key::Escape, &mut settings);
