@@ -4,7 +4,7 @@ title: test(daemon): reducer・reconcile・error path を coverage 対象へ戻�
 status: done
 priority: medium
 labels: [review, v2, daemon, coverage]
-dependson: [484]
+dependson: []
 related: [356, 360, 380]
 parent: 453
 created_at: 2026-07-20T12:06:49.822445+00:00

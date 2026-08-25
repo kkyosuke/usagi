@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, controller, runtime]
 dependson: [313, 314]
-related: [258, 287, 295, 305]
+related: [258, 295, 305]
 parent: 258
 created_at: 2026-07-17T14:22:12.472188+00:00
 updated_at: 2026-07-18T04:11:47.130791+00:00

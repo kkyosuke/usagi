@@ -5,7 +5,6 @@
     { "context": "enforce-base-main", "workflow": "enforce-pr-base.yml", "job": "enforce-base-main", "integration_id": 15368 },
     { "context": "full-test", "workflow": "test.yml", "job": "full-test", "integration_id": 15368 },
     { "context": "coverage", "workflow": "coverage.yml", "job": "coverage", "integration_id": 15368 },
-    { "context": "v1-coverage", "workflow": "v1-coverage.yml", "job": "v1-coverage", "integration_id": 15368 },
     { "context": "markdown-link-check", "workflow": "markdown-link-check.yml", "job": "markdown-link-check", "integration_id": 15368 }
   ],
   "bypass_actors": [

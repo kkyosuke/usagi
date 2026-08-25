@@ -1,8 +1,8 @@
 name: Auto Release on Version Bump
 
 # main へルート Cargo.toml の version 変更が入ったら、自動でタグを作成しリリースする。
-# リリース対象はルートの v2 パッケージなので、リリース起点もルート Cargo.toml の
-# version である（v1/ に退避された旧実装は出荷しない）。
+# リリース対象はルートパッケージなので、リリース起点もルート Cargo.toml の
+# version である。
 # GITHUB_TOKEN で push したタグは他ワークフローを発火させないため、
 # タグ push をトリガーにする代わりに reusable な release.yml を直接呼び出す。
 

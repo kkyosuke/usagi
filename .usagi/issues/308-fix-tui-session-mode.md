@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, ui, parity]
 dependson: []
-related: [302]
+related: []
 created_at: 2026-07-15T00:28:01.690978+00:00
 updated_at: 2026-07-15T22:20:25.814460+00:00
 ---

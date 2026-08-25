@@ -22,7 +22,7 @@
 //!   allowlist and rejects any control character, escape, newline, or space, so
 //!   an ANSI/terminal-control sequence can never reach a browser argument.
 //!
-//! This is the pure core of the click-to-open feature ported from v1's
+//! This is the pure core of the click-to-open feature ported from legacy's
 //! `presentation::tui::home::terminal::link`. The mouse hit-test, selection-drag
 //! coexistence, and the browser spawn itself live in later wiring (#389);
 //! everything here is pure and unit-tested against plain row strings.
@@ -118,7 +118,7 @@ fn columns_of(row: &str, width: usize) -> Vec<char> {
     for ch in row.chars() {
         cols.push(ch);
         // A wide glyph's trailing column(s) carry no character of their own; a
-        // blank keeps them out of any URL run, exactly as v1 treats a wide-glyph
+        // blank keeps them out of any URL run, exactly as legacy treats a wide-glyph
         // continuation cell.
         cols.extend(std::iter::repeat_n(' ', char_width(ch) - 1));
     }

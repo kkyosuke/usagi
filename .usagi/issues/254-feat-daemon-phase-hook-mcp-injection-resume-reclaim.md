@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [daemon, orchestration, mcp, lifecycle]
 dependson: [251, 252, 253]
-related: [219, 248]
+related: [219]
 created_at: 2026-07-12T22:34:02.359082+00:00
 updated_at: 2026-07-13T00:05:49.201076+00:00
 ---

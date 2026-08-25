@@ -4,7 +4,7 @@ title: feat(tui): preview・diff・PR・text overlay を実装する
 status: done
 priority: medium
 labels: [tui, parity-b, overlay]
-dependson: [226, 228]
+dependson: [228]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.941269+00:00

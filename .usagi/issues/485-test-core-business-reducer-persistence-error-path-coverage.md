@@ -4,7 +4,7 @@ title: test(core): business reducer と persistence error path を coverage 対�
 status: done
 priority: medium
 labels: [review, v2, core, coverage]
-dependson: [484]
+dependson: []
 related: [356, 360, 380]
 parent: 453
 created_at: 2026-07-20T12:06:49.488265+00:00

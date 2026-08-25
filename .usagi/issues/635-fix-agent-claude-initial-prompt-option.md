@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [review, security, daemon, agent, claude, argv]
 dependson: []
-related: [253, 594]
+related: [253]
 created_at: 2026-08-02T23:14:00.076228+00:00
 updated_at: 2026-08-03T00:14:29.726762+00:00
 ---

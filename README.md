@@ -21,8 +21,8 @@
 
 </div>
 
-> この README はフルリライト中の **v2** を説明する。現在 GitHub Releases で配布している
-> バイナリは [v1](v1/README.md) であり、v2 はリポジトリルートからソースで実行する。
+> この README は現在の `usagi` を説明する。GitHub Releases とリポジトリルートは
+> 同じ実装を提供する。
 
 ## usagi でやりたいこと
 
@@ -118,8 +118,6 @@ cargo install --path . --locked
 > ソースからビルドしたバイナリは、`USAGI_RUNTIME_MODE` を指定しなければ状態を `~/.usagi/local/` に
 > 置く（開発中の実行が本番の状態を触らないようにするため）。公開 release の artifact は
 > `~/.usagi` 自体を使う。詳細は [artifact の既定 mode](document/05-daemon.md#artifact-の既定-mode) を参照する。
-
-退避された v1 の仕様は [v1 の README](v1/README.md) を参照する。
 
 ### Tab 補完
 
@@ -282,21 +280,8 @@ toolchain は `rust-toolchain.toml` に固定されている。リポジトリ�
 | 実行 | `cargo run -- [args]` |
 
 変更中・commit 前・CI で必要な gate は異なる。coverage 100% を含む品質基準、ブランチ、コミット、PR、
-リリースの規約は [開発規約](document/06-conventions.md)を正本とする。v2 の仕様ドキュメント全体は
+リリースの規約は [開発規約](document/06-conventions.md)を正本とする。仕様ドキュメント全体は
 [document/README.md](document/README.md)から参照できる。
-
-## v1
-
-旧実装は [v1/](v1/README.md) に、仕様書を含む独立した Cargo プロジェクトとして退避している。
-ルート workspace のビルド対象には含まれない。
-
-```bash
-cd v1
-cargo build --release
-```
-
-v1 のコマンド、画面、データ構造、orchestration を参照するときは
-[v1 ドキュメント](v1/document/README.md)を使う。退避版は v1 実装のスナップショットであり更新しない。
 
 ## License
 

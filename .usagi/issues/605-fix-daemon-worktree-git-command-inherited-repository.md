@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, git, security, correctness]
 dependson: []
-related: [470, 543, 584]
+related: [584]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-08-01T00:03:37.285599+00:00
 ---

@@ -9,11 +9,7 @@
 [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker)、
 [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) に移った。
 本書に残るのは、その採用理由と却下した代替案である。
-実地調査で 3 つの独立した欠陥を確認し、実装 issue
-[#540](../../.usagi/issues/540-fix-daemon-daemon-serve-self-shutdown-test-fixture-workspace.md) /
-[#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md) /
-[#543](../../.usagi/issues/543-fix-daemon-session-remove-worktree-teardown-worker-ipc.md)
-に分割した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
+実地調査で 3 つの独立した欠陥を確認した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
 部分は [5. daemon](../05-daemon.md) と [7. MCP サーバ](../07-mcp.md) へ畳み込む（[docs 畳み込み先](#docs-畳み込み先)）。
 
 ## 目次
@@ -68,7 +64,7 @@ PID 25529  PPID 1  ELAPSED 01:48:04
                   呼び出した client の接続が deadline を超えて timeout した。現在は即時受理し、
                   停滞するのは daemon 所有の teardown worker だけである（client は応答を受け取る）
 
-[欠陥 2・修正済み] は日常運用では未発火だった（出荷バイナリは daemon を持たない v1 コード）。
+[欠陥 2・修正済み] は日常運用では未発火だった（出荷バイナリは daemon を持たない legacy コード）。
    v2 出荷時に mode 切り替え運用（task run / dev / prd）で確実に踏むため、発火前に workspace fence を入れた。
 ```
 
@@ -156,7 +152,7 @@ IPC request handler の中で直列に走っていた。重い削除の間 sessi
 接続が削除完了まで応答を受け取れない**。client の deadline budget は TUI 2,000ms / CLI 10,000ms / MCP 30,000ms で、
 coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除は分オーダーになり必ず timeout していた。
 さらに daemon 起動時の `reconcile()` が `Deleting` を `Failed` へ落としていたため、`DeletePlan` が durable に
-残っているのに削除は再開されず、半分消えた worktree tree と session 名を所有し続ける record が残った。v1 で
+残っているのに削除は再開されず、半分消えた worktree tree と session 名を所有し続ける record が残った。legacy で
 `git_teardown` 中断が次の手動 remove まで詰まった病理と同型である。
 
 **採用した機構は「即時 accept + daemon 所有の teardown worker」である。** その選択理由は次のとおり。

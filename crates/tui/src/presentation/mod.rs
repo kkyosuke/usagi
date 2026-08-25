@@ -1,5 +1,5 @@
 //! TUI 面の presentation 層。画面描画（各画面の view・共通 widget）と
-//! キー入力のマッピングを置く。描画は v1 と同じく自前の差分レンダリングで行い、
+//! キー入力のマッピングを置く。描画は legacy と同じく自前の差分レンダリングで行い、
 //! UI フレームワーク（ratatui 等）には依存しない方針を引き継ぐ。
 //! 実 IO は持たず、出力先は呼び出し側（合成ルート）から注入する。
 //!
@@ -519,7 +519,7 @@ impl PaneLaunchCommandPort for UnavailablePaneLaunchPort {
 /// Platform-native terminal launch boundary.
 ///
 /// This is deliberately independent from [`AgentCommandPort`]: `terminal new`
-/// must remain available just as it is in v1, without any daemon client.
+/// must remain available just as it is in legacy, without any daemon client.
 pub trait ExternalTerminalPort: Send {
     /// Open a native terminal rooted at `directory`.
     ///
@@ -7019,7 +7019,7 @@ pub fn run_screen_graph_with_backend(
     }
 }
 
-/// v1 と同じ Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
+/// legacy と同じ Welcome 起動エフェクトを再生し、実際に描いたフレーム数を返す。
 ///
 /// **打鍵で中断できる**。フレーム間の待機は [`Terminal::wait_for_key`] で行い、
 /// キーが届いた時点で残りのフレームを捨てて抜ける。中断に使ったキーは
@@ -20336,7 +20336,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_splash_draws_and_paces_every_v1_frame_without_reading_input() {
+    fn startup_splash_draws_and_paces_every_legacy_frame_without_reading_input() {
         let mut term = FakeTerminal::default();
 
         play_startup_splash(&mut term).unwrap();

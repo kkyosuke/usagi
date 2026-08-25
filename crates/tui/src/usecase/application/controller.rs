@@ -4661,7 +4661,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
     };
     if effect.is_some() {
-        // v1's `terminal new` hands the worktree to the OS terminal and leaves
+        // legacy's `terminal new` hands the worktree to the OS terminal and leaves
         // Closeup active; only embedded-pane actions dismiss this modal.
         if !matches!(effect, Some(Effect::OpenExternalTerminal { .. })) {
             state.overlay = None;

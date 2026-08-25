@@ -4,7 +4,7 @@ title: feat(daemon): live terminal を保つ generation rollover と orphan safe
 status: done
 priority: high
 labels: [daemon, lifecycle, safety, ipc]
-dependson: [216, 218, 219]
+dependson: [216, 219]
 related: [159, 205, 206, 207, 208]
 parent: 213
 created_at: 2026-07-11T12:13:49.117451+00:00

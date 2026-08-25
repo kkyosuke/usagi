@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, closeup, input]
 dependson: []
-related: [278, 269]
+related: []
 created_at: 2026-07-13T11:55:11.641377+00:00
 updated_at: 2026-07-13T11:57:32.160595+00:00
 ---

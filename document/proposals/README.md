@@ -10,12 +10,6 @@
 挙動が確定したら、その内容を正本（`02-architecture.md` など）へ畳み込み、提案は撤去またはリンクだけ残す。
 ロードマップ（実装タスク）は issue ストア（`.usagi/issues/`）で追跡する。
 
-v1 時点の設計提案（daemon 化・durable orchestrator など）は退避版
-[v1/document/proposals/](../../v1/document/proposals/README.md) にあり、更新しない。そこにある
-[daemon 化提案](../../v1/document/04-orchestration.md)の実装済み部分は、[TUI](../03-tui.md)、
-[daemon IPC](../04-ipc.md)、[daemon](../05-daemon.md)へ畳み込んだ。退避版を変更して stub にせず、
-v1 の仕様スナップショットとして保存する。
-
 ## 一覧
 
 | # | ドキュメント | 内容 | 状態 |
@@ -25,7 +19,6 @@ v1 の仕様スナップショットとして保存する。
 | 3 | [03-ipc-protocol.md](03-ipc-protocol.md) | envelope、handshake、stream、idempotency、bounded transport、error | [04-ipc.md](../04-ipc.md) へ畳み込み済み |
 | 4 | [04-daemon-api.md](04-daemon-api.md) | terminal/session command・event と socket/workspace/launch security | [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み済み |
 | 5 | [05-daemon-lifecycle.md](05-daemon-lifecycle.md) | active/draining restart、crash orphan、配置、実装 issue、test strategy | [05-daemon.md](../05-daemon.md) へ畳み込み済み |
-| 6 | [06-tui-v1-parity.md](06-tui-v1-parity.md) | v2 TUI の parity scope・優先度・受け入れ契約 | 提案 |
 | 7 | [07-pty-crash-continuation.md](07-pty-crash-continuation.md) | PTY broker／FD handoff による daemon crash 後の terminal 継続 | 提案（MVP 非依存） |
 | 8 | [08-agent-dispatch-mcp.md](08-agent-dispatch-mcp.md) | 他 session の特定 agent への即時 dispatch、runtime/model validation、caller の durable inbox への確実な完了報告（MCP 契約） | 提案（実装 issue #321–#323, #331–#332） |
 | 9 | [09-user-decision-mcp.md](09-user-decision-mcp.md) | agent の user decision request と durable な回答配送・TUI 操作 | 提案（実装 issue #329–#330） |

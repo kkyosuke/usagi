@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, tui, terminal, vt, replay, correctness, p1]
 dependson: []
-related: [199, 251, 265, 472, 473]
+related: [199, 251, 472, 473]
 created_at: 2026-07-22T11:41:58.106442+00:00
 updated_at: 2026-07-25T02:07:40.444765+00:00
 ---

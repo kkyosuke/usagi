@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, overview, session]
 dependson: []
-related: [226, 257]
+related: []
 created_at: 2026-07-13T00:08:58.484908+00:00
 updated_at: 2026-07-13T00:14:33.453697+00:00
 ---
