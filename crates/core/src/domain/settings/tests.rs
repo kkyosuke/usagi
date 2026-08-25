@@ -1,6 +1,7 @@
 use super::{
     AgentReadinessCommand, AvailableModels, DEFAULT_LOCAL_LLM_MODEL, DefaultModel, EnvBindings,
-    LOCAL_LLM_MODELS, LocalLlm, LocalSettings, ModalSelectionMode, PrAutoOpen, Settings, Theme,
+    LOCAL_LLM_MODELS, LocalLlm, LocalSettings, ModalSelectionMode, PrAutoOpen, Settings,
+    TeamTemplate, Theme,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -88,6 +89,7 @@ fn settings_round_trip_through_json() {
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: false,
+        team_template: TeamTemplate::Pipeline,
         local_llm: LocalLlm {
             enabled: true,
             model: "qwen2.5-coder:3b".to_owned(),
@@ -339,6 +341,27 @@ fn pr_auto_open_defaults_to_switch_only_and_unknown_values_disable_it() {
 }
 
 #[test]
+fn team_templates_round_trip_and_cycle_in_both_directions() {
+    assert_eq!(TeamTemplate::default(), TeamTemplate::None);
+    assert_eq!(
+        serde_json::from_str::<TeamTemplate>("\"hierarchical\"").unwrap(),
+        TeamTemplate::Hierarchical
+    );
+    assert_eq!(
+        serde_json::to_string(&TeamTemplate::Pipeline).unwrap(),
+        "\"pipeline\""
+    );
+    assert_eq!(
+        serde_json::from_str::<TeamTemplate>("\"future-template\"").unwrap(),
+        TeamTemplate::None
+    );
+    assert_eq!(TeamTemplate::None.cycle(true), TeamTemplate::Hierarchical);
+    assert_eq!(TeamTemplate::None.cycle(false), TeamTemplate::Pipeline);
+    assert_eq!(TeamTemplate::Flat.cycle(true), TeamTemplate::Pipeline);
+    assert_eq!(TeamTemplate::Flat.cycle(false), TeamTemplate::Hierarchical);
+}
+
+#[test]
 fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
@@ -347,12 +370,14 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         default_model: DefaultModel::Claude,
         issue_enabled: true,
         memory_enabled: false,
+        team_template: TeamTemplate::Hierarchical,
         local_llm: LocalLlm::default(),
         env: EnvBindings::new(),
     };
     let local = LocalSettings {
         default_model: Some(DefaultModel::OpenAi),
         issue_enabled: Some(false),
+        team_template: Some(TeamTemplate::Flat),
         ..LocalSettings::default()
     };
 
@@ -365,6 +390,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             default_model: DefaultModel::OpenAi,
             issue_enabled: false,
             memory_enabled: false,
+            team_template: TeamTemplate::Flat,
             local_llm: LocalLlm::default(),
             env: EnvBindings::new(),
         }
@@ -463,7 +489,7 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
 #[test]
 fn local_settings_ignore_global_only_and_unknown_workspace_values() {
     let local: LocalSettings = serde_json::from_str(
-        r#"{"theme":"future","modal_selection_mode":"future","default_model":"future"}"#,
+        r#"{"theme":"future","modal_selection_mode":"future","default_model":"future","team_template":"future"}"#,
     )
     .unwrap();
     assert_eq!(local, LocalSettings::default());
@@ -482,6 +508,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         default_model: DefaultModel::Claude,
         issue_enabled: false,
         memory_enabled: true,
+        team_template: TeamTemplate::Pipeline,
         local_llm: LocalLlm {
             enabled: true,
             model: "qwen2.5-coder:3b".to_owned(),
@@ -498,6 +525,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             default_model: DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: true,
+            team_template: TeamTemplate::Pipeline,
             local_llm: LocalLlm::default(),
             env: EnvBindings::new(),
         }

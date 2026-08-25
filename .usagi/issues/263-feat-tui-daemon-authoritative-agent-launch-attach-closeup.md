@@ -4,9 +4,8 @@ title: feat(tui): daemon-authoritative agent launch/attach を Closeup に接続
 status: done
 priority: high
 labels: [tui, agent, daemon, pty]
-dependson: [220, 232, 235, 250, 251, 252, 253, 254, 255, 256]
-related: [257, 246]
-parent: 227
+dependson: [220, 232, 235, 251, 252, 253, 254, 255, 256]
+related: [246]
 created_at: 2026-07-13T00:15:13.466360+00:00
 updated_at: 2026-07-13T01:14:52.094406+00:00
 ---
@@ -25,13 +24,10 @@ v2 の Closeup registry は `agent [name]` を解釈し、controller は `OpenAg
 - producer-issued `OperationId` を request、pending Agent pane、accepted/progress/final、reconnect/replay で保つ。
 - daemon の成功 completion に含まれる fenced `TerminalRef` を pane reducer / runtime へ渡し、選択中なら attach、既存 live tab は再利用する。
 - daemon safe feedback を TUI projection / renderer に表示し、transport failure・unknown completion・stale generation では local spawn・再試行・attach を推測しない。
-- Closeup command/effect/renderer/effect runner の一貫した UX を実装し、terminal launch (#255) と session create (#257) の state/effect を複製しない。
 
 ## 対象外
 
-- session create と profile/model 入力 (#257)。
 - generic shell terminal launch (#255)。
-- Codex / Claude の argv、model allowlist、hook、MCP、secret、PTY spawn/reclaim の実装 (#250--#254)。
 - TUI からの direct process spawn、PTY ownership、daemon 不通時の local fallback。
 
 ## 受け入れ条件

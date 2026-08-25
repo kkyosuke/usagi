@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, daemon, ux, notification]
 dependson: [379]
-related: [28, 329, 330, 379]
+related: [329, 330, 379]
 created_at: 2026-07-20T04:15:00+00:00
 updated_at: 2026-07-20T05:05:00+00:00
 ---

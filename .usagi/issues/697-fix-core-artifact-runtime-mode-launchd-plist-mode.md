@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [core, daemon]
 dependson: []
-related: [542]
+related: []
 created_at: 2026-08-17T23:32:41.138204+00:00
 updated_at: 2026-08-18T00:10:00.000000+00:00
 ---
@@ -23,8 +23,7 @@ release artifact も `USAGI_RUNTIME_MODE` を設定しない。したがって v
 利用者のデータが `~/.usagi/local/` に入る。`local` は開発時の隔離のための概念であって、
 利用者に見せる置き場所ではない。
 
-env では解決できない。[#542](542-fix-daemon-fence-workspace-mode-home.md) が記録しているとおり、
-利用者自身の shell が常にこの変数を持つことは強制できず、env だけを既定の決め手にすると
+env では解決できない。利用者自身の shell が常にこの変数を持つことは強制できず、env だけを既定の決め手にすると
 「installer や service が意図した data home」と「plain shell で起動した `usagi` が解決する data home」が
 食い違う余地が残る。
 

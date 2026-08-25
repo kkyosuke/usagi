@@ -5,8 +5,7 @@
 ## 目次
 
 - [usagi とは](#usagi-とは)
-- [v2 の位置づけ](#v2-の位置づけ)
-- [v1 との関係](#v1-との関係)
+- [設計方針](#設計方針)
 - [現在の実装状態](#現在の実装状態)
 
 ## usagi とは
@@ -15,30 +14,14 @@
 worktree（セッション）を作り、複数の AI エージェント・シェルを並行して走らせ、
 issue の委譲から PR の作成・マージまでのループを回す。
 
-## v2 の位置づけ
+## 設計方針
 
-v2 は usagi のフルリライトである。v1 で決定した「PTY 所有を daemon に移し、TUI は
-daemon が所有する端末に attach するクライアントになる」設計
-（[v1/document/proposals/02-daemon.md](../v1/document/04-orchestration.md)）を
-最初から前提にした構造で作り直す。コードの構成は
-[2. アーキテクチャ](02-architecture.md) を正本とする。
-
-## v1 との関係
-
-| 場所 | 内容 |
-|---|---|
-| `/`（ルート） | v2 の実装。ビルド・CI（fmt / clippy / test / coverage 100%）の対象 |
-| `v1/` | 退避した旧実装。仕様ドキュメント（`v1/document/`）ごと独立した Cargo プロジェクトで、ルートの workspace から exclude されている |
-
-- **出荷するのはルートの v2 パッケージ**である。リリースはルート `Cargo.toml` の version 変更を起点に
-  自動化されており、v1 はリリース経路に乗らない（[6. 開発規約#リリース](06-conventions.md#リリース)）。
-- v2 として最初に出す version は既存の v1 release（`2.9.1`）より大きくする必要がある。小さいと
-  `/releases/latest` が v1 のままになり、installer が新しい v2 を選ばない。
-- v1 は `v1/` 配下で従来どおり単体ビルドでき、tree に残る間は `v1-test.yml` / `v1-coverage.yml` が検証する。
+PTY 所有を daemon に移し、TUI は daemon が所有する端末に attach するクライアントとして構成する。
+コードの構成は [2. アーキテクチャ](02-architecture.md) を正本とする。
 
 ## 現在の実装状態
 
-v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)）と、それを検証する
+usagi は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)）と、それを検証する
 最小の実行面を持つ。CLI が TUI の起動要求を返し、合成ルートが TUI の初期画面へ
 変換するため、入口面と TUI 面のクレート間に直接依存は生じない。以下の表が
 コマンドから起動面への対応の正本である。
@@ -90,15 +73,16 @@ workspace を開いて Home へ遷移する。失敗時は notice を表示し�
 入力検証と作成フローの詳細は [TUI の画面と入力](03-tui.md#画面と入力) を正本とする。Esc で Welcome へ戻る。
 
 Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。`Global` の Theme / Modal mode / PR auto-open と、
-`Workspace init` の Agent / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
+`Workspace init` の Agent / Team / Issue / Memory を表示し、`↑↓` で項目と Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
 Agent はインストール済み CLI に対応する `Claude` / `OpenAI` だけを表示し、新しい Agent pane の既定 profile としてそれぞれ `claude` / `codex` を選ぶ。どちらの CLI もない場合は灰色で無効化する。
+Team は session role の組み込みテンプレートを選ぶ。テンプレートと role catalog の仕様は [session role](10-session-roles.md#catalog)を正本とする。
 Issue と Memory は対応する MCP tool 群を on / off し、どちらも Global の初期値では on である。
 変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して Welcome へ戻り、保存失敗時は draft を保って
-error を表示する。Theme と Modal mode は user data directory の `settings.json` から全体へ適用する。Agent / Issue / Memory は
+error を表示する。Theme と Modal mode は user data directory の `settings.json` から全体へ適用する。Agent / Team / Issue / Memory は
 同じファイルから新規 workspace の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は
 `.usagi/local/settings.json`）へ登録時に一度コピーし、作成済み workspace へ後から反映しない。
-Overview の `config` は Home 上の overlay modal として Agent / Issue / Memory だけを表示し、scope 表示を置かない。
+Overview の `config` は Home 上の overlay modal として Agent / Team / Issue / Memory だけを表示し、scope 表示を置かない。
 settings resolution と entry lifecycle の正本は [TUI の settings scope](03-tui.md#settings-scope-と-workspace-entry)
 である。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
 開始画面を Welcome か Config かで選び、どちらも同じループを回す。

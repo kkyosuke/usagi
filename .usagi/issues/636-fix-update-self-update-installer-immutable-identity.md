@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, security, cli, update, release, supply-chain]
 dependson: []
-related: [461]
+related: []
 created_at: 2026-08-02T23:14:00.167300+00:00
 updated_at: 2026-08-03T01:26:58.709111+00:00
 ---
@@ -40,5 +40,3 @@ installerのimmutable identity/authenticityを検証できない場合、shell/p
 mutable main scriptがrelease後に変わってもself-updateが実行しない/参照しないこと、installer digest mismatch、tag/asset mismatch、response swap、truncated scriptでprocess effect 0かつ旧binary不変をhermetic fixtureで固定する。選択versionとlatestの両経路を含める。
 
 ## 既存 issue との差分
-
-#461 はimplicit CWD binary、archive checksum/shape/version、private staging、atomic replaceを修正した。remote installer code自体をimmutable release identityへpin/authenticateする受入条件は無く、現実装にも存在しない。

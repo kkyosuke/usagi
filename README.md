@@ -21,8 +21,8 @@
 
 </div>
 
-> この README はフルリライト中の **v2** を説明する。現在 GitHub Releases で配布している
-> バイナリは [v1](v1/README.md) であり、v2 はリポジトリルートからソースで実行する。
+> この README は現在の `usagi` を説明する。GitHub Releases とリポジトリルートは
+> 同じ実装を提供する。
 
 ## usagi でやりたいこと
 
@@ -119,8 +119,6 @@ cargo install --path . --locked
 > 置く（開発中の実行が本番の状態を触らないようにするため）。公開 release の artifact は
 > `~/.usagi` 自体を使う。詳細は [artifact の既定 mode](document/05-daemon.md#artifact-の既定-mode) を参照する。
 
-退避された v1 の仕様は [v1 の README](v1/README.md) を参照する。
-
 ### Tab 補完
 
 `usagi completion <shell>` は、CLI 定義から補完スクリプトを標準出力へ生成する。
@@ -213,6 +211,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 |---|---|
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
+| Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
 | Roles | session / root ごとの追加 instruction と既定 role |
@@ -281,21 +280,8 @@ toolchain は `rust-toolchain.toml` に固定されている。リポジトリ�
 | 実行 | `cargo run -- [args]` |
 
 変更中・commit 前・CI で必要な gate は異なる。coverage 100% を含む品質基準、ブランチ、コミット、PR、
-リリースの規約は [開発規約](document/06-conventions.md)を正本とする。v2 の仕様ドキュメント全体は
+リリースの規約は [開発規約](document/06-conventions.md)を正本とする。仕様ドキュメント全体は
 [document/README.md](document/README.md)から参照できる。
-
-## v1
-
-旧実装は [v1/](v1/README.md) に、仕様書を含む独立した Cargo プロジェクトとして退避している。
-ルート workspace のビルド対象には含まれない。
-
-```bash
-cd v1
-cargo build --release
-```
-
-v1 のコマンド、画面、データ構造、orchestration を参照するときは
-[v1 ドキュメント](v1/document/README.md)を使う。退避版は v1 実装のスナップショットであり更新しない。
 
 ## License
 

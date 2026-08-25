@@ -191,6 +191,7 @@ mod tests {
             default_model: crate::domain::settings::DefaultModel::Claude,
             issue_enabled: false,
             memory_enabled: false,
+            team_template: crate::domain::settings::TeamTemplate::Hierarchical,
             local_llm: crate::domain::settings::LocalLlm::default(),
             env: [(
                 "GH_TOKEN".to_owned(),

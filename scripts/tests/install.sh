@@ -92,7 +92,7 @@ if [ -z "$output" ] && [ "$url" = "https://api.github.com/repos/KKyosuke/usagi/r
         '    "tag_name": "v2.0.0",' \
         '  },' \
         '  {' \
-        '    "tag_name": "v1.0.0"' \
+        '    "tag_name": "v0.9.0"' \
         '  }' \
         ']'
     exit 0

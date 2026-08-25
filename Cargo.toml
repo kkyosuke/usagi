@@ -1,5 +1,4 @@
-# usagi v2（フルリライト）の workspace。旧実装（v1）は v1/ に退避してあり、
-# 独立した Cargo プロジェクトとして残っている（この workspace のビルド対象外）。
+# usagi の Cargo workspace。
 #
 # ルートパッケージは配布バイナリ `usagi` の合成ルート（bin）で、実装は crates/ 配下の
 # 4 クレートに置く（共通: usagi-core / daemon 面: usagi-daemon / TUI 面: usagi-tui /
@@ -7,11 +6,8 @@
 #
 # リリース起点はこのルート version である（auto-release.yml が main への変更を監視し、
 # 前コミットから変わっていれば v<version> タグを切る）。workspace 継承にせずリテラルで
-# 置くのは、auto-release が `version = "..."` 行を grep するためである。v1（v1/ に退避
-# した旧実装）は出荷しない。手順の正本は document/06-conventions.md#リリース。
-#
-# version は既存の v1 release（2.9.1）を超えている必要がある（小さいと
-# /releases/latest が v1 のままになり、installer の既定経路が v2 を選ばない）。
+# 置くのは、auto-release が `version = "..."` 行を grep するためである。
+# 手順の正本は document/06-conventions.md#リリース。
 [package]
 name = "usagi"
 version = "3.1.1"
@@ -65,8 +61,6 @@ workspace = true
 
 [workspace]
 members = ["crates/cli", "crates/core", "crates/daemon", "crates/tui"]
-# v1/ は退避された旧実装（独立した Cargo プロジェクト）。workspace に含めない。
-exclude = ["v1"]
 
 [workspace.package]
 edition = "2024"
@@ -74,8 +68,7 @@ repository = "https://github.com/KKyosuke/usagi"
 license = "MIT"
 
 # 内部クレートの参照と外部依存の version は workspace.dependencies で一元管理する。
-# v2 はゼロからのリライトのため、外部依存は必要になった時点で追加する
-# （v1 の依存を先回りで持ち込まない）。
+# 外部依存は必要になった時点で追加する。
 [workspace.dependencies]
 usagi-cli = { path = "crates/cli" }
 usagi-core = { path = "crates/core" }
@@ -135,8 +128,8 @@ portable-pty = "0.9"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
-# リリースバイナリの設定は v1 と同方針（クロス crate の inline 最適化とサイズ優先、
-# strip あり）。panic は既定の unwind のまま。
+# リリースバイナリはクロス crate の inline 最適化とサイズを優先し、strip する。
+# panic は既定の unwind のまま。
 [profile.release]
 lto = true
 codegen-units = 1
