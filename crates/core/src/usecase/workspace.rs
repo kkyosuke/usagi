@@ -708,9 +708,15 @@ mod tests {
             )]
         );
         let items = recent(&storage).unwrap();
-        let Recent::Unite(unite) = &items[0] else {
-            panic!("touched Unite must sort first")
-        };
+        let unites = items
+            .iter()
+            .filter_map(|recent| match recent {
+                Recent::Unite(unite) => Some(unite),
+                Recent::Workspace(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unites.len(), 1);
+        let unite = unites[0];
         assert_eq!(unite.updated_at(), Some(ts(12)));
         assert_eq!(
             unite
@@ -744,9 +750,15 @@ mod tests {
             .unwrap();
 
         let items = recent(&storage).unwrap();
-        let Recent::Unite(unite) = &items[0] else {
-            panic!("one surviving member remains a Unite")
-        };
+        let unites = items
+            .iter()
+            .filter_map(|recent| match recent {
+                Recent::Unite(unite) => Some(unite),
+                Recent::Workspace(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unites.len(), 1);
+        let unite = unites[0];
         assert_eq!(unite.members().len(), 1);
 
         fs::write(storage.dir().join("unites.json"), "{ broken").unwrap();

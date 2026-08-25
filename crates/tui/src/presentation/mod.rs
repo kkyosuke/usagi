@@ -7180,15 +7180,22 @@ fn enter_workspace_deck(
 fn prepare_workspace_deck(
     loader: &mut dyn WorkspaceLoader,
     paths: &[PathBuf],
-) -> io::Result<Vec<WorkspaceSnapshot>> {
-    let snapshots = paths
-        .iter()
-        .map(|path| loader.open(path))
-        .collect::<io::Result<Vec<_>>>()?;
-    if let Some(first) = snapshots.first() {
-        loader.activate_prepared(&first.workspace.path)?;
+) -> io::Result<(Vec<WorkspaceSnapshot>, WorkspaceSnapshot, WorkspaceDeck)> {
+    let Some((first_path, remaining_paths)) = paths.split_first() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a project deck needs at least one workspace",
+        ));
+    };
+    let primary = loader.open(first_path)?;
+    let mut snapshots = vec![primary.clone()];
+    for path in remaining_paths {
+        snapshots.push(loader.open(path)?);
     }
-    Ok(snapshots)
+    loader.activate_prepared(&primary.workspace.path)?;
+    let mut deck = WorkspaceDeck::new(&primary);
+    deck.append_snapshots(&snapshots);
+    Ok((snapshots, primary, deck))
 }
 
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
@@ -7459,17 +7466,17 @@ pub fn run_screen_graph_with_backend(
                     screen = Screen::Config;
                 }
                 WelcomeStep::OpenRecent(index) => {
-                    let Some(recent) = welcome.recent().get(index) else {
-                        continue;
-                    };
+                    // `Welcome` only creates this action for a visible Recent
+                    // number, so the index is fenced by the same model.
+                    let recent = &welcome.recent()[index];
                     let paths = recent_paths(recent);
                     if paths.is_empty() {
                         continue;
                     }
                     // A workspace this daemon does not serve keeps the switcher on
                     // screen with the reason, so another Recent entry can be tried.
-                    let snapshots = match prepare_workspace_deck(loader, &paths) {
-                        Ok(snapshots) => snapshots,
+                    let (snapshots, snapshot, deck) = match prepare_workspace_deck(loader, &paths) {
+                        Ok(prepared) => prepared,
                         Err(error) => match open_refusal_notice(&error) {
                             Some(notice) => {
                                 welcome.set_notice(Some(notice));
@@ -7483,12 +7490,6 @@ pub fn run_screen_graph_with_backend(
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
-                    let Some(snapshot) = snapshots.first().cloned() else {
-                        continue;
-                    };
-                    let Some(deck) = WorkspaceDeck::from_snapshots(&snapshots) else {
-                        continue;
-                    };
                     if let Some(exit) = enter_workspace_deck(
                         term,
                         snapshot,
@@ -7511,8 +7512,8 @@ pub fn run_screen_graph_with_backend(
                 OpenStep::Choose(paths) => {
                     // Same contract as Recent: the list stays up with the reason so
                     // the workspace this daemon does serve can be chosen instead.
-                    let snapshots = match prepare_workspace_deck(loader, &paths) {
-                        Ok(snapshots) => snapshots,
+                    let (snapshots, snapshot, deck) = match prepare_workspace_deck(loader, &paths) {
+                        Ok(prepared) => prepared,
                         Err(error) => match open_refusal_notice(&error) {
                             Some(notice) => {
                                 open.set_notice(Some(notice));
@@ -7526,12 +7527,6 @@ pub fn run_screen_graph_with_backend(
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
-                    let Some(snapshot) = snapshots.first().cloned() else {
-                        continue;
-                    };
-                    let Some(deck) = WorkspaceDeck::from_snapshots(&snapshots) else {
-                        continue;
-                    };
                     // Leaving returns to Welcome, not to the list that was used
                     // to get here: all three entries share one way back so the
                     // switcher is always reachable from a workspace.
@@ -7825,14 +7820,17 @@ mod tests {
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken,
-        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, director_organization, drain_session_completions,
-        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at,
-        handle_terminal_pointer, home_frame_material, intercept_live_terminal_control,
-        is_user_activity, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        poll_and_project_terminals, projection_build_counts, render_controller_frame,
+        WorkspaceConfigContext, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+        WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
+        controller_terminal_view, copy_terminal_selection, director_organization,
+        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
+        garden_click_at, handle_terminal_pointer, home_frame_material,
+        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, poll_and_project_terminals,
+        prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
+        prepare_workspace_deck, projection_build_counts, recent_paths, render_controller_frame,
         render_home_material, render_home_snapshot, reset_projection_build_counts,
         restore_open_panes, retarget_director_chords, route_garden_input,
         route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
@@ -7840,9 +7838,10 @@ mod tests {
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
-        run_workspace_controller_with_backend_and_settings, safe_session_error,
-        select_right_pane_tab, sidebar_pointer_event, step_config, step_new, step_open,
-        terminal_geometry, visit_garden_agent, welcome_action, write_banner,
+        run_workspace_controller_with_backend_and_settings,
+        run_workspace_deck_with_backend_and_config, safe_session_error, select_right_pane_tab,
+        sidebar_pointer_event, step_config, step_new, step_open, terminal_geometry,
+        visit_garden_agent, welcome_action, workspace_has_unsaved_surface, write_banner,
     };
     use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
@@ -12950,6 +12949,41 @@ mod tests {
                 && !frame.contains("Scope:")
                 && frame.contains("direct-config")
         }));
+    }
+
+    #[test]
+    fn direct_deck_entry_uses_the_shared_workspace_composition() {
+        let snapshot = snapshot("direct-deck");
+        let registry = vec![snapshot.workspace.clone()];
+        let mut term = FakeTerminal::with_keys(&[Key::CtrlQ, Key::Char('y')]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+        };
+
+        assert_eq!(
+            run_workspace_deck_with_backend_and_config(
+                &mut term,
+                snapshot,
+                &registry,
+                &mut loader,
+                &mut factory,
+                &mut settings,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(settings.selected, vec![PathBuf::from("/tmp/direct-deck")]);
     }
 
     #[test]
@@ -24838,6 +24872,114 @@ mod tests {
             PathBuf::from("/tmp/gamma"),
             PathBuf::from("/tmp/alpha"),
         ]));
+    }
+
+    #[test]
+    fn project_deck_composition_helpers_cover_safe_fallbacks() {
+        let alpha = snapshot("alpha");
+        assert!(!workspace_has_unsaved_surface(&WorkspaceRuntime::new(
+            alpha.workspace_id,
+            Vec::new(),
+        )));
+        let mut deck = WorkspaceDeck::new(&alpha);
+
+        let mut no_loader: Option<&mut dyn WorkspaceLoader> = None;
+        assert!(
+            prepare_deck_workspace(&mut no_loader, &mut deck, Path::new("/tmp/beta")).is_none()
+        );
+        assert!(deck.notice().unwrap().contains("workspace list"));
+
+        let mut successful_loader = FakeLoader::default();
+        let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut successful_loader);
+        assert_eq!(
+            prepare_deck_workspace(&mut loader, &mut deck, Path::new("/tmp/beta"))
+                .unwrap()
+                .workspace
+                .path,
+            PathBuf::from("/tmp/beta")
+        );
+
+        let mut failed_loader = FakeLoader {
+            fail: true,
+            ..FakeLoader::default()
+        };
+        let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut failed_loader);
+        assert!(prepare_deck_workspace(&mut loader, &mut deck, Path::new("/tmp/beta")).is_none());
+        assert_eq!(deck.notice(), Some("open failed"));
+
+        let mut no_config = None;
+        assert!(prepare_activation_settings(
+            &mut no_config,
+            &mut no_loader,
+            &mut deck,
+            Path::new("/tmp/alpha"),
+            Path::new("/tmp/beta"),
+        ));
+        assert!(prepare_batch_settings(
+            &mut no_config,
+            &mut no_loader,
+            &mut deck,
+            Path::new("/tmp/alpha"),
+            &[],
+        ));
+
+        let mut settings = WorkspaceBindingSettingsPort {
+            refuse: Some(PathBuf::from("/tmp/beta")),
+            ..WorkspaceBindingSettingsPort::default()
+        };
+        let mut rollback_loader = FakeLoader::default();
+        let mut rollback: Option<&mut dyn WorkspaceLoader> = Some(&mut rollback_loader);
+        let mut context = Some(WorkspaceConfigContext {
+            settings: &mut settings,
+            available_models: AvailableAgentModels::all(),
+        });
+        assert!(!prepare_activation_settings(
+            &mut context,
+            &mut rollback,
+            &mut deck,
+            Path::new("/tmp/alpha"),
+            Path::new("/tmp/beta"),
+        ));
+        assert_eq!(deck.notice(), Some("workspace settings are unreadable"));
+
+        assert_eq!(
+            adjust_project_bar_pointer(Key::Click { column: 4, row: 2 }),
+            Key::Click { column: 4, row: 1 }
+        );
+        assert_eq!(
+            adjust_project_bar_pointer(Key::Click { column: 4, row: 0 }),
+            Key::Click { column: 4, row: 0 }
+        );
+        assert_eq!(
+            adjust_project_bar_pointer(Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 4,
+                row: 2,
+            })),
+            Key::Pointer(PointerEvent {
+                kind: PointerKind::Down,
+                column: 4,
+                row: 1,
+            })
+        );
+        assert_eq!(adjust_project_bar_pointer(Key::Other), Key::Other);
+
+        assert_eq!(
+            prepare_workspace_deck(&mut FakeLoader::default(), &[])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            recent_paths(&Recent::Workspace(WorkspaceOverview::new(
+                alpha.workspace,
+                0,
+                0,
+                0,
+            ))),
+            vec![PathBuf::from("/tmp/alpha")]
+        );
+        assert!(recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))).is_empty());
     }
 
     /// #556 acceptance: the workspace fence still refuses, and it refuses as a

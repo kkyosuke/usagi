@@ -162,7 +162,7 @@ v1 Unite aggregate（#77）や複数 workspace の live pane を同時描画す�
 - [x] project tab close は detach のみで、workspace unregister、session 削除、terminal 終了を起こさない。
 - [x] deck を終了・再起動して Welcome の Unite recent を選ぶと、同じ順序の tab set が復元される。
 - [x] direct `Ctrl+digit` / `Ctrl++` に依存せず、対応端末・非対応端末で標準操作が一致する。
-- [ ] coverage 100% を維持する。
+- [x] coverage 100% を維持する。
 
 ## 必須テスト
 
