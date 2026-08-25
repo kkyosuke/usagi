@@ -1174,6 +1174,14 @@ mod tests {
             None,
         );
         assert_eq!(invalid_target["error"]["code"], -32602);
+        let missing_target = execute_tool(
+            serde_json::json!(2),
+            resume,
+            serde_json::json!({}),
+            &mut client,
+            None,
+        );
+        assert_eq!(missing_target["error"]["code"], -32602);
 
         let unavailable = ToolDescriptor::new(
             Box::new(ErrorTool(|| ToolError::Unimplemented("unused"))),
