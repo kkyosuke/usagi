@@ -673,9 +673,7 @@ impl VtScreen {
             2 => (0, self.cols),
             _ => (self.cursor_col, self.cols),
         };
-        for col in start..end.min(self.cols) {
-            self.grid[row][col] = Cell::blank();
-        }
+        clear_glyph_range(&mut self.grid[row], start, end.min(self.cols));
     }
 
     fn erase_display(&mut self) {
@@ -684,9 +682,11 @@ impl VtScreen {
                 for row in 0..self.cursor_row {
                     self.blank_row(row);
                 }
-                for col in 0..=self.cursor_col.min(self.cols - 1) {
-                    self.grid[self.cursor_row][col] = Cell::blank();
-                }
+                clear_glyph_range(
+                    &mut self.grid[self.cursor_row],
+                    0,
+                    self.cursor_col.min(self.cols - 1) + 1,
+                );
             }
             2 => {
                 for row in 0..self.rows {
@@ -694,9 +694,7 @@ impl VtScreen {
                 }
             }
             _ => {
-                for col in self.cursor_col..self.cols {
-                    self.grid[self.cursor_row][col] = Cell::blank();
-                }
+                clear_glyph_range(&mut self.grid[self.cursor_row], self.cursor_col, self.cols);
                 for row in (self.cursor_row + 1)..self.rows {
                     self.blank_row(row);
                 }
@@ -725,6 +723,11 @@ impl VtScreen {
             self.cursor_col = 0;
             self.line_feed();
         }
+        clear_glyph_range(
+            &mut self.grid[self.cursor_row],
+            self.cursor_col,
+            self.cursor_col + width,
+        );
         self.grid[self.cursor_row][self.cursor_col] = Cell {
             ch,
             style: self.style.clone(),
@@ -1325,8 +1328,52 @@ fn append_scrollback(rows: &mut VecDeque<Vec<Cell>>, row: Vec<Cell>, max_rows: u
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
     row.truncate(cols);
     row.resize(cols, Cell::blank());
-    if row.last().is_some_and(|cell| cell.continuation) {
-        *row.last_mut().expect("terminal rows are never empty") = Cell::blank();
+    let mut column = 0;
+    while column < row.len() {
+        if row[column].continuation {
+            row[column] = Cell::blank();
+            column += 1;
+            continue;
+        }
+        let width = UnicodeWidthChar::width(row[column].ch).unwrap_or(0).max(1);
+        if width > 1 {
+            let complete = (1..width).all(|offset| {
+                row.get(column + offset)
+                    .is_some_and(|cell| cell.continuation)
+            });
+            if complete {
+                column += width;
+                continue;
+            }
+            row[column].ch = '\u{fffd}';
+        }
+        column += 1;
+    }
+}
+
+/// Clears every complete glyph intersecting `[start, end)`. A cursor can land
+/// on either half of a wide glyph, and VT erase/overwrite operations must not
+/// leave an orphan leader or continuation behind.
+fn clear_glyph_range(row: &mut [Cell], start: usize, end: usize) {
+    for column in start.min(row.len())..end.min(row.len()) {
+        clear_glyph_at(row, column);
+    }
+}
+
+fn clear_glyph_at(row: &mut [Cell], column: usize) {
+    debug_assert!(
+        column < row.len(),
+        "glyph clear range is clamped to the row"
+    );
+    let mut leader = column;
+    while leader > 0 && row[leader].continuation {
+        leader -= 1;
+    }
+    row[leader] = Cell::blank();
+    let mut continuation = leader + 1;
+    while continuation < row.len() && row[continuation].continuation {
+        row[continuation] = Cell::blank();
+        continuation += 1;
     }
 }
 
@@ -1549,6 +1596,49 @@ mod tests {
         assert_eq!(retained.first().map(String::as_str), Some("�"));
         assert_eq!(retained.last().map(String::as_str), Some("!"));
         assert_eq!(screen.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn overwriting_either_half_of_a_wide_glyph_clears_the_complete_glyph() {
+        let mut leading = VtScreen::new(1, 4);
+        leading.advance("あ\rX".as_bytes());
+        assert_eq!(rows(&leading), vec!["X"]);
+        assert!(leading.grid()[0].iter().all(|cell| !cell.continuation()));
+
+        let mut continuation = VtScreen::new(1, 4);
+        continuation.advance("あ\x1b[2GX".as_bytes());
+        assert_eq!(rows(&continuation), vec![" X"]);
+        assert!(
+            continuation.grid()[0]
+                .iter()
+                .all(|cell| !cell.continuation())
+        );
+    }
+
+    #[test]
+    fn erasing_from_inside_a_wide_glyph_clears_the_complete_glyph() {
+        let mut right = VtScreen::new(1, 4);
+        right.advance("あ\x1b[2G\x1b[K".as_bytes());
+        assert_eq!(rows(&right), vec![""]);
+
+        let mut left = VtScreen::new(1, 4);
+        left.advance("あ\r\x1b[1K".as_bytes());
+        assert_eq!(rows(&left), vec![""]);
+    }
+
+    #[test]
+    fn resize_preserves_complete_wide_glyphs_and_replaces_clipped_ones() {
+        let mut complete = VtScreen::new(1, 3);
+        complete.advance("あ".as_bytes());
+        complete.resize(1, 2);
+        assert_eq!(rows(&complete), vec!["あ"]);
+        assert!(complete.grid()[0][1].continuation());
+
+        let mut clipped = VtScreen::new(1, 3);
+        clipped.advance("Aあ".as_bytes());
+        clipped.resize(1, 2);
+        assert_eq!(rows(&clipped), vec!["A�"]);
+        assert!(clipped.grid()[0].iter().all(|cell| !cell.continuation()));
     }
 
     #[test]
