@@ -38,16 +38,90 @@ pub fn add_worktree(
     base: Option<&str>,
 ) -> Result<()> {
     let dest = dest.to_str().context("worktree path is not valid UTF-8")?;
+    if std::fs::symlink_metadata(dest).is_ok() {
+        bail!("git worktree destination is already occupied");
+    }
+    let revision = base.unwrap_or("HEAD");
+    let commit_expression = format!("{revision}^{{commit}}");
+    let resolved = runner.run(repo, &["rev-parse", "--verify", &commit_expression])?;
+    if !resolved.success {
+        bail!(
+            "git worktree base resolution failed: {}",
+            resolved.stderr.trim()
+        );
+    }
+    let commit = resolved.stdout.trim();
+    if commit.is_empty()
+        || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || commit.len() < 40
+    {
+        bail!("git worktree base resolution returned an invalid object id");
+    }
+    reject_checkout_filters(runner, repo, commit)?;
     // `--` keeps a leading-`-` path or base from being parsed as an option.
     let mut args = vec!["worktree", "add", "-b", branch, "--", dest];
-    if let Some(base) = base {
-        args.push(base);
-    }
+    // Use the exact commit whose attributes were inspected. A mutable branch
+    // cannot change between validation and checkout.
+    args.push(commit);
     let output = runner.run(repo, &args)?;
     if !output.success {
+        // Git can publish the worktree metadata before a later checkout error.
+        // Compensate only when list output proves that the previously absent
+        // exact destination, branch, and inspected commit are all ours.
+        if list_worktrees(runner, repo).is_ok_and(|worktrees| {
+            worktrees.iter().any(|worktree| {
+                worktree.path == Path::new(dest)
+                    && worktree.branch.as_deref() == Some(branch)
+                    && worktree.head.as_deref() == Some(commit)
+            })
+        }) && remove_worktree(runner, repo, Path::new(dest), true).is_ok()
+        {
+            let _ = delete_branch(runner, repo, branch, true);
+        }
         bail!("git worktree add failed: {}", output.stderr.trim());
     }
     Ok(())
+}
+
+fn reject_checkout_filters(runner: &dyn GitRunner, repo: &Path, commit: &str) -> Result<()> {
+    let tree = runner.run(repo, &["ls-tree", "-rz", "--name-only", commit])?;
+    if !tree.success {
+        bail!("git worktree attribute scan failed: {}", tree.stderr.trim());
+    }
+    for path in tree.stdout.split('\0').filter(|path| {
+        Path::new(path)
+            .file_name()
+            .is_some_and(|name| name == ".gitattributes")
+    }) {
+        let object = format!("{commit}:{path}");
+        let attributes = runner.run(repo, &["cat-file", "blob", &object])?;
+        if !attributes.success {
+            bail!(
+                "git worktree attribute scan failed: {}",
+                attributes.stderr.trim()
+            );
+        }
+        if attributes.stdout.lines().any(line_enables_checkout_filter) {
+            bail!("git worktree checkout refused: tracked {path} configures an executable filter");
+        }
+    }
+    Ok(())
+}
+
+fn line_enables_checkout_filter(line: &str) -> bool {
+    let mut fields = line.split_whitespace();
+    let Some(pattern) = fields.next() else {
+        return false;
+    };
+    if pattern.starts_with('#') {
+        return false;
+    }
+    fields.any(|attribute| {
+        attribute == "filter"
+            || attribute.starts_with("filter=")
+            || attribute == "-filter"
+            || attribute == "!filter"
+    })
 }
 
 /// Remove the worktree at `worktree` (with `--force` when `force`).
@@ -157,13 +231,17 @@ fn parse_porcelain(text: &str) -> Vec<WorktreeInfo> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorktreeInfo, add_worktree, delete_branch, list_worktrees, remove_worktree};
+    use super::{
+        WorktreeInfo, add_worktree, delete_branch, line_enables_checkout_filter, list_worktrees,
+        remove_worktree,
+    };
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
     use std::path::{Path, PathBuf};
 
     #[test]
     fn add_worktree_builds_the_expected_command_with_a_base() {
-        let git = FakeGit::new(vec![ok("")]);
+        let commit = "a".repeat(40);
+        let git = FakeGit::new(vec![ok(&commit), ok(""), ok("")]);
         add_worktree(
             &git,
             Path::new("/repo"),
@@ -173,7 +251,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            git.calls.borrow()[0],
+            git.calls.borrow()[2],
             vec![
                 "worktree",
                 "add",
@@ -181,26 +259,130 @@ mod tests {
                 "usagi/x",
                 "--",
                 "/repo/.usagi/sessions/x",
-                "main"
+                commit.as_str()
             ]
         );
     }
 
     #[test]
     fn add_worktree_omits_the_base_when_none_and_reports_failure() {
-        let git = FakeGit::new(vec![ok("")]);
+        let commit = "b".repeat(40);
+        let git = FakeGit::new(vec![ok(&commit), ok(""), ok("")]);
         add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None).unwrap();
         assert_eq!(
-            git.calls.borrow()[0],
-            vec!["worktree", "add", "-b", "b", "--", "/dest"]
+            git.calls.borrow()[2],
+            vec!["worktree", "add", "-b", "b", "--", "/dest", commit.as_str()]
         );
 
-        let bad = FakeGit::new(vec![fail("fatal: branch 'b' already exists")]);
+        let failed_commit = "c".repeat(40);
+        let bad = FakeGit::new(vec![
+            ok(&failed_commit),
+            ok(""),
+            fail("fatal: branch 'b' already exists"),
+            ok(""),
+        ]);
         let err = add_worktree(&bad, Path::new("/repo"), Path::new("/dest"), "b", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("git worktree add failed"));
         assert!(err.contains("already exists"));
+    }
+
+    #[test]
+    fn add_worktree_compensates_only_an_exact_partial_registration() {
+        let commit = "e".repeat(40);
+        let listing = format!("worktree /dest\nHEAD {commit}\nbranch refs/heads/b\n\n");
+        let git = FakeGit::new(vec![
+            ok(&commit),
+            ok(""),
+            fail("checkout failed"),
+            ok(&listing),
+            ok(""),
+            ok(""),
+        ]);
+        let error = add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("checkout failed"));
+        assert_eq!(
+            git.calls.borrow()[4],
+            ["worktree", "remove", "--force", "--", "/dest"]
+        );
+        assert_eq!(git.calls.borrow()[5], ["branch", "-D", "--", "b"]);
+    }
+
+    #[test]
+    fn add_worktree_refuses_tracked_checkout_filters_before_materializing() {
+        let commit = "d".repeat(40);
+        let git = FakeGit::new(vec![
+            ok(&commit),
+            ok(".gitattributes\0src/.gitattributes\0src/lib.rs\0"),
+            ok("*.md text\n"),
+            ok("*.bin filter=owned\n"),
+        ]);
+        let error = add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("executable filter"));
+        assert_eq!(
+            git.calls.borrow().len(),
+            4,
+            "checkout must not have started"
+        );
+    }
+
+    #[test]
+    fn checkout_filter_attribute_detection_is_fail_closed() {
+        assert!(line_enables_checkout_filter("*.bin filter=evil"));
+        assert!(line_enables_checkout_filter("*.bin -filter"));
+        assert!(line_enables_checkout_filter("[attr]binary filter"));
+        assert!(!line_enables_checkout_filter("# *.bin filter=ignored"));
+        assert!(!line_enables_checkout_filter("*.bin diff=custom"));
+        assert!(!line_enables_checkout_filter(""));
+    }
+
+    #[test]
+    fn add_worktree_refuses_every_untrusted_pre_checkout_state() {
+        let occupied_root = tempfile::tempdir().unwrap();
+        let occupied = occupied_root.path().join("occupied");
+        std::fs::write(&occupied, "owned").unwrap();
+        assert!(
+            add_worktree(
+                &FakeGit::new(vec![]),
+                Path::new("/repo"),
+                &occupied,
+                "b",
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("occupied")
+        );
+
+        for (git, expected) in [
+            (
+                FakeGit::new(vec![fail("unknown revision")]),
+                "base resolution failed",
+            ),
+            (FakeGit::new(vec![ok("not-an-object")]), "invalid object id"),
+            (
+                FakeGit::new(vec![ok(&"a".repeat(40)), fail("tree unreadable")]),
+                "attribute scan failed",
+            ),
+            (
+                FakeGit::new(vec![
+                    ok(&"b".repeat(40)),
+                    ok(".gitattributes\0"),
+                    fail("blob unreadable"),
+                ]),
+                "attribute scan failed",
+            ),
+        ] {
+            let error = add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

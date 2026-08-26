@@ -20,7 +20,6 @@ use usagi_core::domain::settings::{ModalSelectionMode, Settings};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::paths::channel_data_dir;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
@@ -37,6 +36,10 @@ use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 mod daemon_fixture;
 
 use daemon_fixture::{Channel, DaemonHome};
+
+fn channel_data_dir(home: &Path) -> PathBuf {
+    Channel::Local.data_dir(home)
+}
 
 /// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
 /// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
@@ -868,7 +871,14 @@ fn send_line_until_delivered(
     send(master, format!("{line}\r").as_bytes());
     let mut last_send = Instant::now();
     loop {
-        if screen_since(output, baseline).is_some_and(|screen| screen.contains(echo)) {
+        if screen_since(output, baseline).is_some_and(|screen| {
+            screen.contains(echo)
+                || screen
+                    .chars()
+                    .filter(|character| !character.is_whitespace() && *character != '│')
+                    .collect::<String>()
+                    .contains(echo)
+        }) {
             return;
         }
         let dropped = dropped_keystroke_notice(output, baseline);
@@ -1853,7 +1863,7 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
 
     // 指示モードで root Agent（claude）を起動する。
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, baseline, "♛ Director");
+    wait_for_screen_since(&captured, baseline, "Ctrl-O n / New: choose CLI");
     click_director_new(&mut master);
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
@@ -2228,7 +2238,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, first_baseline, "♛ Director");
+    wait_for_screen_since(&captured, first_baseline, "Ctrl-O n / New: choose CLI");
     click_director_new(&mut master);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.

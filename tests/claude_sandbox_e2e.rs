@@ -516,6 +516,9 @@ fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
 
 #[test]
 fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
+    // Keep the Unix socket path below `SUN_LEN`. The sandbox always grants
+    // `/tmp` and `/var/tmp`, so putting the protected repository below either
+    // directory would make a universal writable root its ancestor.
     let fixture = PathBuf::from(std::env::var_os("HOME").expect("test HOME"))
         .join(".codex")
         .join(format!("ub{}", std::process::id()));

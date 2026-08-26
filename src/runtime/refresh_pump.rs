@@ -554,18 +554,28 @@ mod tests {
     fn a_wake_cuts_the_idle_wait_short() {
         let calls = Arc::new(AtomicU64::new(0));
         let worker = Arc::clone(&calls);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let pump = RefreshPump::spawn(cadence(), move || {
+            release_rx.recv().unwrap();
             Ok(worker.fetch_add(1, Ordering::SeqCst) + 1)
         });
         pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut release = Some(&release_tx);
         while pump.take().is_none() {
             assert!(Instant::now() < deadline, "the lane published no result");
+            if let Some(release) = release.take() {
+                release.send(()).unwrap();
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         pump.wake();
+        let mut release = Some(release_tx);
         while pump.take().is_none() {
             assert!(Instant::now() < deadline, "the wake produced no fetch");
+            if let Some(release) = release.take() {
+                release.send(()).unwrap();
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         // The steady cadence is 500ms; the second fetch only happened because the

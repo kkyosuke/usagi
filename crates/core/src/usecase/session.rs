@@ -320,11 +320,17 @@ mod tests {
         }
     }
 
+    const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn successful_add() -> Vec<crate::infrastructure::git::GitOutput> {
+        vec![ok(COMMIT), ok(""), ok("")]
+    }
+
     #[test]
     fn create_adds_the_worktree_then_records_the_session() {
         let (tmp, store) = store();
         let repo = tmp.path();
-        let git = FakeGit::new(vec![ok("")]); // worktree add succeeds
+        let git = FakeGit::new(successful_add()); // validation + worktree add succeed
 
         let created = create(&git, &store, repo, spec("alpha"), ts(20)).unwrap();
 
@@ -332,7 +338,7 @@ mod tests {
         // <repo>/.usagi/sessions/<name>, branched from the current HEAD (no base).
         let dest = repo.join(".usagi/sessions/alpha");
         assert_eq!(
-            git.calls.borrow()[0],
+            git.calls.borrow()[2],
             vec![
                 "worktree",
                 "add",
@@ -340,6 +346,7 @@ mod tests {
                 "usagi/alpha",
                 "--",
                 dest.to_str().unwrap(),
+                COMMIT,
             ]
         );
         assert_eq!(created.root, dest);
@@ -351,7 +358,12 @@ mod tests {
     #[test]
     fn create_propagates_a_worktree_add_failure_without_recording() {
         let (tmp, store) = store();
-        let git = FakeGit::new(vec![fail("fatal: branch 'usagi/alpha' already exists")]);
+        let git = FakeGit::new(vec![
+            ok(COMMIT),
+            ok(""),
+            fail("fatal: branch 'usagi/alpha' already exists"),
+            ok(""),
+        ]);
 
         let err = create(&git, &store, tmp.path(), spec("alpha"), ts(20))
             .unwrap_err()
@@ -370,16 +382,16 @@ mod tests {
         fs::write(repo.join(".usagi"), "blocker").unwrap();
         let store = WorkspaceStateStore::new(repo);
         // add succeeds, then the rollback remove is invoked.
-        let git = FakeGit::new(vec![ok(""), ok("")]);
+        let git = FakeGit::new(vec![ok(COMMIT), ok(""), ok(""), ok("")]);
 
         assert!(create(&git, &store, repo, spec("alpha"), ts(20)).is_err());
 
-        // Two git calls: the add, then the rollback `worktree remove --force`.
+        // Validation, add, then the rollback `worktree remove --force`.
         let calls = git.calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0][..2], ["worktree", "add"]);
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[2][..2], ["worktree", "add"]);
         assert_eq!(
-            calls[1],
+            calls[3],
             vec![
                 "worktree",
                 "remove",
@@ -394,7 +406,7 @@ mod tests {
     fn remove_tears_down_the_worktree_then_forgets_the_record() {
         let (tmp, store) = store();
         let repo = tmp.path();
-        let git = FakeGit::new(vec![ok("")]); // worktree add
+        let git = FakeGit::new(successful_add()); // validated worktree add
         create(&git, &store, repo, spec("alpha"), ts(20)).unwrap();
 
         let git = FakeGit::new(vec![ok("")]); // worktree remove
@@ -416,7 +428,7 @@ mod tests {
         let (tmp, store) = store();
         let repo = tmp.path();
         create(
-            &FakeGit::new(vec![ok("")]),
+            &FakeGit::new(successful_add()),
             &store,
             repo,
             spec("alpha"),

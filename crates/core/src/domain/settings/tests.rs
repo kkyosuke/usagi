@@ -492,7 +492,13 @@ fn local_settings_ignore_global_only_and_unknown_workspace_values() {
         r#"{"theme":"future","modal_selection_mode":"future","default_model":"future","team_template":"future"}"#,
     )
     .unwrap();
-    assert_eq!(local, LocalSettings::default());
+    assert_eq!(
+        local,
+        LocalSettings {
+            team_template: Some(TeamTemplate::None),
+            ..LocalSettings::default()
+        }
+    );
     assert_eq!(
         serde_json::from_str::<LocalSettings>("{}").unwrap(),
         LocalSettings::default()

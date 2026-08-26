@@ -7,9 +7,11 @@
 //! module is an OS process adapter; its behaviour is covered through the pure
 //! `ClipboardPort` boundary in `usagi-tui` rather than LLVM line coverage.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::time::Duration;
 
+use usagi_core::infrastructure::bounded_process::{
+    ChildInputExecution, ChildPolicy, write_stdin_bounded,
+};
 use usagi_tui::usecase::application::terminal_selection::ClipboardPort;
 
 /// The real OS clipboard adapter used by the crossterm composition root.
@@ -24,8 +26,9 @@ mod real_io {
     #![coverage(off)]
 
     use super::{
-        ClipboardCommand, ClipboardPort, Command, PlatformClipboard, Stdio, Write, commands_for,
-        current_platform, write_with_fallbacks,
+        ChildInputExecution, ChildPolicy, ClipboardCommand, ClipboardPort, Duration,
+        PlatformClipboard, commands_for, current_platform, write_stdin_bounded,
+        write_with_fallbacks,
     };
 
     impl ClipboardPort for PlatformClipboard {
@@ -44,23 +47,28 @@ mod real_io {
     }
 
     fn write_with(command: &ClipboardCommand, text: &str) -> Result<(), String> {
-        let mut child = Command::new(command.program)
-            .args(command.arguments)
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("{}: {error}", command.program))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| format!("{}: stdin is unavailable", command.program))?
-            .write_all(text.as_bytes())
-            .map_err(|error| format!("{}: {error}", command.program))?;
-        child
-            .wait()
-            .map_err(|error| format!("{}: {error}", command.program))?
-            .success()
-            .then_some(())
-            .ok_or_else(|| format!("{}: command failed", command.program))
+        let outcome = write_stdin_bounded(
+            command.program,
+            command.arguments,
+            text.as_bytes(),
+            1024 * 1024,
+            ChildPolicy {
+                timeout: Duration::from_millis(250),
+                terminate_grace: Duration::from_millis(50),
+                output_limit: 8 * 1024,
+            },
+        );
+        match outcome {
+            ChildInputExecution::Success => Ok(()),
+            ChildInputExecution::TimedOut => Err(format!("{} timed out", command.program)),
+            ChildInputExecution::InputTooLarge => {
+                Err(format!("{} rejected oversized selection", command.program))
+            }
+            ChildInputExecution::OutputTooLarge => {
+                Err(format!("{} produced too much output", command.program))
+            }
+            _ => Err(format!("{} failed", command.program)),
+        }
     }
 }
 

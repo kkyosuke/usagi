@@ -138,7 +138,7 @@ pub fn heavy_e2e_lock() -> HeavyE2eLock {
 /// `usagi_core::infrastructure::paths` の mode 別レイアウトに従う。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Channel {
-    /// `USAGI_RUNTIME_MODE` 未設定（既定）。`<home>/local` を使う。
+    /// `USAGI_RUNTIME_MODE=local`。`<home>/local` を使う。
     Local,
     /// `USAGI_RUNTIME_MODE=production`。`<home>` を直接使う。
     Production,
@@ -149,15 +149,17 @@ impl Channel {
     #[must_use]
     pub fn data_dir(self, home: &Path) -> PathBuf {
         match self {
-            // テストプロセス自身は runtime mode を設定しないため、これは `<home>/local` を返す。
-            Self::Local => usagi_core::infrastructure::paths::channel_data_dir(home),
+            // 親プロセスの runtime mode はテストの channel 選択に影響させない。
+            Self::Local => home.join("local"),
             Self::Production => home.to_path_buf(),
         }
     }
 
     fn apply(self, command: &mut Command) {
         match self {
-            Self::Local => {}
+            Self::Local => {
+                command.env("USAGI_RUNTIME_MODE", "local");
+            }
             Self::Production => {
                 command.env("USAGI_RUNTIME_MODE", "production");
             }

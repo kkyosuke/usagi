@@ -74,7 +74,10 @@ sidebar は各session名の横に `◆ Manager` / `● Worker` と階層イン�
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
 いずれかの effective role に `delegation` block がある場合は、credential のない `session_delegate_issue` を拒否する。
 `max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
-同じ session の利用数と絶対深度を引き継ぐ。
+同じ session の利用数と絶対深度を引き継ぐ。上限判定と一時枠の取得は dispatch store の同じ lock 内で行い、session
+作成や worker spawn の前に予約する。成功時は durable queue/run が枠を引き継ぎ、失敗時は guard が解放するため、並行 request
+が check と publish の間をすり抜けない。session の親は終了 run の retention 対象ではない immutable lineage に保存し、古い
+binding が削除された後も深度・sidebar・Garden の親子関係を維持する。
 
 reader は future version、不正な role ID、空の `scopes`、未知 scope、16 KiB を超える instruction、NUL、対応 scope を許可しない
 default を拒否する。workspace catalog の権威は target session branch ではなく daemon に登録された workspace root である。

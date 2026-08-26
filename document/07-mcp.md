@@ -172,7 +172,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
@@ -183,6 +183,10 @@ durable transition で起床する。待機中の client が切断された場�
 cancellation contract を使う。これらは durable な `Pending` record を回答・取消・削除しないため、caller は再接続後に get /
 list、または同じ idempotency key の request で同じ decision を観測できる。状態変化がない間に decision store を一定間隔で
 再読込しない。
+
+decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
+2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
+NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。

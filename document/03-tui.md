@@ -954,13 +954,14 @@ daemon / backend event、Agent や terminal の出力は操作ではないので
 
 端末が 64 桁 × 14 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。閾値の判定は
 frame loop が monotonic time と user input を観測して経過時間を controller へ注入する形で行い、controller
-自身は時計を持たない。
+自身は時計を持たない。Overview から手動で開いた直後にこの寸法を満たさない場合も、描画前に Garden を閉じて必要寸法を
+notice に表示するため、見えない overlay が入力だけを所有する状態にはしない。
 
 ### 起こし方とクリック遷移
 
 | 入力 | 挙動 |
 |---|---|
-| 任意の key / paste | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
+| 任意の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
 | inactive project の区画を click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く |

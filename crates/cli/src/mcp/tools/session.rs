@@ -52,7 +52,7 @@ impl Tool for UserDecisionRequest {
         "現在の agent run に人間の判断を durable に要求し、回答を同期的に返す"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"title":{"type":"string"},"prompt":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"description":{"type":"string"}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["title","prompt","options"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"title":{"type":"string","minLength":1,"maxLength":256},"prompt":{"type":"string","minLength":1,"maxLength":16384},"options":{"type":"array","maxItems":32,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":128},"label":{"type":"string","minLength":1,"maxLength":256},"description":{"type":"string","maxLength":2048}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"maxLength":256}},"required":["title","prompt","options"],"additionalProperties":false}"#
     }
 }
 pub struct UserDecisionGet;
@@ -88,7 +88,7 @@ impl Tool for UserDecisionResolve {
         "pending decision に option または許可された freeform を一度だけ記録する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"decision_id":{"type":"string"},"answer":{"oneOf":[{"type":"object","properties":{"kind":{"const":"option"},"option_id":{"type":"string"}},"required":["kind","option_id"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"freeform"},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}]}},"required":["decision_id","answer"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"decision_id":{"type":"string","minLength":1,"maxLength":128},"answer":{"oneOf":[{"type":"object","properties":{"kind":{"const":"option"},"option_id":{"type":"string","minLength":1,"maxLength":128}},"required":["kind","option_id"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"freeform"},"text":{"type":"string","minLength":1,"maxLength":16384}},"required":["kind","text"],"additionalProperties":false}]}},"required":["decision_id","answer"],"additionalProperties":false}"#
     }
 }
 pub struct UserDecisionCancel;

@@ -21,6 +21,7 @@ use usagi_core::infrastructure::ipc::{
     BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
     ResponseOutcome, read_json_frame, write_json_frame,
 };
+use usagi_core::infrastructure::paths::RuntimeMode;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
@@ -134,7 +135,7 @@ fn linked_issue_session(name: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    usagi_core::infrastructure::paths::channel_data_dir(home)
+    Channel::Local.data_dir(home)
 }
 
 fn shipping_build_identity() -> BuildIdentity {
@@ -2205,7 +2206,9 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(!out.contains("workspace main"));
     assert!(!out.contains("workspace TUI ("));
     assert_eq!(
-        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        WorkspaceSettingsStore::new_for_mode(&explicit, RuntimeMode::Local)
+            .load()
+            .unwrap(),
         LocalSettings::from(&Settings::default())
     );
 
@@ -2222,7 +2225,9 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let reopened = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], &home);
     assert!(reopened.status.success());
     assert_eq!(
-        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        WorkspaceSettingsStore::new_for_mode(&explicit, RuntimeMode::Local)
+            .load()
+            .unwrap(),
         LocalSettings::from(&Settings::default())
     );
 
