@@ -3140,6 +3140,7 @@ mod tests {
         assert!(store.rebuild_inbox_index(&caller).is_err());
         fs::remove_dir(&path).unwrap();
         symlink(&path, &path).unwrap();
+        assert!(store.rebuild_inbox_index(&caller).is_err());
         assert!(store.inbox_index(&caller).is_err());
         fs::remove_file(&path).unwrap();
 
@@ -3216,9 +3217,8 @@ mod tests {
         assert!(store.read_inbox_records(&caller, [&mismatched]).is_err());
 
         let index_path = store.inbox_index_path(&caller);
-        if index_path.exists() {
-            fs::remove_file(&index_path).unwrap();
-        }
+        fs::write(&index_path, b"stale-index").unwrap();
+        fs::remove_file(&index_path).unwrap();
         fs::create_dir(&index_path).unwrap();
         assert!(store.write_inbox_records(&caller, &[record]).is_err());
     }
