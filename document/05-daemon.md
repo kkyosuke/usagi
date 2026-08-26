@@ -89,16 +89,18 @@ build schema、profile、full target、source tree / compiler / feature / rustfl
 literal `"unknown"` を same build と扱わない。Git metadata の無い package build も package source set で
 識別し、identity read failure は unknown として fail safe にする。
 
-build mismatch の通常 bootstrap は artifact pair と channel から決まる stable operation ID の typed rollover trigger を
-生成する。production / local は old daemon を停止せず、trigger を返して old endpoint と live PTY をそのまま維持する。
-development は trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
+build mismatch の通常 bootstrap は、protocol handshake が互換なら到達可能な old daemon を effect 0 で再利用する。
+production / local は接続の副作用として replacement を起こさず、old endpoint と live PTY をそのまま維持する。このため
+binary の更新直後も TUI / CLI / MCP は停止中の Agent を巻き込まず接続でき、daemon artifact の更新は明示的な
+`usagi daemon restart` / `usagi daemon replace` が担う。development だけは artifact pair と channel から決まる stable
+operation ID の typed rollover trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
 daemon 自身の census が決め、何も live でなければ cold transition、live Agent / generic Terminal があれば PTY を維持する
 seamless rollover になる（[planned replacement](#planned-replacement)）。replacement 後は exact artifact を handshake で
 確認してから再接続する。これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動でき、かつ再 build が
 他の client の live Agent を巻き添えにしない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
-same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。trigger は
-effect-free であり、production / local は cross-process standby / admission consumer が未接続の間は cold stop/start や
-二重 spawn に進まない。
+same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。
+production / local の mismatch reuse は effect-free であり、cross-process standby / admission consumer が未接続の間も
+cold stop/start や二重 spawn に進まない。
 unknown identity、`build.artifact.v1` capability の無い old daemon、read / verification failure も old daemon を維持した
 typed refusal になる。
 
@@ -116,9 +118,12 @@ daemon-owned terminal や managed session をローカルに代替実行する�
 same build reconnect
   client -> current.json -> existing daemon process -> existing PTY master
 
-detected build mismatch / daemon replace
-  client -> stable rollover operation -> typed trigger, stop effect 0
-                                  -> old daemon process + PTY remain alive
+production / local build mismatch
+  client -> compatible handshake -> reuse old daemon, effect 0
+                                -> old daemon process + PTY remain alive
+
+explicit daemon restart / replace
+  client -> stable rollover operation -> typed trigger
 
 development build mismatch
   client -> stable rollover operation -> planned replacement (no --force)

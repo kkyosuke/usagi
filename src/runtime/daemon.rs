@@ -4719,7 +4719,7 @@ fn start_ipc_accept_loop(
                                             );
                                         }
                                         match body.get("kind").and_then(serde_json::Value::as_str) {
-                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, peer_process, request_id, &body, hello),
+                                        Some("mcp_child_claim") => dispatch_mcp_child_claim(&agent_launch, &bound, peer_process, request_id, &body, hello),
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
                                         Some("agent" | "agent_inventory" | "resume_agent") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
@@ -6442,6 +6442,7 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
 
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
     peer_process: (u32, u32, u32),
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
@@ -6450,24 +6451,57 @@ fn dispatch_mcp_child_claim(
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     use usagi_core::usecase::client::DaemonRequest;
 
-    let result = matches!(
-        serde_json::from_value::<DaemonRequest>(body.clone()),
-        Ok(DaemonRequest::McpChildClaim)
-    )
-    .then_some(())
-    .ok_or_else(|| ProtocolError::new(ErrorCode::InvalidArgument, "invalid MCP child claim"))
-    .and_then(|()| {
-        agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
-            .claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)
-    });
+    let result = (|| {
+        if !matches!(
+            serde_json::from_value::<DaemonRequest>(body.clone()),
+            Ok(DaemonRequest::McpChildClaim)
+        ) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "invalid MCP child claim",
+            ));
+        }
+        let (credential, session_id) = {
+            let mut runtime = agent.lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+            })?;
+            let credential =
+                runtime.claim_mcp_child(peer_process.0, peer_process.1, peer_process.2)?;
+            let session_id = runtime.caller_session(&credential);
+            (credential, session_id)
+        };
+        let store_root = if let Some(session_id) = session_id {
+            bound
+                .sessions()
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "MCP caller session scope is unavailable",
+                    )
+                })?
+                .session_scope_by_id(session_id)
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "MCP caller session scope is unavailable",
+                    )
+                })?
+                .path
+        } else {
+            bound.tenant.root().to_path_buf()
+        };
+        Ok((credential, store_root))
+    })();
     match result {
-        Ok(credential) => envelope(
+        Ok((credential, store_root)) => envelope(
             hello,
             request_id,
             ResponseOutcome::Ok,
-            serde_json::json!({ "credential": credential }),
+            serde_json::json!({
+                "credential": credential,
+                "store_root": paths::wire_workspace_root(&store_root),
+            }),
         ),
         Err(error) => envelope(
             hello,
@@ -11360,9 +11394,10 @@ fn client_workspace() -> ClientWorkspace {
 }
 
 /// Connect to the daemon for this binary's isolated runtime channel. Every
-/// channel reuses an exact artifact. A different known artifact returns one
-/// deterministic rollover trigger. Development consumes it with a cold
-/// restart; other channels preserve the old daemon for a future safe handoff.
+/// channel reuses an exact artifact. A different known artifact is reused when
+/// its protocol handshake is compatible. Development may first request one
+/// planned replacement; installed/local clients never churn a live daemon as a
+/// side effect of connecting.
 ///
 /// The returned lane is deadline-armed by construction: there is no way to
 /// obtain an unbounded daemon socket from this module. `connect_budget_ms`
@@ -11452,6 +11487,12 @@ fn bootstrap_client<S: Read + Write>(
                         ) {
                             BuildArtifactDecision::Reuse => Ok(client),
                             BuildArtifactDecision::ForceReplace
+                            | BuildArtifactDecision::RolloverTrigger
+                                if !should_attempt_automatic_replacement(paths::runtime_mode()) =>
+                            {
+                                Ok(client)
+                            }
+                            BuildArtifactDecision::ForceReplace
                             | BuildArtifactDecision::RolloverTrigger => {
                                 Err(ClientError::RolloverRequired(
                                     build_rollover_trigger(
@@ -11487,12 +11528,11 @@ fn bootstrap_client<S: Read + Write>(
         IpcClient::server_build,
     );
     let connection = match connection {
-        Err(bootstrap::BootstrapError::RolloverRequired(trigger))
-            if paths::runtime_mode() == paths::RuntimeMode::Development =>
-        {
+        Err(bootstrap::BootstrapError::RolloverRequired(trigger)) => {
             // Keyed by the artifact this daemon advertises, so a client whose own
             // build no longer exists on disk asks once instead of once per lane.
-            let may_attempt = ATTEMPTED_REPLACEMENTS.claim(&trigger.running_artifact);
+            let may_attempt = should_attempt_automatic_replacement(paths::runtime_mode())
+                && ATTEMPTED_REPLACEMENTS.claim(&trigger.running_artifact);
             match bootstrap::replace_or_reuse(
                 || connect(&data_dir, &expected_build),
                 // Planned, never forced. A rebuild is not a reason to destroy the
@@ -11505,8 +11545,8 @@ fn bootstrap_client<S: Read + Write>(
                 IpcClient::server_build,
                 may_attempt,
             ) {
-                Ok(bootstrap::DevelopmentConnection::Replaced(stream)) => Ok(stream),
-                Ok(bootstrap::DevelopmentConnection::Reused { stream, reason }) => {
+                Ok(bootstrap::BuildMismatchConnection::Replaced(stream)) => Ok(stream),
+                Ok(bootstrap::BuildMismatchConnection::Reused { stream, reason }) => {
                     if let Some(entry) = reused_build_mismatch_record(&trigger, &reason) {
                         ErrorLog::record(&entry);
                     }
@@ -11538,7 +11578,11 @@ static ATTEMPTED_REPLACEMENTS: bootstrap::OncePerArtifact = bootstrap::OncePerAr
 /// standing mismatch costs one log line instead of one per bootstrapped lane.
 static LOGGED_MISMATCHES: bootstrap::OncePerArtifact = bootstrap::OncePerArtifact::new();
 
-/// The log entry for a development client that keeps talking to a daemon built
+const fn should_attempt_automatic_replacement(mode: paths::RuntimeMode) -> bool {
+    matches!(mode, paths::RuntimeMode::Development)
+}
+
+/// The log entry for a compatible client that keeps talking to a daemon built
 /// from another artifact, or `None` when this process already recorded that same
 /// standing mismatch.
 ///
@@ -11553,7 +11597,7 @@ fn reused_build_mismatch_record(trigger: &BuildRolloverTrigger, reason: &str) ->
         .claim(&trigger.running_artifact)
         .then(|| {
             format!(
-                "development client reused the daemon build {} instead of replacing it with {}: {reason}",
+                "client reused the compatible daemon build {} instead of replacing it with {}: {reason}",
                 trigger.running_artifact, trigger.expected_artifact
             )
         })
@@ -14464,7 +14508,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_development_mismatch_is_recorded_once_per_daemon_artifact() {
+    fn a_reused_build_mismatch_is_recorded_once_per_daemon_artifact() {
         let running = test_build("a");
         let expected = test_build("b");
         let trigger = build_rollover_trigger(&running, &expected, "development", false).unwrap();
@@ -14480,6 +14524,19 @@ mod tests {
             reused_build_mismatch_record(&trigger, "live runtime preserved"),
             None
         );
+    }
+
+    #[test]
+    fn only_development_attempts_automatic_build_replacement() {
+        assert!(should_attempt_automatic_replacement(
+            paths::RuntimeMode::Development
+        ));
+        assert!(!should_attempt_automatic_replacement(
+            paths::RuntimeMode::Production
+        ));
+        assert!(!should_attempt_automatic_replacement(
+            paths::RuntimeMode::Local
+        ));
     }
 
     /// A known artifact identity whose source digest is distinguished by `seed`.

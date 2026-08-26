@@ -33,7 +33,7 @@ MCP 入口の文法・usage error・終了 status は
 daemon-provisioned MCP child は起動直後の同じ IPC connection で一度だけ caller slot を claim する。daemon は
 Unix peer PID、親 PID、process group を kernel から取得し、live Agent provider の直系 child で、process group が
 provider を継承するか child 自身を leader とする独立 group であり、まだ別 PID に claim されていない場合だけ
-process-local credential を返す。credential は MCP child の memory と
+process-local credential と daemon が caller session から解決した exact store root を返す。credential は MCP child の memory と
 daemon の memory にだけ置き、Agent の environment / argv / terminal stream には渡さない。以後の
 dispatch/agent tool と `user_decision_*` は credential に加えて claim 済み peer PID、live runtime、generation、
 dispatch binding を照合する。手動の `usagi mcp`、sibling PID、偽造 token、exit/restart 後の caller は
@@ -273,9 +273,12 @@ restart で明示的に失効し、restart 後は新しい credential が同じ 
 cancel と escalation resolution は run 作成時に daemon が記録したこの caller provenance と一致する request だけを受理する。daemon は起動時と Agent completion 時に共有
 `SupervisorRuntime` を tick し、dispatch の terminal fact を aggregate へ反映する。
 
-issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に cwd と実時計を
-束縛する薄い adapter である。成功時は usecase の結果 JSON を MCP の text content に入れて
-返し、作成・更新・削除は応答前に cwd 配下の source Markdown へ永続化される。派生 index / TOC
+issue / memory の store 系 tool は、CLI 面と同じ `usagi-core` usecase に store root と実時計を
+束縛する薄い adapter である。daemon が起動した Agent の MCP child は、OS process lineage で claim した
+credential と同時に caller session の exact worktree を受け取り、その認証済み path を接続中の store root に固定する。
+provider が MCP child を workspace root など別の cwd から起動しても保存先は変わらない。手動の未認証、または
+store root を返さない旧 daemon と接続した `usagi mcp` は、互換経路として従来どおり cwd を使う。成功時は usecase の結果 JSON を MCP の text content に入れて
+返し、作成・更新・削除は応答前に store root 配下の source Markdown へ永続化される。派生 index / TOC
 の refresh failure は committed source の成功応答を error に変えず、dirty marker により次の
 read で自己修復する。commit point、retry、v1 / v2 共通の issue number 採番 authority の正本は
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract)を参照。

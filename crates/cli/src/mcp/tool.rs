@@ -1,6 +1,7 @@
 //! MCP tool の共通インターフェース。
 
 use std::fmt;
+use std::path::Path;
 
 use serde_json::Value;
 use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorToolAction};
@@ -97,8 +98,8 @@ impl ToolDescriptor {
     /// # Errors
     ///
     /// Returns the adapter's validation, execution, or capability error.
-    pub fn call_store(&self, arguments: &Value) -> Result<String, ToolError> {
-        self.tool.call(&arguments.to_string())
+    pub fn call_store(&self, arguments: &Value, store_root: &Path) -> Result<String, ToolError> {
+        self.tool.call(&arguments.to_string(), store_root)
     }
 
     /// Validates runtime arguments with the exact schema advertised for this call.
@@ -309,7 +310,7 @@ pub trait Tool {
     /// # Errors
     ///
     /// 実行に失敗した場合や未実装の場合、`ToolError` を返す。
-    fn call(&self, _params: &str) -> Result<String, ToolError> {
+    fn call(&self, _params: &str, _store_root: &Path) -> Result<String, ToolError> {
         Err(ToolError::Unimplemented(self.name()))
     }
 }

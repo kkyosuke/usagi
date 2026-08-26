@@ -53,11 +53,19 @@ fn shipping_issue_adapters_cover_defensive_parsing_and_missing_projection() {
         &IssueDelete,
     ] {
         assert!(!tool.description().is_empty());
-        assert!(matches!(tool.call("{"), Err(ToolError::InvalidParams(_))));
+        assert!(matches!(
+            tool.call("{", Path::new(".")),
+            Err(ToolError::InvalidParams(_))
+        ));
     }
-    assert_eq!(IssueGet.call(r#"{"number":4294967295}"#).unwrap(), "null");
+    assert_eq!(
+        IssueGet
+            .call(r#"{"number":4294967295}"#, Path::new("."))
+            .unwrap(),
+        "null"
+    );
     assert!(matches!(
-        IssueToPrompt.call(r#"{"number":4294967295}"#),
+        IssueToPrompt.call(r#"{"number":4294967295}"#, Path::new(".")),
         Err(ToolError::Execution(_))
     ));
 }

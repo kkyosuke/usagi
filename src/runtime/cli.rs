@@ -118,24 +118,43 @@ mod action_io {
                 let stdin = std::io::stdin();
                 match daemon::policy_client(ClientPolicy::mcp()) {
                     Ok(mut client) => {
-                        let credential = match client
+                        let (credential, store_root) = match client
                             .request(usagi_core::usecase::client::DaemonRequest::McpChildClaim)
                         {
-                            Ok(DaemonReply::Ok(body)) => body
-                                .get("credential")
-                                .and_then(serde_json::Value::as_str)
-                                .filter(|value| !value.is_empty())
-                                .map(str::to_owned),
-                            _ => None,
+                            Ok(DaemonReply::Ok(body)) => (
+                                body.get("credential")
+                                    .and_then(serde_json::Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .map(str::to_owned),
+                                body.get("store_root")
+                                    .and_then(serde_json::Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .map(std::path::PathBuf::from),
+                            ),
+                            _ => (None, None),
                         };
                         if let Some(credential) = credential {
-                            usagi_cli::mcp::serve_with_client_and_caller(
-                                stdin.lock(),
-                                out,
-                                info.version,
-                                &mut client,
-                                &credential,
-                            )
+                            if let Some(store_root) = store_root {
+                                usagi_cli::mcp::serve_with_client_and_caller_at(
+                                    stdin.lock(),
+                                    out,
+                                    info.version,
+                                    &mut client,
+                                    &credential,
+                                    &store_root,
+                                )
+                            } else {
+                                // A compatible older daemon returns only the
+                                // credential. Preserve that inter-version path
+                                // until an explicit daemon restart upgrades it.
+                                usagi_cli::mcp::serve_with_client_and_caller(
+                                    stdin.lock(),
+                                    out,
+                                    info.version,
+                                    &mut client,
+                                    &credential,
+                                )
+                            }
                         } else {
                             // Manual MCP remains useful for unprivileged store and
                             // observation tools; caller-scoped mutation stays absent.

@@ -4,7 +4,7 @@
 //!
 //! stdio 上の JSON-RPC 2.0 の serve ループ（`initialize` / `tools/list` / `tools/call`）は
 //! [`serve`] が担う。`tools/list` と `initialize` は実際に応答し、`tools/call` は tool を
-//! 名前で引いて呼ぶ。issue / memory tool は cwd の store を core usecase 経由で操作する。
+//! 名前で引いて呼ぶ。issue / memory tool は接続時に固定した store root を core usecase 経由で操作する。
 //! ロジックは usagi-core の usecase（issue / memory）と daemon への IPC（session）へ
 //! 委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
 
@@ -16,8 +16,8 @@ pub mod tool;
 pub mod tools;
 
 pub use serve::{
-    serve, serve_with_client, serve_with_client_and_caller, serve_with_client_and_features,
-    serve_with_client_and_snapshot,
+    serve, serve_with_client, serve_with_client_and_caller, serve_with_client_and_caller_at,
+    serve_with_client_and_features, serve_with_client_and_snapshot,
 };
 use tool::ToolError;
 
@@ -34,7 +34,9 @@ pub fn dispatch(name: &str, params: &str) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::UnknownTool(name.to_owned()))?;
     let arguments = serde_json::from_str(params)
         .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
-    tool.call_store(&arguments)
+    let store_root =
+        std::env::current_dir().map_err(|error| ToolError::Execution(error.to_string()))?;
+    tool.call_store(&arguments, &store_root)
 }
 
 #[cfg(test)]

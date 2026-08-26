@@ -556,6 +556,22 @@ fn production_issue_writes_are_refused_at_the_workspace_root() {
 }
 
 #[test]
+fn claimed_child_store_tools_stay_bound_to_the_authenticated_session() {
+    let mut mcp = McpHarness::start();
+    drop(mcp.launch_caller());
+
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Claimed child scope"})));
+
+    assert_eq!(created["number"], 1);
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/mcp-caller/.usagi/issues/001-claimed-child-scope.md")
+            .is_file()
+    );
+    assert!(!mcp.workspace().join(".usagi/issues").exists());
+}
+
+#[test]
 fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     let mut mcp = McpHarness::start_in_session("store-e2e");
     let created = tool_text(&mcp.tool(
