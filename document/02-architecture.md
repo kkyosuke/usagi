@@ -1026,11 +1026,15 @@ MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き�
   `~/.claude.json.tmp.<pid>.<random>` を書いて rename で本体に被せる。file 単位で許可すると temp と lock が
   `$HOME` 直下で拒否され、保存が丸ごと失敗する。設定は**読めるのに書けない**状態になるため、症状は
   「起動のたびに folder trust と初回フローを聞かれる」という形で出る（`~/.claude` の grant だけでは直らない）。
-- **`$HOME` 全体は writable にしない**。macOS の profile は prefix を regex（`(allow file-write* (regex
-  #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・temp・backup が
-  すべて覆われる。Linux の `bwrap` は mount 単位でしか許可できず prefix を表現できないため、
-  `--bind-try <prefix>` で config 本体だけを read-write に再 bind する（`$HOME` directory 自体は
-  read-only のままなので、Linux では lock / temp を要する保存経路は通らない）。
+- **既存の `$HOME` entry 全体は writable にしない**。macOS の profile は prefix を regex（`(allow
+  file-write* (regex #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・
+  temp・backup がすべて覆われる。Linux の `bwrap` は mount 単位でしか prefix を表現できないため、launcher が
+  起動直前の `$HOME` 直下 entry を列挙し、`$HOME` を read-write bind してから config prefix family 以外の
+  各 entry を read-only bind に戻す。最後に agent state と起動固有 root を read-write で重ねる。このため lock / temp の
+  新規作成と rename は通る一方、起動時に存在した `.ssh` や repository の ancestor などは read-only のままになる。
+  entry 列挙に失敗した場合や直下 path でない結果は無保護に続行せず fail closed にする。mount policy は起動後に
+  作られる別名の直下 entry を config temp と区別できないため、Linux では新規 `$HOME` 直下 entry の作成も許可されるが、
+  起動時点に存在する entry の内容と subtree は上記の再 bind で保護する。
 - 判定は state root と同じく launcher が exec する program の basename だけを根拠にし、値の正本は
   `usagi-core` の `domain::settings::DefaultModel::global_config_prefix` である。daemon 側の policy gate も
   同じ program から prefix を決め、保護対象 workspace・Git common dir と重なる構成を拒否する。

@@ -397,6 +397,31 @@ fn claude_sandbox(
         writeln!(err, "claude-sandbox: {reason:?}")?;
         return Ok(ExitCode::FAILURE);
     }
+    let linux_home_entries = if platform == Platform::Linux
+        && command
+            .first()
+            .and_then(|program| claude_sandbox::agent_config_prefix(program))
+            .is_some()
+    {
+        let Some(home) = policy.home.as_deref() else {
+            writeln!(
+                err,
+                "claude-sandbox: Linux HOME entry inventory がありません"
+            )?;
+            return Ok(ExitCode::FAILURE);
+        };
+        if let Ok(entries) = linux_home_entry_inventory(home) {
+            Some(entries)
+        } else {
+            writeln!(
+                err,
+                "claude-sandbox: Linux HOME entry inventory を取得できません"
+            )?;
+            return Ok(ExitCode::FAILURE);
+        }
+    } else {
+        None
+    };
     let request = SandboxRequest {
         platform,
         mode,
@@ -405,6 +430,7 @@ fn claude_sandbox(
         launch_roots: policy.writable_roots,
         tmpdir: policy.tmpdir,
         home: policy.home,
+        linux_home_entries,
         cache_dir: policy.cache_dir,
         // E2E テスト専用 seam。release ビルドでは `cfg!(debug_assertions)` が false になるため、
         // 配布バイナリはこの環境変数を見ても拘束を外さない。
@@ -423,6 +449,14 @@ fn claude_sandbox(
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut entries = std::fs::read_dir(home)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries)
 }
 
 /// launcher が exec 直前に検証する policy path 一式。同じ `Option<PathBuf>` が並ぶため、
@@ -682,8 +716,8 @@ mod tests {
 
     use super::{
         Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
-        execute_self_update_with, exit_code, mcp_daemon_route, process_outcome,
-        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
+        execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
+        process_outcome, validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
@@ -699,6 +733,18 @@ mod tests {
             mcp_daemon_route(Some(std::ffi::OsStr::new("/workspace"))),
             McpDaemonRoute::Attached
         );
+    }
+
+    #[test]
+    fn linux_home_inventory_is_sorted_and_reports_an_unreadable_source() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("z"), "z").unwrap();
+        std::fs::create_dir(home.path().join("a")).unwrap();
+        assert_eq!(
+            linux_home_entry_inventory(home.path()).unwrap(),
+            [home.path().join("a"), home.path().join("z")]
+        );
+        assert!(linux_home_entry_inventory(&home.path().join("missing")).is_err());
     }
 
     #[test]

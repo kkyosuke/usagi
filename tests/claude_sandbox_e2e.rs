@@ -429,6 +429,63 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
 }
 
 #[test]
+fn claude_global_config_atomic_save_preserves_other_existing_home_entries() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("claude-global-config-prefix");
+    let _ = fs::remove_dir_all(&fixture);
+    let repo = fixture.join("repo");
+    let home = fixture.join("home");
+    let bin = fixture.join("bin");
+    for path in [&repo, &home.join(".claude"), &bin] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let config = home.join(".claude.json");
+    let guard = home.join("existing-guard");
+    fs::write(&config, "old\n").unwrap();
+    fs::write(&guard, ORIGINAL).unwrap();
+    let program = bin.join("claude");
+    fs::write(
+        &program,
+        "#!/bin/sh\ncp \"$1/.claude.json\" \"$1/.claude.json.backup.1\" || exit 1\n: > \"$1/.claude.json.lock\" || exit 1\nprintf 'trusted\\n' > \"$1/.claude.json.tmp.$$\" || exit 1\nmv \"$1/.claude.json.tmp.$$\" \"$1/.claude.json\" || exit 1\nrm \"$1/.claude.json.lock\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+
+    let saved = run_agent_in_root(&repo, &home, &program);
+    if !saved.status.success() && sandbox_backend_unavailable(&saved) {
+        let _ = fs::remove_dir_all(&fixture);
+        return;
+    }
+    assert!(
+        saved.status.success(),
+        "atomic config save must succeed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert_eq!(fs::read(&config).unwrap(), b"trusted\n");
+    assert_eq!(
+        fs::read(home.join(".claude.json.backup.1")).unwrap(),
+        b"old\n"
+    );
+    assert!(!home.join(".claude.json.lock").exists());
+
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf attack > \"$1/existing-guard\"\n",
+    )
+    .unwrap();
+    let refused = run_agent_in_root(&repo, &home, &program);
+    assert!(!refused.status.success());
+    assert_unchanged(&guard);
+
+    let _ = fs::remove_dir_all(&fixture);
+}
+
+#[test]
 fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
