@@ -7724,6 +7724,7 @@ fn admit_agent_dispatch_request(
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn dispatch_agent_maintenance(
     agent: &SharedAgentRuntime,
     request: &AgentDispatchRequest,
@@ -7775,6 +7776,7 @@ fn dispatch_agent_maintenance(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn dispatch_agent(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -12084,6 +12086,7 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
 /// control connection to reject the incumbent build would return
 /// `RolloverRequired` before it could send the request that performs the
 /// rollover.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn existing_policy_client(
     policy: ClientPolicy,
     workspace: ClientWorkspace,
@@ -12211,6 +12214,7 @@ fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_rou
 /// generation. That is the evidence this turns into a re-read, which keeps the
 /// read off the per-request path without letting the snapshot outlive a
 /// generation change indefinitely.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 pub(crate) fn invalidate_routes() {
     let Ok(data_dir) = paths::data_dir() else {
         return;

@@ -697,6 +697,27 @@ impl DispatchStore {
             .copied())
     }
 
+    fn persist_binding_lineage(
+        &self,
+        registry: &mut WorkspaceRegistry,
+        binding: &DispatchBinding,
+    ) -> Result<()> {
+        let Some(workspace_id) = registry
+            .agent_workspaces
+            .get(&binding.worker.agent_id)
+            .copied()
+        else {
+            return Ok(());
+        };
+        record_lineage(
+            registry,
+            workspace_id,
+            binding.worker.session_id,
+            binding.caller.session_id,
+        )?;
+        self.write_workspace_registry(registry)
+    }
+
     /// Atomically reserves one delegation concurrency slot until the caller
     /// publishes a queued prompt or active admission.
     ///
@@ -1119,19 +1140,7 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let mut workspace_registry = self.load_workspace_registry()?;
-        if let Some(workspace_id) = workspace_registry
-            .agent_workspaces
-            .get(&binding.worker.agent_id)
-            .copied()
-        {
-            record_lineage(
-                &mut workspace_registry,
-                workspace_id,
-                binding.worker.session_id,
-                binding.caller.session_id,
-            )?;
-            self.write_workspace_registry(&workspace_registry)?;
-        }
+        self.persist_binding_lineage(&mut workspace_registry, &binding)?;
         if let Some(existing) = registry
             .bindings
             .iter_mut()
