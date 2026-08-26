@@ -3658,12 +3658,17 @@ fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
             && !key.modifiers.hyper
             && !key.modifiers.meta
     };
+    // `adapt_key` canonicalizes a shifted ASCII letter to uppercase. Linux's
+    // native copy chord includes Shift, while terminals that already resolve
+    // the character can still supply lowercase. Keep the character spelling
+    // protocol-independent without relaxing the platform modifier contract.
+    let copy_character = matches!(key.code, KeyCode::Char('c' | 'C'));
     #[cfg(target_os = "macos")]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(false, false, true);
+    let matches_copy = copy_character && only(false, false, true);
     #[cfg(target_os = "windows")]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, false, false);
+    let matches_copy = copy_character && only(true, false, false);
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, true, false);
+    let matches_copy = copy_character && only(true, true, false);
 
     #[cfg(target_os = "windows")]
     let fallback = vec![3];
@@ -7540,6 +7545,40 @@ mod tests {
     }
 
     #[test]
+    fn shifted_lowercase_crossterm_x_reaches_forced_session_removal() {
+        use crossterm::event::{
+            KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
+        };
+
+        let input = LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::SHIFT,
+        )));
+        let key = classify_terminal_input(
+            &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+            Duration::ZERO,
+            &input,
+        )
+        .expect("Shift+x is a management key");
+        assert_eq!(key, Key::Char('X'));
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let event = usagi_tui::presentation::app_event_from_key(key)
+            .expect("the shifted key reaches the Home reducer");
+        assert_eq!(
+            update(&mut state, event),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+            }]
+        );
+    }
+
+    #[test]
     fn terminal_adapter_maps_global_chords_after_classifier_resolution() {
         let cases = [
             (live_key(KeyCode::Char('c'), control()), Key::Quit),
@@ -7707,11 +7746,33 @@ mod tests {
             }
         };
 
-        assert_eq!(
-            terminal_copy_key(&live_key(KeyCode::Char('c'), modifiers)),
-            Some(Key::TerminalCopy { fallback })
-        );
+        for character in ['c', 'C'] {
+            assert_eq!(
+                terminal_copy_key(&live_key(KeyCode::Char(character), modifiers)),
+                Some(Key::TerminalCopy {
+                    fallback: fallback.clone(),
+                })
+            );
+        }
         assert_eq!(terminal_copy_key(&LiveInput::Text("c".into())), None);
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    #[test]
+    fn linux_terminal_copy_survives_crossterm_shifted_character_normalization() {
+        use crossterm::event::{
+            KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
+        };
+
+        let input = LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+            CrosstermKeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(
+            terminal_copy_key(&input),
+            Some(Key::TerminalCopy { fallback: vec![] })
+        );
     }
 
     #[test]
