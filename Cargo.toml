@@ -10,7 +10,7 @@
 # 手順の正本は document/06-conventions.md#リリース。
 [package]
 name = "usagi"
-version = "3.1.2"
+version = "3.2.0"
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
