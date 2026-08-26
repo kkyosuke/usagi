@@ -44,9 +44,11 @@ pub const INHERITED_GIT_VARIABLES: &[&str] = &["GIT_SSH", "GIT_SSH_COMMAND", "GI
 /// The read-only git handed to a root Agent is confined further, because that
 /// one has no reason to reach a remote at all.
 ///
-/// Checkout filters cannot be disabled by a fixed key list because a tracked
-/// `.gitattributes` chooses the driver name. The worktree materializer therefore
-/// rejects such attributes against an exact commit before checkout.
+/// Checkout filters cannot be disabled by a fixed key list because attributes
+/// choose the driver name. The worktree materializer rejects filter attributes
+/// tracked by the exact commit, then disables every effective configured driver
+/// for the separate checkout boundary. The latter also covers attributes from
+/// Git's local and global attribute sources.
 pub const CONFINED_GIT_CONFIG: &[(&str, &str)] = &[
     // A repository-supplied file-system monitor is a command git runs on every
     // enumeration, including the `git ls-files` behind issue numbering.

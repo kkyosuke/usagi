@@ -323,7 +323,7 @@ mod tests {
     const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn successful_add() -> Vec<crate::infrastructure::git::GitOutput> {
-        vec![ok(COMMIT), ok(""), ok("")]
+        vec![ok(COMMIT), ok(""), ok(""), ok(""), ok(""), ok("")]
     }
 
     #[test]
@@ -338,15 +338,14 @@ mod tests {
         // <repo>/.usagi/sessions/<name>, branched from the current HEAD (no base).
         let dest = repo.join(".usagi/sessions/alpha");
         assert_eq!(
-            git.calls.borrow()[2],
+            git.calls.borrow()[3],
             vec![
                 "worktree",
                 "add",
-                "-b",
-                "usagi/alpha",
+                "--no-checkout",
                 "--",
                 dest.to_str().unwrap(),
-                COMMIT,
+                "usagi/alpha",
             ]
         );
         assert_eq!(created.root, dest);
@@ -361,7 +360,9 @@ mod tests {
         let git = FakeGit::new(vec![
             ok(COMMIT),
             ok(""),
+            ok(""),
             fail("fatal: branch 'usagi/alpha' already exists"),
+            ok(""),
             ok(""),
         ]);
 
@@ -375,23 +376,25 @@ mod tests {
 
     #[test]
     fn create_rolls_back_the_worktree_when_recording_fails() {
-        // Force the state record to fail by making `.usagi` a file, so the store's
-        // `create_dir_all` cannot make the directory.
+        // Occupy the state file path with a directory while leaving the session
+        // container available, so materialization succeeds before recording fails.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
-        fs::write(repo.join(".usagi"), "blocker").unwrap();
         let store = WorkspaceStateStore::new(repo);
+        fs::create_dir_all(store.state_path()).unwrap();
         // add succeeds, then the rollback remove is invoked.
-        let git = FakeGit::new(vec![ok(COMMIT), ok(""), ok(""), ok("")]);
+        let mut outputs = successful_add();
+        outputs.push(ok(""));
+        let git = FakeGit::new(outputs);
 
         assert!(create(&git, &store, repo, spec("alpha"), ts(20)).is_err());
 
-        // Validation, add, then the rollback `worktree remove --force`.
+        // Validation, branch, metadata, checkout, then rollback remove.
         let calls = git.calls.borrow();
-        assert_eq!(calls.len(), 4);
-        assert_eq!(calls[2][..2], ["worktree", "add"]);
+        assert_eq!(calls.len(), 7);
+        assert_eq!(calls[3][..2], ["worktree", "add"]);
         assert_eq!(
-            calls[3],
+            calls[6],
             vec![
                 "worktree",
                 "remove",
