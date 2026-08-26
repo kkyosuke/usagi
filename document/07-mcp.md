@@ -278,7 +278,7 @@ durable journal にその由来が記録されており、dispatch store にそ�
 同じ operation id での retry は二重作成しない。create は lifecycle journal から、dispatch は記録済みの結末から
 replay される。
 
-`supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
+`supervisor_start` は bounded な root task と初期 DAG を snapshot と compacting event journal に保存し、同じ
 `idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な
 projection である。caller provenance は daemon 発行の live MCP credential が解決する root/session と Agent、
 および handshake で検証済みの client incarnation の組である。socket の `ConnectionId` は含めないため、同じ MCP

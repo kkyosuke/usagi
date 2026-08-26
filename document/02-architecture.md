@@ -466,8 +466,8 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   だけであり、TUI / CLI / MCP は IPC command を通じて要求する。repository-local な `state.json` の session record は
   managed state として解釈・採用せず、daemon lifecycle store だけを権威にする。notes 等の UI metadata は lifecycle とは独立して扱う。
 - supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
-  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と append-only event journal を保持し、
-  lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
+  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と compacting event journal、
+  offset index、replay checkpoint を保持し、lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
   event producer であり、domain/store はそれらを解釈しない。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
