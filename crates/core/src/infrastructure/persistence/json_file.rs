@@ -575,8 +575,8 @@ pub const FILE_FORMAT_VERSION: u32 = 1;
 /// The on-disk envelope shared by every versioned store file: a `version` plus
 /// the flattened payload (`{ "version": N, <payload…> }`). The write side
 /// borrows the payload (so callers never clone it into an owned wrapper); the
-/// read side accepts and ignores the `version`, which is reserved for future
-/// format migrations.
+/// read side exposes the `version` to the strict reader while the compatibility
+/// reader continues to ignore it.
 #[derive(Serialize)]
 struct VersionedRef<'a, T: ?Sized> {
     version: u32,
@@ -586,10 +586,7 @@ struct VersionedRef<'a, T: ?Sized> {
 
 #[derive(Deserialize)]
 struct Versioned<T> {
-    // Accepted so the envelope round-trips; not read today, but reserved for a
-    // future format migration that needs to branch on it.
     #[serde(default)]
-    #[allow(dead_code)]
     version: u32,
     #[serde(flatten)]
     inner: T,
@@ -604,6 +601,29 @@ struct Versioned<T> {
 /// Returns an error when the file exists but cannot be read or parsed.
 pub fn read_versioned<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     Ok(read::<Versioned<T>>(path)?.map(|v| v.inner))
+}
+
+/// Read a versioned payload only when its envelope version is supported by this
+/// build. This is for durable user-authored state that must not be interpreted
+/// and later overwritten after a newer usagi has changed its schema.
+///
+/// Files without a version keep the legacy value `0` and remain readable.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or parsed, or when its version
+/// is newer than [`FILE_FORMAT_VERSION`].
+pub fn read_supported_version<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let Some(versioned) = read::<Versioned<T>>(path)? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        versioned.version <= FILE_FORMAT_VERSION,
+        "unsupported file format version {} in {}",
+        versioned.version,
+        path.display()
+    );
+    Ok(Some(versioned.inner))
 }
 
 /// Serialize `payload` and write it atomically to `path` as a versioned JSON

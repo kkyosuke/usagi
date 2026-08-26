@@ -3847,40 +3847,57 @@ impl FsWorkspaceLoader {
 impl WorkspaceLoader for FsWorkspaceLoader {
     fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
         validate_workspace_directory(path)?;
+        let previous = crate::runtime::daemon::opened_workspace();
         // Declare the workspace being opened before anything else touches the
-        // daemon: a daemon that serves another workspace then refuses this
-        // connection instead of answering with its own sessions, and a cold start
-        // binds the workspace being opened rather than this process's directory.
+        // daemon: a running multi-tenant daemon selects or adopts this exact
+        // workspace instead of answering with another tenant's sessions, and a
+        // cold start binds the workspace being opened rather than this process's directory.
         // The refusal lands before any registry write or recent-list update, so a
         // workspace that cannot be shown is not recorded as opened either.
         let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
-        let lifecycle =
-            request_lifecycle_snapshot().map_err(|error| workspace_open_error(error, &opened))?;
-        let workspace =
-            workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
-        // New workspaces copy Global's Agent / Issue / Memory defaults. For a
-        // pre-existing registration from before workspace settings existed,
-        // the first open performs the same one-time initialization. The store
-        // never overwrites an existing workspace file.
-        self.initialize_workspace_settings(&workspace.path)?;
-        let mut state = load_workspace_state(&workspace.path)?;
-        let workspace_id = lifecycle.workspace_id;
-        // Identities align with the listed rows (`project` lists the same set),
-        // so a `Failed` row shows on the first frame with a removable action.
-        let session_ids = lifecycle
-            .listed_sessions()
-            .map(|session| session.session_id)
-            .collect();
-        let session_lifecycles = lifecycle.session_lifecycles();
-        state.sessions = lifecycle.project(&workspace, &state.sessions);
-        Ok(WorkspaceSnapshot::with_runtime_projection(
-            workspace,
-            state,
-            workspace_id,
-            session_ids,
-            lifecycle.agent_resumes,
-            session_lifecycles,
-        ))
+        let result = (|| {
+            let lifecycle = request_lifecycle_snapshot()
+                .map_err(|error| workspace_open_error(error, &opened))?;
+            let workspace =
+                workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
+            // New workspaces copy Global's Agent / Issue / Memory defaults. For a
+            // pre-existing registration from before workspace settings existed,
+            // the first open performs the same one-time initialization. The store
+            // never overwrites an existing workspace file.
+            self.initialize_workspace_settings(&workspace.path)?;
+            let mut state = load_workspace_state(&workspace.path)?;
+            let workspace_id = lifecycle.workspace_id;
+            // Identities align with the listed rows (`project` lists the same set),
+            // so a `Failed` row shows on the first frame with a removable action.
+            let session_ids = lifecycle
+                .listed_sessions()
+                .map(|session| session.session_id)
+                .collect();
+            let session_lifecycles = lifecycle.session_lifecycles();
+            state.sessions = lifecycle.project(&workspace, &state.sessions);
+            Ok(WorkspaceSnapshot::with_runtime_projection(
+                workspace,
+                state,
+                workspace_id,
+                session_ids,
+                lifecycle.agent_resumes,
+                session_lifecycles,
+            ))
+        })();
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
+        }
+        result
+    }
+
+    fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
+        workspace_usecase::touch_unite(&self.storage, paths, Utc::now()).map_err(io_error)
+    }
+
+    fn activate_prepared(&mut self, path: &Path) -> std::io::Result<()> {
+        crate::runtime::daemon::declare_opened_workspace(path).map(|_| ())
     }
 
     fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
@@ -4249,6 +4266,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
+    let registry = loader.storage.load_workspaces().map_err(io_error)?;
     let mut settings = PersistentSettingsPort::open()?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut backend_factory = ProductionBackendFactory::default();
@@ -4259,9 +4277,11 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             // The workspace's ports are already dropped by the time the
             // controller returns, so the switcher starts with no connection
             // to the workspace that was left.
-            match presentation::run_workspace_controller_with_backend_and_config(
+            match presentation::run_workspace_deck_with_backend_and_config(
                 terminal,
                 snapshot,
+                &registry,
+                &mut loader,
                 &mut backend_factory,
                 &mut settings,
                 available_models,

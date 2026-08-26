@@ -44,10 +44,11 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 最近使った workspace を **Recent** から直接開き、**New** で既存リポジトリの登録または clone、
 **Config** で全体設定の編集ができる。
 
-workspace を開くと Home へ移り、左側に session、右側に選択した session の Preview / Terminal /
-Diff / Notes と live pane を表示する。
+workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
+選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。
 
 ```text
+ 1 usagi   2 api   3 web   + Open
 ┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ──────┐
 │   feature-login      │                                          │
 │   12m ago  #42  +18  │  Session info, terminal, and diff        │
@@ -65,10 +66,14 @@ Home の基本操作は次のとおり。
 | `←` / `→`、`h` / `l` | Preview / Terminal / Diff / Notes を切り替える |
 | `Enter` / `t` | 選択した session の Closeup を開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
+| `Ctrl-O` → `+` | workspace を project tab として追加する |
+| `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
+| `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
+直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
 live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
