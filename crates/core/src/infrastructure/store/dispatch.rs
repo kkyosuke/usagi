@@ -2917,15 +2917,8 @@ mod tests {
         assert!(first.has_more);
         assert_eq!(first.next_cursor.next_sequence, 3);
         let since_epoch = Utc.timestamp_opt(0, 0).single().unwrap();
-        assert_eq!(
-            store
-                .inbox_page(&caller, None, 2, false, Some(since_epoch))
-                .unwrap()
-                .messages
-                .len(),
-            2,
-            "messages newer than `since` must be returned"
-        );
+        let page = store.inbox_page(&caller, None, 2, false, Some(since_epoch));
+        assert_eq!(page.unwrap().messages.len(), 2);
         assert!(
             store
                 .inbox_page(&caller, None, 2, false, Some(now()))
