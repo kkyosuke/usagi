@@ -702,11 +702,8 @@ impl DispatchStore {
         registry: &mut WorkspaceRegistry,
         binding: &DispatchBinding,
     ) -> Result<()> {
-        let Some(workspace_id) = registry
-            .agent_workspaces
-            .get(&binding.worker.agent_id)
-            .copied()
-        else {
+        let worker_id = binding.worker.agent_id;
+        let Some(workspace_id) = registry.agent_workspaces.get(&worker_id).copied() else {
             return Ok(());
         };
         record_lineage(
@@ -1474,6 +1471,25 @@ mod tests {
         );
         assert_eq!(store.agents().unwrap().len(), 2);
         assert!(store.registry_path().is_file());
+    }
+
+    #[test]
+    fn legacy_unowned_binding_does_not_invent_workspace_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (_, _, caller) = ids();
+        let binding = DispatchBinding {
+            run_id: OperationId::new(),
+            caller,
+            worker: WorkerRef {
+                session_id: Some(SessionId::new()),
+                agent_id: AgentId::new(),
+            },
+        };
+
+        assert_eq!(store.upsert_binding(binding.clone()).unwrap(), binding);
+        assert_eq!(store.binding(binding.run_id).unwrap(), Some(binding));
+        assert!(store.load_workspace_registry().unwrap().lineages.is_empty());
     }
 
     #[test]
