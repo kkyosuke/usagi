@@ -22,9 +22,18 @@
 ## 起動と経路
 
 `usagi mcp` は合成ルートが stdin/stdout を束ねて serve ループを回す（エージェントが spawn する
-stdio プロセスで、CLI からは隠している）。起動時に daemon へ接続し、停止中なら autostart する。
-daemon に接続できなければ stdio serve ループを開始しない（[2. アーキテクチャ](02-architecture.md)、
-[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。
+stdio プロセスで、CLI からは隠している）。接続経路は起動元で分かれる。
+
+| 起動元 | daemon 接続 | daemon 不在時 |
+|---|---|---|
+| daemon-provisioned Agent の MCP child（非空の trusted `USAGI_WORKSPACE_ROOT` を注入済み） | 発行元 daemon の既存 endpoint へ attach し、`bootstrap.lock` と bootstrap broker を使わない | stdio serve を開始せず失敗する |
+| 手動の `usagi mcp` | 通常の daemon bootstrap を通る | daemon を autostart してから接続する |
+
+daemon-provisioned child が attach だけを行うのは、その child が claim する live Agent runtime と caller slot が発行元
+daemon の process memory にしか存在しないためである。別 daemon を cold start しても claim は成立しない。また Agent の
+sandbox は data home への書き込みを許さないため、`bootstrap.lock` を要求すると発行元 daemon が健全でも MCP server が
+起動不能になる。どちらの経路も daemon に接続できなければ stdio serve ループを開始しない
+（[2. アーキテクチャ](02-architecture.md)、[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。
 
 合成ルートは完全な process argv の解析に成功してから daemon bootstrap と stdio serve を始める。
 MCP 入口の文法・usage error・終了 status は
