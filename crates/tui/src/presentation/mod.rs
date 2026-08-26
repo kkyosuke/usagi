@@ -57,8 +57,8 @@ use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
-    render_home_at, right_pane_tab_at, terminal_point_at,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_page_action,
+    home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_deck::{
@@ -911,6 +911,17 @@ fn route_garden_input(
             *pointer_gesture = true;
             GardenClick::Dismiss
         }
+        Key::Left | Key::Right => material
+            .and_then(|material| {
+                garden_page_action(
+                    material.height,
+                    material.width,
+                    &material.projection,
+                    material.now,
+                    matches!(key, Key::Right),
+                )
+            })
+            .unwrap_or(GardenClick::Dismiss),
         _ => GardenClick::Dismiss,
     };
     let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
@@ -1781,6 +1792,8 @@ enum RestoreJobOutcome {
 /// once; the rest are applied by the next frames.
 const MAX_BACKGROUND_EXITS_PER_FRAME: usize = 8;
 const DETACHED_TERMINAL_LIMIT: usize = 8;
+/// The process-level project tab bar permanently owns the first terminal row.
+const PROJECT_BAR_ROWS: usize = 1;
 
 const RESTORE_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(250);
 const RESTORE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(4);
@@ -3841,7 +3854,11 @@ pub fn render_home_snapshot(
     );
     let mut frame = Vec::with_capacity(height);
     frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
-    frame.extend(render_home(height.saturating_sub(1), width, &projection));
+    frame.extend(render_home(
+        height.saturating_sub(PROJECT_BAR_ROWS),
+        width,
+        &projection,
+    ));
     frame
 }
 
@@ -6177,7 +6194,7 @@ fn drive_workspace_controller(
             }
         }
         let (terminal_height, width) = term.size()?;
-        let height = terminal_height.saturating_sub(1);
+        let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
         ui.set_terminal_size(height, width);
         let _ = runtime.apply_event(AppEvent::Resize {
             width: u16::try_from(width).unwrap_or(u16::MAX),
@@ -7962,9 +7979,9 @@ mod tests {
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
         FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, Geometry, GitDiff,
         IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
-        PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
+        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS,
+        PaneLaunch, PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort,
+        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
         SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
         SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
         TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
@@ -7978,16 +7995,16 @@ mod tests {
         adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
         controller_terminal_view, copy_terminal_selection, director_organization,
         drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
-        garden_click_at, garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
-        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
-        key_to_terminal_bytes_for_mode, new_project_notice, play_startup_splash,
-        poll_and_project_terminals, prepare_activation_settings, prepare_batch_settings,
-        prepare_deck_workspace, prepare_workspace_deck, projection_build_counts, recent_paths,
-        registry_contains_path, remove_registry_paths, render_controller_frame,
-        render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_garden_input,
-        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
-        run_with_settings,
+        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
+        home_frame_material, intercept_live_terminal_control, is_user_activity,
+        key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
+        play_startup_splash, poll_and_project_terminals, prepare_activation_settings,
+        prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck,
+        projection_build_counts, recent_paths, registry_contains_path, remove_registry_paths,
+        render_controller_frame, render_home_material, render_home_snapshot,
+        reset_projection_build_counts, restore_open_panes, retarget_director_chords,
+        route_garden_input, route_workspace_input_before_reducer, run as run_from_start,
+        run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -8674,6 +8691,69 @@ mod tests {
         assert_eq!(plots.len(), 2);
         assert_eq!(plots[0].label, "alpha / alpha-session");
         assert_eq!(plots[1].label, "beta / beta-session");
+    }
+
+    #[test]
+    fn garden_arrow_routes_to_the_next_drawn_page_without_waking_home() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let mut material = home_frame_material(
+            23,
+            80,
+            &runtime,
+            "demo",
+            Path::new("/tmp/demo"),
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        );
+        material.projection = material.projection.with_deck_garden(
+            "5 open projects".to_owned(),
+            (0..5)
+                .map(|index| {
+                    (
+                        WorkspaceId::new(),
+                        crate::presentation::widgets::garden::GardenSession {
+                            id: SessionId::new(),
+                            label: format!("project-{index} / session-{index}"),
+                            lifecycle: SessionLifecycle::Available,
+                            selected: false,
+                            failure_summary: None,
+                            agents_observed: false,
+                            agents: Vec::new(),
+                            pr_merged: false,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pointer_gesture = false;
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                Some(&material),
+                &Key::Right,
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Local(Vec::new())),
+        );
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
+        assert_eq!(runtime.state().garden_page(), 1);
+    }
+
+    #[test]
+    fn documented_garden_minimum_includes_the_project_bar_row() {
+        assert!(garden_fits(14 - PROJECT_BAR_ROWS, 64));
+        assert!(!garden_fits(13 - PROJECT_BAR_ROWS, 64));
     }
 
     #[test]

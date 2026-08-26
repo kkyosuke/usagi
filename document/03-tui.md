@@ -890,6 +890,10 @@ resident にせず、inactive plot に Agent runtime を推測して描かない
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
+区画が端末に収まらない場合は固定容量で切り捨てず、全 session を page に分ける。footer の `← Prev` / `Next →` button、
+または `←` / `→` key で page を移動でき、最後の project を含む全 session が Garden 内から到達可能である。page button は
+左右 1 cell の padding を含む描画範囲全体を click target にし、先頭・末尾の無効な方向を押しても Garden を閉じない。
+
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
 
@@ -898,7 +902,9 @@ resident にせず、inactive plot に Agent runtime を推測して描かない
 1 区画は 1 session、1 うさぎは 1 Agent runtime である。project が複数なら nameplate の先頭へ `project /` を置き、その後を
 `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
-描く。inactive project は Agent membership を観測していないため `no agents` と断定せず、`project inactive` と表示する。
+描く。inactive project は Agent membership を観測していないため `no agents` と断定せず、利用可能なら `project inactive`、
+遷移中または失敗した cached lifecycle なら `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
+cached lifecycle は live の進行状況ではないためうさぎを描かず、animation させない。
 runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
@@ -952,7 +958,8 @@ daemon / backend event、Agent や terminal の出力は操作ではないので
 | overlay の無い Switch | する |
 | overlay の無い Closeup（live terminal を含む） | する |
 
-端末が 64 桁 × 14 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。閾値の判定は
+端末が 64 桁 × 14 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。14 行のうち最上段は
+project tab bar、残る 13 行を Garden 本体として使う。閾値の判定は
 frame loop が monotonic time と user input を観測して経過時間を controller へ注入する形で行い、controller
 自身は時計を持たない。Overview から手動で開いた直後にこの寸法を満たさない場合も、描画前に Garden を閉じて必要寸法を
 notice に表示するため、見えない overlay が入力だけを所有する状態にはしない。
@@ -961,7 +968,9 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 
 | 入力 | 挙動 |
 |---|---|
-| 任意の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
+| `←` / `→` | 前後の Garden page へ移る。先頭・末尾では現在の page に留まり、Garden を閉じない |
+| footer の `← Prev` / `Next →` を click | button の左右 padding を含む範囲で前後の page へ移る。無効な方向は現在の page に留まる |
+| 上記以外の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
 | inactive project の区画を click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く |

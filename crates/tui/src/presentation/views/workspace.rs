@@ -338,6 +338,9 @@ pub struct HomeProjection {
     /// more open projects contribute cached plots.
     garden_scope: String,
     garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
+    /// Renderer-independent page request owned by the controller. The Garden
+    /// layout clamps it against the current terminal capacity and session count.
+    garden_page: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
@@ -383,6 +386,32 @@ impl From<&CreateSessionForm> for CreateDraft {
 
 fn clone_notice_message(notice: &Notice) -> String {
     notice.message.clone()
+}
+
+fn project_garden_sessions(
+    state: &AppState,
+    sessions: &[ProjectedSession],
+    session_agents: &BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>>,
+) -> Option<Vec<widgets::garden::GardenSession>> {
+    (state.overlay() == Some(crate::usecase::application::controller::Overlay::Garden)).then(|| {
+        let names = sessions
+            .iter()
+            .map(|session| (session.id, session.label.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        sessions
+            .iter()
+            .map(|session| widgets::garden::GardenSession {
+                id: session.id,
+                label: garden_session_label(session, &names),
+                lifecycle: session.lifecycle,
+                selected: state.selected() == Selection::Target(Target::Session(session.id)),
+                failure_summary: session.failure_summary.clone(),
+                agents_observed: true,
+                pr_merged: state.celebrates_pr_merge(session.id),
+                agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
+            })
+            .collect()
+    })
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -491,27 +520,7 @@ impl HomeProjection {
         }
         // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
         // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
-        let garden_sessions = (state.overlay()
-            == Some(crate::usecase::application::controller::Overlay::Garden))
-        .then(|| {
-            let names = sessions
-                .iter()
-                .map(|session| (session.id, session.label.as_str()))
-                .collect::<BTreeMap<_, _>>();
-            sessions
-                .iter()
-                .map(|session| widgets::garden::GardenSession {
-                    id: session.id,
-                    label: garden_session_label(session, &names),
-                    lifecycle: session.lifecycle,
-                    selected: state.selected() == Selection::Target(Target::Session(session.id)),
-                    failure_summary: session.failure_summary.clone(),
-                    agents_observed: true,
-                    pr_merged: state.celebrates_pr_merge(session.id),
-                    agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
-                })
-                .collect::<Vec<_>>()
-        });
+        let garden_sessions = project_garden_sessions(state, &sessions, &session_agents);
         let garden_workspaces =
             garden_workspace_index(state.workspace(), garden_sessions.as_deref());
         Self {
@@ -562,6 +571,7 @@ impl HomeProjection {
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
             garden_workspaces,
+            garden_page: state.garden_page(),
             garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
             closeup_modal: None,
@@ -624,10 +634,11 @@ impl HomeProjection {
             return now;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        let Some(tick) = widgets::garden::canonical_tick(
+        let Some(tick) = widgets::garden::canonical_tick_page(
             height,
             width,
             sessions,
+            self.garden_page,
             garden_tick(now),
             self.garden_motion.is_reduced(),
         ) else {
@@ -1901,11 +1912,12 @@ fn garden_frame(
 ) -> Option<widgets::garden::GardenFrame> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render(
+    widgets::garden::render_page(
         height,
         width,
         &home.garden_scope,
         sessions,
+        home.garden_page,
         garden_tick(now),
         home.garden_motion.is_reduced(),
     )
@@ -1942,6 +1954,13 @@ pub fn garden_click_at(
 ) -> Option<GardenClick> {
     let frame = garden_frame(raw_height, raw_width, home, now)?;
     let (column, row) = (usize::from(column), usize::from(row));
+    if let Some(hitbox) = frame
+        .page_hitboxes
+        .iter()
+        .find(|hitbox| hitbox.contains(column, row))
+    {
+        return Some(GardenClick::Page(hitbox.page));
+    }
     Some(
         frame
             .hitboxes
@@ -1959,6 +1978,25 @@ pub fn garden_click_at(
             })
             .unwrap_or(GardenClick::Dismiss),
     )
+}
+
+/// Resolve a Garden page arrow against the same clamped page represented by the
+/// current frame. Boundary arrows target the current page and remain consumed.
+#[must_use]
+pub fn garden_page_action(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    now: DateTime<Utc>,
+    forward: bool,
+) -> Option<GardenClick> {
+    let frame = garden_frame(raw_height, raw_width, home, now)?;
+    let page = if forward {
+        (frame.page + 1).min(frame.page_count - 1)
+    } else {
+        frame.page.saturating_sub(1)
+    };
+    Some(GardenClick::Page(page))
 }
 
 /// controller projection の Home frame を描く。
@@ -2890,12 +2928,12 @@ mod tests {
         HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
         SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
         Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_row_height,
-        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
-        pane_tab_label, pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
-        right_pane_tab_at, role_identity, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap,
+        garden_click_at, garden_fits, garden_frame, garden_page_action, garden_tick, health_badge,
+        health_reason_label, home_header_action_at, home_header_layout, home_left_pane,
+        home_row_height, home_row_lines_at, home_viewport_start, load_style,
+        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
+        render_home_at, resume_label, right_pane_tab_at, role_identity, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -2904,9 +2942,9 @@ mod tests {
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, Feedback, GardenClick, HomeMode, RoleChoice,
-        Route, SafeError, SafeMessage, Selection, SessionRoleCatalog, SessionRoleProjection,
-        Target, TargetPhase, update,
+        AppEvent, AppKey, AppState, BackendEvent, Feedback, GARDEN_IDLE_THRESHOLD, GardenClick,
+        HomeMode, RoleChoice, Route, SafeError, SafeMessage, Selection, SessionRoleCatalog,
+        SessionRoleProjection, Target, TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -4760,7 +4798,108 @@ mod tests {
             &projected,
         );
         assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
-        assert_eq!(garden_click_at(13, 100, &home, now(), 10, 10), None);
+        assert_eq!(garden_click_at(12, 100, &home, now(), 10, 10), None);
+        assert_eq!(garden_page_action(24, 100, &plain, now(), true), None);
+        assert_eq!(garden_page_action(12, 100, &home, now(), true), None);
+    }
+
+    #[test]
+    fn garden_pages_reach_later_projects_with_keyboard_and_footer_buttons() {
+        let active_workspace = WorkspaceId::new();
+        let mut state = AppState::home(active_workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let rows = (0..5)
+            .map(|index| {
+                let workspace = WorkspaceId::new();
+                let session = SessionId::new();
+                (
+                    workspace,
+                    widgets::garden::GardenSession {
+                        id: session,
+                        label: format!("project-{index} / session-{index}"),
+                        lifecycle: SessionLifecycle::Available,
+                        selected: false,
+                        failure_summary: None,
+                        agents_observed: false,
+                        agents: Vec::new(),
+                        pr_merged: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let later_workspace = rows[4].0;
+        let later_session = rows[4].1.id;
+        let project = |state: &AppState| {
+            HomeProjection::from_state(state, "active", Path::new("/work"), &[])
+                .with_deck_garden("5 open projects".to_owned(), rows.clone())
+        };
+        let first = project(&state);
+        let first_frame = garden_frame(23, 80, &first, now()).expect("first page fits");
+        assert_eq!(first_frame.page, 0);
+        assert_eq!(first_frame.page_count, 2);
+        assert_eq!(first_frame.hitboxes.len(), 4);
+        assert_eq!(
+            garden_page_action(23, 80, &first, now(), true),
+            Some(GardenClick::Page(1))
+        );
+
+        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Page(1)));
+        let second = project(&state);
+        let second_frame = garden_frame(23, 80, &second, now()).expect("second page fits");
+        assert_eq!(second_frame.page, 1);
+        assert_eq!(second_frame.hitboxes.len(), 1);
+        assert_eq!(second_frame.hitboxes[0].session_id, later_session);
+        assert_eq!(
+            garden_page_action(23, 80, &second, now(), false),
+            Some(GardenClick::Page(0))
+        );
+        assert_eq!(
+            garden_page_action(23, 80, &second, now(), true),
+            Some(GardenClick::Page(1))
+        );
+        let plot = second_frame.hitboxes[0];
+        assert_eq!(
+            garden_click_at(
+                23,
+                80,
+                &second,
+                now(),
+                u16::try_from(plot.column).expect("fits u16"),
+                u16::try_from(plot.row).expect("fits u16"),
+            ),
+            Some(GardenClick::Visit {
+                workspace: later_workspace,
+                session: later_session,
+                agent: None,
+            })
+        );
+
+        let previous = second_frame.page_hitboxes[0];
+        let next = second_frame.page_hitboxes[1];
+        assert_eq!(
+            garden_click_at(
+                23,
+                80,
+                &second,
+                now(),
+                u16::try_from(previous.column).expect("fits u16"),
+                u16::try_from(previous.row).expect("fits u16"),
+            ),
+            Some(GardenClick::Page(0))
+        );
+        // The disabled boundary button remains a consumed no-op rather than
+        // dismissing the Garden through the generic background click.
+        assert_eq!(
+            garden_click_at(
+                23,
+                80,
+                &second,
+                now(),
+                u16::try_from(next.column).expect("fits u16"),
+                u16::try_from(next.row).expect("fits u16"),
+            ),
+            Some(GardenClick::Page(1))
+        );
     }
 
     /// うさぎ 1 羽は 1 Agent である。押されたうさぎの stable `AgentRuntimeId` を

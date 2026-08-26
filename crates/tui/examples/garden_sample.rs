@@ -1,6 +1,6 @@
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render};
+use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render_page};
 
 fn main() {
     let sessions = [
@@ -66,15 +66,26 @@ fn main() {
         100,
         "2 open projects",
         &open_projects,
+        0,
+        (1, false),
+    );
+    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 2 plot ずつ
+    // page に分かれる。先頭と末尾を出し、全 session へ到達できることを眺める。
+    scene_page(
+        "64x14 terminal · Garden page 1/3",
+        13,
+        64,
+        &sessions,
+        0,
         1,
         false,
     );
-    // 最小サイズでは plot が 2 列 1 行に減り、残りは session list へ畳まれる。
-    scene(
-        "64x14 · 最小サイズ（表示上限超過）",
-        14,
+    scene_page(
+        "64x14 terminal · Garden page 3/3",
+        13,
         64,
         &sessions,
+        2,
         1,
         false,
     );
@@ -88,14 +99,26 @@ fn scene(
     tick: u64,
     reduced_motion: bool,
 ) {
+    scene_page(caption, height, width, sessions, 0, tick, reduced_motion);
+}
+
+fn scene_page(
+    caption: &str,
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    page: usize,
+    tick: u64,
+    reduced_motion: bool,
+) {
     scene_in_scope(
         caption,
         height,
         width,
         "my-project",
         sessions,
-        tick,
-        reduced_motion,
+        page,
+        (tick, reduced_motion),
     );
 }
 
@@ -105,10 +128,11 @@ fn scene_in_scope(
     width: usize,
     scope: &str,
     sessions: &[GardenSession],
-    tick: u64,
-    reduced_motion: bool,
+    page: usize,
+    animation: (u64, bool),
 ) {
-    let frame = render(height, width, scope, sessions, tick, reduced_motion)
+    let (tick, reduced_motion) = animation;
+    let frame = render_page(height, width, scope, sessions, page, tick, reduced_motion)
         .expect("the sample uses Garden-compatible terminal sizes");
     println!("--- {caption} ---");
     println!("{}\n", frame.rows.join("\n"));

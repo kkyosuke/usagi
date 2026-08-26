@@ -967,6 +967,11 @@ pub struct AppState {
     /// behind an invisible overlay. The renderer injects this layout fact; the
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
+    /// Zero-based Garden page selected through renderer-owned page controls.
+    /// Presentation clamps it to the current page count before drawing, and
+    /// sends the exact resulting target back instead of asking the reducer to
+    /// derive terminal-dependent capacity.
+    garden_page: usize,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1109,6 +1114,7 @@ impl AppState {
             mascot_tick: 0,
             size: None,
             garden_available: true,
+            garden_page: 0,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1305,6 +1311,11 @@ impl AppState {
     #[must_use]
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
+    }
+    /// Zero-based page requested for the open Garden.
+    #[must_use]
+    pub const fn garden_page(&self) -> usize {
+        self.garden_page
     }
     /// Whether the current Home projection has a live terminal or Agent pane.
     #[must_use]
@@ -1868,10 +1879,10 @@ pub enum AppEvent {
     /// never reach this event, so a workspace whose Agents are busy still shows
     /// the garden once its *user* has stopped touching the keyboard.
     IdleElapsed(std::time::Duration),
-    /// A click on the open Garden, already resolved against the frame's own
-    /// hitboxes by the presentation layer. The reducer never sees the cell, so
-    /// CJK labels, a resize, or the plot cap cannot move a rabbit away from the
-    /// session it draws.
+    /// An interaction with the open Garden, already resolved against the
+    /// frame's own plot/page layout by presentation. The reducer never sees a
+    /// cell or terminal capacity, so CJK labels, resize, and pagination cannot
+    /// move a rabbit away from the session it draws.
     GardenClick(GardenClick),
     /// Open one stable session without relying on list position. The process
     /// deck uses this after a Garden visit switched to another workspace.
@@ -1881,12 +1892,16 @@ pub enum AppEvent {
     GardenUnavailable,
 }
 
-/// What a click on the open Garden landed on.
+/// What an interaction with the open Garden resolved to.
 ///
 /// Resolved by presentation from the `SessionId`- and `AgentRuntimeId`-tagged
 /// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
+    /// A page control or arrow key. The renderer has already clamped the target
+    /// against the frame currently on screen, so this keeps the Garden open and
+    /// replaces the requested page exactly.
+    Page(usize),
     /// A session's plot. Its stable project/session pair becomes the process
     /// shell's visit target; this reducer activates it only when `workspace`
     /// names its own Home.
@@ -3747,10 +3762,13 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             state.overlay = None;
             Vec::new()
         }
-        // 設計どおり、最初の入力を wake-up として消費して Home へ戻す。背面の
-        // terminal や form へは渡さない。
+        // Page arrows are resolved against the drawn frame by presentation.
+        // Every other first input remains a wake-up consumed before Home.
         Overlay::Garden => {
-            state.overlay = None;
+            if !matches!(key, AppKey::Left | AppKey::Right) {
+                state.overlay = None;
+                state.garden_page = 0;
+            }
             Vec::new()
         }
         Overlay::CreateSessionError | Overlay::Daemon => Vec::new(),
@@ -4551,6 +4569,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             if arguments.trim().is_empty() {
                 if state.garden_available {
                     state.overlay = Some(Overlay::Garden);
+                    state.garden_page = 0;
                     state.notice = None;
                 } else {
                     state.overlay = None;
@@ -4852,6 +4871,7 @@ fn update_pointer(
 fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect> {
     if elapsed >= GARDEN_IDLE_THRESHOLD && garden_may_auto_open(state) {
         state.overlay = Some(Overlay::Garden);
+        state.garden_page = 0;
     }
     Vec::new()
 }
@@ -4876,14 +4896,20 @@ fn garden_may_auto_open(state: &AppState) -> bool {
 /// Reduce a click the presentation layer already resolved against the garden's
 /// own hitboxes.
 ///
-/// Every click closes the Garden; only a rabbit also activates a session. A
-/// session that disappeared from the snapshot between the frame and the press is
-/// a stale target, so it closes the garden and does nothing else.
+/// Page controls retain the Garden and replace its requested page. Every other
+/// click closes it; only a rabbit also activates a session. A session that
+/// disappeared from the snapshot between the frame and the press is a stale
+/// target, so it closes the garden and does nothing else.
 fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Garden) {
         return Vec::new();
     }
+    if let GardenClick::Page(page) = click {
+        state.garden_page = page;
+        return Vec::new();
+    }
     state.overlay = None;
+    state.garden_page = 0;
     let GardenClick::Visit {
         workspace, session, ..
     } = click
@@ -8562,7 +8588,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_garden_opens_a_screen_saver_that_any_key_wakes() {
+    fn overview_garden_opens_a_screen_saver_that_non_page_keys_wake() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         state.overlay = Some(Overlay::Overview);
@@ -8577,8 +8603,8 @@ mod tests {
         assert_eq!(state.overlay(), Some(Overlay::Garden));
         assert!(state.notice().is_none());
 
-        // 設計どおり、最初の入力は wake-up として消費され Home へ戻る。Escape 専用では
-        // なく、drawer を開く key でも「起こすだけ」で背面へ渡らない。
+        // Page arrows以外の最初の入力は wake-up として消費され Home へ戻る。
+        // Escape 専用ではなく、drawer を開く key でも背面へ渡らない。
         for key in [
             AppKey::Escape,
             AppKey::Down,
@@ -8605,6 +8631,27 @@ mod tests {
                 .notice()
                 .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
         );
+    }
+
+    #[test]
+    fn garden_page_actions_keep_the_overlay_and_dismiss_resets_the_page() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Page(3))).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert_eq!(state.garden_page(), 3);
+
+        // Reducer-only arrow delivery is consumed without waking the Garden;
+        // the composition shell supplies the exact page action in production.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert_eq!(state.garden_page(), 3);
+
+        assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.garden_page(), 0);
     }
 
     #[test]
@@ -8883,6 +8930,7 @@ mod tests {
         let route = state.route();
 
         for click in [
+            GardenClick::Page(1),
             GardenClick::Visit {
                 workspace,
                 session,

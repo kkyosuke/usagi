@@ -38,7 +38,7 @@ Agent が動き続けていても人が操作していなければ Garden を表
            o(_(")(")             ·  ·  ·                  failed-build
                                                           ×(x.x)
        --v-------v-----------v-----------v----------v-------v----------v-------
-       Garden  click a usagi to visit · any key to return
+       Garden  ←/→ page · click to visit · Esc to return
 ```
 
 絵文字は端末で 1 桁または 2 桁になり得るため、production の地面・草花は ASCII を基本にする。上の `🌱` は
@@ -133,8 +133,8 @@ agent が 1 つの session は 1 羽を大きく描き、初期案と同じ見�
    跳ねないようにする。
 4. `tick`、projection、領域サイズが同じなら、常に同じ frame を返す。
 
-session が plot 数を超える場合は末尾を `+ N more in session list` に畳み、既存 sidebar を完全な一覧の正本として
-残す。resize 後の再配置は許すが、同じ幅の refresh では場所を変えない。
+session が plot 数を超える場合は同じ固定容量の page に分け、`← Prev` / `Next →` button と `←` / `→` key で
+全 page へ到達可能にする。resize 後の再配置は許すが、同じ幅・page の refresh では場所を変えない。
 
 ## 起こし方とクリック遷移
 
@@ -205,7 +205,7 @@ filesystem path、provider-native ID、terminal output、raw error は renderer 
 | 100×24 · 全 lifecycle | 状態別 pose・状態ラベル・3 列 2 行の plot |
 | 100×24 · reduced motion | 全 pose が静止姿勢に固定される |
 | 100×24 · session 0 件 | 空の庭と `No sessions in the garden` |
-| 64×14 · 最小サイズ | 2 列 1 行への縮退と `+ N more in session list` |
+| 64×14 terminal の Garden 本体 13 行（page 1 / 3 と 3 / 3） | 2 列 1 行への縮退と前後 page への到達 |
 
 ```bash
 cargo run -p usagi-tui --example garden_sample
@@ -238,14 +238,16 @@ tab が無いうさぎを押せてしまう。tab strip と同じ observation �
 6. lifecycle 別 animation（`Waiting` の耳交互表示、`Creating` の 2 pose 出現、`Deleting` の段階的 dim）を追加する。
 7. `USAGI_REDUCE_MOTION` を composition で読み、renderer が既に受け取る boolean へ配線する。
 8. `Failed` の safe failure summary を追加する。session の選択状態は Garden では装飾しない。
+9. 複数 project の session を tab 順に束ね、容量超過は Garden 内の page 操作で全件へ到達可能にする。
 
-1〜8 はすべて実装済みで、うさぎは agent 単位である。
+1〜9 はすべて実装済みで、うさぎは agent 単位である。
 
 受け入れ条件は次のとおりである。
 
 - 同じ入力 snapshot / tick / size は byte-for-byte 同じ frame になる。
 - すべての行が端末幅以内で、CJK の session label も途中で壊れない。
-- 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストする。
+- 0 / 1 / 表示上限超過の session、全 lifecycle、narrow / short terminal をテストし、表示上限超過時は
+  すべての page の session と page button が到達可能である。
 - 1 session に複数 agent があるとき、羽数と各 agent の phase が描かれ、集約によって実行中の agent が
   休んでいる姿に化けない。
 - 表示上限を超えた agent は `+N` に畳まれる。表示枠は `Waiting` が先に使い、`Waiting` 自体が上限を超える

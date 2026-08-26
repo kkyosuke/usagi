@@ -10,12 +10,13 @@ use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 
 use super::agent_status;
+use super::button::InlineButton;
 use super::{clip_to_width, display_width, pad_to_width};
 
 /// Garden を表示できる最小端末幅。
 pub const MIN_WIDTH: usize = 64;
-/// Garden を表示できる最小端末高さ。
-pub const MIN_HEIGHT: usize = 14;
+/// Project tab bar を除く Garden 本体を表示できる最小高さ。
+pub const MIN_HEIGHT: usize = 13;
 
 const SIDE_PADDING: usize = 2;
 const HEADER_ROWS: usize = 3;
@@ -119,6 +120,26 @@ impl GardenHitbox {
     }
 }
 
+/// Garden footer の page button と、押したときに表示する page。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GardenPageHitbox {
+    pub page: usize,
+    pub column: usize,
+    pub row: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl GardenPageHitbox {
+    #[must_use]
+    pub const fn contains(self, column: usize, row: usize) -> bool {
+        column >= self.column
+            && column < self.column + self.width
+            && row >= self.row
+            && row < self.row + self.height
+    }
+}
+
 /// Garden の描画結果と、同じ layout から得た click target。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GardenFrame {
@@ -126,6 +147,12 @@ pub struct GardenFrame {
     /// うさぎの rectangle は必ず、それを含む区画の rectangle より **先** に並ぶ。
     /// click 解決は最初に当たったものを採るため、うさぎが区画に優先する。
     pub hitboxes: Vec<GardenHitbox>,
+    /// Footer の previous / next button。描画した span と click 範囲を共有する。
+    pub page_hitboxes: Vec<GardenPageHitbox>,
+    /// 描画した 0-based page。要求値が範囲外なら最後の page へ clamp する。
+    pub page: usize,
+    /// 空の Garden も 1 page と数える。
+    pub page_count: usize,
     /// 端末に収まらず描画しなかった session 数。
     pub hidden_sessions: usize,
 }
@@ -183,13 +210,40 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
+    render_page(
+        height,
+        width,
+        workspace_name,
+        sessions,
+        0,
+        tick,
+        reduced_motion,
+    )
+}
+
+/// Garden の指定 page を描画する。page は現在の session 数に合わせて clamp する。
+#[must_use]
+pub fn render_page(
+    height: usize,
+    width: usize,
+    workspace_name: &str,
+    sessions: &[GardenSession],
+    requested_page: usize,
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<GardenFrame> {
     let GardenLayout {
         content_width,
         columns,
         garden_height,
         capacity,
     } = garden_layout(height, width)?;
-    let visible = sessions.len().min(capacity);
+    let page_count = sessions.len().div_ceil(capacity).max(1);
+    let page = requested_page.min(page_count - 1);
+    let page_start = page.saturating_mul(capacity).min(sessions.len());
+    let page_end = (page_start + capacity).min(sessions.len());
+    let page_sessions = &sessions[page_start..page_end];
+    let visible = page_sessions.len();
     let hidden_sessions = sessions.len().saturating_sub(visible);
 
     let mut rows = Vec::with_capacity(height);
@@ -209,7 +263,7 @@ pub fn render(
         // 埋まった列数ではなく、その行に実際に並ぶ数で中央へ寄せる。容量ぶんの幅で
         // 中央寄せすると、session が列数に満たない行が左へ寄って庭が偏る。
         let row_left = SIDE_PADDING + content_width.saturating_sub((end - start) * PLOT_WIDTH) / 2;
-        let plots = sessions[start..end]
+        let plots = page_sessions[start..end]
             .iter()
             .map(|session| plot(session, tick, reduced_motion))
             .collect::<Vec<_>>();
@@ -223,7 +277,7 @@ pub fn render(
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
         rows.push(ground_row(width, content_width));
-        for (column, (session, plot)) in sessions[start..end].iter().zip(&plots).enumerate() {
+        for (column, (session, plot)) in page_sessions[start..end].iter().zip(&plots).enumerate() {
             let plot_column = row_left + column * PLOT_WIDTH;
             let plot_row_top = grid_top + plot_row * PLOT_HEIGHT;
             // うさぎは区画の内側にあるので、区画より先に積む（click 解決は最初に
@@ -258,26 +312,93 @@ pub fn render(
 
     let footer_start = height - FOOTER_ROWS;
     rows.resize_with(footer_start, || " ".repeat(width));
-    let overflow = if hidden_sessions == 0 {
-        String::new()
+    let (page_footer, page_hitboxes) = page_footer(width, footer_start, page, page_count);
+    rows.push(page_footer);
+    let help = if page_count > 1 {
+        "Garden · ←/→ page · click to visit · Esc to return"
     } else {
-        Role::Warning
-            .style()
-            .paint(&format!("+ {hidden_sessions} more in session list"))
+        "Garden · click a usagi to visit · any key to return"
     };
-    rows.push(centered(width, &overflow));
-    rows.push(centered(
-        width,
-        &Style::new()
-            .dim()
-            .paint("Garden · click a usagi to visit · any key to return"),
-    ));
+    rows.push(centered(width, &Style::new().dim().paint(help)));
 
     Some(GardenFrame {
         rows,
         hitboxes,
+        page_hitboxes,
+        page,
+        page_count,
         hidden_sessions,
     })
+}
+
+fn page_footer(
+    width: usize,
+    row: usize,
+    page: usize,
+    page_count: usize,
+) -> (String, Vec<GardenPageHitbox>) {
+    if page_count <= 1 {
+        return (" ".repeat(width), Vec::new());
+    }
+
+    let previous = InlineButton::new("← Prev");
+    let next = InlineButton::new("Next →");
+    let previous_rendered = previous.render(
+        width,
+        if page == 0 {
+            Style::new().dim()
+        } else {
+            Role::Feature.style()
+        },
+    );
+    let next_rendered = next.render(
+        width,
+        if page + 1 == page_count {
+            Style::new().dim()
+        } else {
+            Role::Feature.style()
+        },
+    );
+    let indicator = Style::new()
+        .dim()
+        .paint(&format!("· Page {}/{} ·", page + 1, page_count));
+    let content_width = previous_rendered
+        .width
+        .saturating_add(display_width(&indicator))
+        .saturating_add(next_rendered.width);
+    let left = width.saturating_sub(content_width) / 2;
+    let next_column = left
+        .saturating_add(previous_rendered.width)
+        .saturating_add(display_width(&indicator));
+    let line = pad_to_width(
+        &format!(
+            "{}{}{}{}",
+            " ".repeat(left),
+            previous_rendered.line,
+            indicator,
+            next_rendered.line
+        ),
+        width,
+    );
+    (
+        line,
+        vec![
+            GardenPageHitbox {
+                page: page.saturating_sub(1),
+                column: left,
+                row,
+                width: previous_rendered.width,
+                height: 1,
+            },
+            GardenPageHitbox {
+                page: (page + 1).min(page_count - 1),
+                column: next_column,
+                row,
+                width: next_rendered.width,
+                height: 1,
+            },
+        ],
+    )
 }
 
 /// First tick of the current run of identical visible Garden plots.
@@ -293,8 +414,25 @@ pub fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
+    canonical_tick_page(height, width, sessions, 0, tick, reduced_motion)
+}
+
+/// [`canonical_tick`] for the page currently visible in the Garden.
+#[must_use]
+pub fn canonical_tick_page(
+    height: usize,
+    width: usize,
+    sessions: &[GardenSession],
+    requested_page: usize,
+    tick: u64,
+    reduced_motion: bool,
+) -> Option<u64> {
     let layout = garden_layout(height, width)?;
-    let sessions = &sessions[..sessions.len().min(layout.capacity)];
+    let page_count = sessions.len().div_ceil(layout.capacity).max(1);
+    let page = requested_page.min(page_count - 1);
+    let start = page.saturating_mul(layout.capacity).min(sessions.len());
+    let end = (start + layout.capacity).min(sessions.len());
+    let sessions = &sessions[start..end];
     if reduced_motion || !sessions.iter().any(session_may_animate) {
         return Some(0);
     }
@@ -319,6 +457,9 @@ pub fn canonical_tick(
 }
 
 fn session_may_animate(session: &GardenSession) -> bool {
+    if !session.agents_observed {
+        return false;
+    }
     if session.pr_merged {
         return true;
     }
@@ -363,15 +504,35 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let nameplate = clip_to_width(&session.label, PLOT_WIDTH);
     let label = Style::new().dim().paint(&nameplate);
-    let ([status, ears, head, body, feet], rabbits) = match session.lifecycle {
-        SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
-        // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
-        _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
+    let ([status, ears, head, body, feet], rabbits) = if session.agents_observed {
+        match session.lifecycle {
+            SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
+            // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
+            _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
+        }
+    } else {
+        (inactive_plot(session), Vec::new())
     };
     Plot {
         rows: [centered(PLOT_WIDTH, &label), status, ears, head, body, feet],
         rabbits,
     }
+}
+
+fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
+    let status = match session.lifecycle {
+        SessionLifecycle::Available => "project inactive",
+        SessionLifecycle::Creating | SessionLifecycle::Initializing => "cached · creating",
+        SessionLifecycle::Deleting => "cached · deleting",
+        SessionLifecycle::Failed => "cached · failed",
+    };
+    [
+        centered(PLOT_WIDTH, &Style::new().dim().paint(status)),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+        " ".repeat(PLOT_WIDTH),
+    ]
 }
 
 /// 庭の幅いっぱいに敷いた地面の 1 行。
@@ -735,7 +896,9 @@ fn centered(width: usize, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GROUND, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render};
+    use super::{
+        GROUND, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render, render_page,
+    };
     use crate::presentation::widgets::display_width;
     use usagi_core::domain::id::{AgentRuntimeId, SessionId};
     use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
@@ -897,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_is_reported_and_deterministic() {
+    fn overflow_is_paged_deterministically_and_every_session_is_reachable() {
         let sessions = (0..20)
             .map(|index| {
                 session(
@@ -908,11 +1071,44 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let first = render(14, 64, "x", &sessions, 3, false).expect("garden fits");
-        let second = render(14, 64, "x", &sessions, 3, false).expect("garden fits");
+        let first = render_page(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
+        let second = render_page(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
         assert_eq!(first, second);
-        assert!(first.hidden_sessions > 0);
-        assert!(first.rows.join("\n").contains("more in session list"));
+        assert_eq!(first.page, 0);
+        assert_eq!(first.page_count, 10);
+        assert!(first.rows.join("\n").contains("Page 1/10"));
+        assert!(!first.rows.join("\n").contains("session-2"));
+
+        let last =
+            render_page(14, 64, "x", &sessions, usize::MAX, 3, false).expect("last page fits");
+        assert_eq!(last.page, 9);
+        assert!(last.rows.join("\n").contains("Page 10/10"));
+        assert!(last.rows.join("\n").contains("session-19"));
+        assert_eq!(last.page_hitboxes.len(), 2);
+        assert_eq!(last.page_hitboxes[0].page, 8);
+        assert_eq!(last.page_hitboxes[1].page, 9);
+        for hitbox in &last.page_hitboxes {
+            assert!(hitbox.contains(hitbox.column, hitbox.row));
+            assert!(!hitbox.contains(hitbox.column + hitbox.width, hitbox.row));
+        }
+
+        let reachable = (0..first.page_count)
+            .flat_map(|page| {
+                let frame =
+                    render_page(14, 64, "x", &sessions, page, 3, false).expect("every page fits");
+                plots(&frame)
+                    .into_iter()
+                    .map(|hitbox| hitbox.session_id)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reachable,
+            sessions
+                .iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1130,6 +1326,54 @@ mod tests {
     }
 
     #[test]
+    fn inactive_projects_cached_lifecycles_are_static_and_explicitly_cached() {
+        for (lifecycle, status) in [
+            (SessionLifecycle::Creating, "cached · creating"),
+            (SessionLifecycle::Initializing, "cached · creating"),
+            (SessionLifecycle::Deleting, "cached · deleting"),
+            (SessionLifecycle::Failed, "cached · failed"),
+        ] {
+            let cached = GardenSession {
+                id: SessionId::parse(STEADY_ID).expect("fixture id"),
+                label: "other / review".to_owned(),
+                lifecycle,
+                selected: false,
+                failure_summary: Some("old snapshot".to_owned()),
+                agents_observed: false,
+                pr_merged: false,
+                agents: Vec::new(),
+            };
+            let first = render(
+                24,
+                100,
+                "2 open projects",
+                std::slice::from_ref(&cached),
+                0,
+                false,
+            )
+            .expect("fits");
+            let later = render(
+                24,
+                100,
+                "2 open projects",
+                std::slice::from_ref(&cached),
+                5,
+                false,
+            )
+            .expect("fits");
+            assert_eq!(first.rows, later.rows, "{lifecycle:?} must not animate");
+            let text = plain(&first).join("\n");
+            assert!(text.contains(status), "{text}");
+            assert!(!text.contains("growing"), "{text}");
+            assert!(!text.contains("heading home"), "{text}");
+            assert_eq!(
+                super::canonical_tick(24, 100, std::slice::from_ref(&cached), 5, false),
+                Some(0)
+            );
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "available sessions use agent projection")]
     fn lifecycle_plot_rejects_an_available_session() {
         let session = session(
@@ -1342,7 +1586,7 @@ mod tests {
         );
         assert_eq!(super::canonical_tick(24, 100, &[waiting], 5, true), Some(0));
         assert_eq!(super::canonical_tick(24, 100, &[], 5, false), Some(0));
-        assert_eq!(super::canonical_tick(13, 100, &[], 5, false), None);
+        assert_eq!(super::canonical_tick(12, 100, &[], 5, false), None);
     }
 
     #[test]
@@ -1452,6 +1696,10 @@ mod tests {
         assert_eq!(
             super::canonical_tick(14, 64, &sessions, 0, false),
             super::canonical_tick(14, 64, &sessions, 1, false)
+        );
+        assert_ne!(
+            super::canonical_tick_page(14, 64, &sessions, 1, 0, false),
+            super::canonical_tick_page(14, 64, &sessions, 1, 1, false)
         );
         assert_ne!(
             super::canonical_tick(24, 100, &sessions, 0, false),
