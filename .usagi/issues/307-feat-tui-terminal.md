@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, terminal, clipboard, ux]
 dependson: []
-related: [248, 265]
+related: []
 created_at: 2026-07-15T00:28:01.651029+00:00
 updated_at: 2026-07-16T01:00:00.000000+00:00
 ---

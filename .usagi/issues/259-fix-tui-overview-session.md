@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, overview, session]
 dependson: []
-related: [226, 257]
+related: []
 created_at: 2026-07-13T00:08:58.484908+00:00
 updated_at: 2026-07-13T00:14:33.453697+00:00
 ---
@@ -30,5 +30,4 @@ Overview modal の Tab 補完がトップレベル command 名だけを置換す
 
 ## 依存・境界
 
-- #226 の registry dispatch を拡張し、controller effect や daemon wire を増やさない。
 - 実行可能な session command の typed effect / lifecycle adapter 接続は #260 が所有する。

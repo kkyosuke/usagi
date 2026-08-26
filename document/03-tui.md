@@ -9,6 +9,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 ## 目次
 
 - [画面と入力](#画面と入力)
+- [project tab と workspace deck](#project-tab-と-workspace-deck)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
@@ -40,8 +41,9 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 Welcome は Open / Recent / New / Config の入口である。Open は登録済み workspace を名前の
 大文字・小文字を区別しない alphabet 順に並べる。常時表示する Filter 欄は編集位置に cursor を
 示し、入力した文字で即座に名前を絞り込み、↑↓ で絞り込み結果を選ぶ。各 workspace は名前と、session 数・未完了 issue 数・
-最終更新の相対時刻を 2 行で表示する。Recent は上下の内側余白を持たない compact card で表示し、
-同じ Workspace 画面を直接開く。New と Config は
+最終更新の相対時刻を 2 行で表示する。`Tab` で Single / Unite を切り替え、Unite では `Space` で複数 workspace を
+選んで `Enter` を押すと、その順序の project tab deck を開く。Recent は上下の内側余白を持たない compact card で表示し、
+単体 workspace または保存済み Unite deck を直接開く。New と Config は
 それぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 New は Clone（リポジトリを新しいディレクトリへ clone）と Existing（既存ディレクトリを登録）の
@@ -75,7 +77,7 @@ Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme�
 新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
 実行した場合は、Home 上の overlay modal に Agent・Team・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
-`←→` / `Tab` で階層型・フラット・パイプライン型と独立した `Use no template` actionを選ぶ。`Enter` は選択をdraftへ適用し、
+`←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
 `Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
 
 ![Team template picker](assets/team-template-picker.svg)
@@ -110,6 +112,39 @@ CJK / 全角を含んでもハイライト幅が見た目とずれない。
 management input](#home-と-target) 参照）。この境界は「テキスト入力にフォーカスがあるか」で切り分け、
 両者の意味が衝突しない。
 
+## project tab と workspace deck
+
+Home の最上段には project tab bar を常時 1 行表示する。deck が 1 件でも `+ Open` を表示し、active tab の既存 Home だけを
+その下へ全面表示する。通常の sidebar は複数 workspace の session を混ぜないが、全幅の
+[Session Garden](#session-garden) は開いている全 project の session をまとめる。tab は deck の安定した順序で
+1 から採番し、active は accent + bold、inactive は dim で描く。狭幅では active を必ず残す contiguous window へ縮め、隠れた件数を
+`… +N` として示す。描画と click hit-test は同じ canonical path 付き projection を使う。`+ Open` は左右 1 cell の padding を
+含む inline button で、`+`、label、左右の padding のどこを押しても同じ Add workspace overlay を開く。
+
+| 入力 | 動作 |
+|---|---|
+| `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する |
+| `Ctrl-O` → `1` … `9` / tab click | 1〜9 番目またはクリックした project tab を active にする |
+| `Ctrl-O` → `0` | 全件 switcher。`↑↓` / 数字 / `Enter` で切替し、10 件目以降にも到達できる |
+| switcher の `x` | 選択 project tab を deck から detach する。workspace 登録、session、daemon terminal は削除・終了しない |
+
+直接の `Ctrl+1` … `Ctrl+9` / `Ctrl++` は標準 binding にしない。legacy terminal では Control と数字・記号を一意に報告できないため、
+live PTY と management surface の両方で解決できる 1 秒の `Ctrl-O` leader を使う。leader がない plain digit / `+` は従来どおり live PTY へ
+1 回だけ渡す。project shortcut は Switch、Closeup、Director、project overlay より先に process shell が消費する。
+
+Add は現在の Home composition を背面に保ち、既存 tab を checked + disabled で示す。選択した全 workspace の snapshot と settings を
+現在の composition を保ったまま準備し、1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
+旧 composition を drop してから新しい composition を作る。通常切替も同じ prepare → commit 境界を使うため、失敗時は current workspace と
+その接続を保つ。未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
+
+TUI が resident に持つ `ControllerBackendComposition` は active workspace の 1 件だけである。切替 return が旧 workspace の port、pump、worker、
+subscription をすべて drop してから次の factory を呼ぶ。drop は daemon-owned Agent / terminal / operation を停止せず detach だけを行い、
+再選択時は daemon inventory と durable tab intent から同じ runtime へ attach する。
+
+2 件以上の ordered canonical path は user-data scope の versioned/atomic `unites.json` に保存する。同じ順序は touch し、Recent では registry の
+workspace overview と read-time join して `Recent::Unite` を組み立てる。unregister / missing member は読み取り時に除外し、0 件は表示しない。
+破損または future version の Unite store は single-workspace Recent を壊さず、保存済み Unite card の選択は同じ tab 順を再構築する。
+
 Home を開く入口は direct workspace、Welcome の Recent、Open の選択、New の作成成功で共通である。
 いずれも workspace snapshot を同じ production backend factory に渡し、factory が生成した
 `DaemonBackend` と同一の port set を使う。Home controller が発行した Effect は
@@ -133,7 +168,7 @@ production fallback stub は持たない。
 | `quit` | `q` / `y` | この TUI client を終了する |
 | `stay` | `n` / `Esc` | この workspace に留まる |
 
-離脱と終了はどちらも **この workspace のために確立した資源をすべて落とす**。terminal lane・poll lane・
+離脱と終了はどちらも **active workspace のために確立した資源をすべて落とす**。project tab の切替も同じ detach 境界を使う。terminal lane・poll lane・
 pane launch client・restore client の接続、Home の 3 つの[背景観測 lane](#home-frame-loop-と背景観測-lane)、
 metrics lane はいずれも workspace の frame loop が所有しており、loop を抜けることが teardown そのものである。
 したがって**次の workspace を開く時点で、前の workspace の port・pump・worker は 1 つも残っていない**。
@@ -318,10 +353,10 @@ preview は表示だけを移し、command target（active）と live PTY 入力
 active を変えないのは [Home と target](#home-と-target) のとおりで、Switch は PTY へキーを流さないため、
 入力は常に active target の focus 済み tab へ向かう。一度も開かれていない session を hover した場合は、
 未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
-追従するため、同時に attach する live terminal は従来どおり 1 つである。Director drawer が開いている間だけは、
-背景の右ペインが Switch の cursor に追従したまま、foreground terminal の attach と入力を drawer で選択中の
-root conversation が所有する。右ペインは detach 前に保持した managed terminal の viewport を dim のまま描き、
-root conversation へ foreground attach を移しても背景の Agent content を空にしない。
+追従するため、通常は同時に attach する live terminal は 1 つである。Director drawer が開いている間だけは、
+背景の右ペインが Switch の cursor に追従したまま、foreground input を drawer で選択中の root conversation が
+所有する。このとき可視の managed terminal も 2 本目の read-only attachment として通常の右ペイン geometry を維持し、
+出力を取得し続ける。したがって Agent content は dim のまま更新され、drawer を開いたことでは静止しない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
@@ -332,9 +367,10 @@ submit は stable option ID または空でない許可済み freeform を送る
 
 decision の title、prompt、option label/description、freeform は modal 幅で折り返す。表示域を超える editor の
 内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
+freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
 
-新しい pending decision を resync で観測すると、Home header の右上に `🔔 N notice` を表示し、その直下の
-banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。ベルをクリックすると existing decision modal を
+新しい pending decision を resync で観測すると、Home header の右上に Nerd Font の単色ベル glyph と
+`N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。ベルをクリックすると existing decision modal を
 開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
 resolve/cancel/expire で pending snapshot から消えると未読も消える。
@@ -356,7 +392,7 @@ reset する。入力を所有しない右ペインでは terminal 内 UI の fo
 
 左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor を stable identity から照合し、
 それだけを選択表示として描く。Closeup から Switch へ戻った際の current target に緑の rail は残さない。Switch の cursor ではない
-session / `+ new session` 行は v1 と同じ dim の非アクティブ色で描き、selected session の Accent は
+session / `+ new session` 行は dim の非アクティブ色で描き、selected session の Accent は
 保つ。Closeup では session を Accent で描き、current session だけを太字にする。`+ new session` は
 色付けされるときは常に Success（緑）で、accent（青）へは決して落ちない。cursor が乗る Switch の選択時は
 Success の太字、Closeup は Success の非太字で描き、太字は Switch の選択時だけに限る。Switch で cursor が
@@ -383,9 +419,9 @@ worktree の撤去だけが済んでブランチ削除で `failed` に落ちた 
 [workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
 待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
-`Ctrl-C` は、`Ctrl-O o` と同じく modal を閉じて Switch へ戻る（live pane の有無に依らない）。overlay を開いて
+`Ctrl-C` は modal だけを閉じて背面の Closeup へ戻る（live pane の有無に依らない）。overlay を開いて
 いない Closeup の live pane 上の `Ctrl-C` が exit prompt を開く契約はそのままである。前面 overlay は共通入力境界で
-`Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で Switch へ戻る Closeup action
+`Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で背面へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
@@ -413,6 +449,9 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 
 | prefix | アクション | 効果 |
 |---|---|---|
+| `Ctrl-O` `+` | OpenWorkspace | Add workspace overlay を開く |
+| `Ctrl-O` `1` … `9` | ActivateWorkspace | 対応する project tab へ切り替える |
+| `Ctrl-O` `0` | OpenWorkspaceSwitcher | 全 project tab の switcher を開く |
 | `Ctrl-O` `Ctrl-O` | Switch | Closeup から Switch へ戻る |
 | `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ（[指示モード](#指示モードdirector-mode)が開いている間は New） |
@@ -423,7 +462,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
-| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる（live なら subscription を detach、pending なら起動待ちを取消、[interrupted](#interrupted-agent-の-tab-投影と明示-resume) なら lineage を dismiss） |
+| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる。live Agent には `Ctrl-D` と同じ EOT を送り、generic live tab は subscription を detach、pending は起動待ちを取消す |
 | `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
@@ -453,10 +492,10 @@ root scope（`session_id: None`）の Agent へ指示を出し、session を作�
 
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
-Unicode display width による clip と hit-test を維持する。workspace breadcrumb、mode toggle、
-pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
-そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
-と hit-test は同じ terminal cell を指す。
+Unicode display width による clip と hit-test を維持する。workspace identity は直上の project tab だけに表示し、
+Home header へ重複する breadcrumb は置かない。mode toggle、pending decision の notice badge、button は 1 つの
+header layout が表示幅と click range を同時に計算する。そのため notice の有無や狭幅での clip があっても、
+描画された button / badge と hit-test は同じ terminal cell を指す。
 
 button の強調は mode toggle と同じ「前面にある面がアクセント」の対比に従う。drawer が閉じているときは
 選択されていない mode chip と同じ dim で描き、Switch / Closeup のどちらでも accent を持たない。drawer を開いた
@@ -466,9 +505,11 @@ clip する場合も、この対比は変わらない。
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
-同時に保てない幅では全幅へ縮退する。背景 Home は ANSI span ごと dim にし、header は表示したままにする。
+同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は ANSI span ごと dim にし、
+header は表示したままにする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
-managed-session Closeup の right pane viewport とは別の pure geometry とする。
+managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
+その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
 conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
@@ -511,10 +552,11 @@ resumable なら同じ slot の interrupted tab を投影する。inventory-only
 加え、消失した selection は同 slot より後の surviving tab、なければ先頭、conversation が無ければ empty state へ
 縮退する。drawer 自体は observation から自動 open しない。
 
-drawer open 時は root の selected live Agent だけを foreground attach し、drawer 専用 viewport geometry を使う。
+drawer open 時は root の selected live Agent を foreground attach し、drawer 専用 viewport geometry を使う。
 選択中 Agent へ既存の ordered input / ACK、terminal-local な scroll / selection / feedback、copy / link を接続する。
-他の root tab と managed pane は detached background である。drawer close 時は root subscription を detach し、
-開く前の managed-session selected live tab を元の right pane geometry で attach する。detach 中の terminal は別 pane の
+drawer の背後で実際に見えている managed-session selected live tab も read-only で attach し、通常の right pane geometry と
+live output を維持する。他の root tab と不可視の managed pane は detached background である。drawer close 時は root
+subscription を detach し、右ペインに残る managed terminal の attachment を維持する。detach 中の terminal は別 pane の
 geometry へ resize せず、**attach 自体がその pane の viewport を宣言する**。daemon は detach と一緒にその window の
 [共有 viewport](05-daemon.md#共有-viewport複数-client-の-geometry) の要求を捨てるため、再 attach では毎回宣言し直す
 必要がある（黙って attach すると、他 window の小さい viewport がその window の終了後も残ってしまう）。宣言は
@@ -742,7 +784,8 @@ Config の `Modal mode` は Overview と Closeup の command surface に共通�
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
 `config` は引数を取らず、現在開いている workspace の Config を Agent / Team / Issue / Memory だけの overlay modal で開く。
-`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。
+`garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
+64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
@@ -840,8 +883,10 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 ## session garden
 
 session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新の coherent Agent inventory・controller が runtime
-ごとに保持する Agent phase だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、
+Home の一時的な全幅レイヤーで、開いている project tab 全件の session を tab 順に並べる。active project は daemon 権威の
+lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase を写し、inactive project は
+最後に準備または active だった daemon snapshot の session / lifecycle を read-only plot として保持する。inactive controller を
+resident にせず、inactive plot に Agent runtime を推測して描かない。背面の route・active target・pane・terminal subscription は変えず、
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
@@ -850,9 +895,11 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新�
 
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。project が複数なら nameplate の先頭へ `project /` を置き、その後を
+`role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
-描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+描く。inactive project は Agent membership を観測していないため `no agents` と断定せず、`project inactive` と表示する。
+runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
 membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
@@ -907,20 +954,22 @@ daemon / backend event、Agent や terminal の出力は操作ではないので
 
 端末が 64 桁 × 14 行に満たない場合も開かない（操作できる一覧を screen saver で覆わない）。閾値の判定は
 frame loop が monotonic time と user input を観測して経過時間を controller へ注入する形で行い、controller
-自身は時計を持たない。
+自身は時計を持たない。Overview から手動で開いた直後にこの寸法を満たさない場合も、描画前に Garden を閉じて必要寸法を
+notice に表示するため、見えない overlay が入力だけを所有する状態にはしない。
 
 ### 起こし方とクリック遷移
 
 | 入力 | 挙動 |
 |---|---|
-| 任意の key / paste | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
+| 任意の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
-| うさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
-| 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ session の Closeup へ入るところまでで、tab の選択は動かさない |
+| active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
+| inactive project の区画を click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く |
+| 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ project / session の Closeup へ入るところまでで、tab の選択は動かさない |
 | 区画の外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 
 click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は区画に stable
-`SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛し、うさぎは区画の内側にあるので先に判定する。
+`WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛し、うさぎは区画の内側にあるので先に判定する。
 controller は画面座標から session 順や羽の順を再計算しないため、CJK label・端末 resize・表示上限で click target が
 ずれない。session の pose（`creating` / `deleting` / `failed`）と PR merge の celebration は session そのものの姿で
 agent 1 体に対応しないため、`AgentRuntimeId` を束縛せず session の訪問だけになる。
@@ -929,16 +978,17 @@ tab の選択も stable identity だけで引く。押されたうさぎの runt
 または会話 lineage（中断 tab）と一致する tab を選び、一致する tab が無ければ（押した瞬間に終了した、pane を
 まだ復元していない）session の Closeup をそのまま残す。位置の近い無関係な tab は選ばない。
 
-click と同時に session が snapshot から消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
+click と同時に session が fresh snapshot から消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
 うさぎの click は sidebar の activation と同じ経路を通るので、使用できない checkout（`failed`）は選択されるが
-attach されない。Garden から daemon command は発行しない。
+attach されない。inactive project の訪問は project tab と同じ prepare → commit 境界を通り、準備に失敗した場合は
+current project を保ったまま project switcher に安全な理由を表示する。session を変更する daemon command は発行しない。
 
 ## PR modal と browser effect
 
 workspace entry は各 `SessionId` の daemon PR snapshot を読み、dismissed でない PR の件数を
 sidebar の右端に Nerd Font の PR アイコンとともに固定列で投影する。Switch の `p`、Closeup の
-`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について同じ PR modal を即時表示し、
-resident PR lane を wake する。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
+`Ctrl-O Ctrl-P`、または PR アイコン＋件数のクリックは、対象 `SessionId` について resident PR lane を wake する。
+dismissed でない PR がある場合だけ同じ PR modal を表示し、snapshot が空なら modal は閉じたままにする。modal の枠タイトルは `Pull Request` の 1 か所だけに置き、各 PR は状態・番号・title を
 一覧へ 1 回だけ表示する。選択中 PR の同じ番号や URL を別の詳細行へ重複表示しない。sidebar projection は新しい revision だけで進み、
 開き直した modal は同じ cache を即時利用する。session ごとの初回 snapshot は baseline として表示用 cache にだけ
 保存し、後続 revision で新しい URL を初めて検知したときは、他の modal や Director drawer が前面にない場合に、
@@ -1210,8 +1260,8 @@ pending tab がある間は action modal を自動表示せず、その wave を
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
 を再び出すのは `Ctrl-O Ctrl-A` だけである。action modal が前面にある間の `Esc` / `Ctrl-C` は、tab の有無や forced
-表示か base surface かに依らず、modal を閉じて Switch へ戻る（`Ctrl-O Ctrl-O` と同じ着地で、action picker を dead-end に
-しない）。modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
+表示か base surface かに依らず、modal だけを閉じて背面の Closeup へ戻る。Switch へ戻る操作は
+`Ctrl-O Ctrl-O` が所有する。modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に一覧へ表示する。completion まで
 入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。この focus は
@@ -1225,13 +1275,20 @@ client-owned pending launch を閉じる。close 後は次の tab（末尾なら
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
 detach するだけで daemon-owned terminal を停止しない。pending launch は送信済み operation を推測して再送・cancel しない。
 
-live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、`Ctrl-O x` / `Ctrl-O Ctrl-X` では閉じない。
-この操作には `Agent tabs stay visible; exit the Agent with Ctrl-D` を表示する。Agent runtime を終了して実行枠を空ける操作は、
-対象 tab を選択して CLI へ `Ctrl-D` を送る。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
+`terminal new` は embedded pane を作らず、選択 session の worktree を cwd とするプラットフォーム標準の terminal を
+別ウィンドウで開く。起動要求を発行した時点で Closeup action modal だけを閉じ、背面の Closeup へ戻る。
 
-shell が attach するのは、現在の active target に属する selected foreground terminal だけである。target / tab の
-切替時は以前の subscription を detach する。background target と選択外 tab の terminal coordinator は bounded
-cache にだけ保持し、foreground stream lane からは外す。
+live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、client-side の detach だけでは非表示にしない。
+live Agent で `Ctrl-O x` / `Ctrl-O Ctrl-X` を入力すると、対象 CLI へ `Ctrl-D` と同じ EOT (`0x04`) を送り、runtime の終了を
+要求する。tab は入力直後に推測で消さず、daemon が終了を観測した時点で閉じ、同じ観測で sidebar・Garden の membership と
+実行枠を更新する。終了入力を配送できなかった場合は tab を残して pane の safe feedback を表示する。interrupted Agent は live PTY を
+持たないため chord では閉じず、`Interrupted Agent has no live process; resume it before closing` を表示する。必要なら
+`Ctrl-O r` で明示 resume してから閉じる。Closeup に Agent を非表示化・再表示するコマンドは持たせない。
+
+shell が attach するのは、現在の active target に属する selected foreground terminal と、Director drawer の背後に
+実際に見えている selected managed terminal だけである。通常は前者 1 件、Director 中は root foreground と read-only な
+managed background の最大 2 件になる。surface / target / tab が不可視になった時点でその subscription を detach する。
+その他の background target と選択外 tab の terminal coordinator は bounded cache にだけ保持し、foreground stream lane からは外す。
 **定常状態の観測のために 1 frame が同期 request を出すことはない**: foreground の出力取得も background tab の exit 観測も
 [背景 observation lane](#背景-observation-lane) が別 thread で行い、描画スレッドはその結果を非ブロッキングに drain するだけである
 （利用者の操作が起こす attach / input / resize / detach は従来どおり描画スレッドから同期送信する）。
@@ -1300,7 +1357,7 @@ live の input cursor は現在セルを反転して表示する。output offset
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
 checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback とその oldest-row origin・cursor・saved cursor・
-scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・application cursor / mouse protocol）を含むため、retention の先頭が
+scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・application cursor / bracketed paste / mouse protocol）を含むため、retention の先頭が
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
 
@@ -1332,14 +1389,14 @@ foreground poll worker の fetch が panic した場合も worker を終了さ�
 |---|---|---|
 | live | attach 済みで streaming 中 | 出力を適用し、入力を PTY へ送る |
 | 再接続待ち | exit 以外の attach / `Resume` 失敗（daemon 不通・resync 要求・stale な参照・ownership 不明・input ordering のずれ） | backoff 満了ごとに再 attach する。復帰するまで最後の screen を静止表示し、入力は安全な理由付きで拒否する |
-| detach 済み | foreground を別の pane（例: [指示モード](#指示モードdirector-mode)の root conversation）へ渡した | 自分からは再 attach しない。再び foreground に選ばれた frame で attach する |
+| detach 済み | target / tab が現在の frame から不可視になった | 自分からは再 attach しない。再び foreground または Director 背景として可視になった frame で attach する |
 | exit 済み | process の終了を観測した | 最終 screen を保持し、tab は inventory 観測とともに閉じる |
 
 detach と失敗の区別は状態名ではなく**予約された再試行の有無**であり、背景へ回した pane が勝手に attach を
 奪い返すことも、失敗した pane が TUI の再起動まで回復しないこともない。daemon が拒否し続ける失敗
 （二度と受理されない `TerminalRef` など）も同じ backoff で再試行し続ける。上限に達した backoff で
-attach 1 往復 / 2s、しかも attach 済みの foreground pane 1 つ分に限られるため、「自力で戻れない pane を
-表示し続けない」ことを優先する。
+attach 1 往復 / 2s、しかも attach 済みの可視 pane（通常 1 件、Director 中だけ最大 2 件）に限られるため、
+「自力で戻れない pane を表示し続けない」ことを優先する。
 
 再 attach で live へ戻った pane は、失敗の種類にかかわらず reconnect として扱い、`Reconnected` feedback と
 PR target の再同期を 1 度だけ発行する。
@@ -1356,13 +1413,15 @@ Home の inventory（decision / session / metrics）を観測する 3 lane は
 
 | lane | 観測対象 | primitive | cadence |
 |---|---|---|---|
-| foreground poll pump | 選択中の attach 済み terminal 1 件の出力 | `Resume { after_offset }` | 出力がある間は interactive（8ms）。無出力が続くと 64ms 上限まで倍々に後退し、出力・attach・入力・resize で即座に interactive へ戻る |
+| foreground poll pump | attach 済みの可視 terminal（通常 1 件、Director 中は root foreground と dimmed managed background の最大 2 件）の出力 | `Resume { after_offset }` | 出力がある間は interactive（8ms）。無出力が続くと 64ms 上限まで倍々に後退し、出力・attach・入力・resize で即座に interactive へ戻る |
 | background inventory pump | detach 済み background tab の **exit metadata だけ** | scope 単位の `Inventory` | 2s。失敗中は 500ms から 8s 上限の指数 backoff |
 
 この分離により、idle な TUI が生む daemon request は frame rate（約 62.5Hz）ではなく上表の cadence で決まり、pane 数にも比例しない
-（foreground は常に高々 1 件、background は tab 数ではなく **scope 数**に比例する）。
+（foreground は可視 surface 数により高々 2 件、background は tab 数ではなく **scope 数**に比例する）。
 
-- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。detach 済み tab の観測 primitive は scope inventory だけである。
+- background lane は `Attach` も terminal 単位の `Resume` も**送らない**。Director 背景として可視・attach 済みの
+  managed terminal は foreground poll pump が扱い、background lane へ重複登録しない。detach 済み tab の観測 primitive は
+  scope inventory だけである。
 - background で bound するのは exit metadata の観測時刻（cadence + queue 遅延 + request deadline 1 回分）だけであり、**final output byte の取得時刻は bound しない**。
   final output は tab を foreground 化して再 attach したとき、または [completed entry](#exited-terminal-の-completed-entry) を history から明示選択したときに
   read-only に読む。
@@ -1474,7 +1533,7 @@ tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは v1 と同じく live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
 snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
@@ -1510,7 +1569,7 @@ Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platf
 pointer の release は PTY へ入力として転送しない。
 
 live terminal に focus がある間、leader が無い `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を除くすべての非 prefix キー入力（文字・修飾キー・paste・
-raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY へは bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、bracketed paste を要求している agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。tab 巡回、PR modal、Closeup/Switch の遷移は
+raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。端末では bracketed paste（DECSET 2004）を有効にし、複数行の貼り付けを 1 つの paste イベントとして受け取る。PTY 側の program が DECSET 2004 を要求している間だけ bracketed paste マーカー（`ESC[200~` … `ESC[201~`）で包んで転送し、agent が埋め込まれた改行ごとに 1 行ずつ実行せず 1 ブロックとして挿入できるようにする（貼り付け内に含まれる終了マーカーは注入対策として除去する）。要求していない間は元の text をそのまま転送し、マーカーを文字として混入させない。tab 巡回、PR modal、Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O p` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。
 daemon の input ACK は `Written` だけを通常成功とする。`Failed` は 0 byte 適用を表示し、`Ambiguous` は
@@ -1683,7 +1742,8 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
   exact ref で 1 枚へ収束する。managed session の generic Terminal はその後ろへ決定的に追加し、root scope の generic
   Terminal は拒否する。saved ref が non-live でも同じ continuation が resumable なら slot intent を保持し、
   interrupted tab として root drawer または managed-session Closeup へ投影する。表示中 surface の selected foreground
-  tab だけを attach / resync し、background target と選択外 tab は detached のまま保持する。
+  tab に加え、Director 背景で実際に見えている selected managed tab だけを attach / resync し、不可視の background target と
+  選択外 tab は detached のまま保持する。
 - **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
   結果だけが durable Observe と pane projection を適用できる。遅延・順序外の結果は全体を拒否し、専用 port が戻り次第、
   fresh fence で一度だけ再観測する。後続の reorder・selection を上書きせず focus を奪わない。transport failure と
@@ -1861,8 +1921,8 @@ live PTY の有無ではなく tab の有無で決まる）。history tab は ma
    同じ位置に残る。
 4. 拒否・失敗は tab を interrupted のまま残して safe feedback を出す。in-flight な operation を持つ tab は、
    inventory から source が消えても消滅しない（利用者の request が答えを受け取るまで tab が残る）。
-5. `Ctrl-O x` は tab を閉じず、`Agent tabs stay visible; exit the Agent with Ctrl-D` を表示する。interrupted tab は
-   runtime を持たないため `Ctrl-D` も送らず、必要なら `Ctrl-O r` で明示 resume する。
+5. live tab の `Ctrl-O x` は CLI へ `Ctrl-D` と同じ EOT を送り、daemon が runtime の終了を観測した時点で tab を閉じる。
+   interrupted tab は runtime を持たないため EOT を送らず、必要なら `Ctrl-O r` で明示 resume してから閉じる。
 
 resume 不可の tab、選択されていない tab、および interrupted tab を持たない selection に対する `Ctrl-O r` は
 daemon request を作らない。inventory refresh・reconnect・workspace open・planned restart も同様である。

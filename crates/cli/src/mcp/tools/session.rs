@@ -18,7 +18,6 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionRemove),
         Box::new(SessionResume),
         Box::new(AgentResumeInventory),
-        Box::new(SessionRecoverLegacy),
         Box::new(SessionNoteGet),
         Box::new(SessionNoteUpdate),
         Box::new(SessionTodoList),
@@ -53,7 +52,7 @@ impl Tool for UserDecisionRequest {
         "現在の agent run に人間の判断を durable に要求し、回答を同期的に返す"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"title":{"type":"string"},"prompt":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"description":{"type":"string"}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["title","prompt","options"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"title":{"type":"string","minLength":1,"maxLength":256},"prompt":{"type":"string","minLength":1,"maxLength":16384},"options":{"type":"array","maxItems":32,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":128},"label":{"type":"string","minLength":1,"maxLength":256},"description":{"type":"string","maxLength":2048}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string","minLength":1,"maxLength":256}},"required":["title","prompt","options"],"additionalProperties":false}"#
     }
 }
 pub struct UserDecisionGet;
@@ -89,7 +88,7 @@ impl Tool for UserDecisionResolve {
         "pending decision に option または許可された freeform を一度だけ記録する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"decision_id":{"type":"string"},"answer":{"oneOf":[{"type":"object","properties":{"kind":{"const":"option"},"option_id":{"type":"string"}},"required":["kind","option_id"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"freeform"},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}]}},"required":["decision_id","answer"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"decision_id":{"type":"string","minLength":1,"maxLength":128},"answer":{"oneOf":[{"type":"object","properties":{"kind":{"const":"option"},"option_id":{"type":"string","minLength":1,"maxLength":128}},"required":["kind","option_id"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"freeform"},"text":{"type":"string","minLength":1,"maxLength":16384}},"required":["kind","text"],"additionalProperties":false}]}},"required":["decision_id","answer"],"additionalProperties":false}"#
     }
 }
 pub struct UserDecisionCancel;
@@ -218,21 +217,6 @@ impl Tool for SessionCreate {
     }
 }
 
-/// `session_recover_legacy` — explicitly validates legacy sessions and, only
-/// with `apply: true`, adopts the complete set into daemon lifecycle state.
-pub struct SessionRecoverLegacy;
-impl Tool for SessionRecoverLegacy {
-    fn name(&self) -> &'static str {
-        "session_recover_legacy"
-    }
-    fn description(&self) -> &'static str {
-        "legacy state.json session を検証する。既定は dry-run であり、永続化には apply: true を明示する。通常の daemon restart や sidebar refresh はこの操作を実行しない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"apply":{"type":"boolean","default":false}},"additionalProperties":false}"#
-    }
-}
-
 /// `session_resume` — explicitly starts a new daemon-owned Agent runtime for
 /// retained provider-native conversation metadata.
 pub struct SessionResume;
@@ -241,10 +225,10 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。互換用 name は eligible target が厳密に 1 件のときだけ daemon が解決する。"
+        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"oneOf":[{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}"#
     }
 }
 

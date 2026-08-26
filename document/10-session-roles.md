@@ -56,13 +56,13 @@ default は各 layer で指定された scope だけを上書きする。
 | workspace | `<registered-workspace-root>/.usagi/roles.toml` | global を上書き |
 
 `roles.toml` は `version = 1` を持つ。選択したテンプレートを土台に差分定義を重ねられるため、テンプレート選択と
-catalog 編集は両立する。`none` を選び両ファイルも無い場合は role 無しの互換モードとなる。
+catalog 編集は両立する。`none` を選び両ファイルも無い場合は role を適用しない。
 
 role は組織上の責務を prompt として与える。階層型チームで Director が小さいタスクを Worker へ直接 dispatch
 する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker を dispatch する場合は
 3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Worker → Manager → Director と
 一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
-`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない version-1 role は互換性のため従来動作を維持する。
+`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない role は従来の許可動作を維持する。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
@@ -74,7 +74,10 @@ sidebar は各session名の横に `◆ Manager` / `● Worker` と階層イン�
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
 いずれかの effective role に `delegation` block がある場合は、credential のない `session_delegate_issue` を拒否する。
 `max_concurrency` は実行中の子だけでなく未起動の delegated prompt も予約枠として数え、Agent の runtime/model を変更しても
-同じ session の利用数と絶対深度を引き継ぐ。
+同じ session の利用数と絶対深度を引き継ぐ。上限判定と一時枠の取得は dispatch store の同じ lock 内で行い、session
+作成や worker spawn の前に予約する。成功時は durable queue/run が枠を引き継ぎ、失敗時は guard が解放するため、並行 request
+が check と publish の間をすり抜けない。session の親は終了 run の retention 対象ではない immutable lineage に保存し、古い
+binding が削除された後も深度・sidebar・Garden の親子関係を維持する。
 
 reader は future version、不正な role ID、空の `scopes`、未知 scope、16 KiB を超える instruction、NUL、対応 scope を許可しない
 default を拒否する。workspace catalog の権威は target session branch ではなく daemon に登録された workspace root である。

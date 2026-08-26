@@ -20,7 +20,6 @@ use usagi_core::domain::settings::{ModalSelectionMode, Settings};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::paths::channel_data_dir;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
@@ -37,6 +36,10 @@ use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
 mod daemon_fixture;
 
 use daemon_fixture::{Channel, DaemonHome};
+
+fn channel_data_dir(home: &Path) -> PathBuf {
+    Channel::Local.data_dir(home)
+}
 
 /// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
 /// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
@@ -239,18 +242,18 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
-/// 100-column Home header の右端にある指示モード button を実 mouse event で押す。
+/// 100-column Home header（project bar の次の行）の右端にある指示モード button を実 mouse event で押す。
 ///
 /// SGR mouse coordinates are one-based. The button is right-aligned and occupies
 /// the rightmost 14 cells, so column 91 is safely inside it even when the mode
 /// segment is also present.
 fn click_director_button(master: &mut File) {
-    send(master, b"\x1b[<0;91;1M\x1b[<0;91;1m");
+    send(master, b"\x1b[<0;91;2M\x1b[<0;91;2m");
 }
 
 /// Click `[ New ]` in the 100-column drawer selector row below the top padding.
 fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;4M\x1b[<0;96;4m");
+    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
 }
 
 fn toggle_director_with_key(master: &mut File) {
@@ -868,7 +871,14 @@ fn send_line_until_delivered(
     send(master, format!("{line}\r").as_bytes());
     let mut last_send = Instant::now();
     loop {
-        if screen_since(output, baseline).is_some_and(|screen| screen.contains(echo)) {
+        if screen_since(output, baseline).is_some_and(|screen| {
+            screen.contains(echo)
+                || screen
+                    .chars()
+                    .filter(|character| !character.is_whitespace() && *character != '│')
+                    .collect::<String>()
+                    .contains(echo)
+        }) {
             return;
         }
         let dropped = dropped_keystroke_notice(output, baseline);
@@ -928,7 +938,7 @@ fn quit_from_switch(
     output: &Arc<Mutex<Vec<u8>>>,
     baseline: usize,
 ) -> ExitStatus {
-    wait_for_screen_since(output, baseline, "[switch]");
+    wait_for_screen_since(output, baseline, "[Switch] preview pane");
     send(master, b"\x11");
     wait_for_screen_since(output, baseline, "Leave this workspace?");
     send(master, b"\r");
@@ -1454,16 +1464,16 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
     stop_daemon(&home);
 }
 
-/// Switching workspaces no longer costs the first workspace's runtimes: the
-/// daemon adopts the second workspace during the switch instead of refusing it,
-/// and the terminal left running in the first one keeps its PTY child (#711).
+/// Project tabs switch through the shipping `Ctrl-O` prefix without costing the
+/// first workspace's runtimes: the daemon adopts the added workspace, and the
+/// Agent left running in the first one keeps its exact PTY child (#721).
 ///
 /// The daemon is stopped before the TUI starts, so the switch is the moment the
 /// second workspace is adopted rather than something an earlier `open` already
 /// arranged.
 #[test]
-#[allow(clippy::too_many_lines)] // The two-workspace switch is intentionally chronological.
-fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
+#[allow(clippy::too_many_lines)] // The two-project-tab switch is intentionally chronological.
+fn real_pty_project_tabs_add_switch_and_reattach_the_same_agent() {
     let _serial = serial();
     let home = short_home();
     let roots = tempfile::tempdir().unwrap();
@@ -1481,9 +1491,9 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
 
     write_prompt_settings(home.path());
     let fixture = tempfile::tempdir().unwrap();
-    let shell = fixture.path().join("fixture-shell");
-    let spawn_count = fixture.path().join("shell-spawn-count");
-    write_terminal_fixture(&shell, &spawn_count);
+    let fixtures = AgentFixtures::new(fixture.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
 
     // Register both workspaces, then stop the daemon: the TUI below cold-starts
     // one for the workspace it opens, and must adopt the other when it switches.
@@ -1494,9 +1504,10 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
                 workspace,
                 &["open".as_ref(), workspace.as_os_str()],
             )
-            .env("SHELL", &shell)
+            .env("PATH", &fixture_path)
+            .env(SANDBOX_PASSTHROUGH, "1")
             .output()
-            .expect("workspace registers with fixture login shell");
+            .expect("workspace registers with fixture provider");
         assert!(registered.status.success());
     }
     // A session in each workspace, so both Home screens have a scope to open.
@@ -1513,19 +1524,10 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
     let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
 
     let baseline = capture_len(&captured);
-    // The TUI cold-starts the daemon, so the fixture login shell has to be in
-    // *its* environment: the daemon inherits it and every terminal it launches
-    // then reports its pid on the screen.
-    let mut child = TuiChild(
-        home.command_at(Channel::Local, &first, &["hop".as_ref()])
-            .env("SHELL", &shell)
-            .env(SANDBOX_PASSTHROUGH, "1")
-            .stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(Stdio::from(slave.try_clone().unwrap()))
-            .stderr(Stdio::from(slave.try_clone().unwrap()))
-            .spawn()
-            .expect("usagi hop starts on the PTY"),
-    );
+    // The TUI cold-starts the daemon, so the provider fixture must be in its
+    // PATH before the first Agent launch.
+    let mut child = spawn_hop_with_path(&home, &first, &fixture_path, &slave)
+        .expect("usagi hop starts on the PTY");
 
     // Recent lists the most recently opened workspace first, so the second entry
     // is the workspace registered first.
@@ -1534,35 +1536,55 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
     wait_for_screen_since(&captured, baseline, "[switch]");
     wait_for_screen_since(&captured, baseline, "switch-first");
 
-    // A live PTY child in the first workspace.
-    submit_closeup_command(&mut master, &captured, baseline, "terminal open");
-    wait_for_screen_since(&captured, baseline, "generic-ready-unique:");
-    let live = displayed_terminal_pid(&captured, baseline);
-    assert!(process_is_alive(live));
+    // A live Agent child in the first workspace. A plain digit has no leader,
+    // so it reaches the provider exactly once instead of activating project 1.
+    submit_closeup_command(&mut master, &captured, baseline, "agent -m codex");
+    wait_for_screen_since(&captured, baseline, "codex-ready-unique:");
+    let original_agent = agent_processes(home.path(), 1)[0].clone();
+    send_line_until_delivered(&mut master, &captured, baseline, "1", "codex-input:1");
+    assert_spawns_settle(&fixtures.codex_count, 1);
 
-    // Leave for Welcome, then open the other workspace. The same daemon adopts
-    // it: no refusal, no restart.
-    send(&mut master, b"\x0f\x0f");
-    wait_for_screen_since(&captured, baseline, "[switch]");
-    send(&mut master, b"\x11");
-    wait_for_screen_since(&captured, baseline, "Leave this workspace?");
-    send(&mut master, b"w");
-    wait_for_screen_absent_since(&captured, baseline, "[switch]");
-    wait_for_screen_since(&captured, baseline, "Recent");
+    // Add the second registered workspace over the current Home. The first row
+    // is the checked/disabled current tab; Down selects the second row.
+    send(&mut master, b"\x0f+");
+    wait_for_screen_since(&captured, baseline, "Add workspace");
+    send(&mut master, b"\x1b[B \r");
+    wait_for_screen_since(&captured, baseline, "second-session");
 
-    // The needle must distinguish the new screen from the old one: `[switch]`
-    // was on screen before the switch, so the second workspace's own name is
-    // what proves this open landed in it. Reconstruction stays anchored to the
-    // original baseline, because a fresh one only holds the deltas since it.
-    send(&mut master, b"1");
-    wait_for_screen_since(&captured, baseline, "switch-second");
+    // Addition activates project 2. Ctrl-O 1 returns to the first project and
+    // the durable Agent tab reattaches to the same daemon-owned runtime.
+    send(&mut master, b"\x0f1");
+    wait_for_screen_since(&captured, baseline, "first-session");
+    activate_selected_live_pane(&mut master, &captured, baseline);
+    wait_for_screen_since(&captured, baseline, "codex-input:1");
+    assert_eq!(
+        agent_processes(home.path(), 1),
+        vec![original_agent.clone()]
+    );
+    assert_eq!(fixtures.codex_spawns(), 1);
+    send_line_until_delivered(
+        &mut master,
+        &captured,
+        baseline,
+        "after-project-switch",
+        "codex-input:after-project-switch",
+    );
 
-    // The first workspace's child survived the switch, and both workspaces now
+    // Both numbered directions remain process-level even from a focused live
+    // Agent pane; neither prefix byte reaches the provider.
+    send(&mut master, b"\x0f2");
+    wait_for_screen_since(&captured, baseline, "second-session");
+    send(&mut master, b"\x0f1");
+    wait_for_screen_since(&captured, baseline, "first-session");
+
+    // The first workspace's child survived every switch, and both workspaces now
     // have their own state subtree under the one daemon.
     assert!(
-        process_is_alive(live),
+        process_is_alive(original_agent.1),
         "switching workspaces must not end the first workspace's runtimes"
     );
+    assert_eq!(agent_processes(home.path(), 1), vec![original_agent]);
+    assert_eq!(fixtures.codex_spawns(), 1);
     let adopted = usagi_core::infrastructure::workspace_state::adopted(
         &Channel::Local.data_dir(home.path()).join("daemon"),
     )
@@ -1574,6 +1596,17 @@ fn real_pty_switching_workspaces_adopts_the_second_and_keeps_the_first_live() {
         let root = usagi_core::infrastructure::paths::canonical_workspace_root(workspace).unwrap();
         assert!(adopted.contains(&root), "{adopted:?}");
     }
+    let expected_unite = vec![
+        usagi_core::infrastructure::paths::canonical_workspace_root(&first).unwrap(),
+        usagi_core::infrastructure::paths::canonical_workspace_root(&second).unwrap(),
+    ];
+    assert!(
+        Storage::new(channel_data_dir(home.path()))
+            .load_unites()
+            .unwrap()
+            .iter()
+            .any(|unite| unite.paths == expected_unite)
+    );
 
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
@@ -1747,13 +1780,13 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 /// テストが指示した瞬間だけ大量出力する Codex fixture。
 ///
 /// `trigger` file が現れたら 1400 行（約 128 KiB）を吐き、終わったら `done` file を置く。
-/// テストは drawer を開いて root Agent を起動した**あと**に trigger を書くので、burst は
-/// 必ず detach 中に流れ、daemon の retained journal（`MAX_RETAINED_OUTPUT_BYTES` = 64 KiB）を
-/// 追い越す。実 agent CLI が裏で描画し続ける状況と同じく、drawer を閉じた再 attach は
-/// 必ず resync 経路を通る。固定 sleep ではなくこの 2 つの file が前提条件の観測点である。
+/// テストは drawer を開いて root Agent を起動した**あと**に trigger を書く。実 Agent CLI が
+/// drawer の背後で描画し続ける状況と同じ burst を作り、その末尾が drawer を閉じる前に
+/// dimmed managed pane へ届くことを観測する。固定 sleep ではなくこの 2 つの file が前提条件の
+/// 観測点である。
 fn write_bursting_codex(fixtures: &AgentFixtures, trigger: &Path, done: &Path) {
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\n(\n  while [ ! -f \"{trigger}\" ]; do sleep 0.05; done\n  i=0\n  while [ $i -lt 1400 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done\n  printf 'done\\n' > \"{done}\"\n) &\nwhile IFS= read input; do printf 'codex-input:%s\\n' \"$input\"; done\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\n(\n  while [ ! -f \"{trigger}\" ]; do sleep 0.05; done\n  i=0\n  while [ $i -lt 1400 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done\n  printf 'dim-live-done\\n'\n  printf 'done\\n' > \"{done}\"\n) &\nwhile IFS= read input; do printf 'codex-input:%s\\n' \"$input\"; done\n",
         count = fixtures.codex_count.display(),
         trigger = trigger.display(),
         done = done.display(),
@@ -1764,9 +1797,8 @@ fn write_bursting_codex(fixtures: &AgentFixtures, trigger: &Path, done: &Path) {
 }
 
 /// 実 daemon・実 PTY: 報告された操作列（session Agent → 指示モードで root Agent → drawer を
-/// 閉じる）を実キー・実クリックで通し、戻ってきた managed Agent tab が live のまま入力を
-/// 受け付けることを固定する。detach 中に daemon の retained journal を追い越させ、再 attach が
-/// resync 経路を通ることも合わせて通す。
+/// 閉じる）を実キー・実クリックで通し、managed Agent tab が drawer の背後でも live に動き、
+/// 戻ってきた後も入力を受け付けることを固定する。
 ///
 /// この E2E が固定するのは受け渡しそのものであり、daemon が attach / `Resume` を拒否したときの
 /// 回復ではない（refusal を実 daemon へ注入する経路が無いため）。その回復は
@@ -1831,7 +1863,7 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
 
     // 指示モードで root Agent（claude）を起動する。
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, baseline, "♛ Director");
+    wait_for_screen_since(&captured, baseline, "Ctrl-O n / New: choose CLI");
     click_director_new(&mut master);
     wait_for_screen_since(&captured, baseline, "↑↓: select");
     send(&mut master, b"\x1b[A");
@@ -1844,17 +1876,18 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
         "root-hello",
         "claude-input:root-hello",
     );
-    // ここで初めて burst を起こす。managed pane は detach 済みなので、この出力は
-    // 必ず「detach 中に journal を追い越す」ことになる。
+    // 背景の right pane に Agent 出力を読める幅を残してから burst を起こす。
+    // root conversation は drawer geometry、managed pane は通常の right-pane geometry を
+    // それぞれ維持する。
+    resize_pty(&master, 160, 24).unwrap();
+    wait_for_screen_since(&captured, baseline, "♛ Director");
     fs::write(&burst_trigger, "go\n").unwrap();
     wait_for_file_lines(&burst_done, 1);
+    wait_for_screen_since(&captured, baseline, "dim-live-done");
 
-    // drawer を閉じると、元の managed session の Agent tab が foreground へ戻る。
+    // drawer を閉じると、live のまま更新されていた managed Agent が入力 owner へ戻る。
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, baseline, "[closeup]");
-    // 再 attach は daemon の atomic snapshot から組み直すので、detach 中に流れた
-    // burst の末尾が見える。
-    wait_for_screen_since(&captured, baseline, "codex-noise:1399-");
     send_line_until_delivered(
         &mut master,
         &captured,
@@ -1862,7 +1895,6 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
         "session-after",
         "codex-input:session-after",
     );
-
     assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     stop_daemon(&home);
     drop(master);
@@ -2206,7 +2238,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     let mut first = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
     open_registered_workspace(&mut master, &captured, first_baseline);
     click_director_button(&mut master);
-    wait_for_screen_since(&captured, first_baseline, "♛ Director");
+    wait_for_screen_since(&captured, first_baseline, "Ctrl-O n / New: choose CLI");
     click_director_new(&mut master);
     wait_for_screen_since(&captured, first_baseline, "↑↓: select");
     // The configured OpenAI default explicitly highlights installed Codex.
@@ -2283,7 +2315,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     assert!(
         launched.iter().all(|argv| {
             argv.contains("--settings")
-                && argv.contains("agent-phase running")
+                && argv.contains(r#""args":["agent-phase","running"]"#)
                 && argv.matches("--append-system-prompt").count() == 1
         }),
         "{launched_argv}"
@@ -2425,8 +2457,9 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     });
 
     // Close the drawer to restore Switch, then enter the managed session. Only
-    // its selected Claude attaches. Closing an Agent tab keeps it visible and
-    // attached so the user can terminate the CLI with Ctrl-D when needed.
+    // its selected Claude attaches. The dedicated close-chord E2E below owns
+    // Agent termination; this lifecycle test keeps all three runtimes alive so
+    // its later reopen and process-identity assertions remain independent.
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, reopened_baseline, "[switch]");
     send(&mut master, b"\r");
@@ -2439,7 +2472,6 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         "claude-input:claude-session-one",
     );
 
-    send(&mut master, b"\x0fx");
     assert!(read_agent_intent(home.path()).dismissed.is_empty());
     send(&mut master, b"claude-session-still-visible\r");
     wait_for_screen_since(
@@ -2629,6 +2661,90 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         2
     );
 
+    drop(slave);
+    drop(master);
+    reader.join().unwrap();
+}
+
+/// The shipping TUI maps the documented leader + Ctrl-X chord to the same EOT
+/// as Ctrl-D for a live Agent. The daemon-owned tab remains until that process
+/// really exits, then the ordinary exit observation removes it without writing
+/// client-side dismissal intent.
+#[test]
+fn real_pty_close_chord_exits_the_focused_live_agent() {
+    let _serial = serial();
+    let home = short_home();
+    let workspace_root = tempfile::tempdir().unwrap();
+    let workspace = workspace_root.path().join("agent-close-workspace");
+    fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    git(
+        &workspace,
+        &["config", "user.email", "tui-e2e@example.test"],
+    );
+    git(&workspace, &["config", "user.name", "TUI E2E"]);
+    fs::write(workspace.join("README.md"), "fixture\n").unwrap();
+    git(&workspace, &["add", "README.md"]);
+    git(&workspace, &["commit", "-qm", "fixture"]);
+
+    write_prompt_settings(home.path());
+    let fixture_root = tempfile::tempdir().unwrap();
+    let fixtures = AgentFixtures::new(fixture_root.path());
+    fixtures.write();
+    let fixture_path = fixtures.path_env();
+
+    let registered = home
+        .command_at(
+            Channel::Local,
+            &workspace,
+            &["open".as_ref(), workspace.as_os_str()],
+        )
+        .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
+        .output()
+        .expect("workspace registers");
+    assert!(registered.status.success());
+    let (workspace_id, session_id) = create_session(home.path(), "agent-close");
+    let terminal = launch_agent(home.path(), workspace_id, Some(session_id), "claude");
+    wait_for_file_lines(&fixtures.claude_count, 1);
+    let process = agent_process_for(&agent_processes(home.path(), 1), &terminal);
+
+    let (mut master, slave) = open_pty().unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let reader_capture = Arc::clone(&captured);
+    let reader = thread::spawn(move || read_pty_shared(reader_master, &reader_capture));
+
+    let baseline = capture_len(&captured);
+    let mut tui = spawn_hop_with_path(&home, &workspace, &fixture_path, &slave).unwrap();
+    open_registered_workspace(&mut master, &captured, baseline);
+    let intent = wait_for_agent_tabs(home.path(), 1);
+    assert!(intent.dismissed.is_empty());
+    send(&mut master, b"\r");
+    wait_for_screen_since(&captured, baseline, "[closeup]");
+    wait_for_screen_since(
+        &captured,
+        baseline,
+        &format!("claude-ready-unique:{process}"),
+    );
+    send(&mut master, b"before-agent-close\r");
+    wait_for_screen_since(&captured, baseline, "claude-input:before-agent-close");
+
+    // Ctrl-O followed by the raw Ctrl-X byte is the exact chord users press.
+    send(&mut master, b"\x0f\x18");
+    wait_for_dead_processes(&[process]);
+    assert!(agent_processes(home.path(), 0).is_empty());
+    assert!(read_agent_intent(home.path()).dismissed.is_empty());
+    assert_eq!(
+        fixtures.claude_spawns(),
+        1,
+        "close must not respawn the Agent"
+    );
+
+    // Tab cleanup can trail the observed process exit, leaving either the
+    // Closeup action modal or the exited pane in front. The explicit navigation
+    // chord returns both Closeup surfaces to Switch before the ordinary quit.
+    assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     drop(slave);
     drop(master);
     reader.join().unwrap();
@@ -3232,7 +3348,7 @@ fn real_pty_director_drawer_holds_scrolled_rows_while_the_root_agent_writes() {
 
     // Scroll back with the mouse wheel over the drawer, then with the key chord.
     for _ in 0..6 {
-        send(&mut master, b"\x1b[<64;70;12M");
+        send(&mut master, b"\x1b[<64;70;13M");
         thread::sleep(Duration::from_millis(60));
     }
     send(&mut master, b"\x0fu");

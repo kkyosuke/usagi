@@ -6,7 +6,6 @@ priority: high
 labels: [review, v2, core, daemon, mcp, decision, resource, retention]
 dependson: []
 related: [329, 378, 406, 673]
-parent: 671
 created_at: 2026-08-13T22:36:36.042890+00:00
 updated_at: 2026-08-23T23:22:34.965949+00:00
 ---

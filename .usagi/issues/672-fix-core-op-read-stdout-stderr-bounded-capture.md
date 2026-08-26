@@ -6,7 +6,6 @@ priority: high
 labels: [review, v2, core, env, process, resource, security]
 dependson: []
 related: [606, 661]
-parent: 671
 created_at: 2026-08-13T00:05:12.227584+00:00
 updated_at: 2026-08-17T00:43:30.331123+00:00
 ---

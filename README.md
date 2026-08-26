@@ -21,8 +21,8 @@
 
 </div>
 
-> この README はフルリライト中の **v2** を説明する。現在 GitHub Releases で配布している
-> バイナリは [v1](v1/README.md) であり、v2 はリポジトリルートからソースで実行する。
+> この README は現在の `usagi` を説明する。GitHub Releases とリポジトリルートは
+> 同じ実装を提供する。
 
 ## usagi でやりたいこと
 
@@ -44,10 +44,12 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 最近使った workspace を **Recent** から直接開き、**New** で既存リポジトリの登録または clone、
 **Config** で全体設定の編集ができる。
 
-workspace を開くと Home へ移り、左側に session、右側に選択した session の Preview / Terminal /
-Diff / Notes と live pane を表示する。
+workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
+選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
+含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。
 
 ```text
+ 1 usagi   2 api   3 web   + Open
 ┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ──────┐
 │   feature-login      │                                          │
 │   12m ago  #42  +18  │  Session info, terminal, and diff        │
@@ -65,10 +67,14 @@ Home の基本操作は次のとおり。
 | `←` / `→`、`h` / `l` | Preview / Terminal / Diff / Notes を切り替える |
 | `Enter` / `t` | 選択した session の Closeup を開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
+| `Ctrl-O` → `+` | workspace を project tab として追加する |
+| `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
+| `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
+直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
 live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
@@ -118,8 +124,6 @@ cargo install --path . --locked
 > ソースからビルドしたバイナリは、`USAGI_RUNTIME_MODE` を指定しなければ状態を `~/.usagi/local/` に
 > 置く（開発中の実行が本番の状態を触らないようにするため）。公開 release の artifact は
 > `~/.usagi` 自体を使う。詳細は [artifact の既定 mode](document/05-daemon.md#artifact-の既定-mode) を参照する。
-
-退避された v1 の仕様は [v1 の README](v1/README.md) を参照する。
 
 ### Tab 補完
 
@@ -176,6 +180,7 @@ agent -m claude
 agent -m codex
 agent -m sakana.ai
 terminal
+terminal new     # 外部ターミナルを開き、modal を閉じて Closeup へ戻る
 ```
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
@@ -184,7 +189,7 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 ### 4. 状態と PR を確認する
 
 session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
-Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックで PR 一覧を開き、`d` で diff、
+Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
 `n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
 検知した PR を選択した一覧を自動で開く。PR を選んで Enter を押すと既定のブラウザで開く。
 
@@ -233,6 +238,9 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi open [path]` | workspace を登録して直接開く |
 | `usagi config` | Global Config を開く |
 | `usagi doctor` | 必要ツールの診断画面を開く |
+| `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
+| `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
+| `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
@@ -283,21 +291,8 @@ toolchain は `rust-toolchain.toml` に固定されている。リポジトリ�
 | 実行 | `cargo run -- [args]` |
 
 変更中・commit 前・CI で必要な gate は異なる。coverage 100% を含む品質基準、ブランチ、コミット、PR、
-リリースの規約は [開発規約](document/06-conventions.md)を正本とする。v2 の仕様ドキュメント全体は
+リリースの規約は [開発規約](document/06-conventions.md)を正本とする。仕様ドキュメント全体は
 [document/README.md](document/README.md)から参照できる。
-
-## v1
-
-旧実装は [v1/](v1/README.md) に、仕様書を含む独立した Cargo プロジェクトとして退避している。
-ルート workspace のビルド対象には含まれない。
-
-```bash
-cd v1
-cargo build --release
-```
-
-v1 のコマンド、画面、データ構造、orchestration を参照するときは
-[v1 ドキュメント](v1/document/README.md)を使う。退避版は v1 実装のスナップショットであり更新しない。
 
 ## License
 

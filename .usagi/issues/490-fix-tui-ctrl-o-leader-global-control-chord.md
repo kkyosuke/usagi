@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, tui, input]
 dependson: []
 related: [224, 303, 305, 408]
-parent: 453
 created_at: 2026-07-20T12:06:51.145630+00:00
 updated_at: 2026-07-21T12:49:20.260560+00:00
 ---
@@ -20,8 +19,6 @@ root/v2 の `src/runtime/tui.rs::CrosstermTerminal::read_key` は global `contro
 live pane で Ctrl-O の後に Ctrl-C、Ctrl-Q、Ctrl-D を押し、続けて通常 key を送る。global quit/unregister action が即発火するか、残存 leader が後続 key を飲み込む。raw byte/semantic event でも差が出る。
 
 ## 対象責務と非対象
-
-pending leader と global chord の優先順位、leader consume/reset、raw/semantic event parity を対象とする。key binding 自体の再設計、#287 の Ctrl-A UX、terminal reconnect は非対象。
 
 ## 受入条件
 

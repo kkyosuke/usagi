@@ -8,8 +8,8 @@
 //! **fail-closed**: sandbox backend が無い、または未対応 platform では [`SandboxPlan::Reject`] を
 //! 返し、Claude を無保護で起動しない。合成ルートは Reject を非 0 終了に写す。
 //!
-//! 起動固有の writable root は provisioner が渡す（session は own worktree、root coordinator は
-//! repository-local root を持たない）。**その起動固有 root に、両 mode とも同じ普遍領域**
+//! 起動固有の writable root は provisioner が渡す（session は own worktree と必要な Git administrative
+//! state、root coordinator は repository-local root を持たない）。**その起動固有 root に、両 mode とも同じ普遍領域**
 //! （`$TMPDIR`・`/tmp`・`/var/tmp`・起動する agent CLI 自身の state と global config・macOS の
 //! Keychain と system / per-user の MDS cache）を加える。daemon の再起動は sandbox 外の bootstrap broker に
 //! 委譲し、data home は writable root に含めない。sandbox は書き込みだけをこの root 集合に
@@ -776,19 +776,24 @@ mod tests {
         assert_eq!(writable_roots(&session), expected);
     }
 
-    // The worktree is the only repository-local root a session may write, and no
-    // universal area may cover the protected workspace.
+    // A session may write the roots its daemon resolved for that exact scope: its
+    // checkout and a linked worktree's Git administrative state. Universal areas
+    // must not widen that set to the protected workspace itself.
     #[test]
-    fn a_session_launch_grants_no_repository_root_beyond_its_own_worktree() {
+    fn a_session_launch_grants_only_its_resolved_repository_roots() {
         for platform in [Platform::MacOs, Platform::Linux] {
-            let request = request(platform, Some("/sandbox"));
+            let mut request = request(platform, Some("/sandbox"));
+            request.launch_roots.push(PathBuf::from("/repo/.git"));
             let repository_roots = writable_roots(&request)
                 .into_iter()
                 .filter(|root| root.starts_with("/repo"))
                 .collect::<Vec<_>>();
             assert_eq!(
                 repository_roots,
-                [PathBuf::from("/repo/.usagi/sessions/work")]
+                [
+                    PathBuf::from("/repo/.git"),
+                    PathBuf::from("/repo/.usagi/sessions/work")
+                ]
             );
             assert!(invalid_policy_reason(&request).is_none());
         }

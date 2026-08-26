@@ -6,12 +6,9 @@ priority: high
 labels: [mcp]
 dependson: [401]
 related: []
-parent: 400
 created_at: 2026-07-20T04:53:54.200783+00:00
 updated_at: 2026-07-20T09:18:39.838495+00:00
 ---
-
-親: #400。依存: #401。session の観測・追加指示・委譲の MCP tool を daemon/core に接続する。delegate 系は `session_prompt` backend に依存するため本 issue で束ねる。
 
 ## 対象 tool（15）
 

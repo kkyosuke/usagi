@@ -601,11 +601,13 @@ where
 {
     let token = Option::<String>::deserialize(deserializer)?;
     Ok(match token.as_deref() {
-        Some("none") => Some(TeamTemplate::None),
         Some("hierarchical") => Some(TeamTemplate::Hierarchical),
         Some("flat") => Some(TeamTemplate::Flat),
         Some("pipeline") => Some(TeamTemplate::Pipeline),
-        _ => None,
+        // `none` and unknown future values both disable delegation instead of
+        // inheriting a potentially more permissive global template.
+        Some(_) => Some(TeamTemplate::None),
+        None => None,
     })
 }
 

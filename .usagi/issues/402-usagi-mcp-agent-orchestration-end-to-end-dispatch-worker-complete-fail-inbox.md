@@ -6,12 +6,9 @@ priority: high
 labels: [mcp]
 dependson: [401]
 related: []
-parent: 400
 created_at: 2026-07-20T04:53:40.373314+00:00
 updated_at: 2026-07-20T09:18:01.804504+00:00
 ---
-
-親: #400。依存: #401（安全弁）。agent orchestration の MCP tool を実 `AgentRuntime`/`DispatchStore` に接続する。
 
 ## 対象 tool（7）
 

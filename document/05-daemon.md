@@ -33,9 +33,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 ## authority と lifecycle
 
 managed session の lifecycle vocabulary は daemon のために定義されている。CLI、MCP、TUI は command を
-提出し、legacy `state.json` を managed state として解釈・更新しない。shared lifecycle state の初期化時だけは、daemon が
-legacy record の name、canonical session path、linked worktree、repository と `usagi/<name>` branch binding を全件検証し、
-成功した全 record を stable ID 付き available session として一回だけ採用する。検証不能な record は partial adoption をせず起動を失敗させる。
+提出し、repository-local な `state.json` を managed state として解釈・更新しない。
 lifecycle state は `creating`、
 `initializing`、`available`、`deleting`、`failed` の closed vocabulary であり、Agent phase と branch
 status は別軸として保持する。
@@ -608,7 +606,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
-| `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership と workspace/session ごとの prompt queue。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
+| `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership、workspace/session ごとの prompt queue、run retention から独立した immutable session lineage、委譲 admission から child publish までの concurrency reservation。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
 
 #### durable store の retention
@@ -764,15 +762,10 @@ task daemon:dev -- restart --force   # live runtime を明示的に手放す col
 明示的に手放す cold transition である。`--` を省くと Task が `restart` を task 名として解釈するため、引数は必ず `--` の後ろに置く。
 
 managed session state は repository 内の `.usagi/` ではなく、この shared daemon directory に保存する。最初の
-起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。lifecycle
-state が無い場合は、検証済みの project runtime state（debug は `<repository>/.usagi/dev/state.json`）の session も available record として同じ atomic write で採用する。
-この adoption は worktree effect を実行せず、既存 `sessions.json` があれば legacy state を読まず、その durable state を変更しない。
-`state.json` に残る display name、origin、notes、PR、last-active は UI-only metadata であり、TUI は同名 managed session へ読み取り結合する。
+起動時だけ従来の `<repository>/.usagi/lifecycle-state.json` があれば `sessions.json` へ atomically 移行して削除する。
+repository-local な `state.json` の session record は採用せず、新しい lifecycle state は空の managed session 集合から始める。
+`state.json` に残る notes 等は managed lifecycle とは独立した UI metadata として扱う。
 以後の restart は起動 cwd に関係なく、同じ file に保存された trusted root を session runtime と generic terminal の `login-shell` profile の両方に使う。
-
-既存の `sessions.json` に legacy session を追加する必要がある場合だけ、operator は `usagi session recover-legacy` を実行する。これは dry-run で candidate 名と検証結果だけを表示し、`--apply` を付けた明示操作だけが adoption を永続化する。daemon restart、TUI sidebar refresh、通常の MCP session tool は recovery を呼ばない。MCP の `session_recover_legacy` も同じく `apply: true` がなければ dry-run である。
-
-apply は legacy record 全件の name、期待 path、linked worktree、canonical path、`git worktree list --porcelain` の `usagi/<name>` branch binding を検証する。legacy 内の重複、欠損・不正 record、Git 検証失敗、既存 v2 session との同名（available / creating / deleting / failed を問わない）、または revision 競合は fail-closed となり、`sessions.json` を変更しない。成功時は既存 v2 record と stable ID を保持したまま、検証済み全 record を fresh stable IDs の available session として単一 atomic write で追加する。legacy UI metadata は read-only のままである。
 
 `daemon.json` は `pid`、OS の `process_start_identity`、`started_at` を持つ。この lifecycle record は durable
 incarnation fence であり、stale cleanup と conditional clear は record 全体を比較する。identity field を持たない legacy
@@ -1242,7 +1235,7 @@ validation error である。
 
 各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Codex では [private structured capture request](04-ipc.md#codex-structured-capture-request) の入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は spawn 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
-Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook process group と exact live runtime の照合で structured capture 境界へ渡す。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
+Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook PID・parent PID・process group と exact live runtime の照合で structured capture 境界へ渡す。provider と同じ process group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
 
 この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および daemon が指定する hook trust bypass を CLI が提供することである。managed policy による hooks 無効化、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
 
@@ -1268,10 +1261,31 @@ producer `OperationId` と target 全体を semantic key にして dedupe する
 後の replay は同じ durable final / relation / `TerminalRef` へ収束し、新しい spawn や capacity reservation を作らない。
 別 target への operation 再利用は idempotency conflict とする。同じ exact target を別 operation で再送した場合は
 `superseded_by` の replacement outcome を replay し、failed / in-flight / live / completed のいずれも最初の final から
-分岐させない。legacy session-scoped request は現 wire generation の互換期間だけ、eligible exact target が厳密に 1 件の
-場合に限って変換する。0 件または複数件を safe typed failure にし、「最新」や provider 種別で選ばない。
+分岐させない。resume request は daemon が発行した exact target を必須とし、「最新」や provider 種別で選ばない。
 
 daemon restart reconciliation は unfinished record の provider status を `interrupted` にするが、自動 resume は行わない。TUI 起動、pane inventory 復元、daemon / macOS 再起動も同様である。schema v1/v2/v3 record は provider metadata または public lineage が欠けたまま schema v4 として読めるが、ID を推測して補完せず resume 不可のままにする。fixture は continuation の restart stability / non-reuse、root と複数 session、同一 scope の複数 history、Claude UUID、structured Codex capture、scope/revision/incarnation mismatch、ID の public plan argv / snapshot / IPC 非露出、source relation、operation restart replay と exact source の一度だけの spawn を確認する。
+
+### Doctor による integration repair
+
+`usagi doctor --fix` は現在の client、published daemon、live Agent の build / integration revision を順に診断する。
+daemon だけが古ければ planned replacement を使い、Agent PTY を破棄しない。古い Agent integration がある場合は一覧を表示し、
+`--restart-agents` が明示されるまで Agent process を停止しない。`--force` は `running` phase（tool / prompt の途中を含む）を
+破棄する追加 authority であり、通常の idle / waiting Agent 再起動や daemon rollover の force ではない。
+launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
+これにより Doctor は同じ build の runtime でも旧 launch 設定を識別し、current adapter での再開対象にできる。
+
+修復順序は old owner で exact Agent を停止、daemon build を rollover、current adapter で provider-native session ID を exact
+resume、再診断の順である。これにより old owner の PTY handle を successor が推測して signal することも、old adapter が新設定を
+materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
+modern daemon は全件 effect-before-zero で拒否する。停止後に scope が stale、current adapter が resume 非対応と判明しても、別
+conversation は推測しない。最終診断は outdated Agent 数、live Agent 数、retained draining
+generation 数を表示する。IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
+
+診断 vocabulary 導入前の daemon は integration revision を返せず Agent を選択停止できない。live Agent が無ければ通常の
+planned replacement を行う。live Agent がある場合は runtime 一覧を表示して rollover を保留し、
+`--restart-agents --force` が同時に指定された場合だけ既存 lifecycle の cold restart を互換経路として使う。この経路は
+generic terminal も破棄し得るため、CLI は実行前の案内と refusal にその追加影響を明記する。再起動後は durable provider
+metadata から exact target を読み直し、current integration で resume する。
 
 restart 後の Agent owner は hydrate 済み operation を admission より先に照合する。同じ semantic intent は保存済み
 accepted / completed / safe failure を replay し、同じ `OperationId` の異なる intent は
@@ -1367,8 +1381,9 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 | `SpawnFailed` / その他の `ReconcileRequired` | `exited` | 2 |
 | `Exited` / `Reclaimed` | `ended` | 1 |
 
-報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、daemon が発行した
-credential で報告元 runtime に束縛される。反映は次の規則に従う。
+報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
+process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
+照合でき、従来の inherited process group も互換経路として受理する。反映は次の規則に従う。
 
 | 報告 phase | projection | 集約重み | durable `ProviderResumePhase` |
 |---|---|---|---|
@@ -1383,7 +1398,7 @@ credential で報告元 runtime に束縛される。反映は次の規則に従
 - session の phase は、その session に属する runtime のうち集約重みが最大のものを選ぶ。報告 phase の相対順序は
   Home の集約（`done > waiting > running > ready > absent`）と core usecase の共有順位を使うため、最も人の
   対応を要する runtime が session 全体の phase になる。
-- 報告 phase は in-memory であり、caller credential と同じく daemon restart で失効する（restart 後は観測 state
+- 報告 phase は in-memory であり、runtime の process binding と同じく daemon restart で失効する（restart 後は観測 state
   由来の phase に戻る）。
 - durable な写像は `ProviderResumeRef.last_known_phase` だけを更新し、`last_known_status`（liveness）は書かない。
   値が変わらない報告は snapshot を書き直さない。`exited` を durable に書かないのは、hook の言う `exited` が
@@ -1568,7 +1583,7 @@ count は `BackgroundWorker` が一元管理する。
 backpressure した byte 数も process-local counter として返す。counter と log は byte 数だけを扱い、
 terminal output、argv、environment、secret を含めない。
 
-TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の足元の右へ表示する。
+TUI は最新 snapshot を workspace の左ペイン下部にある usagi mascot の足元の右へ表示する。
 この観測値は操作対象ではないため、狭い terminal では session 一覧と footer を優先して mascot ごと省略される。
 
 ### agent concurrency projection
@@ -1825,8 +1840,8 @@ wire request をこの表の縦軸（work の種類）へ写す分類は 1 か�
 | wire の `kind`（terminal は `action`） | work の種類 | runtime を名指すか |
 |---|---|---|
 | `rollover` | active 自身の barrier trigger（lease なし） | no |
-| `terminal` / `launch`、`agent`、`resume_agent` | spawn | no |
-| `terminal` / `inventory`・`completed_inventory`、`agent_inventory` | inventory | no |
+| `terminal` / `launch`、`agent`、`resume_agent`、`resume_agent_with_current_integration` | spawn | no |
+| `terminal` / `inventory`・`completed_inventory`、`agent_inventory`、`diagnose_agents` | inventory | no |
 | `terminal` / `input_outcome` | read | yes |
 | `terminal` のその他の action | terminal IO | yes |
 | `metrics`、`pr` | read | no |
@@ -2006,8 +2021,16 @@ wall clock・PID 由来の値は identity にしない。観測結果は `exact`
 ### standby hydrate と activation
 
 standby readiness が hydrate するのは single-writer lifecycle store（`sessions.json`）だけである。読むのは 1 回で、
-active が authority を取った workspace root と state revision を得る。readiness 中は reconcile / save、
-worker / tick、spawn を行わず、未初期化の store は「初期化するのは所有者だけ」として拒否する。
+active が authority を取った workspace root と state revision を得る。`daemon restart` の実行 directory が初期化済み
+workspace 内ならその subtree を使い、採用外または root 記録だけの partial adoption なら `sessions.json` を持つ
+初期化済み subtree を root 順で選ぶ。壊れた lifecycle node は別 subtree へ読み飛ばさず fail closed にする。
+replacement は machine-wide なので、standby の hydrate と active へ送る `rollover` control connection は無関係な
+実行 directory を新規 workspace として採用せず、readiness と handoff の成否もそこへ依存させない。control
+connection は locator・owner record・peer PID・process-start identity・generation を一致させて既存 active へ直接
+接続し、通常 client bootstrap の build mismatch 判定を再実行しない。handoff 自体がその判定を消費する replacement
+operation であり、ここで再判定すると `RolloverRequired` が自分自身を再帰的に要求するためである。
+readiness 中は reconcile / save、worker / tick、spawn を行わず、初期化済み subtree が 1 つも無い場合は
+「初期化するのは所有者だけ」として拒否する。
 
 handoff commit 後は readiness-only accept loop を止めて listener を回収し、同じ generation の空 owner shard と
 global allocator を active writer として開く。retained shard は owner routing で旧 generation 自身が serve するため、

@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, session, sidebar, regression]
 dependson: []
-related: [257, 258, 280, 281]
+related: [258, 280, 281]
 created_at: 2026-07-13T11:54:00.338601+00:00
 updated_at: 2026-07-13T11:57:34.244310+00:00
 ---

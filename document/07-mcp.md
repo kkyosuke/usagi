@@ -163,7 +163,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 
 | tool | 実挙動 |
 |---|---|
-| `session_create` / `session_recover_legacy` | daemon IPC を通じて session lifecycle store と worktree を操作する |
+| `session_create` | daemon IPC を通じて session lifecycle store と worktree を操作する |
 | `session_remove` | 削除を **受理**して返す。worktree の撤去は daemon の teardown worker が完了させる（[session lifecycle の受理契約](#session-lifecycle-の受理契約)） |
 | `session_list` / `session_status` | daemon の durable lifecycle snapshot を返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | `auto` / `queue` / `live` を daemon が解決し、handshake で fence した workspace と optional session が一致する次回 Agent launch 用 durable queue または live Agent PTY へ配送する |
@@ -172,7 +172,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合して user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
@@ -184,12 +184,16 @@ cancellation contract を使う。これらは durable な `Pending` record を�
 list、または同じ idempotency key の request で同じ decision を観測できる。状態変化がない間に decision store を一定間隔で
 再読込しない。
 
+decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
+2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
+NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
+
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
 
 ### session lifecycle の受理契約
 
-`session_create` / `session_remove` / `session_recover_legacy --apply` の成功応答は
+`session_create` / `session_remove` の成功応答は
 `accepted operation <operation_id> (revision <revision>)` である。この文字列は **operation が受理され durable state に
 記録された**ことを意味する。
 
@@ -280,7 +284,7 @@ provider が MCP child を workspace root など別の cwd から起動しても
 store root を返さない旧 daemon と接続した `usagi mcp` は、互換経路として従来どおり cwd を使う。成功時は usecase の結果 JSON を MCP の text content に入れて
 返し、作成・更新・削除は応答前に store root 配下の source Markdown へ永続化される。派生 index / TOC
 の refresh failure は committed source の成功応答を error に変えず、dirty marker により次の
-read で自己修復する。commit point、retry、v1 / v2 共通の issue number 採番 authority の正本は
+read で自己修復する。commit point、retry、issue number 採番 authority の正本は
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract)を参照。
 `issue_get` / `memory_get` は対象が無ければ `null`、delete は `deleted: boolean` を返す。
 検索は query 省略で全件を返し、issue には `ready` / `unmet_deps` を付与する。

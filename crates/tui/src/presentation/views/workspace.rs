@@ -49,7 +49,7 @@ use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::{AgentRuntimeId, SessionId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -68,11 +68,14 @@ const SESSION_ROW_LINES: usize = 3;
 const _: () = assert!(
     SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
 );
-/// v1 と同じ Nerd Font glyph: processor and resident-memory server.
+/// Nerd Font glyphs for processor and resident-memory server.
 const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
 /// Nerd Font cogs: the Agent concurrency slots the daemon admits from.
 const AGENT_ICON: char = '\u{f085}';
+/// Nerd Font bell: pending user decisions. A font glyph keeps the Home chrome
+/// monochrome instead of asking terminals to render the coloured bell emoji.
+const DECISION_NOTICE_ICON: char = '\u{f0f3}';
 /// daemon が Agent concurrency を報告しない場合の表示。`0` と読み違えられない
 /// 1 文字にするため em dash を使う。
 const UNREPORTED: char = '—';
@@ -143,7 +146,7 @@ pub struct ProjectedSession {
     pub organization_depth: usize,
 }
 
-/// Nerd Font pull-request glyph shared with v1's right-aligned sidebar badge.
+/// Nerd Font pull-request glyph for the right-aligned sidebar badge.
 const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
 /// Keep the common one-digit badge column stable even before a PR is detected.
 const PR_RESERVE_WIDTH: usize = 3;
@@ -330,6 +333,11 @@ pub struct HomeProjection {
     /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
     /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
+    /// Header scope and stable project ownership for the process-level Garden.
+    /// A one-project Home uses its workspace name; the deck replaces both when
+    /// more open projects contribute cached plots.
+    garden_scope: String,
+    garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
@@ -498,11 +506,14 @@ impl HomeProjection {
                     lifecycle: session.lifecycle,
                     selected: state.selected() == Selection::Target(Target::Session(session.id)),
                     failure_summary: session.failure_summary.clone(),
+                    agents_observed: true,
                     pr_merged: state.celebrates_pr_merge(session.id),
                     agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
                 })
                 .collect::<Vec<_>>()
         });
+        let garden_workspaces =
+            garden_workspace_index(state.workspace(), garden_sessions.as_deref());
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
@@ -549,6 +560,8 @@ impl HomeProjection {
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
             session_agents,
             garden_sessions,
+            garden_scope: workspace_name.to_owned(),
+            garden_workspaces,
             garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
             closeup_modal: None,
@@ -574,6 +587,31 @@ impl HomeProjection {
             GardenMotion::Full
         };
         self
+    }
+
+    /// Replace the active-only Garden with the process deck's ordered plots.
+    /// This is inert while Garden is closed, so ordinary Home material does not
+    /// retain inactive project rows.
+    #[must_use]
+    pub(crate) fn with_deck_garden(
+        mut self,
+        scope: String,
+        sessions: Vec<(WorkspaceId, widgets::garden::GardenSession)>,
+    ) -> Self {
+        if self.garden_sessions.is_none() {
+            return self;
+        }
+        self.garden_scope = scope;
+        self.garden_workspaces = sessions
+            .iter()
+            .map(|(workspace, session)| (session.id, *workspace))
+            .collect();
+        self.garden_sessions = Some(sessions.into_iter().map(|(_, session)| session).collect());
+        self
+    }
+
+    pub(crate) fn garden_sessions(&self) -> Option<&[widgets::garden::GardenSession]> {
+        self.garden_sessions.as_deref()
     }
 
     pub(crate) fn canonical_garden_now(
@@ -917,6 +955,18 @@ impl HomeProjection {
     }
 }
 
+fn garden_workspace_index(
+    workspace: WorkspaceId,
+    sessions: Option<&[widgets::garden::GardenSession]>,
+) -> BTreeMap<SessionId, WorkspaceId> {
+    sessions.map_or_else(BTreeMap::new, |sessions| {
+        sessions
+            .iter()
+            .map(|session| (session.id, workspace))
+            .collect()
+    })
+}
+
 /// The session the right pane previews.
 ///
 /// Switch owns sidebar navigation, so its right pane follows the cursor: moving
@@ -1196,7 +1246,7 @@ impl Workspace {
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// v1 の chrome と同じアイコン付き mode 表示。現在の mode だけを accent で強調する。
+/// アイコン付き mode 表示。現在の mode だけを accent で強調する。
 fn mode_toggle(current: Mode) -> String {
     Mode::ALL
         .iter()
@@ -1253,12 +1303,6 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
         HomeMode::Switch => Mode::Switch,
         HomeMode::Closeup => Mode::Closeup,
     };
-    let breadcrumb = format!(
-        " {}{}{}",
-        Role::Success.style().bold().paint("USAGI"),
-        Style::new().dim().paint(" > "),
-        Role::Success.style().bold().paint(&home.workspace_name),
-    );
     // The drawer button reads as one more entry in the same right-hand strip as
     // the mode toggle, so it follows the toggle's active/inactive contrast: the
     // accent belongs to whatever is currently in front. A closed drawer is dim
@@ -1275,13 +1319,18 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .dim()
             .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
-    let notice = (!home.unread_decision_ids.is_empty())
-        .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
+    let notice = (!home.unread_decision_ids.is_empty()).then(|| {
+        format!(
+            "{DECISION_NOTICE_ICON} {} notice",
+            home.unread_decision_ids.len()
+        )
+    });
     let mode = mode_toggle(mode);
 
     // Preserve the drawer entry first, then the mode indicator, then the notice.
-    // Whole optional segments are admitted only when they fit; the breadcrumb
-    // receives the remaining cells and is the only normal-width clipped field.
+    // Whole optional segments are admitted only when they fit. Workspace
+    // identity already lives in the project bar directly above this row, so the
+    // remaining cells are quiet spacing rather than a duplicate breadcrumb.
     let mut right_segments = vec![(Some(HomeHeaderAction::Director), director)];
     let mut used = widgets::display_width(&right_segments[0].1);
     let mode_width = widgets::display_width(&mode);
@@ -1311,8 +1360,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
 
     let right_width = used;
     let left_width = width.saturating_sub(right_width);
-    let mut line =
-        widgets::pad_to_width(&widgets::clip_to_width(&breadcrumb, left_width), left_width);
+    let mut line = " ".repeat(left_width);
     let mut actions = Vec::new();
     let mut cursor = left_width;
     for (index, (action, segment)) in right_segments.into_iter().enumerate() {
@@ -1856,7 +1904,7 @@ fn garden_frame(
     widgets::garden::render(
         height,
         width,
-        &home.workspace_name,
+        &home.garden_scope,
         sessions,
         garden_tick(now),
         home.garden_motion.is_reduced(),
@@ -1899,10 +1947,17 @@ pub fn garden_click_at(
             .hitboxes
             .iter()
             .find(|hitbox| hitbox.contains(column, row))
-            .map_or(GardenClick::Dismiss, |hitbox| GardenClick::Visit {
-                session: hitbox.session_id,
-                agent: hitbox.agent,
-            }),
+            .and_then(|hitbox| {
+                home.garden_workspaces
+                    .get(&hitbox.session_id)
+                    .copied()
+                    .map(|workspace| GardenClick::Visit {
+                        workspace,
+                        session: hitbox.session_id,
+                        agent: hitbox.agent,
+                    })
+            })
+            .unwrap_or(GardenClick::Dismiss),
     )
 }
 
@@ -2073,7 +2128,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     };
     widgets::clip_to_width(
         &format!(
-            "  🔔 {}: {}  (click bell to review)",
+            "  {DECISION_NOTICE_ICON} {}: {}  (click bell to review)",
             decision
                 .owner
                 .session_id
@@ -2260,9 +2315,9 @@ fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> us
     home_row_height(row)
 }
 
-/// Paint a Home sidebar row label with v1's colour precedence.
+/// Paint a Home sidebar row label with the established colour precedence.
 ///
-/// `+ new session` is a Success (green) affordance in every mode (#302 / #362):
+/// `+ new session` is a Success (green) affordance in every mode:
 /// resolve it before the generic accent branches so the Switch cursor only adds
 /// bold and it never falls through to the accent (cyan) `selected` colour that
 /// real targets use. A non-cursor `+ new session` in Switch still takes the
@@ -2633,9 +2688,9 @@ fn create_session_input_lines(
     lines
 }
 
-/// v1-compatible sidebar marker with explicit precedence.
+/// Sidebar marker with explicit precedence.
 ///
-/// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
+/// A selected session starts with the usagi glyph and uses a red `|` continuation;
 /// in Closeup its active two-line stack is green. Switch does not retain a rail
 /// for the previous target because its cursor is the sole selection indicator.
 /// The action row remains chevron-free even while it owns the Switch cursor.
@@ -2831,10 +2886,10 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
-        DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession, SESSION_ROW_LINES,
-        SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
+        DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
+        HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
+        SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
+        Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
         garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
         home_header_action_at, home_header_layout, home_left_pane, home_row_height,
         home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
@@ -3662,7 +3717,7 @@ mod tests {
     }
 
     #[test]
-    fn home_header_layout_and_hit_test_share_cjk_notice_and_drawer_geometry() {
+    fn home_header_layout_and_hit_test_share_notice_and_drawer_geometry() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
         // A pending decision makes the notice badge unread; closing its
@@ -3708,7 +3763,11 @@ mod tests {
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
+        assert!(!strip(&layout.line).contains("USAGI"));
+        assert!(!strip(&layout.line).contains("日本語 workspace"));
         assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} Director")));
+        assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
+        assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -4621,6 +4680,34 @@ mod tests {
         assert!(garden_fits(0, 0));
     }
 
+    #[test]
+    fn a_closed_garden_ignores_process_deck_plot_material() {
+        let workspace = WorkspaceId::new();
+        let home = HomeProjection::from_state(
+            &AppState::home(workspace, Vec::new()),
+            "atlas",
+            Path::new("/work"),
+            &[],
+        );
+        let unchanged = home.clone().with_deck_garden(
+            "2 open projects".to_owned(),
+            vec![(
+                WorkspaceId::new(),
+                widgets::garden::GardenSession {
+                    id: SessionId::new(),
+                    label: "other / review".to_owned(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: false,
+                    agents: Vec::new(),
+                    pr_merged: false,
+                },
+            )],
+        );
+        assert_eq!(unchanged, home);
+    }
+
     /// click 解決は frame と同じ layout 呼び出しの hitbox に当てる。うさぎに当たれば
     /// その plot に束縛された stable `SessionId`、外れれば wake-up。
     #[test]
@@ -4650,6 +4737,7 @@ mod tests {
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
                 Some(GardenClick::Visit {
+                    workspace,
                     session: hitbox.session_id,
                     agent: None,
                 }),
@@ -4725,6 +4813,7 @@ mod tests {
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
                 Some(GardenClick::Visit {
+                    workspace,
                     session,
                     agent: rabbit.agent,
                 }),
@@ -4747,6 +4836,7 @@ mod tests {
                 u16::try_from(nameplate.row).expect("fits a u16"),
             ),
             Some(GardenClick::Visit {
+                workspace,
                 session,
                 agent: None,
             }),
@@ -5133,7 +5223,7 @@ mod tests {
     }
 
     #[test]
-    fn home_projection_uses_v1_marker_precedence_and_hides_cursor_in_closeup() {
+    fn home_projection_uses_marker_precedence_and_hides_cursor_in_closeup() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
         let second = SessionId::new();
@@ -5364,7 +5454,7 @@ mod tests {
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
 
-        // Regression (#376): the Switch cursor on `+ new session` must keep the
+        // The Switch cursor on `+ new session` must keep the
         // Success (green) role and only add bold — never fall through to the
         // accent (cyan) `selected` branch used by real targets.
         let rendered = render_home(30, 100, &home).join("\n");
@@ -5404,7 +5494,7 @@ mod tests {
             &[projected_session(session, "session", "/work/session")],
         );
 
-        // Regression (#376): bold is reserved for the Switch cursor, so Closeup
+        // Bold is reserved for the Switch cursor, so Closeup
         // keeps `+ new session` Success (green) but unbolded, and never accent.
         let rendered = render_home(30, 100, &home).join("\n");
         assert!(rendered.contains("\u{1b}[32m+ new session\u{1b}[0m"));
@@ -5555,7 +5645,7 @@ mod tests {
             .find(|line| line.contains('\u{f2db}'))
             .expect("daemon metric row beside usagi");
 
-        // The row carries both glyphs and the v1 CPU/memory summary text.
+        // The row carries both glyphs and the CPU/memory summary text.
         assert!(strip(controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
 
         // The Agent concurrency the daemon admits from sits on its own row below,
@@ -6686,7 +6776,7 @@ mod tests {
     }
 
     #[test]
-    fn home_terminal_scroll_offset_matches_the_legacy_window() {
+    fn home_terminal_scroll_offset_matches_the_viewport_window() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
         let rows = (0..20).map(|row| format!("row {row}")).collect::<Vec<_>>();

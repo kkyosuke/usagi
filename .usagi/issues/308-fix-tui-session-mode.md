@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, ui, parity]
 dependson: []
-related: [302]
+related: []
 created_at: 2026-07-15T00:28:01.690978+00:00
 updated_at: 2026-07-15T22:20:25.814460+00:00
 ---
@@ -22,5 +22,3 @@ Session mode（session の選択・切替を行う面）では、右ペインを
 - renderer test / golden test で Session mode と Closeup mode の明度差を固定する。
 
 ## 関連
-
-#302 は Switch の左 sidebar 非選択 row を dim にする修正であり、右ペインの mode-aware dim は対象外。

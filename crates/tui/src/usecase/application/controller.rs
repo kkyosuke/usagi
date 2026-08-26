@@ -447,8 +447,10 @@ pub struct EnvironmentEditor {
 pub struct DecisionEditor {
     decision: UserDecision,
     selected_option: usize,
-    /// Explicit text viewport offset. `None` follows the selected option.
+    /// Explicit text viewport offset. `None` follows the active automatic anchor.
     scroll_offset: Option<usize>,
+    /// Whether automatic scrolling follows the freeform draft instead.
+    follow_freeform: bool,
     freeform: String,
     error: Option<SafeError>,
 }
@@ -459,6 +461,7 @@ impl DecisionEditor {
             decision,
             selected_option: 0,
             scroll_offset: None,
+            follow_freeform: false,
             freeform: String::new(),
             error: None,
         }
@@ -474,6 +477,10 @@ impl DecisionEditor {
     #[must_use]
     pub const fn scroll_offset(&self) -> Option<usize> {
         self.scroll_offset
+    }
+    #[must_use]
+    pub const fn follows_freeform(&self) -> bool {
+        self.follow_freeform
     }
     #[must_use]
     pub fn freeform(&self) -> &str {
@@ -956,6 +963,10 @@ pub struct AppState {
     interaction_count: u64,
     mascot_tick: u64,
     size: Option<(u16, u16)>,
+    /// Whether presentation can currently draw the Garden without hiding Home
+    /// behind an invisible overlay. The renderer injects this layout fact; the
+    /// reducer uses it to admit both automatic and manual opening consistently.
+    garden_available: bool,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1097,6 +1108,7 @@ impl AppState {
             interaction_count: 0,
             mascot_tick: 0,
             size: None,
+            garden_available: true,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1822,6 +1834,8 @@ pub enum AppEvent {
     Key(AppKey),
     /// terminal size の変更。
     Resize { width: u16, height: u16 },
+    /// Presentation-level Garden layout availability for the current terminal.
+    GardenAvailability(bool),
     /// 定期 tick。
     Tick,
     /// backend snapshot / notice。
@@ -1859,6 +1873,12 @@ pub enum AppEvent {
     /// CJK labels, a resize, or the plot cap cannot move a rabbit away from the
     /// session it draws.
     GardenClick(GardenClick),
+    /// Open one stable session without relying on list position. The process
+    /// deck uses this after a Garden visit switched to another workspace.
+    VisitSession(SessionId),
+    /// Presentation could not allocate the Garden's minimum layout. Manual
+    /// commands fail visibly instead of leaving an invisible input owner.
+    GardenUnavailable,
 }
 
 /// What a click on the open Garden landed on.
@@ -1867,14 +1887,16 @@ pub enum AppEvent {
 /// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
-    /// A session's plot. Its stable session becomes selected/active and its
-    /// existing Closeup opens.
+    /// A session's plot. Its stable project/session pair becomes the process
+    /// shell's visit target; this reducer activates it only when `workspace`
+    /// names its own Home.
     ///
     /// `agent` is the exact rabbit that was pressed, when the press landed on
     /// one. The reducer's activation does not depend on it: the shell uses it to
     /// focus that Agent's own tab inside the Closeup this activation opens, and
     /// a rabbit whose tab has meanwhile gone simply lands on the session.
     Visit {
+        workspace: WorkspaceId,
         session: SessionId,
         agent: Option<AgentRuntimeId>,
     },
@@ -2967,9 +2989,26 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.size = Some((width, height));
             Vec::new()
         }
+        AppEvent::GardenAvailability(available) => {
+            state.garden_available = available;
+            if !available && state.overlay == Some(Overlay::Garden) {
+                state.overlay = None;
+            }
+            Vec::new()
+        }
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
+        AppEvent::VisitSession(session) => visit_session(state, session),
+        AppEvent::GardenUnavailable => {
+            if state.overlay == Some(Overlay::Garden) {
+                state.overlay = None;
+                state.notice = Some(Notice::new(
+                    "garden is unavailable at the current terminal size",
+                ));
+            }
+            Vec::new()
+        }
         // A live input is classified by `LiveInputClassifier` before reaching
         // this reducer. It still clears a pending grace, because grace is an
         // event-based one-shot rather than a timeout.
@@ -3287,6 +3326,31 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     .min(overlay.prs.len().saturating_sub(1));
                 overlay.error = None;
             }
+            // An explicit `p` request is kept as a hidden pending overlay until
+            // its snapshot arrives. Only a non-empty projection may become a
+            // modal; an empty result closes an already-visible stale modal too.
+            if state
+                .pr_overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == *target)
+            {
+                if state
+                    .pr_overlay
+                    .as_ref()
+                    .is_some_and(|overlay| overlay.prs.is_empty())
+                {
+                    state.pr_overlay = None;
+                    if state.overlay == Some(Overlay::Prs) {
+                        state.overlay = None;
+                    }
+                } else if state.overlay.is_none() && !state.director_drawer_open {
+                    state.overlay = Some(Overlay::Prs);
+                } else if state.overlay != Some(Overlay::Prs) {
+                    // Do not let a delayed explicit request steal a newer
+                    // foreground interaction.
+                    state.pr_overlay = None;
+                }
+            }
             // A freshly discovered PR is the completion of work the user is
             // waiting for, so surface it immediately. Metadata-only refreshes,
             // duplicate snapshots, and deliberate dismissals stay quiet. An
@@ -3327,12 +3391,19 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             }
         }
         BackendEvent::PullRequestsError { target, error } => {
-            if let Some(overlay) = state
+            let matching_request = state
                 .pr_overlay
-                .as_mut()
-                .filter(|overlay| overlay.target == *target)
-            {
-                overlay.error = Some(error.clone());
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == *target);
+            if matching_request {
+                if state.overlay.is_none() && !state.director_drawer_open {
+                    state.overlay = Some(Overlay::Prs);
+                } else if state.overlay != Some(Overlay::Prs) {
+                    state.pr_overlay = None;
+                }
+                if let Some(overlay) = state.pr_overlay.as_mut() {
+                    overlay.error = Some(error.clone());
+                }
             }
         }
         BackendEvent::PreviewLoaded { target, lines } => {
@@ -3597,14 +3668,17 @@ fn reconcile_force_remove_confirmation(state: &mut AppState) {
     }
 }
 
+fn dismiss_closeup_action_modal(state: &mut AppState) {
+    state.closeup_action_forced = false;
+    state.overlay = None;
+}
+
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
     }
     if matches!(overlay, Overlay::Closeup) && matches!(key, AppKey::Escape) {
-        state.closeup_action_forced = false;
-        state.overlay = None;
-        state.route = Route::Home(HomeMode::Switch);
+        dismiss_closeup_action_modal(state);
         return Vec::new();
     }
     if matches!(overlay, Overlay::CreateSessionError)
@@ -3766,12 +3840,10 @@ fn update_overlay_control_chord(
         AppKey::CtrlQ => Some(Vec::new()),
         AppKey::CtrlC => {
             match overlay {
-                // Closeup returns to Switch just like `Ctrl-O Ctrl-O`, whether
-                // it is the base surface or forced over a live pane.
+                // Close only the action modal and return input to its underlying
+                // Closeup, whether it is the base surface or a live pane.
                 Overlay::Closeup => {
-                    state.closeup_action_forced = false;
-                    state.overlay = None;
-                    state.route = Route::Home(HomeMode::Switch);
+                    dismiss_closeup_action_modal(state);
                 }
                 // The create-failure dialog treats Ctrl-C as acknowledgement;
                 // route remains untouched beneath the dismissed dialog.
@@ -3809,111 +3881,127 @@ fn reconcile_decision_overlay(state: &mut AppState) {
 }
 
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    let workspace = state.workspace;
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
+    if overlay.editor.is_some() && matches!(&key, AppKey::Escape) {
+        overlay.editor = None;
+        return Vec::new();
+    }
     if let Some(editor) = overlay.editor.as_mut() {
-        match key {
-            AppKey::Escape => {
-                overlay.editor = None;
-            }
-            AppKey::DecisionPrevious | AppKey::Up => {
-                editor.selected_option = editor.selected_option.saturating_sub(1);
-                editor.scroll_offset = None;
-            }
-            AppKey::DecisionNext | AppKey::Down => {
-                editor.selected_option = (editor.selected_option + 1)
-                    .min(editor.decision.options.len().saturating_sub(1));
-                editor.scroll_offset = None;
-            }
-            AppKey::PageUp => {
-                editor.scroll_offset =
-                    Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
-            }
-            AppKey::PageDown => {
-                editor.scroll_offset =
-                    Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
-            }
-            AppKey::SetDecisionFreeform(text) => {
-                if editor.decision.allow_freeform {
-                    editor.freeform = text;
-                    editor.error = None;
-                }
-            }
-            AppKey::Char(ch) if editor.decision.allow_freeform => {
-                editor.freeform.push(ch);
-                editor.error = None;
-            }
-            AppKey::Backspace if editor.decision.allow_freeform => {
-                editor.freeform.pop();
-                editor.error = None;
-            }
-            AppKey::Paste(text) if editor.decision.allow_freeform => {
-                paste_decision_freeform(editor, &text);
-            }
-            AppKey::SubmitDecision | AppKey::Enter => {
-                let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty()
-                {
-                    UserDecisionAnswer::Freeform {
-                        text: editor.freeform.trim().to_owned(),
-                    }
-                } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
-                    UserDecisionAnswer::Option {
-                        option_id: option.id.clone(),
-                    }
-                } else {
-                    editor.error = Some(SafeError {
-                        message: SafeMessage::new("select a valid answer"),
-                        error_id: "decision-invalid-answer".to_owned(),
-                    });
-                    return Vec::new();
-                };
-                if editor
-                    .decision
-                    .validate_answer(&answer, chrono::Utc::now())
-                    .is_err()
-                {
-                    editor.error = Some(SafeError {
-                        message: SafeMessage::new("select a valid answer"),
-                        error_id: "decision-invalid-answer".to_owned(),
-                    });
-                    return Vec::new();
-                }
-                return vec![Effect::ResolveDecision {
-                    workspace: state.workspace,
-                    decision_id: editor.decision.decision_id,
-                    answer,
-                }];
-            }
-            _ => {}
+        return update_decision_editor(workspace, editor, key);
+    }
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.decision_overlay = None;
         }
-    } else {
-        match key {
-            AppKey::Escape => {
-                state.overlay = None;
-                state.decision_overlay = None;
-            }
-            AppKey::DecisionPrevious | AppKey::Up => {
-                overlay.selected = overlay.selected.saturating_sub(1);
-            }
-            AppKey::DecisionNext | AppKey::Down => {
-                overlay.selected =
-                    (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
-            }
-            AppKey::Enter => {
-                if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
-                    overlay.editor = Some(DecisionEditor::new(decision));
-                }
-            }
-            _ => {}
+        AppKey::DecisionPrevious | AppKey::Up => {
+            overlay.selected = overlay.selected.saturating_sub(1);
         }
+        AppKey::DecisionNext | AppKey::Down => {
+            overlay.selected = (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
+        }
+        AppKey::Enter => {
+            if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
+                overlay.editor = Some(DecisionEditor::new(decision));
+            }
+        }
+        _ => {}
     }
     Vec::new()
 }
 
+fn update_decision_editor(
+    workspace: WorkspaceId,
+    editor: &mut DecisionEditor,
+    key: AppKey,
+) -> Vec<Effect> {
+    match key {
+        AppKey::DecisionPrevious | AppKey::Up => {
+            editor.selected_option = editor.selected_option.saturating_sub(1);
+            editor.scroll_offset = None;
+            editor.follow_freeform = false;
+        }
+        AppKey::DecisionNext | AppKey::Down => {
+            editor.selected_option =
+                (editor.selected_option + 1).min(editor.decision.options.len().saturating_sub(1));
+            editor.scroll_offset = None;
+            editor.follow_freeform = false;
+        }
+        AppKey::PageUp => {
+            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
+            editor.follow_freeform = false;
+        }
+        AppKey::PageDown => {
+            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
+            editor.follow_freeform = false;
+        }
+        AppKey::SetDecisionFreeform(text) => {
+            if editor.decision.allow_freeform {
+                editor.freeform = text;
+                follow_decision_freeform(editor);
+            }
+        }
+        AppKey::Char(ch) if editor.decision.allow_freeform => {
+            editor.freeform.push(ch);
+            follow_decision_freeform(editor);
+        }
+        AppKey::Backspace if editor.decision.allow_freeform => {
+            editor.freeform.pop();
+            follow_decision_freeform(editor);
+        }
+        AppKey::Paste(text) if editor.decision.allow_freeform => {
+            paste_decision_freeform(editor, &text);
+        }
+        AppKey::SubmitDecision | AppKey::Enter => {
+            let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty() {
+                UserDecisionAnswer::Freeform {
+                    text: editor.freeform.trim().to_owned(),
+                }
+            } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
+                UserDecisionAnswer::Option {
+                    option_id: option.id.clone(),
+                }
+            } else {
+                editor.error = Some(SafeError {
+                    message: SafeMessage::new("select a valid answer"),
+                    error_id: "decision-invalid-answer".to_owned(),
+                });
+                return Vec::new();
+            };
+            if editor
+                .decision
+                .validate_answer(&answer, chrono::Utc::now())
+                .is_err()
+            {
+                editor.error = Some(SafeError {
+                    message: SafeMessage::new("select a valid answer"),
+                    error_id: "decision-invalid-answer".to_owned(),
+                });
+                return Vec::new();
+            }
+            return vec![Effect::ResolveDecision {
+                workspace,
+                decision_id: editor.decision.decision_id,
+                answer,
+            }];
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn follow_decision_freeform(editor: &mut DecisionEditor) {
+    editor.scroll_offset = None;
+    editor.follow_freeform = true;
+    editor.error = None;
+}
+
 fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
     editor.freeform.push_str(text);
-    editor.error = None;
+    follow_decision_freeform(editor);
 }
 
 /// Open the pending-decision list and ask its owner for a fresh snapshot.
@@ -4277,13 +4365,15 @@ fn open_prs(state: &mut AppState) -> Vec<Effect> {
 }
 
 fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
-    state.overlay = Some(Overlay::Prs);
     let mut overlay = PrOverlay::loading(target);
     if let Target::Session(session) = target
         && let Some(prs) = state.session_prs(session)
     {
         overlay.prs = filtered_prs(prs, PrFilter::All);
     }
+    // Keep the request state so a newly returned PR can still open immediately,
+    // but do not render an empty loading/empty-state modal.
+    state.overlay = (!overlay.prs.is_empty()).then_some(Overlay::Prs);
     state.pr_overlay = Some(overlay);
     state.preview_overlay = None;
     vec![Effect::LoadPullRequests { target }]
@@ -4459,8 +4549,15 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         }
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
-                state.overlay = Some(Overlay::Garden);
-                state.notice = None;
+                if state.garden_available {
+                    state.overlay = Some(Overlay::Garden);
+                    state.notice = None;
+                } else {
+                    state.overlay = None;
+                    state.notice = Some(Notice::new(
+                        "Garden needs a terminal at least 64 columns wide and 14 rows tall",
+                    ));
+                }
             } else {
                 state.notice = Some(Notice::new("garden takes no arguments (usage: garden)"));
             }
@@ -4661,11 +4758,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
     };
     if effect.is_some() {
-        // v1's `terminal new` hands the worktree to the OS terminal and leaves
-        // Closeup active; only embedded-pane actions dismiss this modal.
-        if !matches!(effect, Some(Effect::OpenExternalTerminal { .. })) {
-            state.overlay = None;
-        }
+        dismiss_closeup_action_modal(state);
         state.notice = Some(Notice::new(match selection {
             Some(selection) => format!("Requested {command_name} {selection}"),
             None => format!("Requested {command_name}"),
@@ -4777,7 +4870,7 @@ fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect
 /// entirely on a terminal too small to draw a garden (`presentation::views::
 /// workspace::garden_fits`).
 fn garden_may_auto_open(state: &AppState) -> bool {
-    state.overlay.is_none() && !state.director_drawer_open
+    state.garden_available && state.overlay.is_none() && !state.director_drawer_open
 }
 
 /// Reduce a click the presentation layer already resolved against the garden's
@@ -4791,9 +4884,19 @@ fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> 
         return Vec::new();
     }
     state.overlay = None;
-    let GardenClick::Visit { session, .. } = click else {
+    let GardenClick::Visit {
+        workspace, session, ..
+    } = click
+    else {
         return Vec::new();
     };
+    if workspace != state.workspace {
+        return Vec::new();
+    }
+    visit_session(state, session)
+}
+
+fn visit_session(state: &mut AppState, session: SessionId) -> Vec<Effect> {
     let selection = Selection::Target(Target::Session(session));
     state.select_row(selection);
     if state.selected != selection {
@@ -5977,14 +6080,14 @@ mod tests {
                 overlay: None,
             },
             Case {
-                name: "closeup overlay escape returns to switch",
+                name: "closeup overlay escape returns to closeup",
                 events: vec![
                     AppEvent::LivePaneAvailability(true),
                     AppEvent::Key(AppKey::Enter),
                     AppEvent::Key(AppKey::OpenCloseupOverlay),
                     AppEvent::Key(AppKey::Escape),
                 ],
-                route: Route::Home(HomeMode::Switch),
+                route: Route::Home(HomeMode::Closeup),
                 overlay: None,
             },
             Case {
@@ -6705,11 +6808,10 @@ mod tests {
         }
     }
 
-    /// #355: the Closeup action modal is not an ordinary modal — Escape and
-    /// Ctrl-C both close it and return Home to Switch, while Ctrl-Q stays inert
-    /// like every other overlay.
+    /// Escape and Ctrl-C close only the Closeup action modal and return input to
+    /// the underlying Closeup, while Ctrl-Q stays inert like every other overlay.
     #[test]
-    fn closeup_action_modal_exits_to_switch_on_escape_and_ctrl_c() {
+    fn closeup_action_modal_returns_to_closeup_on_escape_and_ctrl_c() {
         let (workspace, session, _) = ids();
         for exit_key in [AppKey::Escape, AppKey::CtrlC] {
             // Enter Closeup on a session with no live pane: the action modal is
@@ -6723,18 +6825,22 @@ mod tests {
             assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
             assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
-            // The exit key closes the modal and lands on Switch.
+            // The exit key closes only the modal and lands on Closeup.
             assert!(update(&mut state, AppEvent::Key(exit_key.clone())).is_empty());
-            assert_eq!(state.route(), Route::Home(HomeMode::Switch), "{exit_key:?}");
+            assert_eq!(
+                state.route(),
+                Route::Home(HomeMode::Closeup),
+                "{exit_key:?}"
+            );
             assert_eq!(state.overlay(), None, "{exit_key:?}");
         }
     }
 
-    /// #355: even when the action modal is forced over a live pane, Escape and
-    /// Ctrl-C leave to Switch rather than handing input back to the live pane,
-    /// and a trailing live resample does not resurrect the overlay.
+    /// Even when the action modal is forced over a live pane, Escape and Ctrl-C
+    /// hand input back to that pane, and a trailing live resample does not
+    /// resurrect the overlay.
     #[test]
-    fn closeup_forced_action_modal_exits_to_switch() {
+    fn closeup_forced_action_modal_returns_to_the_live_closeup() {
         let (workspace, session, _) = ids();
         for exit_key in [AppKey::Escape, AppKey::CtrlC] {
             let mut state = AppState::home(workspace, vec![session]);
@@ -6747,11 +6853,14 @@ mod tests {
             let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
             assert_eq!(state.overlay(), Some(Overlay::Closeup));
             assert!(update(&mut state, AppEvent::Key(exit_key.clone())).is_empty());
-            assert_eq!(state.route(), Route::Home(HomeMode::Switch), "{exit_key:?}");
+            assert_eq!(
+                state.route(),
+                Route::Home(HomeMode::Closeup),
+                "{exit_key:?}"
+            );
             assert_eq!(state.overlay(), None, "{exit_key:?}");
 
-            // A same-level live resample must not re-open the Closeup overlay now
-            // that the route is Switch.
+            // A same-level live resample must not re-open the Closeup overlay.
             let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
             assert_eq!(state.overlay(), None, "{exit_key:?}");
         }
@@ -6892,10 +7001,10 @@ mod tests {
         );
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
-        // A just-created session has no live pane. Ctrl-C must leave its action
-        // surface for the switcher, never detach the entire TUI.
+        // A just-created session has no live pane. Ctrl-C closes only its action
+        // modal and returns to Closeup, never detaching the entire TUI.
         assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
         assert_eq!(state.overlay(), None);
 
         let effects = update(
@@ -7653,7 +7762,9 @@ mod tests {
                 target: Target::Session(session),
             }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(state.overlay(), None);
+        assert!(!state.closeup_action_forced);
     }
 
     #[test]
@@ -8496,6 +8607,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manual_garden_refuses_an_unavailable_layout_without_leaving_an_overlay() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+        state.overlay = Some(Overlay::Overview);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("garden".into()))
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| { notice.message.as_str().contains("at least 64 columns") })
+        );
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        assert!(update(&mut state, AppEvent::GardenAvailability(true)).is_empty());
+        assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+        assert_eq!(state.overlay(), None);
+    }
+
     /// Just under the threshold nothing happens; reaching it opens the garden.
     /// The reducer owns no clock, so the whole timer is one injected duration.
     #[test]
@@ -8626,6 +8767,7 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::GardenClick(GardenClick::Visit {
+                    workspace,
                     session: second,
                     agent: None,
                 })
@@ -8656,6 +8798,55 @@ mod tests {
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
     }
 
+    #[test]
+    fn another_projects_garden_plot_closes_without_targeting_a_local_session() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+        let (selected, active) = (state.selected(), state.active());
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Visit {
+                    workspace: WorkspaceId::new(),
+                    session: second,
+                    agent: None,
+                })
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.selected(), selected);
+        assert_eq!(state.active(), active);
+    }
+
+    #[test]
+    fn a_deck_visit_opens_a_fresh_workspaces_stable_session() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+
+        assert!(update(&mut state, AppEvent::VisitSession(second)).is_empty());
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(second));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+    }
+
+    #[test]
+    fn unavailable_garden_closes_with_visible_feedback() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 40, 10);
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(update(&mut state, AppEvent::GardenUnavailable).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| notice.message.contains("terminal size"))
+        );
+    }
+
     /// The press and the snapshot race. A session that left the workspace
     /// between the frame and the click is a stale target: close the garden, run
     /// nothing.
@@ -8670,6 +8861,7 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::GardenClick(GardenClick::Visit {
+                    workspace,
                     session: gone,
                     agent: None,
                 })
@@ -8692,6 +8884,7 @@ mod tests {
 
         for click in [
             GardenClick::Visit {
+                workspace,
                 session,
                 agent: None,
             },
@@ -8723,6 +8916,7 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::GardenClick(GardenClick::Visit {
+                    workspace,
                     session,
                     agent: None,
                 })
@@ -9232,12 +9426,12 @@ mod tests {
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
 
-        // `p` opens the PR overlay for the active target and requests its list.
+        // `p` requests the active target's list without showing an empty modal.
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('p'))),
             vec![Effect::LoadPullRequests { target }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
         assert!(state.pr_overlay().unwrap().prs().is_empty());
 
         // A list for another target is ignored; the matching one fills the overlay.
@@ -9259,6 +9453,7 @@ mod tests {
                 prs: prs.clone(),
             }),
         );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
         assert_eq!(state.pr_overlay().unwrap().selected(), 0);
         assert_eq!(state.session_prs(session), Some(prs.as_slice()));
@@ -9335,15 +9530,14 @@ mod tests {
     }
 
     #[test]
-    fn pr_overlay_enter_is_inert_while_empty_and_errors_stay_visible() {
+    fn pr_overlay_stays_hidden_without_prs_and_reports_loading_errors() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-        // Enter with no entries emits nothing and keeps the overlay open.
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
-        // A safe fetch error surfaces on the open overlay.
+        assert_eq!(state.overlay(), None);
+        // A fetch error is not an authoritative empty snapshot, so its safe
+        // diagnostic remains visible in the PR modal.
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PullRequestsError {
@@ -9351,6 +9545,7 @@ mod tests {
                 error: safe_error("gh unavailable"),
             }),
         );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
         assert_eq!(
             state
                 .pr_overlay()
@@ -9359,6 +9554,89 @@ mod tests {
                 .map(|error| error.message.as_str()),
             Some("gh unavailable")
         );
+
+        // An authoritative empty result discards the pending modal state.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+
+        // Reopening from the known-empty cache also stays hidden, and the
+        // duplicate revision returned by an explicit refresh clears its pending
+        // request instead of leaving it to misclassify a future discovery.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_some());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+    }
+
+    #[test]
+    fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // A foreground interaction opened after `p` wins over a delayed error.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pr_overlay().is_none());
+
+        // The same foreground interaction also wins over a delayed successful
+        // response, while the authoritative PR cache still advances.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let pr = pr_link(41);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr.clone()],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert!(state.pr_overlay().is_none());
+        assert_eq!(state.session_prs(session), Some(std::slice::from_ref(&pr)));
+
+        // A cached PR opens immediately. If a newer authoritative snapshot no
+        // longer contains any visible PR, the stale modal closes.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
     }
 
     #[test]
@@ -9799,7 +10077,8 @@ mod tests {
         // And the reverse: opening PRs discards the preview state.
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
-        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_some());
         assert!(state.preview_overlay().is_none());
     }
 

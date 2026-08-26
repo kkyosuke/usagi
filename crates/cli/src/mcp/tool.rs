@@ -161,6 +161,7 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
     {
         return Err(format!("{path} must be at most {maximum}"));
     }
+    validate_collection_limits(value, schema, path)?;
     if let Some(object) = value.as_object() {
         let properties = schema.get("properties").and_then(Value::as_object);
         if let Some(required) = schema.get("required").and_then(Value::as_array) {
@@ -193,6 +194,49 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_collection_limits(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    let limits = value
+        .as_str()
+        .map(|string| {
+            (
+                string.chars().count() as u64,
+                "minLength",
+                "maxLength",
+                "is shorter than the minimum length",
+                "exceeds the maximum length",
+            )
+        })
+        .or_else(|| {
+            value.as_array().map(|array| {
+                (
+                    array.len() as u64,
+                    "minItems",
+                    "maxItems",
+                    "has fewer than the minimum items",
+                    "exceeds the maximum items",
+                )
+            })
+        });
+    let Some((length, minimum, maximum, below, above)) = limits else {
+        return Ok(());
+    };
+    if schema
+        .get(minimum)
+        .and_then(Value::as_u64)
+        .is_some_and(|bound| length < bound)
+    {
+        return Err(format!("{path} {below}"));
+    }
+    if schema
+        .get(maximum)
+        .and_then(Value::as_u64)
+        .is_some_and(|bound| length > bound)
+    {
+        return Err(format!("{path} {above}"));
+    }
+    Ok(())
+}
+
 /// Rejects schema vocabulary that the runtime validator does not implement.
 ///
 /// # Errors
@@ -216,6 +260,10 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
                     | "items"
                     | "minimum"
                     | "maximum"
+                    | "minLength"
+                    | "maxLength"
+                    | "minItems"
+                    | "maxItems"
                     | "default"
                     | "deprecated"
             ) {
@@ -258,6 +306,13 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
             || object
                 .get("maximum")
                 .is_some_and(|value| !value.is_number())
+            || ["minLength", "maxLength", "minItems", "maxItems"]
+                .into_iter()
+                .any(|keyword| {
+                    object
+                        .get(keyword)
+                        .is_some_and(|value| value.as_u64().is_none())
+                })
             || object
                 .get("deprecated")
                 .is_some_and(|value| !value.is_boolean())
@@ -385,6 +440,10 @@ mod tests {
             (json!(null), json!({"type":"unsupported"})),
             (json!(-1), json!({"type":"integer","minimum":0})),
             (json!(2), json!({"type":"integer","maximum":1})),
+            (json!(""), json!({"type":"string","minLength":1})),
+            (json!("long"), json!({"type":"string","maxLength":3})),
+            (json!([]), json!({"type":"array","minItems":1})),
+            (json!([1, 2]), json!({"type":"array","maxItems":1})),
             (
                 json!({"extra":true}),
                 json!({"type":"object","additionalProperties":false}),
@@ -443,6 +502,10 @@ mod tests {
             json!({"oneOf":[{"pattern":"x"}]}),
             json!({"minimum":"zero"}),
             json!({"maximum":"one"}),
+            json!({"minLength":-1}),
+            json!({"maxLength":"one"}),
+            json!({"minItems":1.5}),
+            json!({"maxItems":null}),
             json!({"deprecated":"yes"}),
         ];
         for schema in malformed {

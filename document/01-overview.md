@@ -5,8 +5,7 @@
 ## 目次
 
 - [usagi とは](#usagi-とは)
-- [v2 の位置づけ](#v2-の位置づけ)
-- [v1 との関係](#v1-との関係)
+- [設計方針](#設計方針)
 - [現在の実装状態](#現在の実装状態)
 
 ## usagi とは
@@ -15,30 +14,14 @@
 worktree（セッション）を作り、複数の AI エージェント・シェルを並行して走らせ、
 issue の委譲から PR の作成・マージまでのループを回す。
 
-## v2 の位置づけ
+## 設計方針
 
-v2 は usagi のフルリライトである。v1 で決定した「PTY 所有を daemon に移し、TUI は
-daemon が所有する端末に attach するクライアントになる」設計
-（[v1/document/proposals/02-daemon.md](../v1/document/04-orchestration.md)）を
-最初から前提にした構造で作り直す。コードの構成は
-[2. アーキテクチャ](02-architecture.md) を正本とする。
-
-## v1 との関係
-
-| 場所 | 内容 |
-|---|---|
-| `/`（ルート） | v2 の実装。ビルド・CI（fmt / clippy / test / coverage 100%）の対象 |
-| `v1/` | 退避した旧実装。仕様ドキュメント（`v1/document/`）ごと独立した Cargo プロジェクトで、ルートの workspace から exclude されている |
-
-- **出荷するのはルートの v2 パッケージ**である。リリースはルート `Cargo.toml` の version 変更を起点に
-  自動化されており、v1 はリリース経路に乗らない（[6. 開発規約#リリース](06-conventions.md#リリース)）。
-- v2 として最初に出す version は既存の v1 release（`2.9.1`）より大きくする必要がある。小さいと
-  `/releases/latest` が v1 のままになり、installer が新しい v2 を選ばない。
-- v1 は `v1/` 配下で従来どおり単体ビルドでき、tree に残る間は `v1-test.yml` / `v1-coverage.yml` が検証する。
+PTY 所有を daemon に移し、TUI は daemon が所有する端末に attach するクライアントとして構成する。
+コードの構成は [2. アーキテクチャ](02-architecture.md) を正本とする。
 
 ## 現在の実装状態
 
-v2 は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)）と、それを検証する
+usagi は workspace の骨組み（[2. アーキテクチャ](02-architecture.md)）と、それを検証する
 最小の実行面を持つ。CLI が TUI の起動要求を返し、合成ルートが TUI の初期画面へ
 変換するため、入口面と TUI 面のクレート間に直接依存は生じない。以下の表が
 コマンドから起動面への対応の正本である。
@@ -121,7 +104,7 @@ Switch で session 行を選択しているとき、`x` は `session remove`、`
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
 Workspace entry は各 session の daemon PR snapshot を読み、sidebar の右端に PR アイコンと件数を表示する。
 Switch の `p`、Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、同じ snapshot projection から
-対象 session の Pull Request モーダルを開き、root では `p` により空一覧を表示する。新しい PR URL の検知時は、別の modal や Director drawer が前面になければ
+対象 session に dismissed でない PR がある場合だけ Pull Request モーダルを開く。新しい PR URL の検知時は、別の modal や Director drawer が前面になければ
 対象 session の Pull Request モーダルを検知した PR を選択して自動で開く。初回 snapshot の既存 PR は
 自動表示しない。`v` は対象の
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
@@ -129,7 +112,8 @@ preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay とし�
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
 `q` は終了キーにならない。Closeup の `terminal` は空引数または `open` で選択 target の既存 terminal を
 完全な identity で再利用し、存在しない場合は daemon に launch を依頼する。`terminal new` は選択 target の
-worktree を cwd としてプラットフォーム標準の terminal を別ウィンドウで開き、Closeup を維持する。その他の引数は
+worktree を cwd としてプラットフォーム標準の terminal を別ウィンドウで開き、起動要求後は action modal だけを閉じて
+背面の Closeup へ戻る。その他の引数は
 安全な feedback で拒否する。terminal stream の IPC 境界は [daemon IPC](04-ipc.md#generic-terminal-request) が正本である。
 Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した

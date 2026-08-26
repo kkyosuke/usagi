@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, agent, config, security, correctness]
 dependson: []
-related: [512, 537, 542]
+related: [512, 537]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-08-01T00:06:57.350865+00:00
 ---

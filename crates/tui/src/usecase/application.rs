@@ -144,12 +144,34 @@ pub trait WorkspaceLoader {
     ///
     /// workspace の解決・登録・更新・state 読み込みに失敗した場合、そのエラーを返す。
     ///
-    /// [`io::ErrorKind::PermissionDenied`] は「daemon がこの workspace を serve
-    /// していない」という 1 つの意味に固定する。daemon が権威を持つ workspace は 1 つだけなので、
-    /// 別 workspace の snapshot を返す代わりにこれを返す。entry 画面はこのエラーだけは
+    /// [`io::ErrorKind::PermissionDenied`] は「daemon がこの workspace tenant を
+    /// adopt / serve できない」という 1 つの意味に固定する。別 workspace の snapshot を
+    /// 返す代わりにこれを返す。entry 画面はこのエラーだけは
     /// 画面を保ったまま理由を表示し（[`open_refusal_notice`]）、他のエラーは従来どおり
     /// 呼び出し元へ伝播する。
     fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
+
+    /// Make an already prepared workspace the declaration used by subsequently
+    /// created daemon ports. Batch preparation may have inspected another
+    /// member last, so activation reasserts the chosen target without loading
+    /// it twice. Storage-free adapters may keep the default no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace declaration cannot be installed.
+    fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Persist the ordered set of project tabs as one Unite recent. The
+    /// default keeps compatibility adapters storage-free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the user-data store cannot be updated.
+    fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
+        Ok(())
+    }
 
     /// Remove entries that no longer point at directories and return the paths
     /// removed from the core-owned workspace registry. The caller has already
@@ -323,14 +345,14 @@ pub enum Key {
     /// キャレットやタブを 1 つ右へ／モード選択では次の選択へ（→）。
     Right,
     /// キャレットを行頭へ（Home）。テキスト入力にフォーカスがある間はキャレット移動、
-    /// navigation 文脈では `+ new session`（`Ctrl-A` と同義。#257）。
+    /// navigation 文脈では `+ new session`（`Ctrl-A` と同義）。
     Home,
     /// キャレットを行末へ（End）。navigation 文脈では効果を持たない。
     End,
     /// キャレット位置の 1 文字を前方削除する（Del）。
     Delete,
     /// キャレットを入力の先頭へ（`Ctrl-A`）。テキスト入力にフォーカスがある間だけ
-    /// 行頭キャレットで、navigation 文脈では `+ new session` に予約されたまま（#287）。
+    /// 行頭キャレットで、navigation 文脈では `+ new session` に予約されたまま。
     LineStart,
     /// キャレットを入力の末尾へ（`Ctrl-E`。`End` と等価）。
     LineEnd,

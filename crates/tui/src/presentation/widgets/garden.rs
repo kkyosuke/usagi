@@ -78,6 +78,10 @@ pub struct GardenSession {
     pub lifecycle: SessionLifecycle,
     pub selected: bool,
     pub failure_summary: Option<String>,
+    /// Whether the active workspace controller observed Agent membership for
+    /// this plot. Inactive project snapshots set this false instead of claiming
+    /// that an empty cached list means the session owns no Agents.
+    pub agents_observed: bool,
     pub agents: Vec<GardenAgent>,
     /// A short, non-blocking celebration after one of the session's PRs merges.
     pub pr_merged: bool,
@@ -505,9 +509,14 @@ fn available_plot(
     }
     let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
+        let status = if session.agents_observed {
+            "no agents"
+        } else {
+            "project inactive"
+        };
         return (
             [
-                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
+                centered(PLOT_WIDTH, &Style::new().dim().paint(status)),
                 " ".repeat(PLOT_WIDTH),
                 " ".repeat(PLOT_WIDTH),
                 " ".repeat(PLOT_WIDTH),
@@ -811,6 +820,7 @@ mod tests {
             lifecycle,
             selected: false,
             failure_summary: None,
+            agents_observed: true,
             pr_merged: false,
             agents: vec![GardenAgent {
                 runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
@@ -948,6 +958,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            agents_observed: true,
             pr_merged: false,
             agents,
         };
@@ -980,6 +991,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            agents_observed: true,
             pr_merged: false,
             agents: vec![folded, running, waiting, hidden, ready],
         }];
@@ -1079,6 +1091,7 @@ mod tests {
                 lifecycle: SessionLifecycle::Available,
                 selected: false,
                 failure_summary: None,
+                agents_observed: true,
                 pr_merged: false,
                 agents: Vec::new(),
             }],
@@ -1089,6 +1102,31 @@ mod tests {
         let text = plain(&frame).join("\n");
         assert!(text.contains("no agents"));
         assert!(!text.contains("/)/)"));
+    }
+
+    #[test]
+    fn an_inactive_projects_cached_session_does_not_claim_it_has_no_agents() {
+        let frame = render(
+            24,
+            100,
+            "2 open projects",
+            &[GardenSession {
+                id: SessionId::parse(STEADY_ID).expect("fixture id"),
+                label: "other / review".to_owned(),
+                lifecycle: SessionLifecycle::Available,
+                selected: false,
+                failure_summary: None,
+                agents_observed: false,
+                pr_merged: false,
+                agents: Vec::new(),
+            }],
+            0,
+            false,
+        )
+        .expect("fits");
+        let text = plain(&frame).join("\n");
+        assert!(text.contains("project inactive"));
+        assert!(!text.contains("no agents"));
     }
 
     #[test]
@@ -1351,6 +1389,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            agents_observed: true,
             pr_merged: false,
             agents,
         };
@@ -1467,6 +1506,7 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
             selected: false,
             failure_summary: None,
+            agents_observed: true,
             pr_merged: false,
             agents,
         };

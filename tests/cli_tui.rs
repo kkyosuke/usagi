@@ -21,6 +21,7 @@ use usagi_core::infrastructure::ipc::{
     BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
     ResponseOutcome, read_json_frame, write_json_frame,
 };
+use usagi_core::infrastructure::paths::RuntimeMode;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
@@ -142,7 +143,7 @@ fn linked_issue_session(name: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    usagi_core::infrastructure::paths::channel_data_dir(home)
+    Channel::Local.data_dir(home)
 }
 
 fn shipping_build_identity() -> BuildIdentity {
@@ -1873,13 +1874,13 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
         &[OsStr::new("open"), opened.path().as_os_str()],
     );
     assert!(output.status.success(), "{}", stderr(&output));
+    // The project tab owns the workspace label and clips long names. Its
+    // fixture-specific prefix still proves that the opened workspace, not the
+    // launch directory, was rendered.
     assert!(
-        stdout(&output).contains(
-            opened_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .expect("the fixture directory has a name")
-        )
+        stdout(&output).contains("usagi-opened-"),
+        "{}",
+        stdout(&output)
     );
     let recorded: serde_json::Value = serde_json::from_slice(
         &std::fs::read(daemon_fixture::lifecycle_state_path(&channel_data_dir(
@@ -1904,12 +1905,7 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
     );
     assert!(second.status.success(), "{}", stderr(&second));
     assert!(
-        stdout(&second).contains(
-            elsewhere_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .expect("the fixture directory has a name")
-        ),
+        stdout(&second).contains("usagi-elsewhere-"),
         "{}",
         stdout(&second)
     );
@@ -2218,7 +2214,9 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(!out.contains("workspace main"));
     assert!(!out.contains("workspace TUI ("));
     assert_eq!(
-        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        WorkspaceSettingsStore::new_for_mode(&explicit, RuntimeMode::Local)
+            .load()
+            .unwrap(),
         LocalSettings::from(&Settings::default())
     );
 
@@ -2235,7 +2233,9 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let reopened = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], &home);
     assert!(reopened.status.success());
     assert_eq!(
-        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        WorkspaceSettingsStore::new_for_mode(&explicit, RuntimeMode::Local)
+            .load()
+            .unwrap(),
         LocalSettings::from(&Settings::default())
     );
 

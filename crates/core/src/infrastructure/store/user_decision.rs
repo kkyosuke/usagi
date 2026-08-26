@@ -172,6 +172,9 @@ impl UserDecisionStore {
         &self,
         decision: UserDecision,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
+        if let Err(error) = decision.validate_request() {
+            return Ok(Err(error));
+        }
         self.mutate(|state| {
             if let Some(key) = &decision.idempotency_key
                 && let Some(existing) = state.decisions.iter().find(|item| {
@@ -464,6 +467,7 @@ mod tests {
         let store = UserDecisionStore::new(temp.path());
         let mut decision = item();
         let now = Utc::now();
+        decision.created_at = now - chrono::Duration::seconds(1);
         decision.expires_at = Some(now);
         store.create(decision.clone()).unwrap().unwrap();
 
@@ -601,6 +605,20 @@ mod tests {
         assert_eq!(store.create(first).unwrap().unwrap().title, "t");
         assert_eq!(store.create(second).unwrap().unwrap().title, "t");
         assert_eq!(store.pending(workspace).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn invalid_request_is_refused_before_the_store_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut decision = item();
+        decision.options.clear();
+
+        assert_eq!(
+            store.create(decision).unwrap(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        assert!(!store.path().exists());
     }
 
     #[test]

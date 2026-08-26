@@ -1,7 +1,7 @@
 name: TUI E2E
 
-# The shipped binary is still v1. Run its expensive real-PTY test only for a
-# release candidate: a PR whose distributable version changes, its merge-queue
+# Run the expensive real-PTY test only for a release candidate: a PR whose
+# distributable version changes, its merge-queue
 # validation, or an explicitly requested manual verification.
 on:
   pull_request:
@@ -47,10 +47,10 @@ jobs:
           set -euo pipefail
           case "$EVENT_NAME" in
             pull_request)
-              changed=$(scripts/ci/v1-version-changed.sh "$PR_BASE_SHA" "$PR_HEAD_SHA" | awk -F= '/^changed=/{print $2}')
+              changed=$(scripts/ci/version-changed.sh "$PR_BASE_SHA" "$PR_HEAD_SHA" | awk -F= '/^changed=/{print $2}')
               ;;
             merge_group)
-              changed=$(scripts/ci/v1-version-changed.sh "$MERGE_GROUP_BASE_SHA" "$MERGE_GROUP_HEAD_SHA" | awk -F= '/^changed=/{print $2}')
+              changed=$(scripts/ci/version-changed.sh "$MERGE_GROUP_BASE_SHA" "$MERGE_GROUP_HEAD_SHA" | awk -F= '/^changed=/{print $2}')
               ;;
             workflow_dispatch)
               changed="$RUN_TUI_E2E"
@@ -70,14 +70,13 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          shared-key: rust-v1-tui-e2e
-          workspaces: v1
+          shared-key: rust-tui-e2e
 
       - name: Run real-PTY TUI E2E tests
-        run: cargo test --manifest-path v1/Cargo.toml --test tui_e2e --quiet
+        run: cargo test -p usagi --test cli_tui_pty --quiet

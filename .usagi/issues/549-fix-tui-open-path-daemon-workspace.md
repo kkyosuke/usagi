@@ -5,7 +5,7 @@ status: done
 priority: medium
 labels: [v2, tui, ipc, daemon, correctness]
 dependson: []
-related: [548, 542]
+related: [548]
 created_at: 2026-07-25T06:54:25.075274+00:00
 updated_at: 2026-07-25T13:00:32.295084+00:00
 ---

@@ -77,8 +77,12 @@ pub enum TuiRequest {
     },
     /// Config 画面を開く。
     Config,
-    /// Doctor 画面を開く。
-    Doctor,
+    /// Doctor 診断または明示された修復を実行する。
+    Doctor {
+        fix: bool,
+        restart_agents: bool,
+        force: bool,
+    },
 }
 
 /// CLI の解析・ハンドラ実行結果。
@@ -186,8 +190,18 @@ pub enum Command {
     },
     /// 設定を編集する（TUI の Config を開く）
     Config,
-    /// 必要ツールの導入状況を診断する（TUI の Doctor を開く）
-    Doctor,
+    /// 必要ツールと daemon / Agent integration を診断する
+    Doctor {
+        /// 修復可能な問題を修復してから再診断する
+        #[arg(long)]
+        fix: bool,
+        /// 古い daemon-owned Agent を停止し、現在の integration で exact resume する
+        #[arg(long, requires = "fix")]
+        restart_agents: bool,
+        /// 実行中 tool を含む live Agent の停止を許可する
+        #[arg(long, requires = "restart_agents")]
+        force: bool,
+    },
     /// usagi バイナリを GitHub Releases から更新する
     Update {
         /// 更新先の release を一覧から選択する
@@ -336,11 +350,6 @@ pub enum SessionCommand {
     Remove {
         name: String,
     },
-    /// Explicitly resume the retained provider conversation in a new daemon
-    /// Agent runtime. This command is never issued during startup/reconnect.
-    Resume {
-        name: String,
-    },
     /// Resume one exact target returned by `resume-inventory`. The target is a
     /// secret-free JSON object; provider-native IDs are never accepted.
     ResumeExact {
@@ -349,12 +358,6 @@ pub enum SessionCommand {
     /// List root and managed-session Agent resume targets for one workspace ID.
     ResumeInventory {
         workspace_id: String,
-    },
-    /// Validate legacy sessions without changing state unless `--apply` is set.
-    RecoverLegacy {
-        /// Persist the fully validated adoption plan.
-        #[arg(long)]
-        apply: bool,
     },
     Setup {
         name: String,
@@ -378,7 +381,15 @@ impl Command {
             Command::Hop => Box::new(h::Hop),
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
-            Command::Doctor => Box::new(h::Doctor),
+            Command::Doctor {
+                fix,
+                restart_agents,
+                force,
+            } => Box::new(h::Doctor {
+                fix,
+                restart_agents,
+                force,
+            }),
             Command::Update { select_version } => Box::new(h::Update { select_version }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
@@ -451,10 +462,6 @@ impl Run for Session {
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
-            SessionCommand::Resume { name } => (
-                SessionAction::ResumeAgent,
-                serde_json::json!({"name": name}),
-            ),
             SessionCommand::ResumeExact { target } => {
                 let target = serde_json::from_str(target).map_err(|_| {
                     io::Error::new(
@@ -479,10 +486,6 @@ impl Run for Session {
                     workspace,
                 }));
             }
-            SessionCommand::RecoverLegacy { apply } => (
-                SessionAction::RecoverLegacy,
-                serde_json::json!({"apply": apply}),
-            ),
             SessionCommand::Setup { name, command } => (
                 SessionAction::Setup,
                 serde_json::json!({"name": name, "command": command}),
@@ -584,7 +587,11 @@ mod tests {
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "doctor"]).unwrap().command,
-            Some(Command::Doctor)
+            Some(Command::Doctor {
+                fix: false,
+                restart_agents: false,
+                force: false,
+            })
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "update"]).unwrap().command,
@@ -604,6 +611,32 @@ mod tests {
             Cli::try_parse_from(["usagi", "version"]).unwrap().command,
             Some(Command::Version)
         ));
+    }
+
+    #[test]
+    fn doctor_repair_flags_require_explicit_escalation_in_order() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "doctor", "--fix"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor {
+                fix: true,
+                restart_agents: false,
+                force: false,
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "doctor", "--fix", "--restart-agents", "--force"])
+                .unwrap()
+                .command,
+            Some(Command::Doctor {
+                fix: true,
+                restart_agents: true,
+                force: true,
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "doctor", "--restart-agents"]).is_err());
+        assert!(Cli::try_parse_from(["usagi", "doctor", "--fix", "--force"]).is_err());
     }
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
@@ -756,14 +789,6 @@ mod tests {
                 usagi_core::usecase::client::SessionAction::Remove,
             ),
             (
-                ["usagi", "session", "resume", "a"].as_slice(),
-                usagi_core::usecase::client::SessionAction::ResumeAgent,
-            ),
-            (
-                ["usagi", "session", "recover-legacy", "--apply"].as_slice(),
-                usagi_core::usecase::client::SessionAction::RecoverLegacy,
-            ),
-            (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
                 usagi_core::usecase::client::SessionAction::Setup,
             ),
@@ -868,7 +893,14 @@ mod tests {
                 },
             ),
             (&["usagi", "config"][..], TuiRequest::Config),
-            (&["usagi", "doctor"][..], TuiRequest::Doctor),
+            (
+                &["usagi", "doctor"][..],
+                TuiRequest::Doctor {
+                    fix: false,
+                    restart_agents: false,
+                    force: false,
+                },
+            ),
         ] {
             let mut out = Vec::new();
             let mut err = Vec::new();
@@ -999,7 +1031,11 @@ mod tests {
         };
         assert_eq!(request.clone(), request);
         assert!(format!("{request:?}").contains("Workspace"));
-        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor);
+        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor {
+            fix: false,
+            restart_agents: false,
+            force: false,
+        });
         assert_eq!(outcome.clone(), outcome);
         assert!(format!("{outcome:?}").contains("Doctor"));
     }

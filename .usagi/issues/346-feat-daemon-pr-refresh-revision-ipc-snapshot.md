@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [daemon, ipc, pr]
 dependson: [345]
-related: [198]
+related: []
 created_at: 2026-07-17T23:44:47.737212+00:00
 updated_at: 2026-07-18T00:44:47.842395+00:00
 ---
@@ -32,7 +32,6 @@ updated_at: 2026-07-18T00:44:47.842395+00:00
 
 - #345 に依存する。
 - #347 は本 issue の snapshot/subscription contract に依存する。
-- 旧 TUI watcher の #198 は完了済みであり、実装の移植元ではなく refresh/backoff の参考に限る。
 
 ## 受け入れ条件
 

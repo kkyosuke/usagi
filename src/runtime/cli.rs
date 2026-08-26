@@ -53,7 +53,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::LaunchTui(TuiRequest::Welcome) => Self::LaunchWelcome,
             RunOutcome::LaunchTui(TuiRequest::Workspace { .. }) => Self::LaunchWorkspace,
             RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
-            RunOutcome::LaunchTui(TuiRequest::Doctor) => Self::LaunchDoctor,
+            RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
             RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
             RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
             RunOutcome::LaunchMcp => Self::LaunchMcp,
@@ -99,9 +99,15 @@ mod action_io {
             (Action::LaunchConfig, RunOutcome::LaunchTui(TuiRequest::Config)) => {
                 tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchDoctor, RunOutcome::LaunchTui(TuiRequest::Doctor)) => {
-                tui::launch(out, info, &EntryScreen::Doctor).map(|()| ExitCode::SUCCESS)
-            }
+            (
+                Action::LaunchDoctor,
+                RunOutcome::LaunchTui(TuiRequest::Doctor {
+                    fix,
+                    restart_agents,
+                    force,
+                }),
+            ) => tui::launch_doctor(out, info, fix, restart_agents, force)
+                .map(|()| ExitCode::SUCCESS),
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
@@ -866,7 +872,11 @@ mod tests {
             Action::LaunchConfig,
         );
         assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Doctor),
+            RunOutcome::LaunchTui(TuiRequest::Doctor {
+                fix: false,
+                restart_agents: false,
+                force: false,
+            }),
             Action::LaunchDoctor,
         );
         assert_route(

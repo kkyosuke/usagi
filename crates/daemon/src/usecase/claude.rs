@@ -22,7 +22,9 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-const PROFILE_REVISION: u32 = 1;
+/// Bump whenever Claude's launch-time hooks, sandbox, argv, or config changes.
+/// Revision 3 introduces exec-form hooks and the session Git common-dir grant.
+pub const PROFILE_REVISION: u32 = 3;
 
 /// Claude's product-private provisioning result.
 ///
@@ -205,30 +207,28 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
 /// 同じ表を使うため、配線と検証が分岐しない。すべての起動で `PreToolUse` に
 /// `usagi guard-workspace` を並べて scope 外のツール呼び出しを deny する。
 /// session では worktree 外への書き込みを、root では repository mutation を拒否する。
-/// `usagi_command` はシェル経由で実行されるため単一引用符で quote する。
+/// command hook は `args` を持つ exec form で materialize する。Claude が shell を
+/// 介さず `usagi` を直接 spawn するため、path の quote / tokenization に依存せず、daemon も
+/// hook process を provider の direct child として認証できる。
 #[must_use]
 pub fn scoped_settings_json(usagi_command: &str) -> String {
-    let quoted = shell_quote(usagi_command);
     let mut hooks = serde_json::Map::new();
     for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
         let mut entries = vec![serde_json::json!({
             "type": "command",
-            "command": format!("{quoted} agent-phase {}", phase.as_token()),
+            "command": usagi_command,
+            "args": ["agent-phase", phase.as_token()],
         })];
         if event == "PreToolUse" {
             entries.push(serde_json::json!({
                 "type": "command",
-                "command": format!("{quoted} guard-workspace"),
+                "command": usagi_command,
+                "args": ["guard-workspace"],
             }));
         }
         hooks.insert(event.to_owned(), serde_json::json!([{ "hooks": entries }]));
     }
     serde_json::json!({ "hooks": hooks }).to_string()
-}
-
-/// シェルが解釈する hook command 用に、値を単一引用符で囲んで安全化する。
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
 fn render_plan(
@@ -636,29 +636,42 @@ mod tests {
         let settings: serde_json::Value =
             serde_json::from_str(&scoped_settings_json("/opt/my usagi")).unwrap();
         let pre_tool_use = &settings["hooks"]["PreToolUse"][0]["hooks"];
-        // 空白を含むパスはシェル用に単一引用符で quote される。
+        // 空白を含む path も exec form の command 1 値として保たれる。
         assert_eq!(
             pre_tool_use[0]["command"],
-            serde_json::json!("'/opt/my usagi' agent-phase running")
+            serde_json::json!("/opt/my usagi")
         );
-        // session では phase 報告と guard-workspace が PreToolUse に並ぶ。
+        assert_eq!(
+            pre_tool_use[0]["args"],
+            serde_json::json!(["agent-phase", "running"])
+        );
+        // phase 報告と guard-workspace が PreToolUse に並び、どちらも shell を介さない。
         assert_eq!(
             pre_tool_use[1]["command"],
-            serde_json::json!("'/opt/my usagi' guard-workspace")
+            serde_json::json!("/opt/my usagi")
+        );
+        assert_eq!(
+            pre_tool_use[1]["args"],
+            serde_json::json!(["guard-workspace"])
         );
         assert_eq!(
             settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-            serde_json::json!("'/opt/my usagi' agent-phase ready")
+            serde_json::json!("/opt/my usagi")
         );
         assert_eq!(
-            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
-            serde_json::json!("'/opt/my usagi' agent-phase ended")
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["args"],
+            serde_json::json!(["agent-phase", "ready"])
         );
         // 配線は core の表そのままで、event を落とさない。
         for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
             assert_eq!(
                 settings["hooks"][event][0]["hooks"][0]["command"],
-                serde_json::json!(format!("'/opt/my usagi' agent-phase {}", phase.as_token())),
+                serde_json::json!("/opt/my usagi"),
+                "{event}"
+            );
+            assert_eq!(
+                settings["hooks"][event][0]["hooks"][0]["args"],
+                serde_json::json!(["agent-phase", phase.as_token()]),
                 "{event}"
             );
         }
@@ -677,14 +690,9 @@ mod tests {
         assert!(json.contains("guard-workspace"));
         // phase 報告は root でも残る。
         assert_eq!(
-            settings["hooks"]["Notification"][0]["hooks"][0]["command"],
-            serde_json::json!("'/usr/bin/usagi' agent-phase waiting")
+            settings["hooks"]["Notification"][0]["hooks"][0]["args"],
+            serde_json::json!(["agent-phase", "waiting"])
         );
-    }
-
-    #[test]
-    fn shell_quote_escapes_embedded_single_quotes() {
-        assert_eq!(shell_quote("a'b"), r#"'a'"'"'b'"#);
     }
 
     #[test]

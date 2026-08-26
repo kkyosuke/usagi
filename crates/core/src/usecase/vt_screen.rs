@@ -144,6 +144,8 @@ pub struct VtScreen {
     scroll_bottom: usize,
     /// DECCKM: cursor keys use SS3 instead of CSI while enabled.
     application_cursor: bool,
+    /// DECSET 2004: pasted text must be surrounded by bracketed-paste markers.
+    bracketed_paste: bool,
     /// Concrete DEC mouse tracking mode; only its matching reset disables it.
     mouse_protocol_mode: checkpoint::MouseProtocolMode,
     /// Coordinate encoding selected by DECSET 1005/1006.
@@ -325,6 +327,7 @@ impl VtScreen {
             scroll_top: 0,
             scroll_bottom: rows - 1,
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: checkpoint::MouseProtocolMode::None,
             mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
             primary_screen: None,
@@ -424,6 +427,12 @@ impl VtScreen {
     #[must_use]
     pub const fn application_cursor(&self) -> bool {
         self.application_cursor
+    }
+
+    /// Whether a program requested bracketed-paste input.
+    #[must_use]
+    pub const fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     /// Whether a program requested DEC mouse reports.
@@ -673,9 +682,7 @@ impl VtScreen {
             2 => (0, self.cols),
             _ => (self.cursor_col, self.cols),
         };
-        for col in start..end.min(self.cols) {
-            self.grid[row][col] = Cell::blank();
-        }
+        clear_glyph_range(&mut self.grid[row], start, end.min(self.cols));
     }
 
     fn erase_display(&mut self) {
@@ -684,9 +691,11 @@ impl VtScreen {
                 for row in 0..self.cursor_row {
                     self.blank_row(row);
                 }
-                for col in 0..=self.cursor_col.min(self.cols - 1) {
-                    self.grid[self.cursor_row][col] = Cell::blank();
-                }
+                clear_glyph_range(
+                    &mut self.grid[self.cursor_row],
+                    0,
+                    self.cursor_col.min(self.cols - 1) + 1,
+                );
             }
             2 => {
                 for row in 0..self.rows {
@@ -694,9 +703,7 @@ impl VtScreen {
                 }
             }
             _ => {
-                for col in self.cursor_col..self.cols {
-                    self.grid[self.cursor_row][col] = Cell::blank();
-                }
+                clear_glyph_range(&mut self.grid[self.cursor_row], self.cursor_col, self.cols);
                 for row in (self.cursor_row + 1)..self.rows {
                     self.blank_row(row);
                 }
@@ -710,10 +717,26 @@ impl VtScreen {
 
     fn print(&mut self, ch: char) {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        // A pane can legitimately shrink to one column. A glyph wider than
+        // the complete grid cannot be represented by a leading cell plus its
+        // continuation cells, so keep the grid/cursor invariant with a
+        // single-cell replacement glyph. In particular, Codex's update notice
+        // starts with the double-width `✨`; indexing its second cell used to
+        // panic as soon as that notice appeared in a one-column Agent pane.
+        let (ch, width) = if width > self.cols {
+            ('\u{fffd}', 1)
+        } else {
+            (ch, width)
+        };
         if self.cursor_col >= self.cols || self.cursor_col + width > self.cols {
             self.cursor_col = 0;
             self.line_feed();
         }
+        clear_glyph_range(
+            &mut self.grid[self.cursor_row],
+            self.cursor_col,
+            self.cursor_col + width,
+        );
         self.grid[self.cursor_row][self.cursor_col] = Cell {
             ch,
             style: self.style.clone(),
@@ -757,8 +780,8 @@ impl VtScreen {
     fn scroll_region_up(&mut self, count: usize) {
         for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
             let row = self.grid.remove(self.scroll_top);
-            // Mirror v1's vt100 policy: a region anchored at row zero is
-            // transcript history; a lower region is a transient full-screen UI.
+            // A region anchored at row zero is transcript history; a lower
+            // region is a transient full-screen UI.
             if self.primary_screen.is_none()
                 && self.scroll_top == 0
                 && append_scrollback(&mut self.scrollback, row, SCROLLBACK_MAX)
@@ -823,6 +846,7 @@ impl VtScreen {
                 1003 => self.mouse_protocol_mode = checkpoint::MouseProtocolMode::AnyMotion,
                 1005 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Utf8,
                 1006 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Sgr,
+                2004 => self.bracketed_paste = true,
                 47 | 1047 | 1049 => self.enter_alternate_screen(),
                 _ => {}
             }
@@ -851,6 +875,7 @@ impl VtScreen {
                 1006 if self.mouse_encoding == checkpoint::MouseProtocolEncoding::Sgr => {
                     self.mouse_encoding = checkpoint::MouseProtocolEncoding::Default;
                 }
+                2004 => self.bracketed_paste = false,
                 47 | 1047 | 1049 => self.leave_alternate_screen(),
                 _ => {}
             }
@@ -1071,6 +1096,7 @@ impl VtScreen {
                 utf8_needed: self.utf8_needed as u8,
             },
             application_cursor: self.application_cursor,
+            bracketed_paste: self.bracketed_paste,
             mouse_protocol_mode: self.mouse_protocol_mode,
             mouse_encoding: self.mouse_encoding,
             styles: styles.table,
@@ -1132,6 +1158,7 @@ impl VtScreen {
         screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
         screen.utf8_needed = cp.decoder.utf8_needed as usize;
         screen.application_cursor = cp.application_cursor;
+        screen.bracketed_paste = cp.bracketed_paste;
         screen.mouse_protocol_mode = cp.mouse_protocol_mode;
         screen.mouse_encoding = cp.mouse_encoding;
 
@@ -1314,8 +1341,52 @@ fn append_scrollback(rows: &mut VecDeque<Vec<Cell>>, row: Vec<Cell>, max_rows: u
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
     row.truncate(cols);
     row.resize(cols, Cell::blank());
-    if row.last().is_some_and(|cell| cell.continuation) {
-        *row.last_mut().expect("terminal rows are never empty") = Cell::blank();
+    let mut column = 0;
+    while column < row.len() {
+        if row[column].continuation {
+            row[column] = Cell::blank();
+            column += 1;
+            continue;
+        }
+        let width = UnicodeWidthChar::width(row[column].ch).unwrap_or(0).max(1);
+        if width > 1 {
+            let complete = (1..width).all(|offset| {
+                row.get(column + offset)
+                    .is_some_and(|cell| cell.continuation)
+            });
+            if complete {
+                column += width;
+                continue;
+            }
+            row[column].ch = '\u{fffd}';
+        }
+        column += 1;
+    }
+}
+
+/// Clears every complete glyph intersecting `[start, end)`. A cursor can land
+/// on either half of a wide glyph, and VT erase/overwrite operations must not
+/// leave an orphan leader or continuation behind.
+fn clear_glyph_range(row: &mut [Cell], start: usize, end: usize) {
+    for column in start.min(row.len())..end.min(row.len()) {
+        clear_glyph_at(row, column);
+    }
+}
+
+fn clear_glyph_at(row: &mut [Cell], column: usize) {
+    debug_assert!(
+        column < row.len(),
+        "glyph clear range is clamped to the row"
+    );
+    let mut leader = column;
+    while leader > 0 && row[leader].continuation {
+        leader -= 1;
+    }
+    row[leader] = Cell::blank();
+    let mut continuation = leader + 1;
+    while continuation < row.len() && row[continuation].continuation {
+        row[continuation] = Cell::blank();
+        continuation += 1;
     }
 }
 
@@ -1526,6 +1597,61 @@ mod tests {
         assert_eq!(grid[0][1].ch(), 'あ');
         assert!(!grid[0][1].continuation());
         assert!(grid[0][2].continuation());
+    }
+
+    #[test]
+    fn codex_update_notice_does_not_overflow_a_one_column_screen() {
+        let mut screen = VtScreen::new(1, 1);
+
+        screen.advance("✨ Update available!".as_bytes());
+
+        let retained = rows_with_scrollback(&screen);
+        assert_eq!(retained.first().map(String::as_str), Some("�"));
+        assert_eq!(retained.last().map(String::as_str), Some("!"));
+        assert_eq!(screen.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn overwriting_either_half_of_a_wide_glyph_clears_the_complete_glyph() {
+        let mut leading = VtScreen::new(1, 4);
+        leading.advance("あ\rX".as_bytes());
+        assert_eq!(rows(&leading), vec!["X"]);
+        assert!(leading.grid()[0].iter().all(|cell| !cell.continuation()));
+
+        let mut continuation = VtScreen::new(1, 4);
+        continuation.advance("あ\x1b[2GX".as_bytes());
+        assert_eq!(rows(&continuation), vec![" X"]);
+        assert!(
+            continuation.grid()[0]
+                .iter()
+                .all(|cell| !cell.continuation())
+        );
+    }
+
+    #[test]
+    fn erasing_from_inside_a_wide_glyph_clears_the_complete_glyph() {
+        let mut right = VtScreen::new(1, 4);
+        right.advance("あ\x1b[2G\x1b[K".as_bytes());
+        assert_eq!(rows(&right), vec![""]);
+
+        let mut left = VtScreen::new(1, 4);
+        left.advance("あ\r\x1b[1K".as_bytes());
+        assert_eq!(rows(&left), vec![""]);
+    }
+
+    #[test]
+    fn resize_preserves_complete_wide_glyphs_and_replaces_clipped_ones() {
+        let mut complete = VtScreen::new(1, 3);
+        complete.advance("あ".as_bytes());
+        complete.resize(1, 2);
+        assert_eq!(rows(&complete), vec!["あ"]);
+        assert!(complete.grid()[0][1].continuation());
+
+        let mut clipped = VtScreen::new(1, 3);
+        clipped.advance("Aあ".as_bytes());
+        clipped.resize(1, 2);
+        assert_eq!(rows(&clipped), vec!["A�"]);
+        assert!(clipped.grid()[0].iter().all(|cell| !cell.continuation()));
     }
 
     #[test]
@@ -1802,18 +1928,21 @@ mod tests {
     #[test]
     fn dec_input_modes_follow_program_requests_and_checkpoint() {
         let mut screen = VtScreen::new(2, 8);
-        screen.advance(b"\x1b[?1h\x1b[?1000h\x1b[?1006h");
+        screen.advance(b"\x1b[?1h\x1b[?1000h\x1b[?1006h\x1b[?2004h");
         assert!(screen.application_cursor());
+        assert!(screen.bracketed_paste());
         assert!(screen.mouse_protocol());
         assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Sgr);
 
         let restored = VtScreen::from_checkpoint(&screen.checkpoint()).expect("input modes");
         assert!(restored.application_cursor());
+        assert!(restored.bracketed_paste());
         assert!(restored.mouse_protocol());
         assert_eq!(restored.mouse_encoding(), MouseProtocolEncoding::Sgr);
 
-        screen.advance(b"\x1b[?1l\x1b[?1000l\x1b[?1006l");
+        screen.advance(b"\x1b[?1l\x1b[?1000l\x1b[?1006l\x1b[?2004l");
         assert!(!screen.application_cursor());
+        assert!(!screen.bracketed_paste());
         assert!(!screen.mouse_protocol());
         assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Default);
 
@@ -2088,12 +2217,14 @@ mod tests {
             .remove("scrollback_origin");
         let legacy_object = legacy.as_object_mut().expect("checkpoint object");
         legacy_object.remove("application_cursor");
+        legacy_object.remove("bracketed_paste");
         legacy_object.remove("mouse_protocol_mode");
         legacy_object.remove("mouse_encoding");
         let legacy: ScreenCheckpoint =
             serde_json::from_value(legacy).expect("legacy checkpoint decodes");
         assert_eq!(legacy.primary.scrollback_origin, 0);
         assert!(!legacy.application_cursor);
+        assert!(!legacy.bracketed_paste);
         assert_eq!(legacy.mouse_protocol_mode, MouseProtocolMode::None);
         assert_eq!(legacy.mouse_encoding, MouseProtocolEncoding::Default);
     }
@@ -2207,6 +2338,7 @@ mod tests {
                 utf8_needed: 0,
             },
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: checkpoint::MouseProtocolMode::None,
             mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
         }

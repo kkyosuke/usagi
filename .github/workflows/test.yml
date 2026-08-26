@@ -97,17 +97,11 @@ jobs:
     - name: Test coverage(off) policy linter
       run: bash scripts/tests/coverage-off-lint.sh
 
-    - name: Install cargo-llvm-cov for v1 coverage fixture
-      uses: taiki-e/install-action@cargo-llvm-cov
-
-    - name: Test v1 coverage gate
-      run: bash scripts/tests/v1-coverage.sh
-
     - name: Enforce coverage(off) registry
       run: ruby scripts/coverage-off-lint.rb
 
-    - name: Test v1 release-version detector
-      run: bash scripts/tests/v1-version-changed.sh
+    - name: Test release-version detector
+      run: bash scripts/tests/version-changed.sh
 
     - name: Test verified installer transaction
       run: bash scripts/tests/install.sh

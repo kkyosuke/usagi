@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, tui, input, terminal, security, correctness]
 dependson: []
-related: [578, 580, 581, 600]
+related: [578, 580, 581]
 created_at: 2026-07-31T06:00:00+00:00
 updated_at: 2026-07-31T22:58:59.280667+00:00
 ---

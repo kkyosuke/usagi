@@ -13,7 +13,7 @@ ALLOWED_REASONS = %w[real_io composition generic_monomorphization].freeze
 DEBT_REASON = "migration_debt"
 ATTRIBUTE = /^\s*#!?\[(?:coverage\(off\)|cfg_attr\(test,\s*coverage\(off\)\))\]/
 INLINE = /\/\/\s*coverage:\s*(.+)$/
-IGNORED_ROOTS = %w[.git target v1].freeze
+IGNORED_ROOTS = %w[.git target].freeze
 
 Options = Struct.new(:root, :manifest, :today, :generate, keyword_init: true)
 

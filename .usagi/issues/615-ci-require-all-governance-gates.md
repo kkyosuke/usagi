@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, ci, governance, security, test]
 dependson: []
-related: [203, 601]
+related: []
 created_at: 2026-07-31T15:00:00+09:00
 updated_at: 2026-08-01T00:00:00+09:00
 ---

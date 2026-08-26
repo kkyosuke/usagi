@@ -5,7 +5,7 @@
 //! cleanup. Results are deliberately closed and never contain argv, paths,
 //! environment values, credentials, raw OS errors, or failed command output.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -40,6 +40,18 @@ pub enum ChildObservation {
     /// The child produced no non-whitespace output.
     EmptyOutput,
     /// Capturing or waiting for the child failed.
+    ObservationFailed,
+}
+
+/// Safe result of a bounded command fed through stdin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildInputExecution {
+    Success,
+    SpawnFailed,
+    ExitFailure,
+    TimedOut,
+    InputTooLarge,
+    OutputTooLarge,
     ObservationFailed,
 }
 
@@ -101,7 +113,7 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
             }
         }
     };
-    close_descendant_pipes(pid, &stdout, &stderr, policy.terminate_grace);
+    close_descendant_resources(pid, &stdout, &stderr, None, policy.terminate_grace);
     let stdout = stdout.join();
     let stderr = stderr.join();
     let Ok(status) = status else {
@@ -119,14 +131,98 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
     normalize_output(stdout.bytes, stderr.bytes)
 }
 
+/// Runs a non-interactive command with bounded input, output, lifetime, and
+/// complete process-group cleanup.
+#[must_use]
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=bounded_input_execution_writes_and_times_out_safely
+pub fn write_stdin_bounded(
+    program: &str,
+    arguments: &[&str],
+    input: &[u8],
+    input_limit: usize,
+    policy: ChildPolicy,
+) -> ChildInputExecution {
+    if input.len() > input_limit {
+        return ChildInputExecution::InputTooLarge;
+    }
+    let mut command = Command::new(program);
+    command
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let Ok(mut child) = command.spawn() else {
+        return ChildInputExecution::SpawnFailed;
+    };
+    let pid = child.id();
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        terminate_and_reap(&mut child, policy.terminate_grace);
+        return ChildInputExecution::ObservationFailed;
+    };
+    let input = input.to_vec();
+    let writer = thread::spawn(move || stdin.write_all(&input).is_ok());
+    let stdout = thread::spawn(move || {
+        let mut stdout = stdout;
+        capture(&mut stdout, policy.output_limit)
+    });
+    let stderr = thread::spawn(move || {
+        let mut stderr = stderr;
+        capture(&mut stderr, policy.output_limit)
+    });
+    let deadline = Instant::now() + policy.timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(
+                Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            ),
+            Ok(None) => {
+                terminate_and_reap(&mut child, policy.terminate_grace);
+                break Err(ChildInputExecution::TimedOut);
+            }
+            Err(_) => {
+                terminate_and_reap(&mut child, policy.terminate_grace);
+                break Err(ChildInputExecution::ObservationFailed);
+            }
+        }
+    };
+    close_descendant_resources(pid, &stdout, &stderr, Some(&writer), policy.terminate_grace);
+    let stdout = stdout.join();
+    let stderr = stderr.join();
+    let writer = writer.join();
+    let Ok(status) = status else {
+        return status.unwrap_err();
+    };
+    let (Ok(stdout), Ok(stderr), Ok(true)) = (stdout, stderr, writer) else {
+        return ChildInputExecution::ObservationFailed;
+    };
+    if stdout.exceeded || stderr.exceeded {
+        return ChildInputExecution::OutputTooLarge;
+    }
+    if status.success() {
+        ChildInputExecution::Success
+    } else {
+        ChildInputExecution::ExitFailure
+    }
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=exited_parent_cannot_leave_a_descendant_holding_capture_pipes
-fn close_descendant_pipes(
+fn close_descendant_resources(
     pid: u32,
     stdout: &thread::JoinHandle<Capture>,
     stderr: &thread::JoinHandle<Capture>,
+    writer: Option<&thread::JoinHandle<bool>>,
     grace: Duration,
 ) {
-    if stdout.is_finished() && stderr.is_finished() {
+    let finished = || {
+        stdout.is_finished()
+            && stderr.is_finished()
+            && writer.is_none_or(thread::JoinHandle::is_finished)
+    };
+    if finished() {
         return;
     }
     // A probe must not daemonize. If its main process exits while a descendant
@@ -135,7 +231,7 @@ fn close_descendant_pipes(
     signal_group(pid, libc::SIGTERM);
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
-        if stdout.is_finished() && stderr.is_finished() {
+        if finished() {
             return;
         }
         thread::sleep(
@@ -345,6 +441,39 @@ mod tests {
             policy(),
         );
         assert_eq!(result, ChildObservation::Success("done".to_owned()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn bounded_input_execution_writes_and_times_out_safely() {
+        assert_eq!(
+            write_stdin_bounded(
+                "sh",
+                &["-c", "test \"$(cat)\" = payload"],
+                b"payload",
+                16,
+                policy()
+            ),
+            ChildInputExecution::Success
+        );
+        assert_eq!(
+            write_stdin_bounded("sh", &["-c", "cat >/dev/null"], b"too large", 4, policy()),
+            ChildInputExecution::InputTooLarge
+        );
+        let started = Instant::now();
+        assert_eq!(
+            write_stdin_bounded(
+                "sh",
+                &["-c", "trap '' TERM; sleep 30"],
+                b"payload",
+                16,
+                ChildPolicy {
+                    timeout: Duration::from_millis(30),
+                    ..policy()
+                },
+            ),
+            ChildInputExecution::TimedOut
+        );
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

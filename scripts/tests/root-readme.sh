@@ -11,13 +11,11 @@ write_valid() {
   {
     echo '# usagi'
     echo
-    echo '`usagi` をゼロから作り直す v2 の開発ツリー。'
+    echo '`usagi` の開発ツリー。'
     echo
-    echo '旧実装は [v1/](v1/README.md) に退避してある。'
     echo '構成は [document/02-architecture.md](document/02-architecture.md) が正本。'
     echo '規約は [document/06-conventions.md](document/06-conventions.md) に従う。'
-    echo '実装状態は [v2 の実装状態](document/01-overview.md#現在の実装状態) を参照する。'
-    echo 'リファレンスは [v1/document/](v1/document/README.md) を参照する。'
+    echo '実装状態は [実装状態](document/01-overview.md#現在の実装状態) を参照する。'
     echo
     # Pad past the truncation floor so link/heading cases fail for their own reason.
     for i in $(seq 1 20); do
@@ -72,9 +70,7 @@ expect_fail "missing heading" "$tmp/no-heading.md" "must be '# usagi'"
 for link in \
   document/01-overview.md \
   document/02-architecture.md \
-  document/06-conventions.md \
-  v1/README.md \
-  v1/document/README.md
+  document/06-conventions.md
 do
   write_valid "$tmp/no-link.md"
   grep -vF "($link" "$tmp/no-link.md" >"$tmp/no-link.tmp"

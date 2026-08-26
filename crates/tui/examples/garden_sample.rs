@@ -48,6 +48,27 @@ fn main() {
     scene("100x24 · 全 lifecycle", 24, 100, &sessions, 1, false);
     scene("100x24 · reduced motion", 24, 100, &sessions, 1, true);
     scene("100x24 · session 0 件", 24, 100, &[], 1, false);
+    let mut open_projects = sessions[..2].to_vec();
+    "alpha / session-auth".clone_into(&mut open_projects[0].label);
+    "alpha / issue-647".clone_into(&mut open_projects[1].label);
+    let mut inactive = sample(
+        "06000000-0000-4000-8000-000000000007",
+        "beta / review-api",
+        SessionLifecycle::Available,
+        AgentPhase::Absent,
+    );
+    inactive.agents_observed = false;
+    inactive.agents.clear();
+    open_projects.push(inactive);
+    scene_in_scope(
+        "100x24 · 2 open projects",
+        24,
+        100,
+        "2 open projects",
+        &open_projects,
+        1,
+        false,
+    );
     // 最小サイズでは plot が 2 列 1 行に減り、残りは session list へ畳まれる。
     scene(
         "64x14 · 最小サイズ（表示上限超過）",
@@ -67,7 +88,27 @@ fn scene(
     tick: u64,
     reduced_motion: bool,
 ) {
-    let frame = render(height, width, "my-project", sessions, tick, reduced_motion)
+    scene_in_scope(
+        caption,
+        height,
+        width,
+        "my-project",
+        sessions,
+        tick,
+        reduced_motion,
+    );
+}
+
+fn scene_in_scope(
+    caption: &str,
+    height: usize,
+    width: usize,
+    scope: &str,
+    sessions: &[GardenSession],
+    tick: u64,
+    reduced_motion: bool,
+) {
+    let frame = render(height, width, scope, sessions, tick, reduced_motion)
         .expect("the sample uses Garden-compatible terminal sizes");
     println!("--- {caption} ---");
     println!("{}\n", frame.rows.join("\n"));
@@ -86,6 +127,7 @@ fn sample(
         selected: false,
         failure_summary: (lifecycle == SessionLifecycle::Failed)
             .then(|| "safe sample failure".to_owned()),
+        agents_observed: true,
         pr_merged: false,
         agents: vec![GardenAgent {
             runtime_id: AgentRuntimeId::parse(id).expect("sample IDs are canonical UUIDs"),
@@ -106,6 +148,7 @@ fn sample_agents(
         lifecycle,
         selected: true,
         failure_summary: None,
+        agents_observed: true,
         pr_merged: false,
         agents: agents
             .iter()

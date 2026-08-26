@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::issue::IssueStatus;
 use crate::domain::pullrequest::PrLink;
-use crate::domain::recent::Recent;
+use crate::domain::recent::{Recent, Unite, UniteOverview};
 use crate::domain::workspace::{Workspace, WorkspaceOverview};
 use crate::infrastructure::store::issue::IssueStore;
 use crate::infrastructure::store::state::WorkspaceStateStore;
@@ -130,10 +130,11 @@ pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Wor
 /// Build recent-list entries for all registered workspaces, ordered by
 /// `updated_at` descending.
 ///
-/// Only single-workspace [`Recent::Workspace`] entries are produced. Unite
-/// recents have their own persistence lifecycle and are not synthesized from
-/// the registry. Missing or unreadable repository-local state and issue stores
-/// contribute zero counts without hiding healthy sibling workspaces.
+/// Single-workspace entries come from the registry. Persisted Unite records are
+/// joined to those overviews by path and keep their stored tab order. Missing
+/// Unite members are skipped; a broken optional Unite store degrades to the
+/// healthy single-workspace list. Missing or unreadable repository-local state
+/// and issue stores contribute zero counts without hiding healthy siblings.
 ///
 /// # Errors
 ///
@@ -142,11 +143,68 @@ pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Wor
 pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
     let mut workspaces = storage.load_workspaces()?;
     workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
-    Ok(workspaces
-        .into_iter()
-        .map(overview_for)
+    let overviews = workspaces.into_iter().map(overview_for).collect::<Vec<_>>();
+    let mut recent = overviews
+        .iter()
+        .cloned()
         .map(Recent::Workspace)
-        .collect())
+        .collect::<Vec<_>>();
+    // Unite storage is an optional enhancement to the workspace registry. A
+    // hand-edited, corrupt, or future-version file must not hide healthy single
+    // workspace recents.
+    for unite in storage.load_unites().unwrap_or_default() {
+        let members = unite
+            .paths
+            .iter()
+            .filter_map(|path| {
+                overviews
+                    .iter()
+                    .find(|overview| &overview.workspace.path == path)
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        if !members.is_empty() {
+            recent.push(Recent::Unite(UniteOverview::with_updated_at(
+                members,
+                unite.updated_at,
+            )));
+        }
+    }
+    recent.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
+    Ok(recent)
+}
+
+/// Touch one ordered project-tab set in user-data storage.
+///
+/// Duplicate paths inside the request are removed by first occurrence. A deck
+/// with fewer than two distinct members is a normal single-workspace recent and
+/// is not written to Unite storage.
+///
+/// # Errors
+///
+/// Returns an error when the Unite store cannot be locked, read, or written.
+pub fn touch_unite(
+    storage: &Storage,
+    paths: &[std::path::PathBuf],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    let paths = paths
+        .iter()
+        .filter(|path| seen.insert((*path).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if paths.len() < 2 {
+        return Ok(());
+    }
+    let _lock = storage.lock()?;
+    let mut unites = storage.load_unites()?;
+    if let Some(existing) = unites.iter_mut().find(|unite| unite.paths == paths) {
+        existing.updated_at = now;
+    } else {
+        unites.push(Unite::new(paths, now));
+    }
+    storage.save_unites(&unites)
 }
 
 /// The kind of New-project operation being pre-validated.
@@ -342,12 +400,12 @@ mod tests {
 
     use super::{
         NewWorkspaceError, NewWorkspaceKind, WorkspaceProbe, is_registered, open,
-        preflight_new_workspace, recent, register, remove,
+        preflight_new_workspace, recent, register, remove, touch_unite,
     };
     use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::domain::note::Scratchpad;
     use crate::domain::pullrequest::PrLink;
-    use crate::domain::recent::Recent;
+    use crate::domain::recent::{Recent, Unite};
     use crate::domain::session::{SessionOrigin, SessionRecord};
     use crate::domain::workspace::{Workspace, WorkspaceOverview};
     use crate::domain::workspace_state::WorkspaceState;
@@ -622,6 +680,115 @@ mod tests {
                     0,
                 )),
             ]
+        );
+    }
+
+    #[test]
+    fn unite_touch_deduplicates_exact_order_and_recent_joins_registered_members() {
+        let (tmp, storage) = storage();
+        let alpha = workspace("alpha", tmp.path().join("alpha"), ts(3));
+        let beta = workspace("beta", tmp.path().join("beta"), ts(4));
+        storage
+            .save_workspaces(&[alpha.clone(), beta.clone()])
+            .unwrap();
+
+        touch_unite(
+            &storage,
+            &[alpha.path.clone(), beta.path.clone(), alpha.path.clone()],
+            ts(10),
+        )
+        .unwrap();
+        touch_unite(&storage, &[alpha.path.clone(), beta.path.clone()], ts(12)).unwrap();
+
+        assert_eq!(
+            storage.load_unites().unwrap(),
+            vec![Unite::new(
+                vec![alpha.path.clone(), beta.path.clone()],
+                ts(12)
+            )]
+        );
+        let items = recent(&storage).unwrap();
+        let unites = items
+            .iter()
+            .filter_map(|recent| match recent {
+                Recent::Unite(unite) => Some(unite),
+                Recent::Workspace(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unites.len(), 1);
+        let unite = unites[0];
+        assert_eq!(unite.updated_at(), Some(ts(12)));
+        assert_eq!(
+            unite
+                .members()
+                .iter()
+                .map(|member| member.workspace.path.clone())
+                .collect::<Vec<_>>(),
+            vec![alpha.path, beta.path]
+        );
+    }
+
+    #[test]
+    fn a_single_workspace_is_not_persisted_as_a_unite() {
+        let (_tmp, storage) = storage();
+        touch_unite(&storage, &[PathBuf::from("/alpha")], ts(10)).unwrap();
+        assert!(storage.load_unites().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unite_recent_drops_missing_members_and_corruption_degrades_to_singles() {
+        let (tmp, storage) = storage();
+        let alpha = workspace("alpha", tmp.path().join("alpha"), ts(3));
+        storage
+            .save_workspaces(std::slice::from_ref(&alpha))
+            .unwrap();
+        storage
+            .save_unites(&[
+                Unite::new(vec![PathBuf::from("/missing"), alpha.path.clone()], ts(10)),
+                Unite::new(vec![PathBuf::from("/also-missing")], ts(11)),
+            ])
+            .unwrap();
+
+        let items = recent(&storage).unwrap();
+        let unites = items
+            .iter()
+            .filter_map(|recent| match recent {
+                Recent::Unite(unite) => Some(unite),
+                Recent::Workspace(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(unites.len(), 1);
+        let unite = unites[0];
+        assert_eq!(unite.members().len(), 1);
+
+        fs::write(storage.dir().join("unites.json"), "{ broken").unwrap();
+        assert_eq!(
+            recent(&storage).unwrap(),
+            vec![Recent::Workspace(WorkspaceOverview::new(
+                alpha.clone(),
+                0,
+                0,
+                0
+            ))]
+        );
+
+        let future = r#"{"version":999,"unites":[]}"#;
+        fs::write(storage.dir().join("unites.json"), future).unwrap();
+        assert_eq!(
+            recent(&storage).unwrap(),
+            vec![Recent::Workspace(WorkspaceOverview::new(alpha, 0, 0, 0))]
+        );
+        assert!(
+            touch_unite(
+                &storage,
+                &[PathBuf::from("/alpha"), PathBuf::from("/beta")],
+                ts(12)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(storage.dir().join("unites.json")).unwrap(),
+            future
         );
     }
 
