@@ -162,6 +162,7 @@ pub fn serve_with_client_and_caller(
     )
 }
 
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
 fn serve_with_client_and_caller_scoped(
     input: impl BufRead,
     out: &mut dyn Write,

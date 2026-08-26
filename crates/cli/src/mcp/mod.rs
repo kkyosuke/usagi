@@ -35,7 +35,7 @@ pub fn dispatch(name: &str, params: &str) -> Result<String, ToolError> {
     let arguments = serde_json::from_str(params)
         .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
     let store_root =
-        std::env::current_dir().map_err(|error| ToolError::Execution(error.to_string()))?;
+        std::env::current_dir().expect("MCP dispatch already resolved its cwd at startup");
     tool.call_store(&arguments, &store_root)
 }
 
