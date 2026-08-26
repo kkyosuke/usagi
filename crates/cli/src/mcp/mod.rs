@@ -34,9 +34,13 @@ pub fn dispatch(name: &str, params: &str) -> Result<String, ToolError> {
         .ok_or_else(|| ToolError::UnknownTool(name.to_owned()))?;
     let arguments = serde_json::from_str(params)
         .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
-    let store_root =
-        std::env::current_dir().expect("MCP dispatch already resolved its cwd at startup");
+    let store_root = current_store_root()?;
     tool.call_store(&arguments, &store_root)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=dispatch_routes_to_a_known_tool
+fn current_store_root() -> Result<std::path::PathBuf, ToolError> {
+    std::env::current_dir().map_err(|error| ToolError::Execution(error.to_string()))
 }
 
 #[cfg(test)]
