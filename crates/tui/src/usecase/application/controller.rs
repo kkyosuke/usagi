@@ -1276,6 +1276,15 @@ impl AppState {
             .get(&session)
             .is_none_or(|lifecycle| lifecycle.capabilities().can_use)
     }
+    /// Whether the session at this stable identity accepts a removal request.
+    /// Legacy callers without lifecycle projections keep their established
+    /// behavior, while a daemon-authoritative `Deleting` row cannot be retried.
+    #[must_use]
+    fn session_can_remove(&self, session: SessionId) -> bool {
+        self.session_lifecycles
+            .get(&session)
+            .is_none_or(|lifecycle| lifecycle.capabilities().can_remove)
+    }
     /// 最後の safe notice。
     #[must_use]
     pub fn notice(&self) -> Option<&Notice> {
@@ -3651,7 +3660,6 @@ fn commit_force_remove(state: &mut AppState, confirmed: bool) -> Vec<Effect> {
     if !confirmed {
         return Vec::new();
     }
-    state.move_selection(-1);
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
@@ -4100,7 +4108,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         // Switch の `x` / `X` removes only the cursor's session.  `X` forces the
         // whole removal — a dirty worktree *and* an unmerged branch.  Keep this
         // unavailable while an overlay owns input, and never turn the workspace
-        // root or the new-session row into a deletion target.
+        // root, the new-session row, or a lifecycle that cannot be removed into
+        // a deletion target.
         AppKey::Char('x' | 'X')
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
@@ -4145,8 +4154,9 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
 }
 
-/// Request removal for Switch's selected session and leave the cursor on the
-/// preceding row while the presentation keeps the target as a loading skeleton.
+/// Request removal for Switch's selected session and keep the cursor on that
+/// stable identity while the presentation turns the row into a loading skeleton.
+/// Snapshot reconciliation moves it only after the daemon removes the row.
 ///
 /// `force` is the whole forced removal, not just the dirty-worktree half: it
 /// also discards an unmerged session branch. Splitting the two would leave `X`
@@ -4157,7 +4167,9 @@ fn remove_selected_session(state: &mut AppState, force: bool) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
     };
-    state.move_selection(-1);
+    if !state.session_can_remove(session) {
+        return Vec::new();
+    }
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
@@ -7423,7 +7435,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_x_removes_the_selected_session_and_shift_x_forces_it() {
+    fn switch_x_keeps_the_cursor_on_the_removing_session_and_shift_x_forces_it() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
 
@@ -7436,9 +7448,9 @@ mod tests {
                 force_delete_branch: false,
             }]
         );
-        assert_eq!(state.selected(), Selection::NewSession);
+        assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
 
-        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Char('X'))),
             vec![Effect::RemoveSession {
@@ -7450,7 +7462,32 @@ mod tests {
                 force_delete_branch: true,
             }]
         );
-        assert_eq!(state.selected(), Selection::Target(Target::Session(first)));
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+    }
+
+    #[test]
+    fn deleting_session_keeps_the_cursor_without_accepting_another_remove() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionLifecycles(BTreeMap::from([(
+                session,
+                lifecycle(SessionLifecycle::Deleting),
+            )]))),
+        );
+
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
+        for key in [AppKey::Char('x'), AppKey::Char('X')] {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(
+                state.selected(),
+                Selection::Target(Target::Session(session))
+            );
+        }
     }
 
     #[test]
@@ -7549,6 +7586,10 @@ mod tests {
         // The key acts directly: it never routes through the Enter confirmation.
         assert_eq!(state.overlay(), None);
         assert_eq!(state.force_remove_confirmation(), None);
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
     }
 
     #[test]
@@ -7608,6 +7649,10 @@ mod tests {
         );
         assert_eq!(state.overlay(), None);
         assert_eq!(state.force_remove_confirmation(), None);
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
     }
 
     #[test]
