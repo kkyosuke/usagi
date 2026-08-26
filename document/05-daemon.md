@@ -621,7 +621,7 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 | `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
 | inbox | 既読 256 件。総数の上限は 4096 | 未読の報告。未読が上限を超えたときだけ最古の未読を落とし、error log に記録する（silent loss にしない） |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
-| `supervisor-runs/` | 終了済み run 128 件（snapshot / journal / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run |
+| `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
 未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
@@ -1543,6 +1543,18 @@ safe completion summary、DAG state、decision generation を含む wake reserva
 parent wake effect を実行する。reservation は child run と parent generation で一意なので、duplicate event、
 ACK loss、daemon restart は同じ wake を二重に作らない。parent runtime の再解決・restart は wake adapter が
 保存済み provenance だけを使って行い、session 名から target を推測しない。
+
+`supervisor-scheduler.json` は start reservation を最大256件、wake reservation を最大512件に制限する。
+終了 run の start と配送済み wake は固定長 tombstone へ移して retry を `expired` として effect-zero にし、
+live run / 未配送 wake だけで上限へ達した場合はそれらを捨てず、新規 start / wake を capacity error で拒否する。
+`supervisor_start` は初期 task 128件、依存128件、Task ID 128 UTF-8 bytes、instruction / root task 16 KiB、
+artifact contract 4 KiB、idempotency key / policy selector 256 bytes を上限とし、永続化前に検証する。
+
+event journal は sequence→byte offset の derived index を持つ。`supervisor_events(after_sequence, limit)` は
+cursor の offset へ直接 seek し、最大100件の要求 page だけを read / parse する。index がない旧 journal は一度だけ
+走査して再構築し、以後は page size に比例する。compaction より古い cursor は、残存先頭へ黙って進めず
+`cursor expired` を返す。journal は4,096件で最新2,048件へ atomic compact し、replay checkpoint を先に offset 0へ
+置くことで、compact 中の crash でも current snapshot への duplicate replayだけに収束する。
 
 ## supervisor policy and verification
 

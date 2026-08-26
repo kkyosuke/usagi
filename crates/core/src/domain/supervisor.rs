@@ -50,21 +50,36 @@ impl<'de> Deserialize<'de> for SupervisorRunId {
 
 /// Opaque stable task identity.  Its spelling is never inferred from a session
 /// name; callers may encode a provenance path in it if they need one.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct TaskId(pub String);
+
+pub const MAX_TASK_ID_BYTES: usize = 128;
+pub const MAX_INITIAL_TASKS: usize = 128;
+pub const MAX_TASK_DEPENDENCIES: usize = 128;
+pub const MAX_SUPERVISOR_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_ARTIFACT_CONTRACT_BYTES: usize = 4 * 1024;
+pub const MAX_SUPERVISOR_KEY_BYTES: usize = 256;
 
 impl TaskId {
     /// Creates an opaque task key.
     ///
     /// # Errors
-    /// Returns [`SupervisorError::InvalidTaskId`] for an empty key.
+    /// Returns [`SupervisorError::InvalidTaskId`] for an empty key or one over
+    /// [`MAX_TASK_ID_BYTES`] UTF-8 bytes.
     pub fn new(value: impl Into<String>) -> Result<Self, SupervisorError> {
         let value = value.into();
-        if value.trim().is_empty() {
+        if value.trim().is_empty() || value.len() > MAX_TASK_ID_BYTES {
             return Err(SupervisorError::InvalidTaskId);
         }
         Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
     }
 }
 
@@ -306,6 +321,23 @@ pub struct SupervisorRun {
     /// Event IDs already reduced.  This is persisted so journal replay is
     /// idempotent after a crash between append and snapshot write.
     pub applied_events: BTreeSet<OperationId>,
+    /// Fixed-size probabilistic tombstone for event IDs removed from
+    /// `applied_events` when the journal is compacted. A positive match is
+    /// refused as expired rather than silently applying a possibly old ID.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compacted_event_tombstones: Vec<u64>,
+}
+
+const EVENT_TOMBSTONE_WORDS: usize = 4_096;
+const EVENT_TOMBSTONE_HASHES: u64 = 4;
+
+fn tombstone_bit(id: OperationId, seed: u64) -> usize {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for byte in id.to_string().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    usize::try_from(hash % (EVENT_TOMBSTONE_WORDS as u64 * 64)).expect("bit index fits")
 }
 
 impl SupervisorRun {
@@ -354,6 +386,65 @@ impl SupervisorRun {
             tasks: BTreeMap::new(),
             provenance: BTreeMap::new(),
             applied_events: BTreeSet::new(),
+            compacted_event_tombstones: Vec::new(),
+        }
+    }
+
+    /// Whether an event ID belongs to the exact recent window or the compacted
+    /// tombstone. Tombstone positives are deliberately fail-closed.
+    #[must_use]
+    pub fn event_id_status(&self, event_id: OperationId) -> AppliedEventStatus {
+        if self.applied_events.contains(&event_id) {
+            return AppliedEventStatus::Recent;
+        }
+        if self.compacted_event_tombstones.is_empty() {
+            return AppliedEventStatus::Fresh;
+        }
+        if self.compacted_event_tombstones.len() != EVENT_TOMBSTONE_WORDS {
+            // A malformed durable tombstone must never revive an old event ID.
+            return AppliedEventStatus::Expired;
+        }
+        let present = (0..EVENT_TOMBSTONE_HASHES).all(|seed| {
+            let bit = tombstone_bit(event_id, seed);
+            self.compacted_event_tombstones[bit / 64] & (1_u64 << (bit % 64)) != 0
+        });
+        if present {
+            AppliedEventStatus::Expired
+        } else {
+            AppliedEventStatus::Fresh
+        }
+    }
+
+    /// Whether the fixed-size compaction tombstone has a durable shape this
+    /// build can interpret without reviving an expired event ID.
+    #[must_use]
+    pub fn compaction_state_is_valid(&self) -> bool {
+        self.compacted_event_tombstones.is_empty()
+            || self.compacted_event_tombstones.len() == EVENT_TOMBSTONE_WORDS
+    }
+
+    /// Retain exact IDs for the readable journal window and move older IDs into
+    /// a fixed-size fail-closed tombstone.
+    pub fn compact_applied_events(&mut self, retained: &BTreeSet<OperationId>) {
+        let removed = self
+            .applied_events
+            .iter()
+            .filter(|event_id| !retained.contains(event_id))
+            .copied()
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            return;
+        }
+        self.compacted_event_tombstones
+            .resize(EVENT_TOMBSTONE_WORDS, 0);
+        self.compacted_event_tombstones
+            .truncate(EVENT_TOMBSTONE_WORDS);
+        for event_id in removed {
+            for seed in 0..EVENT_TOMBSTONE_HASHES {
+                let bit = tombstone_bit(event_id, seed);
+                self.compacted_event_tombstones[bit / 64] |= 1_u64 << (bit % 64);
+            }
+            self.applied_events.remove(&event_id);
         }
     }
 
@@ -437,7 +528,16 @@ pub enum SupervisorError {
     InvalidTransition,
     StaleGeneration,
     TerminalRun,
+    ExpiredEventId,
     SequenceGap { expected: u64, actual: u64 },
+}
+
+/// Idempotency classification for a reducer event ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppliedEventStatus {
+    Fresh,
+    Recent,
+    Expired,
 }
 impl fmt::Display for SupervisorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -454,8 +554,10 @@ impl std::error::Error for SupervisorError {}
 /// Returns a typed rejection without changing `run` when the event is stale,
 /// out of sequence, invalid for its task/provenance, or mutates a terminal run.
 pub fn reduce(run: &mut SupervisorRun, event: &SupervisorEvent) -> Result<(), SupervisorError> {
-    if run.applied_events.contains(&event.event_id) {
-        return Ok(());
+    match run.event_id_status(event.event_id) {
+        AppliedEventStatus::Recent => return Ok(()),
+        AppliedEventStatus::Expired => return Err(SupervisorError::ExpiredEventId),
+        AppliedEventStatus::Fresh => {}
     }
     let expected = run.state_revision + 1;
     if event.sequence != expected {
@@ -1876,6 +1978,11 @@ mod tests {
             SupervisorError::InvalidTaskId
         );
         assert_eq!(
+            TaskId::new("う".repeat(MAX_TASK_ID_BYTES / 3 + 1)).unwrap_err(),
+            SupervisorError::InvalidTaskId
+        );
+        assert!(TaskId::new(format!("{}aa", "う".repeat((MAX_TASK_ID_BYTES - 2) / 3))).is_ok());
+        assert_eq!(
             SupervisorError::SequenceGap {
                 expected: 2,
                 actual: 4,
@@ -1888,5 +1995,55 @@ mod tests {
         assert!(serde_json::from_str::<SupervisorRunId>(&format!("\"{v4}\"")).is_err());
         let upper = SupervisorRunId::new().to_string().to_uppercase();
         assert!(serde_json::from_str::<SupervisorRunId>(&format!("\"{upper}\"")).is_err());
+    }
+
+    #[test]
+    fn compacted_event_ids_are_refused_even_with_a_fresh_sequence() {
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let old = event(
+            1,
+            SupervisorEventKind::SetRunState {
+                state: SupervisorRunState::Running,
+                terminal_reason: None,
+            },
+        );
+        run.applied_events.insert(old.event_id);
+        run.compact_applied_events(&BTreeSet::new());
+        assert_eq!(
+            run.event_id_status(old.event_id),
+            AppliedEventStatus::Expired
+        );
+        assert_eq!(reduce(&mut run, &old), Err(SupervisorError::ExpiredEventId));
+        assert_eq!(run.state_revision, 0);
+    }
+
+    #[test]
+    fn task_ids_and_compaction_state_fail_closed_when_deserialized() {
+        assert!(serde_json::from_str::<TaskId>("\"task\"").is_ok());
+        assert!(serde_json::from_str::<TaskId>("\"\"").is_err());
+        assert!(
+            serde_json::from_value::<TaskId>(serde_json::json!("x".repeat(MAX_TASK_ID_BYTES + 1)))
+                .is_err()
+        );
+
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        run.compacted_event_tombstones.push(1);
+        assert!(!run.compaction_state_is_valid());
+        assert_eq!(
+            run.event_id_status(OperationId::new()),
+            AppliedEventStatus::Expired
+        );
     }
 }
