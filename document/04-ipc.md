@@ -720,7 +720,7 @@ daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHel
 従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
 oldest-row origin /
-cursor / saved cursor / scroll region、interned style table、decoder の途中状態、application cursor mode、mouse protocol の有効状態と coordinate encoding を持つため、reattach 後の最初のホイールから full-screen program へ同じ入力列を送れる。client は
+cursor / saved cursor / scroll region、interned style table、decoder の途中状態、application cursor mode、bracketed paste mode、mouse protocol の有効状態と coordinate encoding を持つため、reattach 後の最初の paste / ホイールから full-screen program へ同じ入力列を送れる。client は
 checkpoint から screen を復元し、`output_offset` からの raw suffix を同じ parser へ feed する。
 raw tail を blank parser へ流すことに起因する UTF-8 / CSI / OSC の切断は revision 2 では起こらない。
 
