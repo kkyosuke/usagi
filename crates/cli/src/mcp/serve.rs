@@ -117,15 +117,17 @@ pub fn serve_with_client(
     let families = McpToolFamilies::from_settings(&global.with_local(&local));
     let locator = PathExecutableLocator;
     let snapshot = runtime_model_snapshot(&workspace_root, &locator);
-    serve_with_client_and_features_and_caller(
+    serve_with_client_and_capabilities(
         input,
         out,
         version,
         client,
-        &snapshot,
-        families,
-        None,
-        &store_root,
+        ServerCapabilities {
+            runtime_models: &snapshot,
+            tools: families,
+            caller_credential: None,
+            store_root: &store_root,
+        },
     )
 }
 
@@ -177,15 +179,17 @@ fn serve_with_client_and_caller_scoped(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let families = McpToolFamilies::from_settings(&global.with_local(&local));
     let snapshot = runtime_model_snapshot(workspace_root, &PathExecutableLocator);
-    serve_with_client_and_features_and_caller(
+    serve_with_client_and_capabilities(
         input,
         out,
         version,
         client,
-        &snapshot,
-        families,
-        Some(caller_credential),
-        store_root,
+        ServerCapabilities {
+            runtime_models: &snapshot,
+            tools: families,
+            caller_credential: Some(caller_credential),
+            store_root,
+        },
     )
 }
 
@@ -262,38 +266,31 @@ pub fn serve_with_client_and_features(
     families: McpToolFamilies,
 ) -> io::Result<()> {
     let store_root = std::env::current_dir()?;
-    serve_with_client_and_features_and_caller(
+    serve_with_client_and_capabilities(
         input,
         out,
         version,
         client,
-        snapshot,
-        families,
-        None,
-        &store_root,
+        ServerCapabilities {
+            runtime_models: snapshot,
+            tools: families,
+            caller_credential: None,
+            store_root: &store_root,
+        },
     )
 }
 
-fn serve_with_client_and_features_and_caller(
+fn serve_with_client_and_capabilities(
     mut input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
     client: &mut dyn DaemonClient,
-    snapshot: &RuntimeModelSnapshot,
-    families: McpToolFamilies,
-    caller_credential: Option<&str>,
-    store_root: &Path,
+    capabilities: ServerCapabilities<'_>,
 ) -> io::Result<()> {
     // Fail before accepting input if metadata, route, schema, or capability drifted.
-    drop(tools::registry_with_families(families));
+    drop(tools::registry_with_families(capabilities.tools));
     let mut buf = Vec::with_capacity(MAX_STDIO_MESSAGE_BYTES + 1);
     let mut state = ServerState::AwaitingInitialize;
-    let capabilities = ServerCapabilities {
-        runtime_models: snapshot,
-        tools: families,
-        caller_credential,
-        store_root,
-    };
     loop {
         buf.clear();
         if read_bounded_line(&mut input, &mut buf)? == 0 {
@@ -1273,6 +1270,7 @@ mod tests {
             serde_json::json!({}),
             &mut client,
             None,
+            Path::new("."),
         );
         assert_eq!(missing_target["error"]["code"], -32602);
 
