@@ -45,7 +45,8 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 **Config** で全体設定の編集ができる。
 
 workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
-選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。
+選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
+含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。
 
 ```text
  1 usagi   2 api   3 web   + Open

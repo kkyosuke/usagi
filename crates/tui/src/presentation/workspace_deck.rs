@@ -1,17 +1,22 @@
 //! Process-level project tabs shown above one active workspace Home.
 //!
-//! The deck owns only workspace membership, ordering, active identity, and its
-//! two small overlays. Session, pane, and Agent state remain owned by the
-//! active workspace controller.
+//! The deck owns workspace membership, ordering, active identity, its two small
+//! overlays, and a read-only session snapshot for inactive Garden plots.
+//! Mutable session, pane, and Agent state remain owned by the active workspace
+//! controller.
 
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use usagi_core::domain::id::WorkspaceId;
+use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::theme::{Role, Style};
+use crate::presentation::views::workspace::ProjectedSession;
+use crate::presentation::widgets::button::InlineButton;
+use crate::presentation::widgets::garden::GardenSession;
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
@@ -25,16 +30,68 @@ pub struct WorkspaceSlot {
     path: PathBuf,
     workspace_id: WorkspaceId,
     label: String,
+    sessions: Vec<CachedGardenSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedGardenSession {
+    id: SessionId,
+    label: String,
+    lifecycle: SessionLifecycle,
+    failure_summary: Option<String>,
+}
+
+impl CachedGardenSession {
+    fn from_projected(session: &ProjectedSession) -> Self {
+        Self {
+            id: session.id,
+            label: session.label.clone(),
+            lifecycle: session.lifecycle,
+            failure_summary: session.failure_summary.clone(),
+        }
+    }
+
+    fn garden_session(&self) -> GardenSession {
+        GardenSession {
+            id: self.id,
+            label: self.label.clone(),
+            lifecycle: self.lifecycle,
+            selected: false,
+            failure_summary: self.failure_summary.clone(),
+            agents_observed: false,
+            agents: Vec::new(),
+            pr_merged: false,
+        }
+    }
 }
 
 impl WorkspaceSlot {
     /// Project a freshly attached snapshot into deck metadata.
     #[must_use]
     pub fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Self {
+        let sessions = snapshot
+            .state
+            .sessions
+            .iter()
+            .zip(&snapshot.session_ids)
+            .map(|(record, id)| {
+                let projection = snapshot.session_lifecycles.get(id);
+                CachedGardenSession {
+                    id: *id,
+                    label: record.display_label().to_owned(),
+                    lifecycle: projection.map_or(SessionLifecycle::Available, |projection| {
+                        projection.lifecycle
+                    }),
+                    failure_summary: projection
+                        .and_then(|projection| projection.failure_summary.clone()),
+                }
+            })
+            .collect();
         Self {
             path: snapshot.workspace.path.clone(),
             workspace_id: snapshot.workspace_id,
             label: snapshot.workspace.name.clone(),
+            sessions,
         }
     }
 
@@ -78,6 +135,7 @@ pub struct WorkspaceDeck {
     active: WorkspaceId,
     overlay: Option<DeckOverlay>,
     notice: Option<String>,
+    pending_garden_visit: Option<(PathBuf, SessionId)>,
 }
 
 impl WorkspaceDeck {
@@ -90,6 +148,7 @@ impl WorkspaceDeck {
             slots: vec![slot],
             overlay: None,
             notice: None,
+            pending_garden_visit: None,
         }
     }
 
@@ -131,6 +190,14 @@ impl WorkspaceDeck {
     }
 
     #[must_use]
+    pub fn path_for_workspace(&self, workspace: WorkspaceId) -> Option<&Path> {
+        self.slots
+            .iter()
+            .find(|slot| slot.workspace_id == workspace)
+            .map(WorkspaceSlot::path)
+    }
+
+    #[must_use]
     pub fn contains_path(&self, path: &Path) -> bool {
         self.slots.iter().any(|slot| slot.path == path)
     }
@@ -154,6 +221,7 @@ impl WorkspaceDeck {
         {
             slot.workspace_id = snapshot.workspace_id;
             slot.label.clone_from(&snapshot.workspace.name);
+            slot.sessions = WorkspaceSlot::from_snapshot(snapshot).sessions;
             self.active = snapshot.workspace_id;
         }
         self.overlay = None;
@@ -220,6 +288,83 @@ impl WorkspaceDeck {
         }
         self.overlay = None;
         self.notice = None;
+        if self
+            .pending_garden_visit
+            .as_ref()
+            .is_some_and(|(target, _)| target == path)
+        {
+            self.pending_garden_visit = None;
+        }
+    }
+
+    /// Carry one identity-only Garden visit across the workspace composition
+    /// teardown. It is consumed only by the prepared target workspace.
+    pub fn schedule_garden_visit(&mut self, path: PathBuf, session: SessionId) {
+        self.pending_garden_visit = Some((path, session));
+    }
+
+    #[must_use]
+    pub fn take_garden_visit(&mut self, active_path: &Path) -> Option<SessionId> {
+        if self
+            .pending_garden_visit
+            .as_ref()
+            .is_some_and(|(path, _)| path == active_path)
+        {
+            return self.pending_garden_visit.take().map(|(_, session)| session);
+        }
+        None
+    }
+
+    /// Keep the active tab's inactive-Garden fallback current without retaining
+    /// its workspace controller or Agent inventory.
+    pub fn update_active_sessions(&mut self, sessions: &[ProjectedSession]) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.workspace_id == self.active)
+        {
+            slot.sessions = sessions
+                .iter()
+                .map(CachedGardenSession::from_projected)
+                .collect();
+        }
+    }
+
+    /// Flatten every open project's cached sessions for the process-level
+    /// Garden. The active project keeps its richer, current Agent projection;
+    /// inactive projects remain read-only cached plots until visited.
+    #[must_use]
+    pub fn garden_projection(
+        &self,
+        active_sessions: &[GardenSession],
+    ) -> (String, Vec<(WorkspaceId, GardenSession)>) {
+        let multiple_projects = self.slots.len() > 1;
+        let scope = if multiple_projects {
+            format!("{} open projects", self.slots.len())
+        } else {
+            self.slots
+                .first()
+                .map_or_else(String::new, |slot| slot.label.clone())
+        };
+        let mut projected = Vec::new();
+        for slot in &self.slots {
+            if slot.workspace_id == self.active {
+                projected.extend(active_sessions.iter().cloned().map(|session| {
+                    (
+                        slot.workspace_id,
+                        project_labeled(session, slot, multiple_projects),
+                    )
+                }));
+            } else {
+                projected.extend(slot.sessions.iter().map(|session| {
+                    (
+                        slot.workspace_id,
+                        project_labeled(session.garden_session(), slot, multiple_projects),
+                    )
+                }));
+            }
+        }
+        (scope, projected)
     }
 
     #[must_use]
@@ -235,6 +380,17 @@ impl WorkspaceDeck {
         };
         self.slots.get(replacement).map(WorkspaceSlot::path)
     }
+}
+
+fn project_labeled(
+    mut session: GardenSession,
+    slot: &WorkspaceSlot,
+    multiple_projects: bool,
+) -> GardenSession {
+    if multiple_projects {
+        session.label = format!("{} / {}", slot.label, session.label);
+    }
+    session
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,7 +551,8 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
             format!(" {} {name} ", index + 1)
         })
         .collect::<Vec<_>>();
-    let add_width = widgets::display_width(ADD_LABEL) + 2;
+    let add_button = InlineButton::new(ADD_LABEL);
+    let add_width = add_button.width();
 
     let mut best = (active, active + 1);
     let mut best_count = 1;
@@ -454,9 +611,12 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         line.push_str(&Style::new().dim().paint(&hidden));
     }
     if column < width {
-        let add = widgets::clip_to_width(&format!(" {ADD_LABEL} "), width.saturating_sub(column));
-        let span = widgets::display_width(&add);
-        line.push_str(&Role::Accent.style().paint(&add));
+        let add = add_button.render(
+            width.saturating_sub(column),
+            Role::Accent.style().bold().reverse(),
+        );
+        let span = add.width;
+        line.push_str(&add.line);
         hits.push(ProjectBarHit {
             columns: column..column + span,
             target: ProjectBarTarget::Add,
@@ -594,6 +754,8 @@ fn render_switcher(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::workspace_state::WorkspaceState;
 
     use super::*;
@@ -607,6 +769,32 @@ mod tests {
                 updated_at: Utc::now(),
             },
             WorkspaceState::default(),
+        )
+    }
+
+    fn snapshot_with_session(name: &str, path: &str, session: &str) -> WorkspaceSnapshot {
+        let state = WorkspaceState {
+            sessions: vec![SessionRecord {
+                name: session.to_owned(),
+                display_name: None,
+                origin: SessionOrigin::Human,
+                started_from: None,
+                root: PathBuf::from(path).join(session),
+                created_at: Utc::now(),
+                last_active: None,
+                notes: Scratchpad::default(),
+                prs: Vec::new(),
+            }],
+            ..WorkspaceState::default()
+        };
+        WorkspaceSnapshot::new(
+            Workspace {
+                name: name.to_owned(),
+                path: PathBuf::from(path),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            state,
         )
     }
 
@@ -796,6 +984,111 @@ mod tests {
         right.activate_snapshot(&snapshots[9]);
         let left_overflow = project_bar(&right, 50);
         assert!(left_overflow.line.contains("… +"));
+    }
+
+    #[test]
+    fn add_button_clicks_include_plus_and_both_padding_cells() {
+        let deck = WorkspaceDeck::new(&snapshot("alpha", "/alpha"));
+        let bar = project_bar(&deck, 80);
+        let hit = bar
+            .hits
+            .iter()
+            .find(|hit| hit.target == ProjectBarTarget::Add)
+            .expect("the add button is visible");
+        assert_eq!(hit.columns.len(), InlineButton::new(ADD_LABEL).width());
+        for column in [
+            hit.columns.start,
+            hit.columns.start + 1,
+            hit.columns.end - 1,
+        ] {
+            assert_eq!(bar.target_at(column), Some(&ProjectBarTarget::Add));
+        }
+    }
+
+    #[test]
+    fn garden_flattens_every_open_project_and_carries_a_visit_across_activation() {
+        let alpha = snapshot_with_session("alpha", "/alpha", "build");
+        let beta = snapshot_with_session("beta", "/beta", "review");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        assert_eq!(
+            deck.path_for_workspace(beta.workspace_id),
+            Some(beta.workspace.path.as_path())
+        );
+        assert_eq!(deck.path_for_workspace(WorkspaceId::new()), None);
+        let active = vec![GardenSession {
+            id: alpha.session_ids[0],
+            label: "◆ Manager · build".to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            selected: true,
+            failure_summary: None,
+            agents_observed: true,
+            agents: Vec::new(),
+            pr_merged: false,
+        }];
+
+        let (scope, sessions) = deck.garden_projection(&active);
+        assert_eq!(scope, "2 open projects");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].0, alpha.workspace_id);
+        assert_eq!(sessions[0].1.label, "alpha / ◆ Manager · build");
+        assert_eq!(sessions[1].0, beta.workspace_id);
+        assert_eq!(sessions[1].1.label, "beta / review");
+
+        deck.schedule_garden_visit(beta.workspace.path.clone(), beta.session_ids[0]);
+        assert_eq!(deck.take_garden_visit(&alpha.workspace.path), None);
+        assert_eq!(
+            deck.take_garden_visit(&beta.workspace.path),
+            Some(beta.session_ids[0])
+        );
+        assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
+    }
+
+    #[test]
+    fn garden_cache_tracks_active_rows_and_single_project_labels_stay_compact() {
+        let alpha = snapshot_with_session("alpha", "/alpha", "old");
+        let beta = snapshot_with_session("beta", "/beta", "review");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let fresh = ProjectedSession::from_record(
+            alpha.session_ids[0],
+            &SessionRecord {
+                name: "fresh".to_owned(),
+                display_name: None,
+                origin: SessionOrigin::Human,
+                started_from: None,
+                root: PathBuf::from("/alpha/fresh"),
+                created_at: Utc::now(),
+                last_active: None,
+                notes: Scratchpad::default(),
+                prs: Vec::new(),
+            },
+        );
+        deck.update_active_sessions(std::slice::from_ref(&fresh));
+        deck.activate_snapshot(&beta);
+        let active_beta = deck.slots[1].sessions[0].garden_session();
+        let (_, sessions) = deck.garden_projection(std::slice::from_ref(&active_beta));
+        assert_eq!(sessions[0].1.label, "alpha / fresh");
+
+        let single = WorkspaceDeck::new(&alpha);
+        let active_alpha = single.slots[0].sessions[0].garden_session();
+        let (scope, sessions) = single.garden_projection(std::slice::from_ref(&active_alpha));
+        assert_eq!(scope, "alpha");
+        assert_eq!(sessions[0].1.label, "old");
+
+        let mut empty = single;
+        empty.close_path(Path::new("/alpha"));
+        empty.update_active_sessions(&[]);
+        assert_eq!(empty.garden_projection(&[]), (String::new(), Vec::new()));
+    }
+
+    #[test]
+    fn closing_a_pending_garden_projects_tab_discards_the_visit() {
+        let alpha = snapshot("alpha", "/alpha");
+        let beta = snapshot("beta", "/beta");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        let session = SessionId::new();
+        deck.schedule_garden_visit(beta.workspace.path.clone(), session);
+        deck.close_path(&beta.workspace.path);
+        assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
     }
 
     #[test]
