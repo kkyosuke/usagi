@@ -1281,7 +1281,9 @@ pending tab を安全な feedback に置き換える。`←` / `→`（または
 選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document tab と、daemon へ未送信の
 client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
-detach するだけで daemon-owned terminal を停止しない。pending launch は送信済み operation を推測して再送・cancel しない。
+detach するだけで daemon-owned terminal を停止しない。同じ workspace UI の生存中は閉じた exact terminal を後続の
+inventory 復元から除外し、`terminal open` を明示したときだけ再表示する。workspace UI を開き直した場合は local な close
+状態を引き継がず、live terminal を inventory から復元する。pending launch は送信済み operation を推測して再送・cancel しない。
 
 `terminal new` は embedded pane を作らず、選択 session の worktree を cwd とするプラットフォーム標準の terminal を
 別ウィンドウで開く。起動要求を発行した時点で Closeup action modal だけを閉じ、背面の Closeup へ戻る。

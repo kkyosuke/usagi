@@ -1723,6 +1723,11 @@ struct WorkspaceUi {
     /// Recently detached coordinators, oldest first. Keeping the coordinator
     /// preserves its connection-local input ledger and unresolved input fence.
     detached_terminals: VecDeque<TerminalSession>,
+    /// Generic terminals the user logically closed in this workspace UI. The
+    /// daemon keeps their PTYs alive, so a later inventory must not immediately
+    /// recreate their tabs. A fresh workspace UI starts empty and restores them
+    /// again; an explicit `terminal open` also removes the exact fence.
+    closed_generic_terminals: BTreeSet<TerminalRef>,
     terminal_reconnected: bool,
     terminal_size: (usize, usize),
     agent_tab_intent: Option<AgentTabIntentContext>,
@@ -2118,6 +2123,7 @@ impl WorkspaceUi {
             active_pane_launch: None,
             terminals: Vec::new(),
             detached_terminals: VecDeque::new(),
+            closed_generic_terminals: BTreeSet::new(),
             terminal_reconnected: false,
             terminal_size: (0, 0),
             agent_tab_intent: None,
@@ -2402,6 +2408,47 @@ impl WorkspaceUi {
         while self.detached_terminals.len() > DETACHED_TERMINAL_LIMIT {
             self.detached_terminals.pop_front();
         }
+    }
+
+    /// Hide one generic terminal for the rest of this workspace UI while only
+    /// detaching its client subscription. Daemon process ownership is unchanged.
+    fn close_generic_terminal(&mut self, terminal: &TerminalRef) {
+        self.closed_generic_terminals.insert(terminal.clone());
+        self.close_terminal(terminal);
+    }
+
+    /// An explicit `terminal open` is the user's request to show an existing
+    /// daemon terminal again, so it releases the process-local close fence.
+    fn reopen_generic_terminal(&mut self, terminal: &TerminalRef) {
+        self.closed_generic_terminals.remove(terminal);
+    }
+
+    /// A coherent inventory proves which process-local close fences can still
+    /// matter. Exited terminals no longer need suppression, keeping this set
+    /// bounded by the daemon's live generic inventory.
+    fn reconcile_closed_generic_terminals(&mut self, terminals: &[TerminalInventoryEntry]) {
+        self.closed_generic_terminals.retain(|closed| {
+            terminals.iter().any(|entry| {
+                entry.live && entry.kind == TerminalKind::Terminal && entry.terminal.fences(closed)
+            })
+        });
+    }
+
+    /// Return the authoritative inventory with only this UI's logically closed
+    /// generic terminals hidden. Agent rows and every other terminal row stay
+    /// unchanged for reconciliation.
+    fn restorable_terminal_inventory(
+        &self,
+        terminals: &[TerminalInventoryEntry],
+    ) -> Vec<TerminalInventoryEntry> {
+        terminals
+            .iter()
+            .filter(|entry| {
+                entry.kind != TerminalKind::Terminal
+                    || !self.closed_generic_terminals.contains(&entry.terminal)
+            })
+            .cloned()
+            .collect()
     }
 
     fn agent_continuation_for(&self, terminal: &TerminalRef) -> Option<AgentContinuationRef> {
@@ -4613,7 +4660,9 @@ fn apply_restore_completion(
     let observation = match ui.observe_agent_tabs(terminals.clone(), agents) {
         Ok(observation) => observation,
         Err(error) => {
-            let targets = generic_restore_targets(workspace, allowed_sessions, &terminals, runtime);
+            let restorable = ui.restorable_terminal_inventory(&terminals);
+            let targets =
+                generic_restore_targets(workspace, allowed_sessions, &restorable, runtime);
             let _ = runtime.append_restore_snapshot(
                 dispatched_interaction,
                 dispatched_registry_revision,
@@ -4631,6 +4680,8 @@ fn apply_restore_completion(
             outcome: RestoreJobOutcome::FenceRejected,
         };
     }
+    ui.reconcile_closed_generic_terminals(&terminals);
+    let restorable = ui.restorable_terminal_inventory(&terminals);
     let selected = runtime.focused_terminal();
     let mut saved_selections = BTreeMap::new();
     if let Some(context) = ui.agent_tab_intent.as_ref() {
@@ -4644,7 +4695,7 @@ fn apply_restore_completion(
         workspace,
         allowed_sessions,
         observation.projection,
-        &terminals,
+        &restorable,
         selected.as_ref(),
         interrupted,
         &saved_selections,
@@ -4739,7 +4790,7 @@ fn close_focused_terminal_pane(
     }
     let outcome = runtime.close_focused_pane();
     if let Some(terminal) = outcome.detach {
-        ui.close_terminal(&terminal);
+        ui.close_generic_terminal(&terminal);
     }
     if let Some(operation) = outcome.cancel {
         pending_targets.remove(&operation);
@@ -5729,8 +5780,26 @@ fn drain_pane_completions_into_runtime(
                 };
                 match result {
                     Ok(terminal) => {
+                        let completed = terminal.clone();
                         let _ = runtime
                             .complete_pane_focus_if_uninterrupted(target, operation, terminal);
+                        // Release the close fence only after the target-scoped
+                        // reducer accepted this exact completion. A stale or
+                        // wrong-scope daemon answer must not make a later
+                        // inventory replay resurrect the closed terminal.
+                        let accepted = runtime.panes().pane(target).is_some_and(|pane| {
+                            pane.tabs().iter().any(|tab| {
+                                matches!(
+                                    tab,
+                                    PaneTab::Live(live)
+                                        if live.kind == PaneKind::Terminal
+                                            && live.terminal.fences(&completed)
+                                )
+                            })
+                        });
+                        if accepted {
+                            ui.reopen_generic_terminal(&completed);
+                        }
                     }
                     Err(message) => {
                         let _ = runtime.fail_pane(target, operation, message);
@@ -19421,9 +19490,8 @@ mod tests {
             assert_eq!(state.targets[0].selected, Some(closed));
         }
 
-        // Closing a generic tab remains available and is not a conversation
-        // dismissal, so it
-        // records neither a lineage nor a deferred terminal fence.
+        // Closing a generic tab is not a durable conversation dismissal. It
+        // records only a process-local exact fence against inventory restore.
         let _ = runtime.focus_terminal(Target::Session(session), generic.clone());
         let before = durable.lock().unwrap().clone();
         super::close_focused_terminal_pane(
@@ -19436,6 +19504,144 @@ mod tests {
             PaneTab::Live(LivePane { terminal, .. }) if terminal.fences(&generic)
         )));
         assert_eq!(*durable.lock().unwrap(), before);
+        assert_eq!(ui.closed_generic_terminals, BTreeSet::from([generic]));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One user flow covers close, inventory replay, explicit open, and exit cleanup.
+    fn generic_close_survives_inventory_replay_until_explicit_open() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = scoped_terminal_ref(workspace, Some(session));
+        let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_tab_intent(
+                workspace,
+                BTreeSet::from([session]),
+                Box::new(MemoryIntentPort {
+                    state: durable,
+                    mutations: Arc::new(Mutex::new(Vec::new())),
+                }),
+            );
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let completion = |live: bool, fence: (u64, u64), port: Box<dyn AgentCommandPort>| {
+            super::RestoreCompletion {
+                port,
+                dispatched_interaction: fence.0,
+                dispatched_registry_revision: fence.1,
+                dispatched_allowed_sessions: BTreeSet::from([session]),
+                terminals: Ok(vec![TerminalInventoryEntry {
+                    terminal: terminal.clone(),
+                    kind: TerminalKind::Terminal,
+                    live,
+                }]),
+                agents: Ok(AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: Vec::new(),
+                    resumable: Vec::new(),
+                }),
+                observation_coherent: true,
+            }
+        };
+
+        let first_fence = runtime.restore_fence();
+        let first = super::apply_restore_completion(
+            completion(true, first_fence, Box::new(UnavailableAgentCommandPort)),
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(first.outcome, super::RestoreJobOutcome::Applied);
+        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+
+        super::close_focused_terminal_pane(
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+
+        // The same live row may arrive from a restore already queued around the
+        // close. Its exact process-local fence keeps the tab closed.
+        let replay_fence = runtime.restore_fence();
+        let replay = super::apply_restore_completion(
+            completion(true, replay_fence, first.port),
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(replay.outcome, super::RestoreJobOutcome::Applied);
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+
+        // A completion outside the pending tab's target is rejected by the
+        // runtime and must not release the close fence as a side effect.
+        let refused_operation = OperationId::new();
+        let target = Target::Session(session);
+        let _ = runtime.request_pane(target, refused_operation, PaneKind::Terminal);
+        let mut refused_pending = std::collections::HashMap::from([(refused_operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation: refused_operation,
+                    result: Ok(scoped_terminal_ref(workspace, Some(SessionId::new()))),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut refused_pending,
+            terminal_geometry(20, 80),
+        );
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+        let _ = runtime.fail_pane(target, refused_operation, "wrong scope".to_owned());
+
+        // `terminal open` resolves to that existing daemon terminal. Its
+        // completion deliberately releases the local close fence.
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let mut pending = std::collections::HashMap::from([(operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation,
+                    result: Ok(terminal.clone()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+        assert!(ui.closed_generic_terminals.is_empty());
+
+        // A later logical close is retained only while the terminal is live.
+        super::close_focused_terminal_pane(
+            &mut ui,
+            &mut runtime,
+            &mut std::collections::HashMap::new(),
+        );
+        let exit_fence = runtime.restore_fence();
+        let exited = super::apply_restore_completion(
+            completion(false, exit_fence, replay.port),
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(exited.outcome, super::RestoreJobOutcome::Applied);
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.is_empty());
     }
 
     #[test]
