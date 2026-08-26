@@ -342,11 +342,16 @@ request 送信前に lane を確立できなかった場合は effect が確定�
 
 ### bootstrap section の bounded wait
 
-connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、client は `bootstrap.lock` の
+connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、**cold-start authority を持つ** client は `bootstrap.lock` の
 cross-process section を取る。この section と、private directory の setup section（`ensure_private_dir` が親
 ディレクトリに取る flock）は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
 ディレクトリはマシン全体で共有されるため、blocking にすると MCP server / CLI / rollover のいずれかが section に
 いる間、UI 経路の接続確立が無期限に待ってしまう。保持したまま wedge したプロセスがいれば永久に待つ。
+
+daemon が provision した MCP child と Agent lifecycle hook は、発行元 daemon の live runtime に結び付くため、既存
+endpoint へ attach するだけでこの section に入らない。これらは daemon が動いていることを前提とする resident child であり、
+別 daemon を cold start しても claim 対象の runtime は存在しない。MCP の手動起動との分岐は
+[7. MCP サーバ#起動と経路](07-mcp.md#起動と経路)を正本とする。
 
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|
