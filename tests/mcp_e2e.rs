@@ -4,12 +4,14 @@
 
 mod support;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use serde_json::json;
 use support::mcp::{FixtureArgv, McpHarness};
 use usagi_core::domain::{
@@ -26,6 +28,79 @@ use usagi_core::usecase::client::{
     DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
     TuiUserDecisionAction,
 };
+
+#[test]
+fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
+    let mcp = McpHarness::start();
+    let bootstrap_path = mcp.data_dir().join("daemon/bootstrap.lock");
+    let bootstrap = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bootstrap_path)
+        .expect("the running daemon has a bootstrap lock node");
+    FileExt::lock_exclusive(&bootstrap).expect("the fixture holds bootstrap authority");
+
+    // `USAGI_WORKSPACE_ROOT` is the non-secret provision marker the daemon
+    // injects into its Agent and forwards to the MCP child. The child must
+    // attach to that already-running daemon: taking this held lock would spend
+    // the five-second bootstrap ceiling and then exit before stdio serve.
+    let started = Instant::now();
+    let mut child = support::daemon::usagi_command(
+        mcp.home(),
+        support::daemon::Channel::Local,
+        mcp.cwd(),
+        &["mcp".as_ref()],
+    )
+    .env(
+        usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
+        mcp.workspace(),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("daemon-provisioned MCP child starts");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "clientInfo": {"name": "attached-regression", "version": "1"}
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut response)
+        .unwrap();
+
+    if response.is_empty() {
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        panic!("MCP child closed before initialize: {stderr}");
+    }
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "usagi");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "attached MCP waited on bootstrap.lock"
+    );
+
+    let _ = child.kill();
+    child.wait().unwrap();
+}
 
 #[test]
 fn production_tools_list_fixes_the_48_tool_schema_contract() {

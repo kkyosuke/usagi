@@ -2229,7 +2229,7 @@ fn home_left_pane(
         lines.push(String::new());
     }
     let footer = match home.mode {
-        HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
+        HomeMode::Switch => "[switch] ←→ project / ↑↓ select / Enter closeup",
         HomeMode::Closeup => {
             "[closeup] Ctrl-O: x/Ctrl-X close / o switch / a/Ctrl-A actions / n/p tabs"
         }
@@ -5253,7 +5253,7 @@ mod tests {
         let switch_text = joined_home(&switch);
         assert!(!switch_text.contains("| 同じ名前"));
         assert!(switch_text.contains("\u{f0907} 同じ名前"));
-        assert!(switch_text.contains("[switch] ↑↓ select"));
+        assert!(switch_text.contains("[switch] ←→ project / ↑↓ select"));
 
         for line in render_home(8, 7, &switch) {
             assert!(display_width(&line) <= 7);
