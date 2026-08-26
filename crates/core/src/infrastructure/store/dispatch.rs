@@ -1540,6 +1540,7 @@ impl DispatchStore {
             && index.journal_len == journal_len
             && index.valid_len <= index.journal_len
             && index.entries.first().is_none_or(|entry| entry.offset == 0)
+            && index.entries.first().is_none_or(|entry| entry.sequence > 0)
             && index
                 .entries
                 .last()
@@ -1599,9 +1600,17 @@ impl DispatchStore {
                 }
                 Err(error) => return Err(error).context("failed to parse dispatch inbox message"),
             };
-            let expected = next_inbox_sequence(&index.entries)?;
-            if record.sequence != expected {
-                anyhow::bail!("dispatch inbox sequence is not contiguous");
+            // Compaction removes acknowledged/read records without renumbering:
+            // cursors already handed to callers must remain stable. The retained
+            // journal can therefore start above one or contain gaps, but sequence
+            // identity must stay positive and strictly increasing.
+            if record.sequence == 0
+                || index
+                    .entries
+                    .last()
+                    .is_some_and(|entry| record.sequence <= entry.sequence)
+            {
+                anyhow::bail!("dispatch inbox sequence is not strictly increasing");
             }
             if records.len() >= INBOX_HARD_LIMIT {
                 anyhow::bail!("dispatch inbox exceeds its hard limit");
@@ -3450,6 +3459,19 @@ mod tests {
             "an unread report was dropped to make room for read ones"
         );
         assert!(inbox.len() <= INBOX_HARD_LIMIT);
+
+        // Read retention can leave a stable-sequence gap after an unread record.
+        // Losing the disposable index must not make that authoritative journal
+        // impossible to rebuild on restart.
+        fs::remove_file(store.inbox_index_path(&caller)).unwrap();
+        let reopened = DispatchStore::new(tmp.path());
+        assert!(
+            reopened
+                .inbox(&caller)
+                .unwrap()
+                .iter()
+                .any(|item| item.run_id == awaited && !item.read)
+        );
     }
 
     #[test]
@@ -3505,5 +3527,14 @@ mod tests {
                 .to_string()
                 .contains("cursor expired")
         );
+
+        // Prefix compaction also advances the first retained sequence. The
+        // index is derived state, so deleting it must still allow exact rebuild.
+        fs::remove_file(store.inbox_index_path(&caller)).unwrap();
+        let reopened = DispatchStore::new(tmp.path());
+        let rebuilt = reopened.inbox_index(&caller).unwrap();
+        assert_eq!(rebuilt.entries.len(), INBOX_HARD_LIMIT);
+        assert_eq!(rebuilt.entries.first().unwrap().sequence, 2);
+        assert_eq!(rebuilt.entries.last().unwrap().sequence, 4097);
     }
 }

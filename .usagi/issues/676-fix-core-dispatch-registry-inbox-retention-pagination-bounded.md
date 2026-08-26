@@ -1,7 +1,7 @@
 ---
 number: 676
 title: fix(core): dispatch registry / inbox を retention と pagination で bounded にする
-status: done
+status: doing
 priority: high
 labels: [review, v2, core, daemon, mcp, dispatch, resource, retention]
 dependson: []
@@ -64,3 +64,7 @@ O(N²) の成長そのものを止める retention を入れた。
       stale/corrupt時にauthoritative journalから再構築する。
 - [x] 4,096件が未ACKだけで埋まった場合は最古messageを落とさず、新規appendをcapacity errorでeffect-zeroにする。
 - [x] `agent_inbox`のcursor/limitと独立した`agent_inbox_ack`をMCP schemaからdaemon/storeまで配線した。
+
+page/ACKとappend costはboundedになったが、元の受入条件にあるregistry/inboxのserialized byte・age上限、
+small-budgetで10万件相当を流すstress fixtureは未対応である。件数だけでは1 recordの巨大化をboundできないため、
+このissueは`doing`を維持する。
