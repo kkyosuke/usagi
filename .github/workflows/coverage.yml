@@ -82,6 +82,7 @@ jobs:
       run: |
         . ./scripts/coverage.sh
         coverage_report --json > coverage.json
+        # Temporary diagnosis for the one summary-only dispatch function.
         ruby -rjson -e '
           data = JSON.parse(File.read("coverage.json")).fetch("data").fetch(0)
           suffix = "crates/core/src/infrastructure/store/dispatch.rs"
