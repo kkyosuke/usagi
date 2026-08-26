@@ -1179,6 +1179,41 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_garden_keeps_each_vertical_column_together_while_scrolling() {
+        let sessions = (0..5)
+            .map(|index| {
+                session(
+                    &format!("{index:08x}-0000-4000-8000-000000000001"),
+                    &format!("session-{index}"),
+                    SessionLifecycle::Available,
+                    AgentPhase::Ready,
+                )
+            })
+            .collect::<Vec<_>>();
+        let first = render_scrolled(23, 80, "x", &sessions, 0, 3, false).expect("garden fits");
+        let shifted = render_scrolled(23, 80, "x", &sessions, 1, 3, false).expect("garden scrolls");
+        let plot_for = |frame: &super::GardenFrame, id| {
+            plots(frame)
+                .into_iter()
+                .find(|plot| plot.session_id == id)
+                .expect("session is visible")
+        };
+
+        assert_eq!(first.max_scroll, 1);
+        for session in &sessions[2..4] {
+            let before = plot_for(&first, session.id);
+            let after = plot_for(&shifted, session.id);
+            assert_eq!(before.column - after.column, PLOT_WIDTH);
+            assert_eq!(before.row, after.row);
+        }
+        assert!(
+            plots(&shifted)
+                .iter()
+                .any(|plot| plot.session_id == sessions[4].id)
+        );
+    }
+
+    #[test]
     fn running_motion_changes_pose_while_reduced_motion_stays_still() {
         let sessions = fixtures();
         let moving_a = render(24, 100, "x", &sessions, 0, false).expect("fits");
