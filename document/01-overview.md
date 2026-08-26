@@ -112,7 +112,8 @@ preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay とし�
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
 `q` は終了キーにならない。Closeup の `terminal` は空引数または `open` で選択 target の既存 terminal を
 完全な identity で再利用し、存在しない場合は daemon に launch を依頼する。`terminal new` は選択 target の
-worktree を cwd としてプラットフォーム標準の terminal を別ウィンドウで開き、Closeup を維持する。その他の引数は
+worktree を cwd としてプラットフォーム標準の terminal を別ウィンドウで開き、起動要求後は action modal だけを閉じて
+背面の Closeup へ戻る。その他の引数は
 安全な feedback で拒否する。terminal stream の IPC 境界は [daemon IPC](04-ipc.md#generic-terminal-request) が正本である。
 Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した

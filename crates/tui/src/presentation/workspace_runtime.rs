@@ -2066,11 +2066,11 @@ mod tests {
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
     }
 
-    /// #355: the real-loop key translation exits the Closeup action modal to
-    /// Switch on both Escape and Ctrl-C (`Key::Quit`), dropping the persisted
-    /// modal so its caret never leaks into the next open.
+    /// The real-loop key translation closes only the Closeup action modal on
+    /// Escape and Ctrl-C (`Key::Quit`), dropping the persisted modal so its caret
+    /// never leaks into the next open.
     #[test]
-    fn closeup_modal_escape_and_ctrl_c_exit_to_switch() {
+    fn closeup_modal_escape_and_ctrl_c_return_to_closeup() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         for exit_key in [Key::Escape, Key::Quit] {
@@ -2080,12 +2080,31 @@ mod tests {
             let effects = runtime.handle_key(exit_key.clone());
             assert!(effects.is_empty(), "{exit_key:?}");
             assert!(
-                matches!(runtime.state().route(), Route::Home(HomeMode::Switch)),
+                matches!(runtime.state().route(), Route::Home(HomeMode::Closeup)),
                 "{exit_key:?}"
             );
             assert_eq!(runtime.state().overlay(), None, "{exit_key:?}");
             assert!(runtime.closeup_modal().is_none(), "{exit_key:?}");
         }
+    }
+
+    #[test]
+    fn terminal_new_closes_only_the_action_modal_and_returns_to_closeup() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        type_str(&mut runtime, "terminal new");
+
+        assert_eq!(
+            runtime.handle_key(Key::Enter),
+            vec![Effect::OpenExternalTerminal {
+                target: Target::Session(session),
+            }]
+        );
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert!(runtime.active_pane().tabs().is_empty());
     }
 
     #[test]
@@ -2109,19 +2128,18 @@ mod tests {
         assert!(!runtime.wants_live_input());
         assert!(!runtime.wants_pane_control_input());
         assert!(!runtime.wants_right_pane_tab_click());
-        // #355: Escape dismisses the forced modal and leaves Closeup for Switch
-        // (rather than handing input back to the live pane), so live passthrough
-        // stays disarmed until the session is re-activated.
+        // Escape dismisses only the forced modal and hands input back to the
+        // underlying live Closeup pane.
         let _ = runtime.handle_key(Key::Escape);
         assert!(matches!(
             runtime.state().route(),
-            Route::Home(HomeMode::Switch)
+            Route::Home(HomeMode::Closeup)
         ));
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
-        assert!(!runtime.wants_live_input());
-        assert!(!runtime.wants_pane_control_input());
-        assert!(!runtime.wants_right_pane_tab_click());
+        assert!(runtime.wants_live_input());
+        assert!(runtime.wants_pane_control_input());
+        assert!(runtime.wants_right_pane_tab_click());
     }
 
     #[test]

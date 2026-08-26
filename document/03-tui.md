@@ -417,9 +417,9 @@ worktree の撤去だけが済んでブランチ削除で `failed` に落ちた 
 [workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
 待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
-`Ctrl-C` は、`Ctrl-O o` と同じく modal を閉じて Switch へ戻る（live pane の有無に依らない）。overlay を開いて
+`Ctrl-C` は modal だけを閉じて背面の Closeup へ戻る（live pane の有無に依らない）。overlay を開いて
 いない Closeup の live pane 上の `Ctrl-C` が exit prompt を開く契約はそのままである。前面 overlay は共通入力境界で
-`Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で Switch へ戻る Closeup action
+`Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で背面へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
@@ -1251,8 +1251,8 @@ pending tab がある間は action modal を自動表示せず、その wave を
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
 を再び出すのは `Ctrl-O Ctrl-A` だけである。action modal が前面にある間の `Esc` / `Ctrl-C` は、tab の有無や forced
-表示か base surface かに依らず、modal を閉じて Switch へ戻る（`Ctrl-O Ctrl-O` と同じ着地で、action picker を dead-end に
-しない）。modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
+表示か base surface かに依らず、modal だけを閉じて背面の Closeup へ戻る。Switch へ戻る操作は
+`Ctrl-O Ctrl-O` が所有する。modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に一覧へ表示する。completion まで
 入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。この focus は
@@ -1265,6 +1265,9 @@ pending tab を安全な feedback に置き換える。`←` / `→`（または
 client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
 閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
 detach するだけで daemon-owned terminal を停止しない。pending launch は送信済み operation を推測して再送・cancel しない。
+
+`terminal new` は embedded pane を作らず、選択 session の worktree を cwd とするプラットフォーム標準の terminal を
+別ウィンドウで開く。起動要求を発行した時点で Closeup action modal だけを閉じ、背面の Closeup へ戻る。
 
 live / interrupted Agent tab は daemon inventory に存在する限り常に表示し、client-side の detach だけでは非表示にしない。
 live Agent で `Ctrl-O x` / `Ctrl-O Ctrl-X` を入力すると、対象 CLI へ `Ctrl-D` と同じ EOT (`0x04`) を送り、runtime の終了を

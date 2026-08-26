@@ -2732,10 +2732,12 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
         "close must not respawn the Agent"
     );
 
-    // The last tab exiting opens Closeup's action modal. Escape returns to
-    // Switch, where the ordinary workspace quit contract applies.
+    // The last tab exiting opens Closeup's action modal. Escape closes only the
+    // modal; the explicit pane-navigation chord then returns to Switch, where
+    // the ordinary workspace quit contract applies.
     send(&mut master, b"\x1b");
-    assert!(quit_from_switch(&mut master, &mut tui, &captured, baseline).success());
+    wait_for_screen_absent_since(&captured, baseline, "Type a command:");
+    assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     drop(slave);
     drop(master);
     reader.join().unwrap();

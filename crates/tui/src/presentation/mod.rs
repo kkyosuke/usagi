@@ -15262,6 +15262,8 @@ mod tests {
             before,
         ));
         let _ = runtime.handle_key(Key::Escape);
+        assert!(runtime.wants_live_input());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Switch));
         assert!(!runtime.wants_live_input());
         for key in [
             Key::Live(LiveTerminalAction::ScrollUp),
