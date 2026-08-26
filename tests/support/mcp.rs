@@ -215,6 +215,26 @@ impl McpHarness {
             fixture_bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
+        // A real managed session is reached only after its repository root has
+        // been adopted. These fixtures create a raw Git worktree directly, so
+        // establish that same root ownership before asking the session-scoped
+        // MCP client to bind. Cold-start admission intentionally refuses an
+        // otherwise unknown `.usagi/sessions/*` path.
+        if session.is_some() {
+            let status = usagi_command(
+                home.path(),
+                channel,
+                workspace.path(),
+                &["daemon".as_ref(), "start".as_ref()],
+            )
+            .env("PATH", &path)
+            .env(SANDBOX_PASSTHROUGH, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("fixture daemon starts from its repository root");
+            assert!(status.success(), "fixture root daemon did not start");
+        }
         let mut child = usagi_command(home.path(), channel, &cwd, &["mcp".as_ref()])
             .env("PATH", &path)
             .env(SANDBOX_PASSTHROUGH, "1")

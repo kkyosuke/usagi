@@ -195,8 +195,15 @@ repository に**立っている**ことは、どの workspace を指している
 
 この制限は **`bound` による暗黙の adopt にだけ**掛かる。「repository でなければ workspace になれない」という規則では
 ない。`usagi open <path>` と TUI の Open / New は `selected` を申告する明示的な操作であり、対象が repository か
-どうかを問わない。daemon が起動時 cwd を initial tenant にする経路も同じく制限しない。制限の根拠は
-「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
+どうかを問わない。制限の根拠は「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
+
+client が daemon を auto-start する前にも、同じ `bound` 解決を read-only preflight として行う。かつて adopt した
+workspace の最長一致、または申告 path 自身が repository の場合だけ、その解決済み root を lifecycle child と
+bootstrap broker の cwd にする。どちらでもない場合は handshake と同じ `workspace-mismatch` / effect none を返し、
+child、workspace fence、project-local `.usagi` を作らない。`selected` と、選択済み root に対する `unbound` readiness は
+明示操作なので従来どおり任意の canonical directory を起動 root にできる。Doctor のように選択を持たない `unbound`
+lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
+生死に依存しない。
 
 `selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。

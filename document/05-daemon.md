@@ -269,6 +269,12 @@ workspace root の解決は process ごとに 1 回だけ行い、fence と sess
 [session tree と ignore rules](#session-tree-と-ignore-rules)）。したがって subdirectory や session worktree から
 起動しても、runtime が所有しない workspace を fence することはない。
 
+client 起点の auto-start はこの process-side 解決より前に
+[workspace fence の cold-start preflight](04-ipc.md#workspace-fence)を通る。`bound` cwd は、既存の adopted root の
+最長一致か、その cwd 自身が repository root の場合だけ lifecycle child を起動できる。明示的な `selected` open は
+repository でない directory も許可する。この preflight は lifecycle child より前なので、拒否した cwd に fence や
+project-local `.usagi` を残さない。
+
 workspace fence の node には、取得した owner が自分の pid を 1 行書く。別の data directory の daemon は互いの
 `daemon.json` を読めないため、この hint が cross-mode の唯一の発見経路である（`daemon status` は自分の mode の
 record しか見ない）。hint は診断専用であり、refusal を決めるのは `flock` である。したがって hint が未公開・破損・
