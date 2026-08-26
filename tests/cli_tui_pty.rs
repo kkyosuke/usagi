@@ -2724,7 +2724,6 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     send(&mut master, b"\x0f\x18");
     wait_for_dead_processes(&[process]);
     assert!(agent_processes(home.path(), 0).is_empty());
-    wait_for_screen_since(&captured, baseline, "Type a command:");
     assert!(read_agent_intent(home.path()).dismissed.is_empty());
     assert_eq!(
         fixtures.claude_spawns(),
@@ -2732,11 +2731,9 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
         "close must not respawn the Agent"
     );
 
-    // The last tab exiting opens Closeup's action modal. Escape closes only the
-    // modal; the explicit pane-navigation chord then returns to Switch, where
-    // the ordinary workspace quit contract applies.
-    send(&mut master, b"\x1b");
-    wait_for_screen_absent_since(&captured, baseline, "Type a command:");
+    // Tab cleanup can trail the observed process exit, leaving either the
+    // Closeup action modal or the exited pane in front. The explicit navigation
+    // chord returns both Closeup surfaces to Switch before the ordinary quit.
     assert!(quit_workspace(&mut master, &mut tui, &captured, baseline).success());
     drop(slave);
     drop(master);

@@ -2108,6 +2108,32 @@ mod tests {
     }
 
     #[test]
+    fn terminal_new_from_a_live_pane_modal_returns_input_to_the_pane() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        let _ = runtime.focus_terminal(target, terminal);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert!(!runtime.wants_live_input());
+        type_str(&mut runtime, "terminal new");
+
+        assert_eq!(
+            runtime.handle_key(Key::Enter),
+            vec![Effect::OpenExternalTerminal { target }]
+        );
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert!(runtime.wants_live_input());
+    }
+
+    #[test]
     fn open_action_overlay_disarms_live_passthrough() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();

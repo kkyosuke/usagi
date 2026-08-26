@@ -3650,13 +3650,17 @@ fn reconcile_force_remove_confirmation(state: &mut AppState) {
     }
 }
 
+fn dismiss_closeup_action_modal(state: &mut AppState) {
+    state.closeup_action_forced = false;
+    state.overlay = None;
+}
+
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
     }
     if matches!(overlay, Overlay::Closeup) && matches!(key, AppKey::Escape) {
-        state.closeup_action_forced = false;
-        state.overlay = None;
+        dismiss_closeup_action_modal(state);
         return Vec::new();
     }
     if matches!(overlay, Overlay::CreateSessionError)
@@ -3821,8 +3825,7 @@ fn update_overlay_control_chord(
                 // Close only the action modal and return input to its underlying
                 // Closeup, whether it is the base surface or a live pane.
                 Overlay::Closeup => {
-                    state.closeup_action_forced = false;
-                    state.overlay = None;
+                    dismiss_closeup_action_modal(state);
                 }
                 // The create-failure dialog treats Ctrl-C as acknowledgement;
                 // route remains untouched beneath the dismissed dialog.
@@ -4737,8 +4740,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
     };
     if effect.is_some() {
-        state.overlay = None;
-        state.closeup_action_forced = false;
+        dismiss_closeup_action_modal(state);
         state.notice = Some(Notice::new(match selection {
             Some(selection) => format!("Requested {command_name} {selection}"),
             None => format!("Requested {command_name}"),
