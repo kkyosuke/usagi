@@ -1072,6 +1072,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "signal-hook",
+ "syn",
  "tempfile",
  "toml",
  "usagi-cli",

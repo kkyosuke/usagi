@@ -3,7 +3,8 @@
 > [ドキュメント目次](README.md) ｜ ← 前へ [1. プロジェクト概要](01-overview.md) ｜ 次へ → [3. TUI](03-tui.md)
 
 実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
-面（TUI / daemon / 入口）の境界をクレート境界に一致させ、依存方向を rustc で強制する。
+面（TUI / daemon / 入口）の境界をクレート境界に一致させ、面どうしの依存禁止を rustc で強制する。
+クレート内は古典的な4層をそのまま重ねたものではなく、後述する実装依存行列を検査で固定する。
 本書がディレクトリ構成・クレート責務・依存ルールの正本である。
 
 ## 目次
@@ -131,8 +132,9 @@
 
 ### usagi-tui の内部構成
 
-TUI 面はクレート内でクリーンアーキテクチャの層を切る（依存方向は
-`presentation → usecase → domain ← infrastructure`）。複数 surface が共有する domain 語彙は
+TUI 面はクレート内を presentation / usecase / infrastructure に分ける。presentation と
+infrastructure adapter は usecase が公開する port / state へ依存し、usecase は同じクレートの
+presentation / infrastructure へ依存しない。複数 surface が共有する domain 語彙と technical boundary は
 [usagi-core](#各クレートの責務) が持つ。一方、TUI の表示 intent のように一つの face だけが使う domain / port は
 その face の usecase 境界に閉じる。`AgentTabIntent` は TUI-local domain であり、core domain へ置かない。
 
@@ -477,18 +479,41 @@ session の Git effect（create、mirror した tree の nested worktree、remov
 
 ## クリーンアーキテクチャとの対応
 
-4 層（`presentation → usecase → domain ← infrastructure`）はクレート分割後も維持する。
+この構成が守る Clean Architecture の境界は、**domain の外部非依存**、**面クレートの相互非依存**、
+**面ローカル usecase の presentation / adapter 非依存**である。ディレクトリ名だけから
+`presentation → usecase → domain ← infrastructure` という古典的な4層を全クレートへ一律には適用しない。
 層とクレートの対応は次のとおり。
 
 | 層 | 置き場所 |
 |---|---|
 | domain | `usagi-core` の `domain/` |
 | usecase | 面をまたぐ共有は `usagi-core` の `usecase/`。片面専用のロジックは各面クレート内 |
-| infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末描画は tui）は各面クレート内 |
+| technical boundary / infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末 adapter は tui）は各面クレート内 |
 | presentation | 各面クレート（TUI の画面 / daemon のサーバ端点 / cli のサブコマンド・MCP tool アダプタ）と、ルート `main.rs` の dispatch |
 
-依存方向は「クレート間」（tui / cli / daemon → core）と「core 内モジュール」（usecase → domain ← infrastructure）
-の両方のレベルで守る。実 IO は合成ルートで注入し、各クレートは依存注入によりユニットテスト可能に保つ。
+`usagi-core/infrastructure` は外部 IO adapter だけの置き場ではない。面をまたぐ wire contract、
+cross-process lock を含む transactional store、Git effect の共有実装をまとめた technical boundary である。
+core usecase は `IssueStore` / `WorkspaceStateStore` / `Storage` / `GitRunner` 等を引数として受け、
+その transaction / compensation contract を直接合成する。逆に core infrastructure の adapter は
+usecase が定義する port を実装できる。これらを実体のない同型 port で包み直さず common crate に閉じることを、
+本プロジェクトの明示的な設計判断とする。時計・process 実行等は引き続き注入し、ユニットテスト可能性を保つ。
+
+実装依存行列は次のとおり（`○` は参照可、`—` は同一領域、空欄は禁止）。`core` の technical boundary と
+usecase の相互参照は上記の共有 contract に限り、domain は常に内側に留まる。
+
+| 参照元 | core domain | core usecase | core technical boundary | 同じ面の usecase | 同じ面の infrastructure | 同じ面の presentation |
+|---|---:|---:|---:|---:|---:|---:|
+| core domain | — |  |  | - | - | - |
+| core usecase | ○ | — | ○ | - | - | - |
+| core technical boundary | ○ | ○ | — | - | - | - |
+| face usecase | ○ | ○ | ○ | — |  |  |
+| face infrastructure | ○ | ○ | ○ | ○ | — |  |
+| face presentation | ○ | ○ | ○ | ○ | ○ | — |
+
+クレート間は `tui / cli / daemon → core` だけを許し、面クレートどうしは依存しない。ルート package だけが
+全クレートへ依存して実 IO を合成する。この行列は [`tests/architecture.rs`](../tests/architecture.rs) が、
+全 manifest の usagi dependency と `domain` / `usecase` / `infrastructure` の production Rust AST を走査して強制する。
+コメントや `#[cfg(test)]` の fake は production 依存として数えない。
 
 ## 単一バイナリと合成ルート
 
