@@ -429,7 +429,10 @@ system / global config は**意図的に残す**。private repository の clone 
 system / global config も落とす（remote に到達する理由がないため）。
 
 `filter.<driver>.smudge` は driver 名を tracked `.gitattributes` が任意に選べるため、固定 key の上書きでは
-無効化できない。filter process を起動しない materialization は未実装で、issue #675 に残る。
+無効化できない。session worktree 作成は base ref を先に commit object ID へ固定し、その tree 内の全
+`.gitattributes` を blob として検査する。`filter` / `filter=*` / `-filter` / `!filter` が1つでもあれば checkout を
+開始せず拒否し、検査した commit IDそのものだけを `git worktree add` へ渡す。したがって検査と materialize の間に
+branch が動いても、未検査の filter process は起動しない。
 
 session の Git effect（create、mirror した tree の nested worktree、remove）は全て daemon の
 `GitRunner` 実装 1 か所を通るため、confine もそこで 1 回だけ適用する。

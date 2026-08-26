@@ -1876,6 +1876,9 @@ pub enum AppEvent {
     /// Open one stable session without relying on list position. The process
     /// deck uses this after a Garden visit switched to another workspace.
     VisitSession(SessionId),
+    /// Presentation could not allocate the Garden's minimum layout. Manual
+    /// commands fail visibly instead of leaving an invisible input owner.
+    GardenUnavailable,
 }
 
 /// What a click on the open Garden landed on.
@@ -2997,6 +3000,15 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
         AppEvent::VisitSession(session) => visit_session(state, session),
+        AppEvent::GardenUnavailable => {
+            if state.overlay == Some(Overlay::Garden) {
+                state.overlay = None;
+                state.notice = Some(Notice::new(
+                    "garden is unavailable at the current terminal size",
+                ));
+            }
+            Vec::new()
+        }
         // A live input is classified by `LiveInputClassifier` before reaching
         // this reducer. It still clears a pending grace, because grace is an
         // event-based one-shot rather than a timeout.
@@ -8818,6 +8830,21 @@ mod tests {
         assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
         assert_eq!(state.active(), Some(second));
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+    }
+
+    #[test]
+    fn unavailable_garden_closes_with_visible_feedback() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 40, 10);
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(update(&mut state, AppEvent::GardenUnavailable).is_empty());
+        assert_eq!(state.overlay(), None);
+        assert!(
+            state
+                .notice()
+                .is_some_and(|notice| notice.message.contains("terminal size"))
+        );
     }
 
     /// The press and the snapshot race. A session that left the workspace

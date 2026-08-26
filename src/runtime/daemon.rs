@@ -1,7 +1,5 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
-#![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final,planned_stop_retires_generation_endpoint_and_allows_safe_autostart
-
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,6 +8,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -182,6 +181,7 @@ struct TrustedLoginShell {
     workspace_root: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_terminal_profile_contract
 impl TrustedLoginShell {
     /// The workspace whose configured bindings this launch inherits.
     fn launch_workspace_root(
@@ -204,6 +204,7 @@ impl TrustedLoginShell {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_terminal_profile_contract
 impl TerminalProfileResolver for TrustedLoginShell {
     fn resolve(
         &mut self,
@@ -268,6 +269,7 @@ fn terminal_environment() -> BTreeMap<String, String> {
 #[derive(Default)]
 struct SpawnedChildren(Mutex<BTreeMap<u32, ChildIdentity>>);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=an_observed_child_stays_provable_until_its_release_is_dropped
 impl SpawnedChildren {
     /// Observe a freshly spawned child and record it as this process's own.
     ///
@@ -356,6 +358,7 @@ fn is_same_child(recorded: &ChildIdentity, start_identity: &str, process_group: 
 /// The store-side view of [`SpawnedChildren`]: it can only ask, never record.
 struct ObservedChildren(Arc<SpawnedChildren>);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=an_observed_child_stays_provable_until_its_release_is_dropped
 impl IdentityAuthority for ObservedChildren {
     fn verified(&self, process: &ProcessIdentity) -> Option<ChildIdentity> {
         self.0
@@ -394,6 +397,7 @@ impl LogicalClock for SystemLogicalClock {
 /// The pools keep the per-kind limits the coordinators enforce in memory, so the
 /// allocator refuses exactly what a single process would have refused — except
 /// that it also counts the generations that are still draining.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
 fn open_runtime_state(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -414,6 +418,7 @@ fn open_runtime_state(
 
 /// Reads this generation's shard and every retained one, migrating the legacy
 /// whole-snapshot stores on the first start that finds them.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=restart_hydrates_file_snapshot_before_dispatch_admission_and_preserves_ledger
 fn hydrate_runtime_state(
     state: &ShardedRuntimeState,
     what: &str,
@@ -452,6 +457,7 @@ struct DurableResourceCensus {
     data_dir: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=shipping_retention_limits_are_wired_into_root_composition
 impl ResourceCensus for DurableResourceCensus {
     fn live(&self) -> std::io::Result<LiveResources> {
         let archive = ShardArchiveFiles::new(&self.data_dir)?;
@@ -469,6 +475,7 @@ impl ResourceCensus for DurableResourceCensus {
 /// An unreadable or unparsable registry is reported as such rather than treated
 /// as absent, so an operator sees the difference between "no daemon ever
 /// registered a generation" and "the registry cannot be trusted".
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
     match usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir) {
         Ok(document) => {
@@ -487,6 +494,7 @@ fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
 
 /// Whether the operator explicitly gave up the live runtime a transition would
 /// destroy.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 const fn transition_mode(force: bool) -> TransitionMode {
     if force {
         TransitionMode::Cold
@@ -499,6 +507,7 @@ const fn transition_mode(force: bool) -> TransitionMode {
 /// within retention; a durable on-disk output journal is intentionally deferred
 /// with daemon-crash PTY FD continuation (out of scope for this issue).
 struct DiscardJournal;
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl OutputJournal for DiscardJournal {
     fn append(&mut self, _output: &Output) -> Result<(), ()> {
         Ok(())
@@ -523,6 +532,7 @@ struct RootCodexProvisioner {
     sandbox_cache_dir: Option<PathBuf>,
     sandbox_passthrough: bool,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_codex_launch_stays_in_the_repository_and_uses_the_daemon_mcp
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
         &mut self,
@@ -618,6 +628,7 @@ const CLAUDE_PROGRAM: &str = "claude";
 /// Ensure the launched agent's private state directory exists before a root
 /// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
 /// so the daemon creates and validates the provider-specific directory first.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_scope_grants_only_the_state_directory_of_the_agent_it_launches
 fn root_agent_writable_roots(
     home: Option<&Path>,
     program: &str,
@@ -653,10 +664,12 @@ fn root_agent_writable_roots(
 /// and deletion, so a live helper is never removed here.
 const CODEX_ARG0_REPAIR_LIMIT: usize = 4_096;
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
 fn repair_codex_arg0_permissions(state_root: &Path) -> std::io::Result<usize> {
     repair_codex_arg0_permissions_with_limit(state_root, CODEX_ARG0_REPAIR_LIMIT)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
 fn repair_codex_arg0_permissions_with_limit(
     state_root: &Path,
     limit: usize,
@@ -734,6 +747,7 @@ struct RootClaudeProvisioner {
     /// 同じ opt-in を伝え、backend の無い環境でも live 起動経路を通す。release ビルドでは常に false。
     sandbox_passthrough: bool,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl RootClaudeProvisioner {
     /// The policy paths this launch may carry. Both scopes carry the same
     /// universal areas: the agent CLI keeps its scratchpad, state and credential
@@ -751,6 +765,7 @@ impl RootClaudeProvisioner {
         }
     }
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
         &mut self,
@@ -928,6 +943,7 @@ fn insert_root_git_environment(spawn: &mut SpawnProvision) {
 ///
 /// `program` names the agent CLI this launch execs, so the check covers the same
 /// `$HOME` state root the launcher will grant it.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
 fn validate_root_git_common_dir_policy(
     workspace_root: &Path,
     program: &str,
@@ -966,6 +982,7 @@ fn validate_root_git_common_dir_policy(
     (!overlaps).then_some(()).ok_or(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
 fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
     fn read_path(path: &Path, prefix: Option<&str>) -> Result<PathBuf, ()> {
         let metadata = std::fs::metadata(path).map_err(|_| ())?;
@@ -1036,6 +1053,7 @@ struct SandboxPolicyInputs<'a> {
 
 /// launcher へ host path を渡す前に通す policy gate。writable root 集合・`$HOME` 配下の
 /// state root・（root mode では）Git common dir を、保護対象 workspace と突き合わせる。
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn validate_claude_sandbox_policy(
     policy: &SandboxPolicyInputs<'_>,
 ) -> Result<(), ClaudeSandboxPolicyError> {
@@ -1128,6 +1146,7 @@ fn validate_claude_sandbox_policy(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_cold_starts_through_the_out_of_sandbox_broker
 fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(ClaudeSandboxPolicyError::InvalidBackend);
@@ -1147,6 +1166,7 @@ fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError>
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn validate_owned_directory(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
@@ -1166,6 +1186,7 @@ fn validate_owned_directory(path: &Path) -> Result<(), ClaudeSandboxPolicyError>
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn path_has_symlink_component(path: &Path) -> bool {
     path.ancestors().any(|component| {
         std::fs::symlink_metadata(component).map_or(true, |metadata| {
@@ -1174,6 +1195,7 @@ fn path_has_symlink_component(path: &Path) -> bool {
     })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_policy_accepts_the_per_user_cache_root
 fn is_macos_system_firmlink(path: &Path) -> bool {
     cfg!(target_os = "macos") && matches!(path.to_str(), Some("/var" | "/tmp" | "/etc"))
 }
@@ -1241,6 +1263,7 @@ struct SandboxLauncherPaths<'a> {
 /// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
 /// instruction that makes the spawned child the launcher instead of the bare
 /// product.  Host paths stay out of the durable launch snapshot.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn claude_sandbox_launcher(
     usagi: &Path,
     mode: SandboxMode,
@@ -1280,6 +1303,7 @@ fn claude_sandbox_launcher(
 /// `--settings <json>`: the scoped hook wiring Claude loads for this launch.
 /// The payload is passed inline so no host path or rendered product payload has
 /// to be materialized on disk.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn claude_settings_arguments(usagi: &Path) -> Result<Vec<String>, ()> {
     let usagi = usagi.to_str().ok_or(())?;
     Ok(vec!["--settings".to_owned(), scoped_settings_json(usagi)])
@@ -1309,6 +1333,7 @@ fn claude_prompt_arguments(prompt: String) -> Vec<String> {
 
 /// The configured environment for a launch in `workspace_root`, or nothing when
 /// no reader is wired (tests that exercise only the MCP / sandbox wiring).
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn configured_environment(
     environment: Option<&Arc<SharedUserEnvironment>>,
     workspace_root: &Path,
@@ -1322,6 +1347,7 @@ fn configured_environment(
 /// The durable allowlist for a launch: the MCP names plus the configured
 /// variable names. Only names are durable — values and secrets stay in the
 /// ephemeral spawn provision.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn launch_allowlist(
     context: &ProvisionContext,
     user: &BTreeMap<String, String>,
@@ -1343,6 +1369,7 @@ fn launch_environment(
     environment
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<EnvironmentVariableName> {
     if context.inject_mcp {
         [
@@ -1365,6 +1392,7 @@ fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<Environment
 /// re-applying the mode lands it on the very directory the daemon is using.
 /// Both values come from the one [`paths::DataHome`] pair, never from separate
 /// derivations that could disagree.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn mcp_environment(
     context: &ProvisionContext,
     data_home: &paths::DataHome,
@@ -1404,6 +1432,7 @@ fn mcp_environment(
 /// Product-specific MCP and structured-hook launch arguments. They stay ephemeral in
 /// [`SpawnProvision`] so the durable launch plan never stores configuration
 /// paths or rendered product payloads.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn codex_integration_arguments(
     command: &Path,
     local_llm_model: Option<&str>,
@@ -1447,6 +1476,7 @@ fn codex_developer_instructions_arguments(prompt: &str) -> Vec<String> {
 /// Renders a TOML basic string without involving a shell. The prompt contains
 /// newlines, and callers may supply quotes, backslashes, or control characters,
 /// so every character TOML forbids literally is escaped.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn toml_basic_string(text: &str) -> String {
     let mut rendered = String::with_capacity(text.len() + 2);
     rendered.push('"');
@@ -1474,6 +1504,7 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'"'"'"#))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_disabled_family_leaves_both_the_registry_and_the_agent_prompt
 fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
     Ok(claude_product_mcp_arguments(command, local_llm_model))
@@ -1511,6 +1542,7 @@ impl ConfiguredMcpTools {
 /// Unreadable settings fail the launch, exactly as they fail `usagi mcp` before
 /// its serve loop starts. Falling back to the defaults here would launch an agent
 /// whose prompt advertises tools its own MCP server could not register.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_disabled_family_leaves_both_the_registry_and_the_agent_prompt
 fn configured_mcp_tools(
     data_home: &paths::DataHome,
     workspace_root: &Path,
@@ -1583,6 +1615,7 @@ impl Default for SystemAgentReadiness {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 impl AgentReadinessProbe for SystemAgentReadiness {
     fn observe(&self, product: &str) -> AgentReadiness {
         // Which products exist, and which status command proves each one usable,
@@ -1598,6 +1631,7 @@ impl AgentReadinessProbe for SystemAgentReadiness {
 }
 
 impl SystemAgentReadiness {
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
     fn ready_command(&self, product: &str, program: &str, arguments: &[&str]) -> AgentReadiness {
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
@@ -1674,6 +1708,7 @@ fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness 
         | ChildObservation::ObservationFailed => AgentReadiness::Unavailable,
     }
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
     workspaces: &Workspaces,
     context: &ProvisionContext,
@@ -1706,6 +1741,7 @@ fn working_directories(
 /// current definition from the registered workspace catalog. The instruction
 /// remains in this ephemeral provision path and is never copied into a launch
 /// request, durable snapshot, dispatch record, response, or log.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn effective_role_instruction(
     workspaces: &Workspaces,
     data_home: &paths::DataHome,
@@ -1768,6 +1804,7 @@ struct TenantWorkspaces {
     initial: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl TenantWorkspaces {
     /// The canonical spelling of a declared root, or the typed refusal for a
     /// root that cannot be resolved on this machine.
@@ -1829,6 +1866,7 @@ fn is_session_worktree_path(path: &Path) -> bool {
         .any(|pair| pair[0] == *".usagi" && pair[1] == *"sessions")
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
     fn resolve(
         &self,
@@ -1922,6 +1960,7 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
 /// The handshake has already adopted or refused; this is the lookup of what it
 /// settled on. A miss means the workspace was retired between the two steps, and
 /// the connection is closed rather than served another workspace's state.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn connection_workspace(
     workspaces: &Workspaces,
     initial: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
@@ -1954,6 +1993,7 @@ struct ConnectionWorkspace {
     workspaces: Workspaces,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl ConnectionWorkspace {
     /// The lifecycle runtime of the workspace this connection is bound to.
     fn sessions(&self) -> &SharedSessionRuntime {
@@ -1969,6 +2009,7 @@ impl ConnectionWorkspace {
 /// The #268 scope resolver, adapted to the Agent owner's product-neutral
 /// `(workspace, session)` input by deriving the available session's worktree.
 struct SharedScopeResolver(Workspaces);
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 impl SessionScopeResolver for SharedScopeResolver {
     fn resolve_available_scope(
         &self,
@@ -2018,6 +2059,7 @@ impl SessionScopeResolver for SharedScopeResolver {
 /// resolver, generic terminal requests already carry a worktree ID, so the
 /// runtime verifies that exact identity before admitting a PTY spawn.
 struct SharedTerminalScopeResolver(Workspaces);
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 impl TerminalScopeResolver for SharedTerminalScopeResolver {
     fn resolve_available_scope(
         &self,
@@ -2051,6 +2093,7 @@ impl TerminalScopeResolver for SharedTerminalScopeResolver {
         })
     }
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Option<WorktreeId> {
     let target = serde_json::to_value(session).ok()?;
     snapshot
@@ -2085,6 +2128,7 @@ type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 struct AgentDecisionWaker<'a> {
     agent: &'a SharedAgentRuntime,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl DecisionWaker for AgentDecisionWaker<'_> {
     fn wake(&mut self, wake: &DecisionWake) -> anyhow::Result<()> {
         let prompt = format!(
@@ -2122,6 +2166,7 @@ impl DecisionWaker for AgentDecisionWaker<'_> {
 }
 
 struct DeferredDecisionWaker;
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 impl DecisionWaker for DeferredDecisionWaker {
     fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
         anyhow::bail!("parent agent wake is deferred until the agent owner is available")
@@ -2134,6 +2179,7 @@ struct SharedAgent {
     runtime: SharedAgentRuntime,
     disconnected: SyncSender<ConnectionId>,
 }
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl AgentTerminalActor for SharedAgent {
     fn handle(
         &mut self,
@@ -2204,6 +2250,7 @@ struct TerminalPipelineMetrics {
     backpressured_bytes: AtomicU64,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=metrics_snapshot_is_served_through_the_daemon_endpoint
 impl TerminalPipelineMetrics {
     fn observe_backpressure(&self, bytes: usize) {
         self.backpressured_bytes
@@ -2265,6 +2312,7 @@ impl AgentPty {
         )
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_restart_rolls_over_two_real_pty_children_without_provider_resume
 impl PtySpawner for AgentPty {
     fn spawn(
         &mut self,
@@ -2375,6 +2423,7 @@ fn provisioned_agent_command(
     (program, argv)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 fn send_agent_observation(
     sender: &SyncSender<AgentPtyObservation>,
     observation: AgentPtyObservation,
@@ -2390,6 +2439,7 @@ fn send_agent_observation(
         Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 impl PtyWriter for AgentPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
@@ -2464,6 +2514,7 @@ impl DaemonPty {
         )
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn
 impl GenericPtySpawner for DaemonPty {
     fn spawn(
         &mut self,
@@ -2531,6 +2582,7 @@ impl GenericPtySpawner for DaemonPty {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respawn
 fn send_pty_observation(
     sender: &SyncSender<PtyObservation>,
     observation: PtyObservation,
@@ -2546,6 +2598,7 @@ fn send_pty_observation(
         Err(TrySendError::Disconnected(_)) => Err(()),
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
 impl PtyWriter for DaemonPty {
     fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
@@ -2685,6 +2738,7 @@ struct DecisionWaiters {
     waiting: Mutex<BTreeMap<usagi_core::domain::id::UserDecisionId, Vec<DecisionWaiter>>>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl DecisionWaiters {
     fn subscribe(
         self: &Arc<Self>,
@@ -2782,6 +2836,7 @@ struct ProductionRefreshClock {
     started: Instant,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 impl RefreshClock for ProductionRefreshClock {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -2791,6 +2846,7 @@ impl RefreshClock for ProductionRefreshClock {
 #[derive(Clone, Copy)]
 struct GhProcess;
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 impl GhProcessPort for GhProcess {
     type Error = std::io::Error;
 
@@ -2800,33 +2856,25 @@ impl GhProcessPort for GhProcess {
         argv: &[String],
         timeout_ms: u64,
     ) -> Result<String, Self::Error> {
-        let mut child = Command::new(program)
-            .args(argv)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let mut output = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    stdout.read_to_string(&mut output)?;
-                }
-                return status
-                    .success()
-                    .then_some(output)
-                    .ok_or_else(|| std::io::Error::other("PR provider failed"));
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "PR provider timed out",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let arguments = argv.iter().map(String::as_str).collect::<Vec<_>>();
+        match observe(
+            program,
+            &arguments,
+            ChildPolicy {
+                timeout: Duration::from_millis(timeout_ms),
+                terminate_grace: Duration::from_millis(100),
+                output_limit: 256 * 1024,
+            },
+        ) {
+            ChildObservation::Success(output) => Ok(output),
+            ChildObservation::TimedOut => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "PR provider timed out",
+            )),
+            ChildObservation::OutputTooLarge => Err(std::io::Error::other(
+                "PR provider output exceeded the safe limit",
+            )),
+            _ => Err(std::io::Error::other("PR provider failed")),
         }
     }
 }
@@ -2836,6 +2884,7 @@ struct ProcessResourceSampler {
     previous: Option<(Instant, u64)>,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=dispatch_metrics_reads_the_process_resource_sample
 impl ProcessResourceSampler {
     fn snapshot(&mut self) -> (u32, u64) {
         let now = Instant::now();
@@ -2859,6 +2908,7 @@ impl ProcessResourceSampler {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=dispatch_metrics_reads_the_process_resource_sample
 fn process_resource_usage() -> Option<(u64, u64)> {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) } != 0 {
@@ -2881,6 +2931,7 @@ fn process_resource_usage() -> Option<(u64, u64)> {
 
 type SharedMetricsBroker = Arc<Mutex<MetricsBroker>>;
 type SharedProcessResourceSampler = Arc<Mutex<ProcessResourceSampler>>;
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
     fn handle(
         &mut self,
@@ -2931,6 +2982,7 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
 /// worker retains the accepted reader, writer, and retirement descriptor until
 /// the mutex is acquired. One daemon-owned consumer bounds the contention and
 /// lets the connection worker close all three descriptors immediately.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=drawer_close_reopen_continues_input_on_the_same_daemon_connection
 fn start_connection_cleanup_worker(
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
@@ -2983,6 +3035,7 @@ struct DaemonBackgroundWorkers {
     terminal_observations: Option<SyncSender<PtyObservation>>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=lifecycle_owner_closes_sources_and_joins_every_critical_worker
 impl DaemonBackgroundWorkers {
     fn new(shutdown: Arc<ShutdownRequest>, projection: Arc<PrProjectionQueue>) -> Self {
         Self {
@@ -3034,6 +3087,7 @@ impl Drop for DaemonBackgroundWorkers {
 // workspace, build, owner record, custody probe, shutdown); bundling them would only
 // hide the composition wiring.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn spawn_ipc_server(
     listener: SecureUnixListener,
     generation: &usagi_core::infrastructure::ipc::DaemonGeneration,
@@ -3231,7 +3285,7 @@ fn spawn_ipc_server(
             tenant: initial.clone(),
             workspaces: Arc::clone(&workspaces),
         },
-        &DispatchStore::new(data_dir.join("daemon")),
+        &DispatchStore::new(&data_dir.join("daemon")),
         &teardown,
     );
     if compensated != 0 {
@@ -3299,6 +3353,7 @@ fn spawn_ipc_server(
 /// Removes Agent records whose managed session was already retired by an
 /// older daemon. This startup pass repairs the historical state where session
 /// teardown removed the lifecycle row without closing its Agent owner.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn reconcile_removed_session_agents(
     daemon_dir: &Path,
     agent: &SharedAgentRuntime,
@@ -3333,6 +3388,7 @@ fn reconcile_removed_session_agents(
 /// retained: a collection could never unblock it, so pretending it is joinable
 /// would park retirement. Production accept loops fail closed before spawning
 /// in that case; the error branch remains defensive for injected callers.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 fn retain_client_worker(
     workers: &ClientWorkers,
     unblock: std::io::Result<AcceptedStream>,
@@ -3356,6 +3412,7 @@ fn retain_client_worker(
 
 /// Reap completed workers before deciding whether another accepted connection
 /// can acquire daemon-owned descriptors and a thread.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 fn client_connection_capacity_available(workers: &ClientWorkers, limit: usize) -> bool {
     let report = workers.reap_finished();
     if !report.is_clean() {
@@ -3396,6 +3453,7 @@ fn client_connection_limit_from_nofile(soft_limit: u64) -> usize {
         .clamp(1, CLIENT_CONNECTION_LIMIT_CEILING)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 fn client_connection_limit() -> usize {
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     // SAFETY: `limit` points to writable storage for one `rlimit`, and the
@@ -3412,6 +3470,7 @@ fn client_connection_limit() -> usize {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn bind_ipc_listener(
     data_dir: &Path,
 ) -> std::io::Result<(
@@ -3433,6 +3492,7 @@ fn bind_ipc_listener(
 /// Starts the only production PR refresh worker. Remote calls happen outside
 /// the shared inventory lock, so snapshot and terminal paths continue to make
 /// progress while `gh` is slow.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn start_pr_refresh_worker(
     pr_inventory: SharedPrInventory,
     daemon_dir: PathBuf,
@@ -3465,6 +3525,7 @@ fn start_pr_refresh_worker(
 ///
 /// `None` when any of them cannot be read: pruning on a partial view is exactly
 /// the deletion this guards against.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<SessionId>> {
     let mut known = std::collections::BTreeSet::new();
     for state in usagi_core::infrastructure::workspace_state::adopted(daemon_dir).ok()? {
@@ -3487,6 +3548,7 @@ fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<Sessio
     Some(known)
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn spawn_pr_refresh_worker<R, C>(
     pr_inventory: SharedPrInventory,
     daemon_dir: Option<PathBuf>,
@@ -3553,6 +3615,7 @@ where
 /// owns the unbounded `git worktree remove` plus `remove_dir_all` afterwards.
 /// Its work list is derived from durable state, so it also resumes a teardown
 /// that a previous daemon was interrupted in.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn start_session_teardown_worker(
     workspaces: Workspaces,
     agent: SharedAgentRuntime,
@@ -3582,6 +3645,7 @@ struct WorkspacesTeardown {
     workspaces: Workspaces,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 impl TeardownJournal for WorkspacesTeardown {
     fn pending(&self) -> Vec<PendingTeardown> {
         self.workspaces
@@ -3614,6 +3678,7 @@ struct AgentAndWorktreeTeardown<E> {
     worktree: E,
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
     fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
         self.agent
@@ -3625,6 +3690,7 @@ impl<E: TeardownEffect> TeardownEffect for AgentAndWorktreeTeardown<E> {
     }
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn spawn_session_teardown_worker<J, E>(
     journal: J,
     effect: E,
@@ -3705,6 +3771,7 @@ struct DaemonWorkspaceActivity {
     agent: SharedAgentRuntime,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
     for DaemonWorkspaceActivity
 {
@@ -3727,6 +3794,7 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn start_tenant_retire_worker(
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     activity: DaemonWorkspaceActivity,
@@ -3741,6 +3809,7 @@ fn start_tenant_retire_worker(
     )
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn spawn_tenant_retire_worker<A>(
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     activity: A,
@@ -3773,6 +3842,7 @@ where
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 fn start_custody_worker(
     probe: FsCustodyProbe,
     owner: DaemonRecord,
@@ -3783,6 +3853,7 @@ fn start_custody_worker(
     spawn_custody_worker(probe, owner, data_dir, gate, shutdown, CUSTODY_TICK)
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 fn spawn_custody_worker<P>(
     probe: P,
     owner: DaemonRecord,
@@ -3857,6 +3928,7 @@ const DRAINING_COLLECTION_TICK: Duration = Duration::from_millis(250);
 /// Starts the only production retention collector. Launch and exit already
 /// collect on the spot; this worker covers an idle daemon, where the age budget
 /// and the minimum visibility TTL are the only things still moving.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_retention_collector_ticks_until_shutdown_and_stops_when_already_down
 fn start_retention_gc_worker(
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
@@ -3888,6 +3960,7 @@ fn start_retention_gc_worker(
 
 /// The worker loop, with the collection step injected so a test can drive it
 /// without a daemon, a PTY, or a store.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=the_retention_collector_ticks_until_shutdown_and_stops_when_already_down
 fn spawn_retention_gc_worker<C>(
     mut collect: C,
     shutdown: Arc<ShutdownRequest>,
@@ -3912,6 +3985,7 @@ where
 
 /// Starts the worker that ends this process after a handoff once its owner shard
 /// and global allocator have no claim left.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_draining_collector_retries_observations_and_never_outlives_shutdown
 fn start_draining_collection_worker(
     durable: ShardedRuntimeState,
     registry: GenerationRegistry,
@@ -3952,6 +4026,7 @@ fn start_draining_collection_worker(
 /// local gate had irreversibly retired). The shutdown request wakes the serve
 /// thread, which joins the accept loop and every late-registered client worker
 /// before it unlinks the endpoint and exits the process.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=the_draining_collector_retries_observations_and_never_outlives_shutdown
 fn spawn_draining_collection_worker<C>(
     mut collect: C,
     shutdown: Arc<ShutdownRequest>,
@@ -3989,6 +4064,7 @@ struct FsCustodyProbe {
     record: FsRecordFile,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 impl CustodyProbe for FsCustodyProbe {
     fn locked_inode(&self) -> std::io::Result<NodeIdentity> {
         self.locked.ok_or_else(|| {
@@ -4030,6 +4106,7 @@ fn node_identity(metadata: &std::fs::Metadata) -> NodeIdentity {
 /// Keeps decision deadlines progressing even when no subsequent MCP/TUI
 /// request arrives. Every action is idempotent, so a daemon restart simply
 /// resumes from the JSON store.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn start_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
     waiters: Arc<DecisionWaiters>,
@@ -4040,6 +4117,7 @@ fn start_decision_maintenance(
 
 /// The loop, with the tick injected so a test can drive it without waiting out
 /// the production cadence.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn spawn_decision_maintenance(
     decisions: Arc<UserDecisionStore>,
     waiters: Arc<DecisionWaiters>,
@@ -4066,6 +4144,7 @@ fn spawn_decision_maintenance(
         })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=repairs_reused_codex_arg0_files_before_launch
 fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
     // Repair only stale directory modes before the Agent owner mutex exists.
     // Codex performs the lock-aware deletion itself after startup.
@@ -4087,6 +4166,7 @@ fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
 }
 
 #[allow(clippy::too_many_arguments)] // Composition injects each Agent dependency separately.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn open_agent_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -4186,7 +4266,7 @@ fn open_agent_runtime(
         pty,
         AgentProfileId::new("codex").expect("literal profile id is canonical"),
         Geometry { cols: 80, rows: 24 },
-        DispatchStore::new(data_dir.join("daemon")),
+        DispatchStore::new(&data_dir.join("daemon")),
         usagi_core::infrastructure::runtime_model::PathExecutableLocator,
         snapshot,
         retention,
@@ -4206,6 +4286,7 @@ fn open_agent_runtime(
     }))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_fixture_codex_survives_disconnect_and_replays_final
 fn start_agent_observer(
     agent: std::sync::Weak<SharedAgentState>,
     observations: Receiver<AgentPtyObservation>,
@@ -4284,6 +4365,7 @@ fn start_agent_observer(
 /// It owns every scan and every durable inventory write that PTY output causes.
 /// The queue's `recv` parks on a condvar and returns `None` once the queue is
 /// closed and drained, so this thread has no timer and no polling.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn start_pr_projection_worker(
     pr_inventory: SharedPrInventory,
     projection: Arc<PrProjectionQueue>,
@@ -4318,6 +4400,7 @@ fn start_pr_projection_worker(
     )
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=planned_critical_worker_shutdown_joins_without_a_health_failure
 fn spawn_critical_worker<R, F>(
     name: &str,
     worker: BackgroundWorker,
@@ -4347,6 +4430,7 @@ where
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn open_session_runtime(
     repo_root: PathBuf,
     state_dir: &Path,
@@ -4368,6 +4452,7 @@ fn open_session_runtime(
 /// Reads the root selected by the durable session store, rather than the
 /// daemon process's startup directory. This keeps terminal profile resolution
 /// aligned with restored managed-session state after a restart.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<PathBuf> {
     sessions
         .lock()
@@ -4376,6 +4461,7 @@ fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<P
 }
 
 #[allow(clippy::too_many_arguments)] // Composition injects each terminal dependency separately.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 fn new_terminal_runtime(
     data_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -4414,6 +4500,7 @@ fn new_terminal_runtime(
     Ok(Arc::new(Mutex::new(runtime)))
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 fn start_terminal_observer<S, Q>(
     terminal: std::sync::Weak<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
@@ -4476,6 +4563,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Composition owns the independently injected daemon services.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 fn start_ipc_accept_loop(
     listener: SecureUnixListener,
     server: usagi_core::infrastructure::ipc::ServerProtocol,
@@ -4757,7 +4845,7 @@ fn start_ipc_accept_loop(
                                         Some("pr" | "pr_batch" | "pr_dismiss") => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                         Some("dispatch_tool") => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, wait: DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation } }, request_id, &body, hello),
                                         Some("supervisor_tool") => {
-                                            let caller = authenticated_supervisor_caller(&agent_launch, &client, &body);
+                                            let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                             dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                         },
                                         Some("user_decision") => dispatch_user_decision(&agent_launch, &bound, &decisions, DecisionWaitContext { waiters: &decision_waiters, cancellation: &decision_cancellation }, request_id, &body, hello),
@@ -4949,6 +5037,7 @@ struct DispatchToolContext<'a> {
     wait: DecisionWaitContext<'a>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 fn dispatch_dispatch_tool(
     context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -4995,6 +5084,7 @@ fn dispatch_dispatch_tool(
 }
 
 #[allow(clippy::too_many_lines)] // One handler keeps authentication and durable routing atomic.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 fn dispatch_agent_tool(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -5092,14 +5182,21 @@ fn dispatch_agent_tool(
         let mut runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
         })?;
-        let caller = runtime
-            .mcp_dispatch_caller(&credential.credential)
+        let authenticated = runtime
+            .mcp_dispatch_context(&credential.credential)
             .ok_or_else(|| {
                 ProtocolError::new(
                     ErrorCode::OwnershipUnknown,
                     "agent caller provenance is unknown",
                 )
             })?;
+        if authenticated.workspace_id != workspace {
+            return Err(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "agent caller does not belong to this workspace",
+            ));
+        }
+        let caller = authenticated.caller;
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
             let mut runs = store
@@ -5165,11 +5262,12 @@ fn dispatch_agent_tool(
                 let session_name = input.session.name;
                 let requested_role = input.session.role;
                 drop(runtime);
-                authorize_delegation(
+                let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
                     Some(&caller),
                     Some(&serde_json::json!(requested_role)),
+                    &operation_id,
                 )
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
@@ -5396,6 +5494,7 @@ fn dispatch_agent_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn project_reported_pr(
     inventory: &SharedPrInventory,
     session: Option<SessionId>,
@@ -5415,6 +5514,7 @@ fn project_reported_pr(
 }
 
 #[allow(clippy::too_many_lines)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn dispatch_supervisor_tool(
     runtime: &SharedSupervisorRuntime,
     caller: Result<String, usagi_core::infrastructure::ipc::ProtocolError>,
@@ -5674,8 +5774,10 @@ fn dispatch_supervisor_tool(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn authenticated_supervisor_caller(
     agent: &SharedAgentRuntime,
+    bound: &ConnectionWorkspace,
     client: &usagi_core::domain::id::ClientId,
     body: &serde_json::Value,
 ) -> Result<String, usagi_core::infrastructure::ipc::ProtocolError> {
@@ -5694,19 +5796,40 @@ fn authenticated_supervisor_caller(
                 "supervisor caller provenance is unknown",
             )
         })?;
-    let caller = agent
+    let workspace = bound
+        .sessions()
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
+        .snapshot()
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+        })?
+        .get("workspace_id")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
+        })?;
+    let authenticated = agent
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
-        .mcp_dispatch_caller(&credential.credential)
+        .mcp_dispatch_context(&credential.credential)
         .ok_or_else(|| {
             ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
                 "supervisor caller provenance is unknown",
             )
         })?;
-    Ok(supervisor_caller_descriptor(client, &caller))
+    if authenticated.workspace_id != workspace {
+        return Err(ProtocolError::new(
+            ErrorCode::OwnershipUnknown,
+            "supervisor caller does not belong to this workspace",
+        ));
+    }
+    Ok(supervisor_caller_descriptor(client, &authenticated.caller))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn supervisor_caller_descriptor(
     client: &usagi_core::domain::id::ClientId,
     caller: &usagi_core::domain::agent::CallerRef,
@@ -5720,6 +5843,7 @@ fn supervisor_caller_descriptor(
     )
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let message = error.to_string();
@@ -5736,6 +5860,7 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
 
 /// PR events are deliberately only hints; the IPC request always returns this
 /// durable snapshot so reconnects and dropped events converge without replay.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
 fn dispatch_pr_snapshot(
     inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -5803,6 +5928,7 @@ enum UserDecisionDispatchError {
     Cancelled,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecisionDispatchError {
     fn from(error: usagi_core::domain::user_decision::UserDecisionError) -> Self {
         Self::Decision(error)
@@ -5810,6 +5936,7 @@ impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecision
 }
 
 #[allow(clippy::too_many_lines)] // The complete wire-to-store error mapping is one atomic routing contract.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn dispatch_user_decision(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -5919,12 +6046,21 @@ fn dispatch_user_decision(
                 "decision caller provenance is unknown",
             )
         })?;
-        let run_id = runtime.mcp_caller(&credential.credential).ok_or_else(|| {
-            ProtocolError::new(
+        let authenticated = runtime
+            .mcp_dispatch_context(&credential.credential)
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::OwnershipUnknown,
+                    "decision caller provenance is unknown",
+                )
+            })?;
+        if authenticated.workspace_id != workspace {
+            return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
-                "decision caller provenance is unknown",
-            )
-        })?;
+                "decision caller does not belong to this workspace",
+            ));
+        }
+        let run_id = authenticated.run_id;
         let dispatch = runtime.dispatch_store();
         let run = dispatch
             .runs()
@@ -6000,7 +6136,12 @@ fn dispatch_user_decision(
                             prompt: input.prompt,
                             options: input.options,
                             allow_freeform: input.allow_freeform,
-                            expires_at: input.expires_at,
+                            // An omitted deadline is finite by default so an
+                            // abandoned synchronous waiter cannot occupy a
+                            // pending slot forever.
+                            expires_at: input
+                                .expires_at
+                                .or_else(|| now.checked_add_signed(chrono::Duration::hours(24))),
                             idempotency_key: input.idempotency_key,
                             status: UserDecisionStatus::Pending,
                             answer: None,
@@ -6069,6 +6210,10 @@ fn dispatch_user_decision(
                     ErrorCode::IdempotencyConflict,
                     "decision idempotency key conflicts",
                 ),
+                UserDecisionDispatchError::Decision(UserDecisionError::InvalidRequest) => (
+                    ErrorCode::InvalidArgument,
+                    "decision request must be bounded and offer at least one answer path",
+                ),
                 UserDecisionDispatchError::Decision(UserDecisionError::InvalidOption) => {
                     (ErrorCode::InvalidArgument, "decision option is not allowed")
                 }
@@ -6110,6 +6255,7 @@ fn dispatch_user_decision(
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn wait_for_user_decision(
     decisions: &UserDecisionStore,
     waiters: &Arc<DecisionWaiters>,
@@ -6167,6 +6313,7 @@ fn wait_for_user_decision(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 fn consume_user_decision_events(
     decisions: &UserDecisionStore,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
@@ -6196,6 +6343,7 @@ fn consume_user_decision_events(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn dispatch_dispatch(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
@@ -6268,6 +6416,7 @@ fn dispatch_dispatch(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<SessionId> {
     snapshot
         .get("sessions")?
@@ -6280,6 +6429,7 @@ fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<Sessio
         .and_then(|session| serde_json::from_value(session.get("session_id")?.clone()).ok())
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
@@ -6334,6 +6484,7 @@ fn dispatch_rollover(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=metrics_snapshot_is_served_through_the_daemon_endpoint
 fn dispatch_metrics(
     metrics: &SharedMetricsBroker,
     process_metrics: &SharedProcessResourceSampler,
@@ -6421,6 +6572,7 @@ fn dispatch_metrics(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn dispatch_session(
     bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
@@ -6456,6 +6608,7 @@ fn dispatch_session(
     session_response_envelope(action, result, request_id, hello)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
     body.get("caller_context")
         .and_then(|context| context.get("credential"))
@@ -6467,6 +6620,7 @@ fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
         })
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_mcp_child_claim(
     agent: &SharedAgentRuntime,
     peer_process: (u32, u32, u32),
@@ -6505,6 +6659,7 @@ fn dispatch_mcp_child_claim(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 fn session_response_envelope(
     action: usagi_core::usecase::client::SessionAction,
     result: Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError>,
@@ -6608,6 +6763,7 @@ fn session_response_envelope(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 fn exact_merged_pr_head(
     inventory: Option<usagi_core::usecase::client::PrSnapshot>,
     branch_head: Option<String>,
@@ -6639,6 +6795,7 @@ fn best_effort_merged_pr_head(
 }
 
 #[allow(clippy::too_many_lines)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn dispatch_session_action(
     bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
@@ -6714,8 +6871,12 @@ fn dispatch_session_action(
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let store = runtime.dispatch_store();
             let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;
-            let bindings = store.bindings().map_err(|_| SessionRuntimeError::Storage)?;
-            let runs = store.runs().map_err(|_| SessionRuntimeError::Storage)?;
+            let workspace = bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .workspace_id()
+                .map_err(|_| SessionRuntimeError::Storage)?;
             if let Some(items) = status
                 .body
                 .get_mut("sessions")
@@ -6736,21 +6897,9 @@ fn dispatch_session_action(
                             .filter(|agent| agent.session_id == Some(id))
                             .max_by_key(|agent| agent.current_run.is_some());
                         item["agent_status"] = serde_json::json!(member.map(|agent| agent.status));
-                        let parent_session = bindings
-                            .iter()
-                            .filter(|binding| binding.worker.session_id == Some(id))
-                            // Multiple agents may hand work off inside one session, but
-                            // that does not create a new organizational level. Only a
-                            // cross-session dispatch owns a parent/child relationship.
-                            .filter(|binding| {
-                                binding.caller.session_id != binding.worker.session_id
-                            })
-                            .max_by_key(|binding| {
-                                runs.iter()
-                                    .find(|run| run.run_id == binding.run_id)
-                                    .map(|run| run.started_at)
-                            })
-                            .and_then(|binding| binding.caller.session_id);
+                        let parent_session = store
+                            .session_parent(workspace, id)
+                            .map_err(|_| SessionRuntimeError::Storage)?;
                         item["parent_session_id"] = serde_json::json!(parent_session);
                     }
                 }
@@ -6975,18 +7124,32 @@ fn dispatch_session_action(
             payload,
         )?),
         SessionAction::DelegateIssue => {
-            let caller = payload
+            let authenticated = payload
                 .get("_caller_credential")
                 .and_then(serde_json::Value::as_str)
                 .map(|credential| {
                     agent
                         .lock()
                         .map_err(|_| SessionRuntimeError::Storage)?
-                        .mcp_dispatch_caller(credential)
+                        .mcp_dispatch_context(credential)
                         .ok_or(SessionRuntimeError::ScopeUnavailable)
                 })
                 .transpose()?;
-            authorize_delegation(bound, agent, caller.as_ref(), payload.get("role"))?;
+            let workspace = bound_workspace()?;
+            if authenticated
+                .as_ref()
+                .is_some_and(|context| context.workspace_id != workspace)
+            {
+                return Err(SessionRuntimeError::ScopeUnavailable);
+            }
+            let caller = authenticated.map(|context| context.caller);
+            let _delegation_permit = authorize_delegation(
+                bound,
+                agent,
+                caller.as_ref(),
+                payload.get("role"),
+                operation_id,
+            )?;
             let (name, prompt) = {
                 let number = payload
                     .get("number")
@@ -7034,12 +7197,19 @@ fn dispatch_session_action(
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_id(&name)?;
-            let workspace = bound_workspace()?;
             let delivery = if let Some(caller) = caller {
                 let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
                 runtime
                     .dispatch_store()
-                    .queue_delegated_prompt(workspace, Some(id), prompt, chrono::Utc::now(), caller)
+                    .queue_delegated_prompt(
+                        workspace,
+                        Some(id),
+                        prompt,
+                        chrono::Utc::now(),
+                        caller,
+                        usagi_core::domain::id::OperationId::parse(operation_id)
+                            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
+                    )
                     .map_err(|_| SessionRuntimeError::Storage)?;
                 usagi_daemon::usecase::agent_ipc::PromptDelivery {
                     delivered_to: "queue",
@@ -7100,6 +7270,7 @@ fn dispatch_session_action(
 /// would reject every such selector — after the worktree already existed. The
 /// tool schema no longer advertises that branch and this is the daemon-side half
 /// of the same rule.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_publishes_and_accepts_only_a_new_agent_selector
 fn new_agent_selector(
     selector: Option<&serde_json::Value>,
 ) -> Result<
@@ -7132,13 +7303,40 @@ fn new_agent_selector(
 /// Applies configured company-role authority before any delegated side effect.
 /// Catalogs without a `delegation` block keep their established permissive
 /// behavior; once a block is present the daemon owns every decision.
+struct DelegationPermit {
+    store: Option<usagi_core::infrastructure::store::dispatch::DispatchStore>,
+    operation_id: Option<usagi_core::domain::id::OperationId>,
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+impl DelegationPermit {
+    const fn inert() -> Self {
+        Self {
+            store: None,
+            operation_id: None,
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+impl Drop for DelegationPermit {
+    fn drop(&mut self) {
+        if let (Some(store), Some(operation_id)) = (&self.store, self.operation_id) {
+            let _ = store.release_delegation(operation_id);
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
 fn authorize_delegation(
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,
     caller: Option<&usagi_core::domain::agent::CallerRef>,
     requested_role: Option<&serde_json::Value>,
-) -> Result<(), SessionRuntimeError> {
+    operation_id: &str,
+) -> Result<DelegationPermit, SessionRuntimeError> {
     use usagi_core::domain::role::{RoleId, RoleScope};
+    use usagi_core::infrastructure::store::dispatch::DelegationReservationOutcome;
 
     let requested = requested_role
         .filter(|value| !value.is_null())
@@ -7161,7 +7359,7 @@ fn authorize_delegation(
                 "authenticated caller is required by the delegation policy".into(),
             ));
         }
-        return Ok(());
+        return Ok(DelegationPermit::inert());
     };
     let parent_role = match caller.session_id {
         Some(id) => sessions.session_role(id)?,
@@ -7177,7 +7375,7 @@ fn authorize_delegation(
         .and_then(|role| catalog.roles.get(role))
         .and_then(|definition| definition.delegation.as_ref())
     else {
-        return Ok(());
+        return Ok(DelegationPermit::inert());
     };
     if !policy.enabled {
         return Err(SessionRuntimeError::InvalidRole(
@@ -7196,15 +7394,6 @@ fn authorize_delegation(
 
     let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
     let store = runtime.dispatch_store();
-    let usage = store
-        .delegation_usage(caller)
-        .map_err(|_| SessionRuntimeError::Storage)?;
-    if usage >= policy.max_concurrency {
-        return Err(SessionRuntimeError::InvalidRole(format!(
-            "delegation concurrency limit ({}) reached",
-            policy.max_concurrency
-        )));
-    }
     let depth = store
         .delegation_depth(caller)
         .map_err(|_| SessionRuntimeError::Storage)?;
@@ -7214,7 +7403,40 @@ fn authorize_delegation(
             policy.max_depth
         )));
     }
-    Ok(())
+    let operation_id = usagi_core::domain::id::OperationId::parse(operation_id)
+        .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+    match store
+        .reserve_delegation(caller, operation_id, policy.max_concurrency)
+        .map_err(|_| SessionRuntimeError::Storage)?
+    {
+        DelegationReservationOutcome::Reserved => Ok(DelegationPermit {
+            store: Some(store.clone()),
+            operation_id: Some(operation_id),
+        }),
+        DelegationReservationOutcome::AlreadyAdmitted => Ok(DelegationPermit::inert()),
+        DelegationReservationOutcome::LimitReached => {
+            Err(SessionRuntimeError::InvalidRole(format!(
+                "delegation concurrency limit ({}) reached",
+                policy.max_concurrency
+            )))
+        }
+        DelegationReservationOutcome::InProgress => Err(SessionRuntimeError::InvalidRole(
+            "delegation operation is already in progress".into(),
+        )),
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
+fn required_payload_string<'a>(
+    payload: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, SessionRuntimeError> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(SessionRuntimeError::InvalidRequest)
 }
 
 /// Creates a triage session for a brief and dispatches a fresh worker into it,
@@ -7229,6 +7451,7 @@ fn authorize_delegation(
 /// a restart. A dispatch whose spawn outcome is *unknown* is deliberately not
 /// rolled back: the worktree may already hold a running worker, so the caller
 /// gets the session and run identity to reconcile instead.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn delegate_brief(
     bound: &ConnectionWorkspace,
     teardown: &TeardownSignal,
@@ -7238,15 +7461,7 @@ fn delegate_brief(
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     use usagi_core::usecase::client::{DispatchAgentIntent, DispatchIntent};
 
-    let string = |key: &str| {
-        payload
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or(SessionRuntimeError::InvalidRequest)
-    };
-    let brief = string("brief")?;
+    let brief = required_payload_string(payload, "brief")?;
     let suffix = operation_id
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -7261,11 +7476,11 @@ fn delegate_brief(
     );
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
-    let credential = string("_caller_credential")?;
+    let credential = required_payload_string(payload, "_caller_credential")?;
     let (workspace, caller, repository_root) = {
         let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-        let caller = runtime
-            .mcp_dispatch_caller(credential)
+        let authenticated = runtime
+            .mcp_dispatch_context(credential)
             .ok_or(SessionRuntimeError::ScopeUnavailable)?;
         let sessions = bound
             .sessions()
@@ -7278,9 +7493,22 @@ fn delegate_brief(
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .ok_or(SessionRuntimeError::Storage)?;
-        (workspace, caller, sessions.repository_root().to_path_buf())
+        if authenticated.workspace_id != workspace {
+            return Err(SessionRuntimeError::ScopeUnavailable);
+        }
+        (
+            workspace,
+            authenticated.caller,
+            sessions.repository_root().to_path_buf(),
+        )
     };
-    authorize_delegation(bound, agent, Some(&caller), payload.get("role"))?;
+    let _delegation_permit = authorize_delegation(
+        bound,
+        agent,
+        Some(&caller),
+        payload.get("role"),
+        operation_id,
+    )?;
     // Machine-local runtime/model policy belongs to the workspace root and is
     // not copied into managed worktrees. Decide every read-only refusal here;
     // `dispatch` still re-reads the same trusted root and stays the authority.
@@ -7344,6 +7572,7 @@ fn delegate_brief(
 /// admitted it is durable: the daemon's teardown worker finishes it, and a
 /// daemon that dies first resumes it from the `Deleting` record on the next
 /// start.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_failed_delegation_reports_its_reconcile_state_on_the_wire
 fn compensate_delegation(
     sessions: &SharedSessionRuntime,
     teardown: &TeardownSignal,
@@ -7390,6 +7619,7 @@ fn compensate_delegation(
 /// A reservation in the dispatch store — even one a restart already failed — is
 /// not an orphan: that operation reached the dispatch side, which owns its
 /// outcome. Only a create with nothing at all behind it is rolled back.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_failed_delegation_reports_its_reconcile_state_on_the_wire
 fn reconcile_orphan_delegations(
     bound: &ConnectionWorkspace,
     dispatch: &DispatchStore,
@@ -7438,6 +7668,7 @@ enum AgentDispatchRequest {
     RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
     scope: &dyn SessionScopeResolver,
@@ -7649,6 +7880,7 @@ fn dispatch_agent(
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn run_agent_readiness(
     agent: &SharedAgentRuntime,
     preflight: Option<&AgentReadinessPreflight>,
@@ -7665,6 +7897,7 @@ fn run_agent_readiness(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn dispatch_agent_after_preflight(
     agent: &SharedAgentRuntime,
     operation_id: &str,
@@ -7687,6 +7920,7 @@ fn dispatch_agent_after_preflight(
         .dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
     peer_process: (u32, u32, u32),
@@ -7747,6 +7981,7 @@ fn dispatch_codex_session_capture(
 /// Unlike the generic fallback dispatch, a body which is not a well formed phase
 /// report is refused here: an agent-originated report must fail closed instead
 /// of being echoed back as a success.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_ipc_agent_phase_report_without_a_live_credential_fails_closed
 fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
     peer_process: (u32, u32, u32),
@@ -7883,6 +8118,7 @@ fn wait_private_lock_after_flock_barrier(path: &Path) {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=private_lock_refuses_unsafe_metadata_and_paths
 fn private_lock_error(label: &str, detail: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
@@ -7922,6 +8158,7 @@ fn verify_private_lock_metadata(
     Ok(())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=private_lock_refuses_unsafe_metadata_and_paths
 fn open_private_lock(
     path: &Path,
     label: &str,
@@ -7995,6 +8232,7 @@ fn open_private_lock(
     Ok(file)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=private_lock_refuses_unsafe_metadata_and_paths
 fn verify_private_lock_path(path: &Path, file: &std::fs::File, label: &str) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
@@ -8106,6 +8344,7 @@ fn take_record_write_failpoint(path: &Path) -> bool {
     })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_legacy_store_is_migrated_once_and_retired_in_place
 impl FsRecordFile {
     fn transaction<T>(&self, operation: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
         let parent = self.path.parent().ok_or_else(|| {
@@ -8255,6 +8494,7 @@ impl FsRecordFile {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_legacy_store_is_migrated_once_and_retired_in_place
 impl RecordFile for FsRecordFile {
     fn read(&self) -> std::io::Result<Option<String>> {
         self.transaction(|| self.read_unlocked())
@@ -8290,12 +8530,14 @@ impl RecordFile for FsRecordFile {
 
 struct ExactProcessControl;
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 impl ProcessIdentitySource for ExactProcessControl {
     fn process_start_identity(&self, pid: u32) -> std::io::Result<String> {
         process_start_identity(pid)
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 impl LivenessProbe for ExactProcessControl {
     fn observe(&self, record: &DaemonRecord) -> DaemonProcessObservation {
         let Some(expected) = record
@@ -8317,6 +8559,7 @@ impl LivenessProbe for ExactProcessControl {
 }
 
 struct SigtermTerminator;
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 impl Terminator for SigtermTerminator {
     fn terminate(&self, record: &DaemonRecord) -> std::io::Result<()> {
         // The record boundary already rejects a pid that cannot name a process,
@@ -8334,6 +8577,7 @@ impl Terminator for SigtermTerminator {
 }
 
 #[cfg(target_os = "linux")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn process_start_identity(pid: u32) -> std::io::Result<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let close = stat.rfind(')').ok_or_else(|| {
@@ -8355,6 +8599,7 @@ fn process_start_identity(pid: u32) -> std::io::Result<String> {
 }
 
 #[cfg(target_os = "macos")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn process_start_identity(pid: u32) -> std::io::Result<String> {
     let pid = libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
     // SAFETY: `info` is initialized and the buffer pointer/length describe the
@@ -8415,6 +8660,7 @@ impl Drop for PidFd {
 }
 
 #[cfg(target_os = "linux")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
@@ -8461,6 +8707,7 @@ fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::
 }
 
 #[cfg(target_os = "macos")]
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
@@ -8517,6 +8764,7 @@ struct IpcReady<'a> {
     listener: RefCell<Option<SecureUnixListener>>,
     cleanup: RefCell<Option<EndpointCleanup>>,
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 impl<'a> IpcReady<'a> {
     /// Bind the production endpoint seam for one `serve` process.
     fn new(
@@ -8628,6 +8876,7 @@ impl<'a> IpcReady<'a> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 impl DaemonReady for IpcReady<'_> {
     fn recover_stale_endpoint(&self) -> std::io::Result<()> {
         // The instance lock excludes another *active* daemon, not every daemon:
@@ -8712,6 +8961,7 @@ impl DaemonReady for IpcReady<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 impl StaleDaemonCleanup for IpcReady<'_> {
     fn cleanup_if(
         &self,
@@ -8773,6 +9023,7 @@ impl OwnedCurrentLocator<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_started_daemon_registers_its_generation_and_retires_it_on_stop
 impl CurrentLocator for OwnedCurrentLocator<'_> {
     fn read(&self) -> std::io::Result<LocatorObservation> {
         self.file().read()
@@ -8814,6 +9065,7 @@ struct RegistryAuthority<'a> {
 }
 
 impl RegistryAuthority<'_> {
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_started_daemon_registers_its_generation_and_retires_it_on_stop
     fn registry(&self) -> std::io::Result<GenerationRegistry> {
         Ok(GenerationRegistry::new(
             GenerationRegistryFile::new(self.data_dir)?,
@@ -8822,6 +9074,7 @@ impl RegistryAuthority<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_started_daemon_registers_its_generation_and_retires_it_on_stop
 impl GenerationAuthority for RegistryAuthority<'_> {
     fn claim(&self) -> std::io::Result<()> {
         let bound = self.ready.bound_endpoint().ok_or_else(|| {
@@ -8882,6 +9135,7 @@ impl GenerationAuthority for RegistryAuthority<'_> {
 /// unreadable registry names nothing, which is the safe direction for a *sweep*
 /// — it reclaims what it can prove is residue and the registry's own recovery
 /// still fails the authority closed.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_collection_pass_removes_the_shard_of_a_generation_nothing_retains
 fn live_generation_endpoints(data_dir: &Path) -> BTreeSet<String> {
     let Ok(Some(document)) = read_registry_document(data_dir) else {
         return BTreeSet::new();
@@ -8931,6 +9185,7 @@ struct StandbyIpc<'a> {
     gate: RefCell<Option<AdmissionGate>>,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl<'a> StandbyIpc<'a> {
     /// Bind the standby endpoint seam for one `serve --standby` process.
     fn new(
@@ -8990,6 +9245,7 @@ impl<'a> StandbyIpc<'a> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl StandbyEndpoint for StandbyIpc<'_> {
     fn bind(&self) -> std::io::Result<()> {
         // Hydrate first: a standby that cannot read the state it would serve has
@@ -9084,6 +9340,7 @@ impl StandbyEndpoint for StandbyIpc<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl Drop for StandbyIpc<'_> {
     fn drop(&mut self) {
         // A panic unwinds past the state machine's own stand-down, and a socket
@@ -9105,6 +9362,7 @@ impl Drop for StandbyIpc<'_> {
 /// session runtime, a terminal runtime, an Agent runtime, a supervisor and a
 /// PR projector, and a standby owns none of them. Every admitted connection here
 /// gets a handshake and then a typed refusal.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 fn spawn_standby_ipc_server(
     listener: SecureUnixListener,
     protocol: usagi_core::infrastructure::ipc::ServerProtocol,
@@ -9197,6 +9455,7 @@ fn spawn_standby_ipc_server(
         })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 fn spawn_standby_client_worker(
     stream: std::os::unix::net::UnixStream,
     completion: AcceptedStream,
@@ -9333,6 +9592,7 @@ struct PreHandshakeDeadlineStream {
     deadline: Instant,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 impl PreHandshakeDeadlineStream {
     fn new(stream: std::os::unix::net::UnixStream, deadline: Instant) -> Self {
         Self { stream, deadline }
@@ -9374,6 +9634,7 @@ impl PreHandshakeDeadlineStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 impl Read for PreHandshakeDeadlineStream {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         self.stream.set_read_timeout(Some(self.remaining()?))?;
@@ -9381,6 +9642,7 @@ impl Read for PreHandshakeDeadlineStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_ipc_pre_handshake_cap_deadline_fairness_and_shutdown_are_bounded
 impl Write for PreHandshakeDeadlineStream {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.stream.set_write_timeout(Some(self.remaining()?))?;
@@ -9440,6 +9702,7 @@ impl AcceptedStream {
     /// Observes a peer close without consuming bytes that may belong to a later
     /// request. The retained duplicate is already owned for retirement, so this
     /// adds no descriptor to a waiting decision.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
     fn peer_disconnected(&self) -> bool {
         if self.retired.load(Ordering::Acquire) {
             return true;
@@ -9504,12 +9767,14 @@ impl AcceptedStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 impl DecisionWaitCancellation for AcceptedStream {
     fn is_cancelled(&self) -> bool {
         self.peer_disconnected()
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 impl ConnectionShutdown for AcceptedStream {
     fn shutdown(&self) -> std::io::Result<()> {
         // Published before the syscall, so a worker that wakes for any reason —
@@ -9607,6 +9872,7 @@ impl RetiringReader {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_retired_reader_stops_without_any_socket_wakeup
 impl Read for RetiringReader {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         loop {
@@ -9628,6 +9894,7 @@ impl Read for RetiringReader {
 /// the retained join handle is next reaped.
 struct ShutdownAcceptedStreamOnDrop(Option<AcceptedStream>);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=accepted_stream_observes_peer_close_behind_buffered_data
 impl Drop for ShutdownAcceptedStreamOnDrop {
     fn drop(&mut self) {
         if let Some(stream) = &self.0 {
@@ -9655,6 +9922,7 @@ impl Drop for ShutdownAcceptedStreamOnDrop {
 /// (`crates/daemon/tests/generation_authority.rs`). Both mean "this generation
 /// may not do this; re-resolve the authority", and both are effect zero, so the
 /// two roles stay one contract for a client rather than two.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 fn standby_reply(
     gate: &AdmissionGate,
     request_id: usagi_core::infrastructure::ipc::RequestId,
@@ -9703,6 +9971,7 @@ struct StandbyRegistryAuthority<'a> {
     registered: RefCell<Option<usagi_core::domain::id::DaemonGeneration>>,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl<'a> StandbyRegistryAuthority<'a> {
     /// Bind the standby registry seam against the endpoint that process bound.
     fn new(data_dir: &'a Path, endpoint: &'a StandbyIpc<'a>, pid: u32) -> Self {
@@ -9751,6 +10020,7 @@ impl<'a> StandbyRegistryAuthority<'a> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl StandbyAuthority for StandbyRegistryAuthority<'_> {
     fn preflight(&self) -> std::io::Result<()> {
         self.active_generation().map(|_| ())
@@ -9813,6 +10083,7 @@ impl StandbyAuthority for StandbyRegistryAuthority<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
 impl Drop for StandbyRegistryAuthority<'_> {
     fn drop(&mut self) {
         // Dropped before the endpoint it registered (declaration order in the
@@ -9835,6 +10106,7 @@ struct UnixStandbyProbe<'a> {
     build: BuildIdentity,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds
 impl StandbyProbe for UnixStandbyProbe<'_> {
     fn hello(
         &self,
@@ -9906,6 +10178,7 @@ impl StandbyProbe for UnixStandbyProbe<'_> {
 /// retires every generation, and the standby it retired must exit rather than
 /// keep a socket a future rollover might trust.
 #[allow(clippy::too_many_arguments)] // Promotion carries the exact process, endpoint, runtime root, and both shutdown domains.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds
 fn start_standby_custody_worker(
     data_dir: PathBuf,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -9970,6 +10243,7 @@ fn start_standby_custody_worker(
 /// Replace the readiness-only standby accept loop with the full active runtime
 /// on the same bound socket and generation after the durable handoff commits.
 #[allow(clippy::too_many_arguments)] // Each handoff fence is passed explicitly; bundling would hide identity or listener ownership.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_standby_stands_down_with_its_incumbent_so_the_next_start_succeeds
 fn promote_standby_generation(
     data_dir: &Path,
     workspace_root: &Path,
@@ -10024,6 +10298,7 @@ fn promote_standby_generation(
 /// not describe its start time two ways, or a comparison against the registry
 /// would fail for a process that is plainly alive. Only the process group, which
 /// the daemon record has no field for, is read through the child probe.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn own_process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
     Ok(ProcessIdentity {
         pid,
@@ -10037,6 +10312,7 @@ fn own_process_identity(pid: u32) -> std::io::Result<ProcessIdentity> {
 /// An identity that does not match is `Unknown` rather than `Gone`: the PID is
 /// live, so nothing about the recorded owner has been proved either way. Only an
 /// absent process is `Gone`, and only `Gone` lets recovery retire an authority.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
 fn observe_generation_process(process: &ProcessIdentity) -> ProcessObservation {
     if process.start_identity.is_empty() {
         return ProcessObservation::Unknown;
@@ -10086,6 +10362,7 @@ impl Drop for SignalShutdown {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_stop_request_retires_the_broker_and_removes_its_endpoint
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
     fn prepare(&self) -> std::io::Result<()> {
@@ -10172,6 +10449,7 @@ impl ShutdownSignal for SignalShutdown {
 struct ServeLauncher {
     exe: PathBuf,
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl ServeLauncher {
     fn launch_standby(&self) -> std::io::Result<u32> {
         let mut command = std::process::Command::new(&self.exe);
@@ -10185,6 +10463,7 @@ impl ServeLauncher {
         command.spawn().map(|child| child.id())
     }
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl DaemonLauncher for ServeLauncher {
     fn launch(&self) -> std::io::Result<()> {
         let mut command = std::process::Command::new(&self.exe);
@@ -10272,6 +10551,7 @@ fn bootstrap_broker_address(
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bootstrap_broker_address_is_fenced_by_workspace_and_executable
 fn broker_workspace(workspace: &ClientWorkspace) -> std::io::Result<PathBuf> {
     let root = match workspace {
         ClientWorkspace::Bound { root } | ClientWorkspace::Selected { root }
@@ -10292,6 +10572,7 @@ fn broker_workspace(workspace: &ClientWorkspace) -> std::io::Result<PathBuf> {
         .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn request_bootstrap_broker(address: &BootstrapBrokerAddress, request: u8) -> std::io::Result<()> {
     let mut stream = std::os::unix::net::UnixStream::connect(&address.socket)?;
     let timeout = if request == BROKER_START {
@@ -10309,6 +10590,7 @@ fn request_bootstrap_broker(address: &BootstrapBrokerAddress, request: u8) -> st
         .ok_or_else(|| std::io::Error::other("daemon bootstrap broker refused the request"))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn request_broker_start(
     data_dir: &Path,
     workspace: &ClientWorkspace,
@@ -10329,6 +10611,7 @@ fn request_broker_start(
     ))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std::io::Result<()> {
     let workspace = paths::canonical_workspace_root(workspace)
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -10363,6 +10646,7 @@ fn spawn_bootstrap_broker(exe: &Path, data_dir: &Path, workspace: &Path) -> std:
     ))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn reap_child(mut child: std::process::Child) {
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -10382,6 +10666,7 @@ fn bootstrap_serve_command(exe: &Path, workspace: &Path) -> std::process::Comman
     command
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn launch_broker_daemon(exe: &Path, workspace: &Path, data_dir: &Path) -> std::io::Result<()> {
     if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
         return Ok(());
@@ -10463,6 +10748,7 @@ struct BrokerIdlePolicy {
     poll: Duration,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
 impl BrokerIdlePolicy {
     const fn production() -> Self {
         Self {
@@ -10494,6 +10780,7 @@ impl BrokerActivity {
         }
     }
 
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
     fn touch(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.last = Instant::now();
@@ -10501,6 +10788,7 @@ impl BrokerActivity {
     }
 
     /// Stop the idle watch and let it be joined without waiting out a poll.
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
     fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.stopped = true;
@@ -10515,6 +10803,7 @@ impl BrokerActivity {
 /// than by killing the loop from outside: the accept loop stays blocked (so a
 /// cold start pays no polling latency), and the endpoint is torn down by the
 /// same path an operator's `usagi daemon stop` takes.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
 fn spawn_broker_idle_watch(
     activity: &Arc<BrokerActivity>,
     address: BootstrapBrokerAddress,
@@ -10547,6 +10836,7 @@ fn spawn_broker_idle_watch(
     })
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn serve_bootstrap_broker(
     data_dir: &Path,
     workspace: &Path,
@@ -10640,6 +10930,7 @@ struct IpcRolloverRequester<'a> {
     launcher: &'a ServeLauncher,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl IpcRolloverRequester<'_> {
     fn committed(&self, operation: &OperationId, standby_pid: u32) -> bool {
         read_registry_document(self.data_dir)
@@ -10689,6 +10980,7 @@ impl IpcRolloverRequester<'_> {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl RolloverRequester for IpcRolloverRequester<'_> {
     fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
         let pid = self.launcher.launch_standby()?;
@@ -10722,6 +11014,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
 }
 
 struct RealSleeper;
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=reports_a_timeout_when_started_daemon_never_becomes_ready
 impl Sleeper for RealSleeper {
     fn sleep(&self) {
         std::thread::sleep(Duration::from_millis(50));
@@ -10739,6 +11032,7 @@ impl FileInstanceLock {
     ///
     /// `None` means this lock was never acquired (or its descriptor cannot be
     /// inspected), which leaves custody undecidable instead of lost.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_live_registered_authority_is_repaired_rather_than_displaced
     fn locked_inode(&self) -> Option<NodeIdentity> {
         let held = self.held.borrow();
         let metadata = held.as_ref()?.metadata().ok()?;
@@ -10784,6 +11078,7 @@ struct FileWorkspaceFences {
     pid: u32,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_through_a_symlinked_or_relative_spelling
 impl WorkspaceFenceFactory for FileWorkspaceFences {
     fn fence_for(&self, workspace_root: &Path) -> Box<dyn WorkspaceFence + Send> {
         Box::new(FileWorkspaceFence {
@@ -10803,6 +11098,7 @@ struct SystemTenantOpener {
     generation: usagi_core::domain::id::DaemonGeneration,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=opening_a_second_workspace_adopts_it_without_disturbing_the_first
 impl TenantRuntimeOpener for SystemTenantOpener {
     type Runtime = SharedSessionRuntime;
 
@@ -10829,6 +11125,7 @@ impl TenantRuntimeOpener for SystemTenantOpener {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_through_a_symlinked_or_relative_spelling
 impl WorkspaceFence for FileWorkspaceFence {
     fn acquire(&self) -> std::io::Result<WorkspaceFenceOutcome> {
         const POLL: Duration = Duration::from_millis(20);
@@ -10872,6 +11169,7 @@ impl WorkspaceFence for FileWorkspaceFence {
 }
 
 /// Replace the fence node's contents with this owner's pid line.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_when_the_owner_hint_is_unreadable
 fn write_owner_hint(file: &std::fs::File, pid: u32) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom};
     file.set_len(0)?;
@@ -10882,6 +11180,7 @@ fn write_owner_hint(file: &std::fs::File, pid: u32) -> std::io::Result<()> {
 }
 
 /// Read the owner pid published by the daemon currently holding the fence.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=workspace_fence_refuses_when_the_owner_hint_is_unreadable
 fn read_owner_hint(file: &std::fs::File) -> Option<u32> {
     use std::io::Read;
     // The hint is one short decimal line; a longer node is not ours to trust.
@@ -10890,6 +11189,7 @@ fn read_owner_hint(file: &std::fs::File) -> Option<u32> {
     contents.trim().parse().ok()
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_second_active_daemon_is_refused_without_disturbing_the_registry
 impl InstanceLock for FileInstanceLock {
     fn acquire(&self) -> std::io::Result<bool> {
         const TIMEOUT: Duration = Duration::from_secs(2);
@@ -10920,6 +11220,7 @@ impl InstanceLock for FileInstanceLock {
 }
 
 /// `usagi daemon` の実行時資源を組み立てて daemon presentation へ渡す。
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 pub(crate) fn run(
     out: &mut dyn Write,
     command: CliDaemonCommand,
@@ -10950,6 +11251,7 @@ pub(crate) fn run(
 /// Config intentionally runs without starting the daemon, so its settings
 /// adapter cannot rely on bootstrap lock acquisition to establish the private
 /// directory invariant first.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=config_first_boot_with_restrictive_umask_preserves_ordinary_daemon_bootstrap
 pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
     let data_dir =
         paths::data_dir().map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -10957,6 +11259,7 @@ pub(crate) fn prepare_private_data_dir() -> std::io::Result<PathBuf> {
     Ok(data_dir)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 fn run_broker_lifecycle_command(command: CliDaemonCommand) -> Option<std::io::Result<()>> {
     if command == CliDaemonCommand::BootstrapBroker {
         return Some((|| {
@@ -10978,6 +11281,7 @@ fn run_broker_lifecycle_command(command: CliDaemonCommand) -> Option<std::io::Re
 /// panic in an IPC, PTY, or observer worker. The hook records every thread's
 /// panic before the thread unwinds; [`run`] then catches a main-thread panic at
 /// the outer daemon boundary and terminates the process with an ordinary error.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
 fn install_panic_logger() {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -10985,6 +11289,7 @@ fn install_panic_logger() {
         previous(info);
     }));
 }
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_panicked_background_worker_is_reported_as_daemon_health_danger
 fn format_panic(info: &PanicHookInfo<'_>) -> String {
     let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
         (*message).to_owned()
@@ -11019,6 +11324,7 @@ const SERVICE_SUPERVISOR: &str = "no";
 /// resolved instead of the supervisor's default directory. Other platforms have
 /// no supported supervisor; the detached `start` path and client bootstrap keep
 /// working there.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn install_service(
     executable: &std::path::Path,
     data_home: &paths::DataHome,
@@ -11040,6 +11346,7 @@ fn install_service(
 }
 
 /// Remove the platform's supervisor definition installed by [`install_service`].
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn uninstall_service() -> std::io::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -11064,6 +11371,7 @@ fn unsupported_service() -> std::io::Error {
 }
 
 #[allow(clippy::too_many_lines)] // Composition wires the closed lifecycle verbs and their IO ports.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn run_inner(
     out: &mut dyn Write,
     command: CliDaemonCommand,
@@ -11224,6 +11532,7 @@ fn run_inner(
 /// Best effort by construction: there may be no broker (nothing started one, or
 /// it already retired), and a daemon that is going away anyway must not fail a
 /// stop because a helper could not be reached.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=planned_stop_retires_generation_endpoint_and_allows_safe_autostart
 fn retire_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) {
     let Ok(exe) = exe.canonicalize() else {
         return;
@@ -11244,6 +11553,7 @@ fn retire_bootstrap_broker(data_dir: &Path, workspace: &Path, exe: &Path) {
 /// again. Starting from a subdirectory or a session worktree therefore cannot
 /// fence a workspace the runtime will not own. Canonicalization collapses
 /// spelling differences before any of that comparison happens.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bound_workspace_root_predicts_the_root_open_binds
 fn bound_workspace_root(daemon_dir: &Path, candidate: &Path) -> std::io::Result<PathBuf> {
     // A data directory written before workspace state subtrees existed keeps its
     // lifecycle document beside the locator. Moving it is the first thing any
@@ -11355,6 +11665,7 @@ static OPENED_WORKSPACE: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// it would therefore either be refused by the fence for a root nothing can
 /// compare, or — worse, and what used to happen — be answered by a daemon that
 /// owns a different workspace.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=open_registers_and_renders_an_explicit_or_current_workspace
 pub(crate) fn declare_opened_workspace(root: &Path) -> std::io::Result<PathBuf> {
     let canonical = paths::canonical_workspace_root(root)
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
@@ -11430,6 +11741,7 @@ fn client_workspace() -> ClientWorkspace {
 /// obtain an unbounded daemon socket from this module. `connect_budget_ms`
 /// bounds bootstrap, connect and handshake; each later request re-arms the lane
 /// with its own budget through [`rearm_lane`].
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_daemon_request_autostarts_without_manual_daemon_start
 pub(crate) fn client(
     policy: ClientPolicy,
     connect_budget_ms: u64,
@@ -11437,6 +11749,7 @@ pub(crate) fn client(
     client_for(policy, &client_workspace(), connect_budget_ms)
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_daemon_request_autostarts_without_manual_daemon_start
 fn client_for(
     policy: ClientPolicy,
     workspace: &ClientWorkspace,
@@ -11610,6 +11923,7 @@ static LOGGED_MISMATCHES: bootstrap::OncePerArtifact = bootstrap::OncePerArtifac
 /// bootstrapped lane observes the same mismatch, hence one entry per daemon
 /// artifact rather than one per connection. Only the artifact identities and the
 /// non-sensitive reason are recorded.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_reused_development_mismatch_is_recorded_once_per_daemon_artifact
 fn reused_build_mismatch_record(trigger: &BuildRolloverTrigger, reason: &str) -> Option<String> {
     LOGGED_MISMATCHES
         .claim(&trigger.running_artifact)
@@ -11649,6 +11963,7 @@ impl MonotonicClock for SystemClock {
 /// so a stalled daemon cannot block a surface past its policy budget.
 pub(crate) struct DeadlineUnixStream(std::os::unix::net::UnixStream);
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query
 impl Read for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -11656,6 +11971,7 @@ impl Read for DeadlineUnixStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query
 impl Write for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -11667,6 +11983,7 @@ impl Write for DeadlineUnixStream {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_hung_daemon_bounds_one_keystroke_and_resolves_it_by_ledger_query
 impl DeadlineConnection for DeadlineUnixStream {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
     fn set_read_deadline(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
@@ -11874,6 +12191,7 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
 /// The directory is bound to the first caller's data directory. That is the same
 /// directory every other lane in this process uses ([`paths::data_dir`] is
 /// process-stable), so there is no second authority to disagree with.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn route_cache(data_dir: &Path) -> &'static Mutex<usagi_core::usecase::owner_routing::RouteCache> {
     static CACHE: OnceLock<Mutex<usagi_core::usecase::owner_routing::RouteCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
@@ -11909,6 +12227,7 @@ pub(crate) fn invalidate_routes() {
 /// registered, already retired, or forged — is a typed `stale_target`; it is
 /// never answered with the active endpoint, because the active generation would
 /// happily serve a *different* terminal that merely shares a name.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn owner_endpoint(
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> Result<usagi_core::usecase::owner_routing::TrustedEndpoint, ClientError> {
@@ -11928,6 +12247,7 @@ fn owner_endpoint(
 /// taking only the active one's would read the draining generation's terminals
 /// as absent. Absence is what collects a tab, so the fan-out is what keeps a
 /// terminal whose owner is merely busy from being reaped.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 pub(crate) fn trusted_generations()
 -> Result<Vec<usagi_core::usecase::owner_routing::TrustedEndpoint>, ClientError> {
     let data_dir =
@@ -11946,6 +12266,7 @@ pub(crate) struct OwnerLane {
     pub(crate) role: usagi_core::infrastructure::ipc::GenerationRole,
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=owner_addressed_requests_route_to_their_reference_and_the_rest_are_refused
 impl OwnerLane {
     /// Whether this lane reached the generation that currently holds `current`.
     pub(crate) fn is_active(&self) -> bool {
@@ -11980,6 +12301,7 @@ impl OwnerLane {
 /// typed refusal the reference deserves.
 ///
 /// [`connect_generation`]: usagi_daemon::infrastructure::unix_transport::connect_generation
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 pub(crate) fn owner_client(
     policy: ClientPolicy,
     generation: usagi_core::domain::id::DaemonGeneration,
@@ -12019,6 +12341,7 @@ pub(crate) fn owner_client(
 /// the socket is re-derived and re-verified as that generation's own private
 /// endpoint by `connect_generation` — plus the generation the peer names, which
 /// [`owner_client`] checks for both roles alike.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_draining_generation_refuses_control_and_still_serves_its_own_terminals
 fn connect_draining(
     policy: ClientPolicy,
     endpoint: &usagi_core::usecase::owner_routing::TrustedEndpoint,
@@ -12047,6 +12370,7 @@ fn connect_draining(
 /// identities; the replacement it keys is then carried out on exactly the path
 /// `usagi daemon restart` takes, so a build/update swap can never reach a
 /// `stop` → fresh `start` the manual verb is guarded against.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 pub(crate) fn replace_running_daemon(
     out: &mut dyn Write,
     policy: ClientPolicy,
@@ -12069,6 +12393,7 @@ pub(crate) fn replace_running_daemon(
 /// Requests intentional replacement of the currently running daemon artifact.
 /// This only creates the deterministic trigger; it never sends a stop signal or
 /// spawns a second daemon. [`replace_running_daemon`] consumes it.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
@@ -12099,6 +12424,7 @@ fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, Cli
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_children_reapply_the_runtime_mode_onto_the_daemon_data_home
 fn runtime_channel() -> &'static str {
     match paths::runtime_mode() {
         paths::RuntimeMode::Production => "production",
@@ -12124,6 +12450,7 @@ fn recover_stale_client_endpoint(data_dir: &Path) -> std::io::Result<bootstrap::
     recover_stale_client_endpoint_with(data_dir, InstanceLock::acquire, || {})
 }
 
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=ordinary_client_recovers_a_sigkilled_daemon_without_manual_lifecycle
 fn recover_stale_client_endpoint_with(
     data_dir: &Path,
     acquire: impl FnOnce(&FileInstanceLock) -> std::io::Result<bool>,
@@ -12206,6 +12533,7 @@ pub(crate) fn current_build() -> BuildIdentity {
 /// socket in the transport the caller's lane runs over; it is applied only after
 /// the peer's process-start identity, record and generation have been observed,
 /// so the fence is identical for every lane.
+#[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=one_published_generation_routes_to_the_same_endpoint_and_refuses_an_unknown_owner
 fn connect_client<S: Read + Write>(
     data_dir: &Path,
     policy: ClientPolicy,
@@ -12261,10 +12589,12 @@ fn lifecycle_command(exe: &Path, args: &[&str], opened: Option<PathBuf>) -> std:
     child
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
     run_lifecycle_with(exe, &["daemon", command], command)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
 fn run_lifecycle_with(exe: &Path, args: &[&str], command: &str) -> std::io::Result<()> {
     let status = lifecycle_command(exe, args, opened_workspace()).status()?;
     status
@@ -12293,6 +12623,7 @@ fn acquire_bootstrap_lock_within(
         .map_err(|error| map_bootstrap_lock_error(&error))
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=active_owner_is_waited_for_without_starting_a_duplicate
 fn acquire_bootstrap_lock_io_within(
     data_dir: &Path,
     wait: PrivateLockWait,
@@ -12328,6 +12659,7 @@ fn map_bootstrap_lock_error(error: &std::io::Error) -> ClientError {
 /// workspace switchers that must keep working from any directory. The
 /// workspace-bound connections those screens make afterwards carry their own
 /// declaration and are fenced there.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_daemon_request_autostarts_without_manual_daemon_start
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
     client_for(
         ClientPolicy::tui(),
@@ -12339,6 +12671,8 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 
 #[cfg(test)]
 mod tests {
+    #![coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=module_unit_contract
+
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::AtomicUsize;
@@ -19047,6 +19381,80 @@ instructions = "{instructions}"
         assert!(runtime.session_scope_by_id(session_id).is_ok());
     }
 
+    #[test]
+    fn root_dispatch_admission_refuses_reparenting_before_registry_effects() {
+        use usagi_core::domain::agent::{
+            Agent, AgentStatus, CallerRef, DispatchBinding, DispatchRun, RunStatus, WorkerRef,
+        };
+        use usagi_core::domain::id::{AgentId, OperationId as DispatchOperationId};
+        use usagi_core::infrastructure::store::dispatch::{
+            AgentAdmissionReservation, CredentialProvenance,
+        };
+
+        let temporary = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temporary.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let agent_id = AgentId::new();
+        let worker = Agent {
+            agent_id,
+            session_id: Some(session),
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Starting,
+            current_run: None,
+        };
+        dispatch.upsert_agent(workspace, worker.clone()).unwrap();
+        dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: DispatchOperationId::new(),
+                caller: CallerRef {
+                    session_id: Some(SessionId::new()),
+                    agent_id: AgentId::new(),
+                },
+                worker: WorkerRef {
+                    session_id: Some(session),
+                    agent_id,
+                },
+            })
+            .unwrap();
+
+        let conflicting = DispatchOperationId::new();
+        assert!(
+            dispatch
+                .reserve_admission(
+                    worker,
+                    DispatchRun {
+                        run_id: conflicting,
+                        agent_id,
+                        prompt: "reparent".into(),
+                        started_at: chrono::Utc::now(),
+                        ended_at: None,
+                        status: RunStatus::Preparing,
+                    },
+                    DispatchBinding {
+                        run_id: conflicting,
+                        caller: CallerRef {
+                            session_id: Some(SessionId::new()),
+                            agent_id: AgentId::new(),
+                        },
+                        worker: WorkerRef {
+                            session_id: Some(session),
+                            agent_id,
+                        },
+                    },
+                    AgentAdmissionReservation {
+                        operation_id: conflicting,
+                        semantic_key: "reparent".into(),
+                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                    },
+                )
+                .is_err()
+        );
+        assert!(dispatch.run(conflicting).unwrap().is_none());
+        assert!(dispatch.admission(conflicting).unwrap().is_none());
+    }
+
     /// A delegation builds its worktree before it can dispatch into it, so a
     /// daemon that died in that window left a session no caller owns. The next
     /// start rolls exactly those back — and leaves the ones whose dispatch did
@@ -19065,7 +19473,7 @@ instructions = "{instructions}"
             )
             .unwrap(),
         ));
-        let dispatch = DispatchStore::new(temporary.path().join("dispatch"));
+        let dispatch = DispatchStore::new(&temporary.path().join("dispatch"));
         let teardown = TeardownSignal::new();
         let delegate = |name: &str| {
             let operation = usagi_core::domain::id::OperationId::new();
@@ -19249,7 +19657,7 @@ instructions = "{instructions}"
         assert_eq!(
             reconcile_orphan_delegations(
                 &bound,
-                &DispatchStore::new(temporary.path().join("dispatch")),
+                &DispatchStore::new(&temporary.path().join("dispatch")),
                 &teardown
             ),
             0

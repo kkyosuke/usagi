@@ -75,6 +75,32 @@ struct Registry {
 struct WorkspaceRegistry {
     agent_workspaces: BTreeMap<AgentId, WorkspaceId>,
     prompts: Vec<WorkspacePrompt>,
+    #[serde(default)]
+    lineages: Vec<SessionLineage>,
+    #[serde(default)]
+    delegation_reservations: Vec<DelegationReservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionLineage {
+    workspace: WorkspaceId,
+    session: SessionId,
+    parent: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DelegationReservation {
+    workspace: WorkspaceId,
+    operation: OperationId,
+    parent: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegationReservationOutcome {
+    Reserved,
+    AlreadyAdmitted,
+    LimitReached,
+    InProgress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +111,8 @@ struct WorkspacePrompt {
     queued_at: DateTime<Utc>,
     #[serde(default)]
     caller: Option<CallerRef>,
+    #[serde(default)]
+    operation_id: Option<OperationId>,
 }
 
 impl WorkspacePrompt {
@@ -96,6 +124,33 @@ impl WorkspacePrompt {
             caller: self.caller,
         }
     }
+}
+
+fn record_lineage(
+    registry: &mut WorkspaceRegistry,
+    workspace_id: WorkspaceId,
+    session_id: Option<SessionId>,
+    parent_session_id: Option<SessionId>,
+) -> Result<()> {
+    let Some(session_id) = session_id.filter(|session| Some(*session) != parent_session_id) else {
+        return Ok(());
+    };
+    if let Some(existing) = registry
+        .lineages
+        .iter()
+        .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
+    {
+        if existing.parent != parent_session_id {
+            anyhow::bail!("session delegation parent cannot be reassigned");
+        }
+        return Ok(());
+    }
+    registry.lineages.push(SessionLineage {
+        workspace: workspace_id,
+        session: session_id,
+        parent: parent_session_id,
+    });
+    Ok(())
 }
 
 /// Durable, secret-free proof that an Agent operation was prepared before its
@@ -267,16 +322,15 @@ pub struct QueuedPrompt {
 }
 
 /// File-backed durable dispatch state rooted at the daemon state directory.
+#[derive(Clone)]
 pub struct DispatchStore {
     dir: PathBuf,
 }
 
 impl DispatchStore {
     #[must_use]
-    pub fn new(dir: impl AsRef<Path>) -> Self {
-        Self {
-            dir: dir.as_ref().into(),
-        }
+    pub fn new(dir: &Path) -> Self {
+        Self { dir: dir.into() }
     }
 
     #[must_use]
@@ -301,7 +355,7 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
     ) -> Result<QueuedPrompt> {
-        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, None)
+        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, None, None)
     }
 
     /// Queues a next-launch prompt together with its authenticated parent.
@@ -319,8 +373,16 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
         caller: CallerRef,
+        operation_id: OperationId,
     ) -> Result<QueuedPrompt> {
-        self.queue_prompt_for(workspace_id, session_id, prompt, queued_at, Some(caller))
+        self.queue_prompt_for(
+            workspace_id,
+            session_id,
+            prompt,
+            queued_at,
+            Some(caller),
+            Some(operation_id),
+        )
     }
 
     fn queue_prompt_for(
@@ -330,6 +392,7 @@ impl DispatchStore {
         prompt: String,
         queued_at: DateTime<Utc>,
         caller: Option<CallerRef>,
+        operation_id: Option<OperationId>,
     ) -> Result<QueuedPrompt> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut workspace_registry = self.load_workspace_registry()?;
@@ -343,7 +406,19 @@ impl DispatchStore {
             prompt,
             queued_at,
             caller,
+            operation_id,
         };
+        if let Some(caller) = &queued.caller {
+            if workspace_registry.agent_workspaces.get(&caller.agent_id) != Some(&workspace_id) {
+                anyhow::bail!("delegation caller does not belong to the workspace");
+            }
+            record_lineage(
+                &mut workspace_registry,
+                workspace_id,
+                queued.session_id,
+                caller.session_id,
+            )?;
+        }
         let existing = workspace_registry
             .prompts
             .iter()
@@ -370,7 +445,7 @@ impl DispatchStore {
                 .position(|item| item.session_id == session_id)
         {
             registry.prompts.remove(index);
-            json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+            json_file::write_atomic(&self.dir, &self.registry_path(), registry)?;
         }
         Ok(queued.into_legacy_shape())
     }
@@ -622,22 +697,51 @@ impl DispatchStore {
             .copied())
     }
 
-    /// Counts active and durably queued child delegations for one organization
-    /// member. The member is identified by session lineage rather than by a
-    /// replaceable runtime/model Agent incarnation.
+    /// Atomically reserves one delegation concurrency slot until the caller
+    /// publishes a queued prompt or active admission.
     ///
     /// # Errors
     ///
-    /// Returns an error when either durable registry cannot be read.
-    pub fn delegation_usage(&self, caller: &CallerRef) -> Result<usize> {
+    /// Returns an error when durable state cannot be read or written, or the
+    /// caller has no authenticated workspace ownership.
+    pub fn reserve_delegation(
+        &self,
+        caller: &CallerRef,
+        operation_id: OperationId,
+        max_concurrency: usize,
+    ) -> Result<DelegationReservationOutcome> {
         let _lock = StoreLock::acquire(&self.dir)?;
-        let workspace_registry = self.load_workspace_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
         let workspace_id = workspace_registry
             .agent_workspaces
             .get(&caller.agent_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
         let registry = self.load_registry()?;
+        if registry.bindings.iter().any(|binding| {
+            binding.run_id == operation_id
+                && binding.caller.session_id == caller.session_id
+                && workspace_registry
+                    .agent_workspaces
+                    .get(&binding.worker.agent_id)
+                    == Some(&workspace_id)
+        }) || workspace_registry.prompts.iter().any(|prompt| {
+            prompt.operation_id == Some(operation_id)
+                && prompt.workspace_id == workspace_id
+                && prompt
+                    .caller
+                    .as_ref()
+                    .is_some_and(|parent| parent.session_id == caller.session_id)
+        }) {
+            return Ok(DelegationReservationOutcome::AlreadyAdmitted);
+        }
+        if workspace_registry
+            .delegation_reservations
+            .iter()
+            .any(|reservation| reservation.operation == operation_id)
+        {
+            return Ok(DelegationReservationOutcome::InProgress);
+        }
         let active = registry
             .bindings
             .iter()
@@ -665,10 +769,66 @@ impl DispatchStore {
                     && prompt
                         .caller
                         .as_ref()
-                        .is_some_and(|queued| queued.session_id == caller.session_id)
+                        .is_some_and(|parent| parent.session_id == caller.session_id)
             })
             .count();
-        Ok(active.saturating_add(queued))
+        let reserved = workspace_registry
+            .delegation_reservations
+            .iter()
+            .filter(|reservation| {
+                reservation.workspace == workspace_id && reservation.parent == caller.session_id
+            })
+            .count();
+        if active.saturating_add(queued).saturating_add(reserved) >= max_concurrency {
+            return Ok(DelegationReservationOutcome::LimitReached);
+        }
+        workspace_registry
+            .delegation_reservations
+            .push(DelegationReservation {
+                workspace: workspace_id,
+                operation: operation_id,
+                parent: caller.session_id,
+            });
+        self.write_workspace_registry(&workspace_registry)?;
+        Ok(DelegationReservationOutcome::Reserved)
+    }
+
+    /// Releases a transient delegation slot after publication or failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable state cannot be read or written.
+    pub fn release_delegation(&self, operation_id: OperationId) -> Result<bool> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        let before = workspace_registry.delegation_reservations.len();
+        workspace_registry
+            .delegation_reservations
+            .retain(|reservation| reservation.operation != operation_id);
+        let changed = workspace_registry.delegation_reservations.len() != before;
+        if changed {
+            self.write_workspace_registry(&workspace_registry)?;
+        }
+        Ok(changed)
+    }
+
+    /// Returns immutable session parentage retained independently of run
+    /// history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable state cannot be read.
+    pub fn session_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+    ) -> Result<Option<SessionId>> {
+        Ok(self
+            .load_workspace_registry()?
+            .lineages
+            .into_iter()
+            .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
+            .and_then(|lineage| lineage.parent))
     }
 
     /// Resolves the absolute delegation depth of an organization member from
@@ -686,25 +846,21 @@ impl DispatchStore {
             .get(&caller.agent_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
-        let registry = self.load_registry()?;
         let mut depth = 0usize;
         let mut cursor = caller.session_id;
         let mut seen = BTreeSet::new();
         while let Some(session_id) = cursor
             && seen.insert(session_id)
         {
-            let Some(parent) = registry.bindings.iter().rev().find(|binding| {
-                workspace_registry
-                    .agent_workspaces
-                    .get(&binding.worker.agent_id)
-                    == Some(&workspace_id)
-                    && binding.worker.session_id == Some(session_id)
-                    && binding.caller.session_id != binding.worker.session_id
-            }) else {
+            let Some(parent) = workspace_registry
+                .lineages
+                .iter()
+                .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
+            else {
                 break;
             };
             depth = depth.saturating_add(1);
-            cursor = parent.caller.session_id;
+            cursor = parent.parent;
         }
         Ok(depth)
     }
@@ -781,6 +937,16 @@ impl DispatchStore {
     ) -> Result<AgentAdmissionReservation> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        let workspace_id = workspace_registry
+            .agent_workspaces
+            .get(&binding.worker.agent_id)
+            .copied()
+            .context("worker workspace ownership is unavailable")?;
+        let child = binding.worker.session_id;
+        let parent = binding.caller.session_id;
+        record_lineage(&mut workspace_registry, workspace_id, child, parent)?;
+        self.write_workspace_registry(&workspace_registry)?;
         let reservation = registry.reserve_admission(agent, run, binding, admission);
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(reservation)
@@ -825,7 +991,15 @@ impl DispatchStore {
     pub fn reconcile_incomplete_admissions(&self) -> Result<usize> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
         let reconciled = registry.reconcile_incomplete_admissions();
+        // These guards represent code executing in the previous daemon
+        // process. No credential or worker survives restart, so retaining one
+        // would leak a concurrency slot forever.
+        if !workspace_registry.delegation_reservations.is_empty() {
+            workspace_registry.delegation_reservations.clear();
+            self.write_workspace_registry(&workspace_registry)?;
+        }
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(reconciled)
     }
@@ -942,18 +1116,34 @@ impl DispatchStore {
     ///
     /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_binding(&self, binding: DispatchBinding) -> Result<DispatchBinding> {
-        self.mutate_registry(|registry| {
-            if let Some(existing) = registry
-                .bindings
-                .iter_mut()
-                .find(|item| item.run_id == binding.run_id)
-            {
-                *existing = binding.clone();
-            } else {
-                registry.bindings.push(binding.clone());
-            }
-            binding
-        })
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut registry = self.load_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        if let Some(workspace_id) = workspace_registry
+            .agent_workspaces
+            .get(&binding.worker.agent_id)
+            .copied()
+        {
+            record_lineage(
+                &mut workspace_registry,
+                workspace_id,
+                binding.worker.session_id,
+                binding.caller.session_id,
+            )?;
+            self.write_workspace_registry(&workspace_registry)?;
+        }
+        if let Some(existing) = registry
+            .bindings
+            .iter_mut()
+            .find(|item| item.run_id == binding.run_id)
+        {
+            *existing = binding.clone();
+        } else {
+            registry.bindings.push(binding.clone());
+        }
+        registry.retain_bounded();
+        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        Ok(binding)
     }
 
     /// # Errors
@@ -1451,9 +1641,18 @@ mod tests {
         let store = DispatchStore::new(tmp.path());
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
+        let parent_session = SessionId::new();
+        let parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
         let caller = CallerRef {
-            session_id: Some(SessionId::new()),
-            agent_id: AgentId::new(),
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
         };
         store
             .queue_delegated_prompt(
@@ -1462,6 +1661,7 @@ mod tests {
                 "delegated work".into(),
                 now(),
                 caller.clone(),
+                OperationId::new(),
             )
             .unwrap();
 
@@ -1484,8 +1684,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)] // One durable graph proves queue, active-run, replacement, and ancestry joins together.
-    fn delegation_usage_counts_queued_and_active_children_by_session_lineage() {
+    fn delegation_depth_survives_manager_runtime_replacement() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
         let workspace = WorkspaceId::new();
@@ -1505,26 +1704,6 @@ mod tests {
                 AgentProfileId::new("claude").unwrap(),
                 ModelSelector::new("second").unwrap(),
             )
-            .unwrap();
-        let active_session = SessionId::new();
-        let active_worker = store
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(active_session),
-                AgentProfileId::new("codex").unwrap(),
-                ModelSelector::new("worker").unwrap(),
-            )
-            .unwrap();
-        let active_run = OperationId::new();
-        store
-            .upsert_run(DispatchRun {
-                run_id: active_run,
-                agent_id: active_worker.agent_id,
-                prompt: "active".into(),
-                started_at: now(),
-                ended_at: None,
-                status: RunStatus::Running,
-            })
             .unwrap();
         let director = store
             .upsert_agent_by_runtime_model(
@@ -1548,42 +1727,6 @@ mod tests {
                 },
             })
             .unwrap();
-        store
-            .upsert_binding(DispatchBinding {
-                run_id: active_run,
-                caller: CallerRef {
-                    session_id: Some(manager_session),
-                    agent_id: original_manager.agent_id,
-                },
-                worker: WorkerRef {
-                    session_id: Some(active_session),
-                    agent_id: active_worker.agent_id,
-                },
-            })
-            .unwrap();
-        store
-            .queue_delegated_prompt(
-                workspace,
-                Some(SessionId::new()),
-                "queued".into(),
-                now(),
-                CallerRef {
-                    session_id: Some(manager_session),
-                    agent_id: original_manager.agent_id,
-                },
-            )
-            .unwrap();
-
-        assert_eq!(
-            store
-                .delegation_usage(&CallerRef {
-                    session_id: Some(manager_session),
-                    agent_id: replacement_manager.agent_id,
-                })
-                .unwrap(),
-            2,
-            "a replacement Manager inherits both active and queued usage"
-        );
         assert_eq!(
             store
                 .delegation_depth(&CallerRef {
@@ -1615,8 +1758,407 @@ mod tests {
             session_id: Some(SessionId::new()),
             agent_id: AgentId::new(),
         };
-        assert!(store.delegation_usage(&unknown).is_err());
         assert!(store.delegation_depth(&unknown).is_err());
+    }
+
+    #[test]
+    fn delegation_reservation_closes_the_concurrency_check_to_publish_gap() {
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(DispatchStore::new(tmp.path()));
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let manager = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("manager").unwrap(),
+            )
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(session),
+            agent_id: manager.agent_id,
+        };
+        let barrier = Arc::new(Barrier::new(3));
+        let operations = [OperationId::new(), OperationId::new()];
+        let workers = operations
+            .into_iter()
+            .map(|operation_id| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                let caller = caller.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.reserve_delegation(&caller, operation_id, 1).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DelegationReservationOutcome::Reserved)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == DelegationReservationOutcome::LimitReached)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One graph covers every reservation and immutable-lineage boundary.
+    fn delegation_reservation_replay_and_lineage_fail_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
+        };
+        assert!(
+            store
+                .reserve_delegation(
+                    &CallerRef {
+                        session_id: None,
+                        agent_id: AgentId::new(),
+                    },
+                    OperationId::new(),
+                    1,
+                )
+                .is_err()
+        );
+
+        let reserved = OperationId::new();
+        assert_eq!(
+            store.reserve_delegation(&caller, reserved, 1).unwrap(),
+            DelegationReservationOutcome::Reserved
+        );
+        assert_eq!(
+            store.reserve_delegation(&caller, reserved, 1).unwrap(),
+            DelegationReservationOutcome::InProgress
+        );
+        assert!(store.release_delegation(reserved).unwrap());
+        assert!(!store.release_delegation(reserved).unwrap());
+
+        let child_session = SessionId::new();
+        let child = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(child_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("child").unwrap(),
+            )
+            .unwrap();
+        let active_run = OperationId::new();
+        store
+            .upsert_run(DispatchRun {
+                run_id: active_run,
+                agent_id: child.agent_id,
+                prompt: "active".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap();
+        let binding = DispatchBinding {
+            run_id: active_run,
+            caller: caller.clone(),
+            worker: WorkerRef {
+                session_id: Some(child_session),
+                agent_id: child.agent_id,
+            },
+        };
+        store.upsert_binding(binding.clone()).unwrap();
+        assert_eq!(store.bindings().unwrap(), vec![binding]);
+        assert_eq!(
+            store.reserve_delegation(&caller, active_run, 2).unwrap(),
+            DelegationReservationOutcome::AlreadyAdmitted
+        );
+        assert_eq!(
+            store
+                .reserve_delegation(&caller, OperationId::new(), 1)
+                .unwrap(),
+            DelegationReservationOutcome::LimitReached
+        );
+
+        let queued_operation = OperationId::new();
+        let queued_session = SessionId::new();
+        store
+            .queue_delegated_prompt(
+                workspace,
+                Some(queued_session),
+                "queued".into(),
+                now(),
+                caller.clone(),
+                queued_operation,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .reserve_delegation(&caller, queued_operation, 3)
+                .unwrap(),
+            DelegationReservationOutcome::AlreadyAdmitted
+        );
+        assert!(
+            store
+                .queue_delegated_prompt(
+                    WorkspaceId::new(),
+                    Some(SessionId::new()),
+                    "wrong workspace".into(),
+                    now(),
+                    caller.clone(),
+                    OperationId::new(),
+                )
+                .is_err()
+        );
+
+        let other_parent_session = SessionId::new();
+        let other_parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(other_parent_session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("other-parent").unwrap(),
+            )
+            .unwrap();
+        let conflicting = CallerRef {
+            session_id: Some(other_parent_session),
+            agent_id: other_parent.agent_id,
+        };
+        assert!(
+            store
+                .queue_delegated_prompt(
+                    workspace,
+                    Some(queued_session),
+                    "reparent".into(),
+                    now(),
+                    conflicting.clone(),
+                    OperationId::new(),
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .upsert_binding(DispatchBinding {
+                    run_id: OperationId::new(),
+                    caller: conflicting,
+                    worker: WorkerRef {
+                        session_id: Some(child_session),
+                        agent_id: child.agent_id,
+                    },
+                })
+                .is_err()
+        );
+
+        let unowned_agent = AgentId::new();
+        assert!(
+            store
+                .reserve_admission(
+                    agent(SessionId::new(), unowned_agent),
+                    DispatchRun {
+                        run_id: OperationId::new(),
+                        agent_id: unowned_agent,
+                        prompt: "unowned".into(),
+                        started_at: now(),
+                        ended_at: None,
+                        status: RunStatus::Preparing,
+                    },
+                    DispatchBinding {
+                        run_id: OperationId::new(),
+                        caller: caller.clone(),
+                        worker: WorkerRef {
+                            session_id: Some(SessionId::new()),
+                            agent_id: unowned_agent,
+                        },
+                    },
+                    AgentAdmissionReservation {
+                        operation_id: OperationId::new(),
+                        semantic_key: "unowned".into(),
+                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                    },
+                )
+                .is_err()
+        );
+
+        let admitted_agent_id = AgentId::new();
+        let admitted_session = SessionId::new();
+        let admitted_operation = OperationId::new();
+        let mut ownership = store.load_workspace_registry().unwrap();
+        ownership
+            .agent_workspaces
+            .insert(admitted_agent_id, workspace);
+        store.write_workspace_registry(&ownership).unwrap();
+        let admitted = agent(admitted_session, admitted_agent_id);
+        store
+            .reserve_admission(
+                admitted,
+                DispatchRun {
+                    run_id: admitted_operation,
+                    agent_id: admitted_agent_id,
+                    prompt: "admitted".into(),
+                    started_at: now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: admitted_operation,
+                    caller: caller.clone(),
+                    worker: WorkerRef {
+                        session_id: Some(admitted_session),
+                        agent_id: admitted_agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: admitted_operation,
+                    semantic_key: "admitted".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        assert!(store.agent(admitted_agent_id).unwrap().is_some());
+
+        let conflicting_operation = OperationId::new();
+        assert!(
+            store
+                .reserve_admission(
+                    agent(admitted_session, admitted_agent_id),
+                    DispatchRun {
+                        run_id: conflicting_operation,
+                        agent_id: admitted_agent_id,
+                        prompt: "reparent admitted worker".into(),
+                        started_at: now(),
+                        ended_at: None,
+                        status: RunStatus::Preparing,
+                    },
+                    DispatchBinding {
+                        run_id: conflicting_operation,
+                        caller: CallerRef {
+                            session_id: Some(other_parent_session),
+                            agent_id: other_parent.agent_id,
+                        },
+                        worker: WorkerRef {
+                            session_id: Some(admitted_session),
+                            agent_id: admitted_agent_id,
+                        },
+                    },
+                    AgentAdmissionReservation {
+                        operation_id: conflicting_operation,
+                        semantic_key: "conflicting-parent".into(),
+                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                    },
+                )
+                .is_err()
+        );
+        assert!(store.run(conflicting_operation).unwrap().is_none());
+        assert!(store.admission(conflicting_operation).unwrap().is_none());
+
+        assert_eq!(
+            store
+                .reserve_delegation(&caller, OperationId::new(), 10)
+                .unwrap(),
+            DelegationReservationOutcome::Reserved
+        );
+        store.reconcile_incomplete_admissions().unwrap();
+        assert!(
+            store
+                .reserve_delegation(&caller, OperationId::new(), 10)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn session_lineage_survives_dispatch_run_retention() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let child_session = SessionId::new();
+        let parent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
+        let child = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(child_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("child").unwrap(),
+            )
+            .unwrap();
+        let lineage_run = OperationId::new();
+        store
+            .upsert_run(DispatchRun {
+                run_id: lineage_run,
+                agent_id: child.agent_id,
+                prompt: "lineage".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            })
+            .unwrap();
+        store
+            .upsert_binding(DispatchBinding {
+                run_id: lineage_run,
+                caller: CallerRef {
+                    session_id: Some(parent_session),
+                    agent_id: parent.agent_id,
+                },
+                worker: WorkerRef {
+                    session_id: Some(child_session),
+                    agent_id: child.agent_id,
+                },
+            })
+            .unwrap();
+        for _ in 0..=RUN_RETENTION {
+            store
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id: child.agent_id,
+                    prompt: "history".into(),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+        assert!(store.binding(lineage_run).unwrap().is_none());
+        assert_eq!(
+            store.session_parent(workspace, child_session).unwrap(),
+            Some(parent_session)
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(child_session),
+                    agent_id: child.agent_id,
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1745,6 +2287,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One reservation lifecycle keeps prepare, commit, and restart reconciliation together.
     fn admission_reservation_is_atomic_secret_free_and_reconciles_incomplete_runs() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -1753,6 +2296,9 @@ mod tests {
         let mut worker = agent(session, agent_id);
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
+        store
+            .upsert_agent(WorkspaceId::new(), worker.clone())
+            .unwrap();
         let run = DispatchRun {
             run_id: operation,
             agent_id,
@@ -2141,10 +2687,14 @@ mod tests {
             session_id: Some(session),
             agent_id,
         };
+        let owned_worker = agent(session, agent_id);
+        store
+            .upsert_agent(WorkspaceId::new(), owned_worker.clone())
+            .unwrap();
         let reserved = OperationId::new();
         store
             .reserve_admission(
-                agent(session, agent_id),
+                owned_worker,
                 DispatchRun {
                     run_id: reserved,
                     agent_id,

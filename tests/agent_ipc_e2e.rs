@@ -75,7 +75,7 @@ fn short_dir(prefix: &str) -> tempfile::TempDir {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    usagi_core::infrastructure::paths::channel_data_dir(home)
+    Channel::Local.data_dir(home)
 }
 
 fn git(repo: &Path, args: &[&str]) {

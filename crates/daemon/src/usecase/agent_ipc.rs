@@ -171,6 +171,16 @@ struct McpCaller {
     child_pid: Option<u32>,
 }
 
+/// Dispatch authority derived from one live daemon-minted MCP credential.
+/// Workspace, run, and caller identity are resolved together so a connection
+/// bound to another workspace cannot combine independently valid facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedDispatchCaller {
+    pub workspace_id: WorkspaceId,
+    pub run_id: OperationId,
+    pub caller: CallerRef,
+}
+
 /// Accepts both provider-inherited and provider-isolated MCP process groups.
 ///
 /// Codex starts each managed child as its own process-group leader. The direct
@@ -297,7 +307,7 @@ impl AgentRuntime {
             default_profile,
             geometry,
             DispatchStore::new(
-                std::env::temp_dir().join(format!("usagi-dispatch-{}", AgentRuntimeId::new())),
+                &std::env::temp_dir().join(format!("usagi-dispatch-{}", AgentRuntimeId::new())),
             ),
         )
     }
@@ -847,12 +857,34 @@ impl AgentRuntime {
     /// agent or session name participates in this lookup.
     #[must_use]
     pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
-        let run_id = self.mcp_caller(credential)?;
+        self.mcp_dispatch_context(credential)
+            .map(|context| context.caller)
+    }
+
+    /// Resolves all dispatch provenance from the same live credential and
+    /// verifies the durable Agent ownership sidecar before returning it.
+    #[must_use]
+    pub fn mcp_dispatch_context(&self, credential: &str) -> Option<AuthenticatedDispatchCaller> {
+        let mcp = self.mcp_callers.get(credential)?;
+        let record = self
+            .coordinator
+            .record_for(&mcp.runtime)
+            .ok()
+            .filter(|record| record.state == super::runtime::RuntimeState::Running)?;
+        let workspace_id = record.runtime.terminal.workspace_id;
+        let run_id = mcp.operation;
         let binding = self.dispatch.binding(run_id).ok()??;
-        Some(CallerRef {
+        let caller = CallerRef {
             session_id: binding.worker.session_id,
             agent_id: binding.worker.agent_id,
-        })
+        };
+        (self.dispatch.workspace_for_agent(caller.agent_id).ok()?? == workspace_id).then_some(
+            AuthenticatedDispatchCaller {
+                workspace_id,
+                run_id,
+                caller,
+            },
+        )
     }
 }
 
@@ -3386,7 +3418,10 @@ mod tests {
     use crate::usecase::terminal::SnapshotWire;
     use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
     use serde_json::{Value, json};
-    use usagi_core::domain::id::{AgentId, AgentResumeSourceId, ClientId, RequestId};
+    use usagi_core::domain::{
+        agent::Agent,
+        id::{AgentId, AgentResumeSourceId, ClientId, RequestId},
+    };
     use usagi_core::usecase::client::TerminalAction;
 
     trait JsonAgentTerminalActor {
@@ -3734,7 +3769,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
         )
     }
@@ -4137,7 +4172,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
             snapshot,
         )
@@ -4153,7 +4188,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             locator,
         )
     }
@@ -4172,7 +4207,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("codex").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
         )
     }
@@ -4230,6 +4265,77 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    fn daemon_dispatch_store_fails_closed_for_missing_ownership_and_reparenting() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worker = Agent {
+            agent_id: AgentId::new(),
+            session_id: Some(session),
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Starting,
+            current_run: None,
+        };
+        let admission = |operation, parent| {
+            (
+                worker.clone(),
+                DispatchRun {
+                    run_id: operation,
+                    agent_id: worker.agent_id,
+                    prompt: "dispatch ownership".into(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: operation,
+                    caller: CallerRef {
+                        session_id: Some(parent),
+                        agent_id: AgentId::new(),
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(session),
+                        agent_id: worker.agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: operation,
+                    semantic_key: "dispatch-ownership".into(),
+                    credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+        };
+
+        let missing = OperationId::new();
+        let (agent, run, binding, reservation) = admission(missing, SessionId::new());
+        assert!(
+            store
+                .reserve_admission(agent, run, binding, reservation)
+                .is_err()
+        );
+        assert!(store.run(missing).unwrap().is_none());
+
+        store.upsert_agent(workspace, worker.clone()).unwrap();
+        let admitted = OperationId::new();
+        let (agent, run, binding, reservation) = admission(admitted, SessionId::new());
+        store
+            .reserve_admission(agent, run, binding, reservation)
+            .unwrap();
+
+        let conflicting = OperationId::new();
+        let (agent, run, binding, reservation) = admission(conflicting, SessionId::new());
+        assert!(
+            store
+                .reserve_admission(agent, run, binding, reservation)
+                .is_err()
+        );
+        assert!(store.run(conflicting).unwrap().is_none());
+        assert!(store.admission(conflicting).unwrap().is_none());
+    }
 
     /// The Agent runtime is the authority a metrics observer reads through: the
     /// level it publishes is `AGENT_RUNTIME_LIMIT` wide and moves with the
@@ -5212,7 +5318,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
         );
         let workspace = WorkspaceId::new();
@@ -5781,7 +5887,7 @@ mod tests {
                 },
                 AgentProfileId::new("claude").unwrap(),
                 Geometry { cols: 80, rows: 24 },
-                DispatchStore::new(dispatch_dir.clone()),
+                DispatchStore::new(&dispatch_dir),
                 FixtureLocator(executable_dir.path().to_path_buf()),
             )
         };
@@ -5882,7 +5988,7 @@ mod tests {
             },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(dispatch_dir),
+            DispatchStore::new(&dispatch_dir),
             FixtureLocator(executable_dir.path().to_path_buf()),
             reconciled,
         )
@@ -6024,7 +6130,7 @@ mod tests {
             },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
         )));
         let operation = OperationId::new().to_string();
         let launch = intent(None);
@@ -6190,9 +6296,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let parent_session = SessionId::new();
+        let parent_agent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
         let parent = CallerRef {
-            session_id: Some(SessionId::new()),
-            agent_id: AgentId::new(),
+            session_id: Some(parent_session),
+            agent_id: parent_agent.agent_id,
         };
         runtime
             .dispatch
@@ -6202,6 +6318,7 @@ mod tests {
                 "delegated work".into(),
                 Utc::now(),
                 parent.clone(),
+                OperationId::new(),
             )
             .unwrap();
 
@@ -6683,7 +6800,7 @@ mod tests {
             .unwrap()
             .operation
             .clone();
-        runtime.dispatch = DispatchStore::new(tempfile::tempdir().unwrap().keep());
+        runtime.dispatch = DispatchStore::new(&tempfile::tempdir().unwrap().keep());
         runtime.mcp_callers.insert(
             "missing-binding".into(),
             McpCaller {
@@ -7042,6 +7159,10 @@ mod tests {
             runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
             Some(session)
         );
+        let authenticated = runtime.mcp_dispatch_context(&credential).unwrap();
+        assert_eq!(authenticated.workspace_id, workspace);
+        assert_eq!(authenticated.run_id.to_string(), operation);
+        assert_eq!(authenticated.caller.session_id, Some(session));
         assert!(runtime.mcp_dispatch_caller("forged").is_none());
         let runtime_ref = runtime
             .coordinator
@@ -7885,7 +8006,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
             RuntimeStoreSnapshot {
                 schema_version: 99,
@@ -7918,7 +8039,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
             RuntimeStoreSnapshot::default(),
             retention.clone(),

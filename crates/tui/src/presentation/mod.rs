@@ -932,6 +932,10 @@ fn route_workspace_input_before_reducer(
     }
 }
 
+fn garden_shell_owned_wake(key: &Key) -> bool {
+    !matches!(key, Key::Click { .. } | Key::Other | Key::Resize)
+}
+
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
 pub trait MetricsPort {
     /// Compatibility observation hook for simple embedders. Production ports
@@ -6052,13 +6056,13 @@ fn drive_workspace_controller(
     // The screen saver's idle deadline rides the same clock: the shell observes
     // user input and monotonic time, the reducer only sees an injected duration.
     let mut idle_watch = IdleWatch::new(pointer_clock.elapsed());
+    // A Garden mouse-down owns the complete drag/release gesture even though
+    // the down itself closes the overlay. Later gesture phases must not land on
+    // the newly revealed terminal or sidebar.
+    let mut garden_pointer_gesture = false;
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
-    // A Garden pointer press owns its complete gesture even though the press
-    // itself dismisses the overlay. This prevents the following drag/release
-    // from selecting or opening content on the newly revealed Home.
-    let mut garden_pointer_gesture = false;
     // Seed the daemon-authoritative snapshots before the first frame so a
     // pending decision and another client's sessions are visible without
     // requiring a manual key binding. Both are wakes of a resident lane, not
@@ -6167,7 +6171,11 @@ fn drive_workspace_controller(
             width: u16::try_from(width).unwrap_or(u16::MAX),
             height: u16::try_from(height).unwrap_or(u16::MAX),
         });
-        let _ = runtime.apply_event(AppEvent::GardenAvailability(garden_fits(height, width)));
+        let garden_available = garden_fits(height, width);
+        if runtime.state().overlay() == Some(Overlay::Garden) && !garden_available {
+            let _ = runtime.apply_event(AppEvent::GardenUnavailable);
+        }
+        let _ = runtime.apply_event(AppEvent::GardenAvailability(garden_available));
         let director_open = runtime.state().director_drawer_open();
         let geometry = foreground_terminal_geometry(height, width, director_open);
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
@@ -6549,6 +6557,19 @@ fn drive_workspace_controller(
             frame_material_key = None;
             continue;
         }
+        if garden_pointer_gesture {
+            match key {
+                Key::Pointer(PointerEvent {
+                    kind: PointerKind::Up,
+                    ..
+                }) => {
+                    garden_pointer_gesture = false;
+                    continue;
+                }
+                Key::Pointer(_) => continue,
+                _ => garden_pointer_gesture = false,
+            }
+        }
         // Screen saver admission, before the key is routed anywhere: a wake-up
         // key resets the deadline first, so the frame that wakes the user can
         // never re-open the garden it just closed. A terminal too small to draw
@@ -6556,6 +6577,24 @@ fn drive_workspace_controller(
         let idle = idle_watch.observe(&key, pointer_clock.elapsed());
         if garden_fits(height, width) {
             let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
+        }
+        // Wheel, drag and raw terminal input are normally owned before the Home
+        // reducer. While the Garden is visible they are wake-up input instead:
+        // consume the first event and never mutate the covered pane.
+        if runtime.state().overlay() == Some(Overlay::Garden) {
+            if matches!(key, Key::Click { .. }) {
+                garden_pointer_gesture = true;
+            } else if garden_shell_owned_wake(&key) {
+                garden_pointer_gesture = matches!(
+                    key,
+                    Key::Pointer(PointerEvent {
+                        kind: PointerKind::Drag,
+                        ..
+                    })
+                );
+                let _ = runtime.apply_event(AppEvent::GardenClick(GardenClick::Dismiss));
+                continue;
+            }
         }
         // Neither a tick nor a resize refreshes an inventory here any more. Both
         // used to dispatch `RefreshDecisions` + `RefreshSessions`, which ran the
@@ -7927,7 +7966,7 @@ mod tests {
         adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
         controller_terminal_view, copy_terminal_selection, director_organization,
         drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
-        garden_click_at, handle_terminal_pointer, home_frame_material,
+        garden_click_at, garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
         new_project_notice, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
@@ -8266,6 +8305,23 @@ mod tests {
         assert_eq!(terminal_copy_event, Some(AppEvent::Key(AppKey::CtrlC)));
         #[cfg(not(target_os = "windows"))]
         assert_eq!(terminal_copy_event, None);
+    }
+
+    #[test]
+    fn garden_claims_shell_owned_terminal_input_as_wake_events() {
+        assert!(garden_shell_owned_wake(&Key::Pointer(PointerEvent {
+            kind: crate::usecase::terminal_input::PointerKind::Drag,
+            column: 1,
+            row: 1,
+        })));
+        assert!(garden_shell_owned_wake(&Key::Live(
+            LiveTerminalAction::ScrollDown
+        )));
+        assert!(garden_shell_owned_wake(&Key::Passthrough(vec![1])));
+        assert!(garden_shell_owned_wake(&Key::Enter));
+        assert!(garden_shell_owned_wake(&Key::Quit));
+        assert!(garden_shell_owned_wake(&Key::CtrlQ));
+        assert!(!garden_shell_owned_wake(&Key::Other));
     }
 
     /// A resize is a redraw, never an inventory refresh. It reaches the reducer
@@ -9745,11 +9801,11 @@ mod tests {
                 resume: true,
             });
             super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            super::drain_pane_completions_into_runtime(
+            drain_completions_at(
                 &mut ui,
                 &mut runtime,
                 &mut std::collections::HashMap::new(),
+                1,
                 Geometry { cols: 20, rows: 5 },
             );
         }
@@ -9769,11 +9825,11 @@ mod tests {
         });
         let mut pending = std::collections::HashMap::from([(operation, target)]);
         super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        super::drain_pane_completions_into_runtime(
+        drain_completions_at(
             &mut ui,
             &mut runtime,
             &mut pending,
+            1,
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
@@ -9809,11 +9865,11 @@ mod tests {
         });
         pending.insert(operation, target);
         super::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        super::drain_pane_completions_into_runtime(
+        drain_completions_at(
             &mut ui,
             &mut runtime,
             &mut pending,
+            1,
             Geometry { cols: 20, rows: 5 },
         );
 
@@ -10186,11 +10242,12 @@ mod tests {
     /// Take exactly `count` completions off the worker channel, then put them back
     /// through the drain the frame loop uses. Nothing sleeps, so the number of
     /// completions each request produced is exact.
-    fn drain_completions(
+    fn drain_completions_at(
         ui: &mut WorkspaceUi,
         runtime: &mut WorkspaceRuntime,
         pending: &mut std::collections::HashMap<OperationId, Target>,
         count: usize,
+        geometry: Geometry,
     ) -> Vec<super::PaneLaunchOutcome> {
         let taken = (0..count)
             .map(|_| {
@@ -10208,8 +10265,17 @@ mod tests {
                 .send(completion)
                 .expect("the workspace still owns its completion receiver");
         }
-        super::drain_pane_completions_into_runtime(ui, runtime, pending, terminal_geometry(20, 80));
+        super::drain_pane_completions_into_runtime(ui, runtime, pending, geometry);
         outcomes
+    }
+
+    fn drain_completions(
+        ui: &mut WorkspaceUi,
+        runtime: &mut WorkspaceRuntime,
+        pending: &mut std::collections::HashMap<OperationId, Target>,
+        count: usize,
+    ) -> Vec<super::PaneLaunchOutcome> {
+        drain_completions_at(ui, runtime, pending, count, terminal_geometry(20, 80))
     }
 
     fn drain_next_completion(

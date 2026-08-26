@@ -516,9 +516,9 @@ fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
 
 #[test]
 fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
-    let fixture = PathBuf::from(std::env::var_os("HOME").expect("test HOME"))
-        .join(".codex")
-        .join(format!("ub{}", std::process::id()));
+    // Keep the Unix socket path below `SUN_LEN` while isolating every test
+    // process from the operator's real HOME and production daemon data.
+    let fixture = PathBuf::from("/tmp").join(format!("usagi-csb-{}", std::process::id()));
     let _ = fs::remove_dir_all(&fixture);
     let repo = fixture.join("repo");
     let data = fixture.join("data");
