@@ -114,6 +114,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Enforce internal issue completion
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        PR_BODY: ${{ github.event.pull_request.body || '' }}
+      run: scripts/ci/internal-issue-status.sh "$BASE_SHA" "$HEAD_SHA"
+
+    - name: Test internal issue completion checker
+      run: bash scripts/tests/internal-issue-status.sh
 
     - name: Test required context contract
       run: bash scripts/tests/required-contexts.sh

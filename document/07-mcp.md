@@ -3,9 +3,8 @@
 > [ドキュメント目次](README.md) ｜ ← 前へ [6. 開発規約](06-conventions.md) ｜ 次へ → [8. coverage exclusion inventory](08-coverage.md)
 
 `usagi mcp` は AI エージェント向けの入口面で、stdio 上の JSON-RPC 2.0 で tool と resource を
-公開する。面の責務・経路・daemon を権威とする反映フローの設計判断は
-[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) が正本で、本章は現在の
-ビルドが公開する wire 面をまとめる。
+公開する。本章が現在のビルドで動作する MCP 入口・経路・wire 面の正本である。
+[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) は、この配置を採用した設計判断の履歴として残す。
 
 ## 目次
 
