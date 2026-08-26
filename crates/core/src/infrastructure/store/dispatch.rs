@@ -1373,10 +1373,11 @@ impl DispatchStore {
             .filter(|entry| since.is_none_or(|value| entry.created_at > value))
             .filter(|entry| !unread_only || (!entry.read && entry.sequence >= ack.next_sequence))
             .take(limit + 1)
+            .copied()
             .collect::<Vec<_>>();
         let has_more = selected.len() > limit;
         let page_entries = &selected[..selected.len().min(limit)];
-        let mut records = self.read_inbox_records(caller, page_entries.iter().copied())?;
+        let mut records = self.read_inbox_records(caller, page_entries)?;
         for record in &mut records {
             record.message.read = record.message.read || record.sequence < ack.next_sequence;
         }
@@ -1436,7 +1437,7 @@ impl DispatchStore {
         let index = self.inbox_index(caller)?;
         let ack = self.read_inbox_ack(caller)?;
         Self::validate_inbox_ack(ack, &index)?;
-        let mut records = self.read_inbox_records(caller, index.entries.iter())?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
         for record in &mut records {
             record.message.read = record.message.read || record.sequence < ack.next_sequence;
         }
@@ -1462,7 +1463,7 @@ impl DispatchStore {
     pub fn mark_inbox_read(&self, caller: &CallerRef, run_id: OperationId) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let index = self.inbox_index(caller)?;
-        let mut records = self.read_inbox_records(caller, index.entries.iter())?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
         let mut changed = false;
         for record in &mut records {
             if record.message.run_id == run_id && !record.message.read {
@@ -1632,12 +1633,11 @@ impl DispatchStore {
         json_file::write_atomic_cache(&self.dir, &self.inbox_index_path(caller), index)
     }
 
-    fn read_inbox_records<'a>(
+    fn read_inbox_records(
         &self,
         caller: &CallerRef,
-        entries: impl IntoIterator<Item = &'a InboxIndexEntry>,
+        entries: &[InboxIndexEntry],
     ) -> Result<Vec<InboxRecord>> {
-        let entries = entries.into_iter().collect::<Vec<_>>();
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -1713,7 +1713,7 @@ impl DispatchStore {
         index: &InboxIndex,
         ack: InboxAck,
     ) -> Result<InboxIndex> {
-        let mut records = self.read_inbox_records(caller, index.entries.iter())?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
         let read_count = records
             .iter()
             .filter(|record| record.message.read || record.sequence < ack.next_sequence)
@@ -3202,19 +3202,19 @@ mod tests {
         let missing_store = DispatchStore::new(&missing_path);
         assert!(
             missing_store
-                .read_inbox_records(&caller, [&matching])
+                .read_inbox_records(&caller, &[matching])
                 .is_err()
         );
         let beyond = InboxIndexEntry {
             offset: fs::metadata(&path).unwrap().len(),
             ..matching
         };
-        assert!(store.read_inbox_records(&caller, [&beyond]).is_err());
+        assert!(store.read_inbox_records(&caller, &[beyond]).is_err());
         let mismatched = InboxIndexEntry {
             sequence: 8,
             ..matching
         };
-        assert!(store.read_inbox_records(&caller, [&mismatched]).is_err());
+        assert!(store.read_inbox_records(&caller, &[mismatched]).is_err());
 
         let index_path = store.inbox_index_path(&caller);
         fs::write(&index_path, b"stale-index").unwrap();
