@@ -179,6 +179,7 @@ agent -m claude
 agent -m codex
 agent -m sakana.ai
 terminal
+terminal new     # 外部ターミナルを開き、modal を閉じて Closeup へ戻る
 ```
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を

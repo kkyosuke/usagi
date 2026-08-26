@@ -3650,14 +3650,17 @@ fn reconcile_force_remove_confirmation(state: &mut AppState) {
     }
 }
 
+fn dismiss_closeup_action_modal(state: &mut AppState) {
+    state.closeup_action_forced = false;
+    state.overlay = None;
+}
+
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
     }
     if matches!(overlay, Overlay::Closeup) && matches!(key, AppKey::Escape) {
-        state.closeup_action_forced = false;
-        state.overlay = None;
-        state.route = Route::Home(HomeMode::Switch);
+        dismiss_closeup_action_modal(state);
         return Vec::new();
     }
     if matches!(overlay, Overlay::CreateSessionError)
@@ -3819,12 +3822,10 @@ fn update_overlay_control_chord(
         AppKey::CtrlQ => Some(Vec::new()),
         AppKey::CtrlC => {
             match overlay {
-                // Closeup returns to Switch just like `Ctrl-O Ctrl-O`, whether
-                // it is the base surface or forced over a live pane.
+                // Close only the action modal and return input to its underlying
+                // Closeup, whether it is the base surface or a live pane.
                 Overlay::Closeup => {
-                    state.closeup_action_forced = false;
-                    state.overlay = None;
-                    state.route = Route::Home(HomeMode::Switch);
+                    dismiss_closeup_action_modal(state);
                 }
                 // The create-failure dialog treats Ctrl-C as acknowledgement;
                 // route remains untouched beneath the dismissed dialog.
@@ -4739,11 +4740,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
     };
     if effect.is_some() {
-        // legacy's `terminal new` hands the worktree to the OS terminal and leaves
-        // Closeup active; only embedded-pane actions dismiss this modal.
-        if !matches!(effect, Some(Effect::OpenExternalTerminal { .. })) {
-            state.overlay = None;
-        }
+        dismiss_closeup_action_modal(state);
         state.notice = Some(Notice::new(match selection {
             Some(selection) => format!("Requested {command_name} {selection}"),
             None => format!("Requested {command_name}"),
@@ -6055,14 +6052,14 @@ mod tests {
                 overlay: None,
             },
             Case {
-                name: "closeup overlay escape returns to switch",
+                name: "closeup overlay escape returns to closeup",
                 events: vec![
                     AppEvent::LivePaneAvailability(true),
                     AppEvent::Key(AppKey::Enter),
                     AppEvent::Key(AppKey::OpenCloseupOverlay),
                     AppEvent::Key(AppKey::Escape),
                 ],
-                route: Route::Home(HomeMode::Switch),
+                route: Route::Home(HomeMode::Closeup),
                 overlay: None,
             },
             Case {
@@ -6783,11 +6780,10 @@ mod tests {
         }
     }
 
-    /// #355: the Closeup action modal is not an ordinary modal — Escape and
-    /// Ctrl-C both close it and return Home to Switch, while Ctrl-Q stays inert
-    /// like every other overlay.
+    /// Escape and Ctrl-C close only the Closeup action modal and return input to
+    /// the underlying Closeup, while Ctrl-Q stays inert like every other overlay.
     #[test]
-    fn closeup_action_modal_exits_to_switch_on_escape_and_ctrl_c() {
+    fn closeup_action_modal_returns_to_closeup_on_escape_and_ctrl_c() {
         let (workspace, session, _) = ids();
         for exit_key in [AppKey::Escape, AppKey::CtrlC] {
             // Enter Closeup on a session with no live pane: the action modal is
@@ -6801,18 +6797,22 @@ mod tests {
             assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
             assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
-            // The exit key closes the modal and lands on Switch.
+            // The exit key closes only the modal and lands on Closeup.
             assert!(update(&mut state, AppEvent::Key(exit_key.clone())).is_empty());
-            assert_eq!(state.route(), Route::Home(HomeMode::Switch), "{exit_key:?}");
+            assert_eq!(
+                state.route(),
+                Route::Home(HomeMode::Closeup),
+                "{exit_key:?}"
+            );
             assert_eq!(state.overlay(), None, "{exit_key:?}");
         }
     }
 
-    /// #355: even when the action modal is forced over a live pane, Escape and
-    /// Ctrl-C leave to Switch rather than handing input back to the live pane,
-    /// and a trailing live resample does not resurrect the overlay.
+    /// Even when the action modal is forced over a live pane, Escape and Ctrl-C
+    /// hand input back to that pane, and a trailing live resample does not
+    /// resurrect the overlay.
     #[test]
-    fn closeup_forced_action_modal_exits_to_switch() {
+    fn closeup_forced_action_modal_returns_to_the_live_closeup() {
         let (workspace, session, _) = ids();
         for exit_key in [AppKey::Escape, AppKey::CtrlC] {
             let mut state = AppState::home(workspace, vec![session]);
@@ -6825,11 +6825,14 @@ mod tests {
             let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
             assert_eq!(state.overlay(), Some(Overlay::Closeup));
             assert!(update(&mut state, AppEvent::Key(exit_key.clone())).is_empty());
-            assert_eq!(state.route(), Route::Home(HomeMode::Switch), "{exit_key:?}");
+            assert_eq!(
+                state.route(),
+                Route::Home(HomeMode::Closeup),
+                "{exit_key:?}"
+            );
             assert_eq!(state.overlay(), None, "{exit_key:?}");
 
-            // A same-level live resample must not re-open the Closeup overlay now
-            // that the route is Switch.
+            // A same-level live resample must not re-open the Closeup overlay.
             let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
             assert_eq!(state.overlay(), None, "{exit_key:?}");
         }
@@ -6970,10 +6973,10 @@ mod tests {
         );
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
-        // A just-created session has no live pane. Ctrl-C must leave its action
-        // surface for the switcher, never detach the entire TUI.
+        // A just-created session has no live pane. Ctrl-C closes only its action
+        // modal and returns to Closeup, never detaching the entire TUI.
         assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
         assert_eq!(state.overlay(), None);
 
         let effects = update(
@@ -7731,7 +7734,9 @@ mod tests {
                 target: Target::Session(session),
             }]
         );
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(state.overlay(), None);
+        assert!(!state.closeup_action_forced);
     }
 
     #[test]
