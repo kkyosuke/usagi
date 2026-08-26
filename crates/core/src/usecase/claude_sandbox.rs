@@ -114,6 +114,9 @@ pub struct SandboxRequest {
     pub tmpdir: Option<PathBuf>,
     /// `$HOME`（あれば）。Claude state・macOS の Keychain に使う。
     pub home: Option<PathBuf>,
+    /// Linux で `$HOME` の writable prefix を表現するため、合成ルートが起動直前に列挙した
+    /// `$HOME` 直下の entry。一覧を取得できなければ `None` のまま fail closed にする。
+    pub linux_home_entries: Option<Vec<PathBuf>>,
     /// macOS の per-user cache root（`$DARWIN_USER_CACHE_DIR`。あれば）。Keychain 検索が更新する
     /// MDS cache（`<cache>/mds`）を writable にするために使う。
     pub cache_dir: Option<PathBuf>,
@@ -181,7 +184,14 @@ pub fn plan(request: &SandboxRequest) -> SandboxPlan {
             None => reject_backend("bwrap"),
             Some(backend) => SandboxPlan::Launch {
                 program: backend.clone(),
-                argv: linux_argv(&roots, &prefixes, program, program_args),
+                argv: linux_argv(
+                    &roots,
+                    &prefixes,
+                    request.home.as_deref(),
+                    request.linux_home_entries.as_deref(),
+                    program,
+                    program_args,
+                ),
             },
         },
     }
@@ -196,10 +206,7 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
         return Some("sandbox backend が absolute path ではありません".to_owned());
     }
     let protected = request.protected_root.as_deref();
-    for root in writable_roots(request)
-        .into_iter()
-        .chain(writable_prefixes(request))
-    {
+    for root in writable_roots(request) {
         if !root.is_absolute() || root == Path::new("/") {
             return Some("writable root が安全な absolute path ではありません".to_owned());
         }
@@ -209,6 +216,37 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
         });
         if overlaps_workspace {
             return Some("writable root が保護対象 workspace の ancestor です".to_owned());
+        }
+    }
+    for prefix in writable_prefixes(request) {
+        if !prefix.is_absolute() || prefix.to_str().is_none() {
+            return Some("writable prefix が安全な absolute path ではありません".to_owned());
+        }
+        let overlaps_workspace = protected.is_some_and(|workspace| {
+            path_has_prefix(workspace, &prefix)
+                || (request.mode == SandboxMode::Root && prefix.starts_with(workspace))
+        });
+        if overlaps_workspace {
+            return Some("writable prefix が保護対象 workspace と重なります".to_owned());
+        }
+    }
+    if request.platform == Platform::Linux && !writable_prefixes(request).is_empty() {
+        let (Some(home), Some(entries)) = (
+            request.home.as_deref(),
+            request.linux_home_entries.as_deref(),
+        ) else {
+            return Some("Linux HOME entry inventory がありません".to_owned());
+        };
+        if home == Path::new("/")
+            || home.to_str().is_none()
+            || protected.is_some_and(|workspace| home.starts_with(workspace))
+        {
+            return Some("Linux HOME が安全な writable directory ではありません".to_owned());
+        }
+        if entries.iter().any(|entry| {
+            !entry.is_absolute() || entry.to_str().is_none() || entry.parent() != Some(home)
+        }) {
+            return Some("Linux HOME entry inventory が安全な直下 path ではありません".to_owned());
         }
     }
     None
@@ -435,11 +473,15 @@ fn sandbox_regex_prefix_literal(path: &Path) -> String {
 
 /// Linux: `bwrap --ro-bind / / … --bind-try <root> <root> … <program> <args…>`。
 ///
-/// root 全体を read-only で束ね、writable root だけを read-write で再 bind する。`--bind-try` は
-/// 存在しない root（未作成の Claude state など）でも起動を止めない。
+/// root 全体を read-only で束ね、writable root だけを read-write で再 bind する。global config の
+/// prefix がある場合は `$HOME` を read-write にし、起動直前に観測した直下 entry のうち prefix family
+/// 以外を read-only に戻す。最後に state / launch root を再 bind するため、それらの subtree は writable
+/// のまま残る。`--bind-try` / `--ro-bind-try` は列挙後に消えた entry や未作成の state で起動を止めない。
 fn linux_argv(
     roots: &[PathBuf],
     prefixes: &[PathBuf],
+    home: Option<&Path>,
+    home_entries: Option<&[PathBuf]>,
     program: &str,
     program_args: &[String],
 ) -> Vec<String> {
@@ -453,15 +495,35 @@ fn linux_argv(
         "/proc".to_owned(),
         "--die-with-parent".to_owned(),
     ];
-    for root in roots.iter().chain(prefixes) {
-        let path = root.to_string_lossy().into_owned();
-        argv.push("--bind-try".to_owned());
-        argv.push(path.clone());
-        argv.push(path);
+    if !prefixes.is_empty()
+        && let (Some(home), Some(home_entries)) = (home, home_entries)
+    {
+        push_linux_bind(&mut argv, "--bind-try", home);
+        for entry in home_entries {
+            if !prefixes.iter().any(|prefix| path_has_prefix(entry, prefix)) {
+                push_linux_bind(&mut argv, "--ro-bind-try", entry);
+            }
+        }
+    }
+    for root in roots {
+        push_linux_bind(&mut argv, "--bind-try", root);
     }
     argv.push(program.to_owned());
     argv.extend(program_args.iter().cloned());
     argv
+}
+
+fn path_has_prefix(path: &Path, prefix: &Path) -> bool {
+    path.to_str()
+        .zip(prefix.to_str())
+        .is_some_and(|(path, prefix)| path.starts_with(prefix))
+}
+
+fn push_linux_bind(argv: &mut Vec<String>, option: &str, root: &Path) {
+    let path = root.to_string_lossy().into_owned();
+    argv.push(option.to_owned());
+    argv.push(path.clone());
+    argv.push(path);
 }
 
 #[cfg(test)]
@@ -477,6 +539,12 @@ mod tests {
             launch_roots: vec![PathBuf::from("/repo/.usagi/sessions/work")],
             tmpdir: Some(PathBuf::from("/tmp/user")),
             home: Some(PathBuf::from("/home/dev")),
+            linux_home_entries: Some(vec![
+                PathBuf::from("/home/dev/.claude"),
+                PathBuf::from("/home/dev/.claude.json"),
+                PathBuf::from("/home/dev/.ssh"),
+                PathBuf::from("/home/dev/notes"),
+            ]),
             cache_dir: Some(PathBuf::from("/private/var/folders/ab/cd/C")),
             passthrough: false,
             command: vec!["claude".to_owned(), "--print".to_owned()],
@@ -829,13 +897,118 @@ mod tests {
     }
 
     #[test]
-    fn linux_rebinds_the_global_config_file_read_write() {
+    fn linux_rebinds_home_then_protects_every_non_config_entry() {
         let (_, argv) = plan(&request(Platform::Linux, Some("/usr/bin/bwrap")))
             .into_launch()
             .unwrap();
         assert!(argv.windows(3).any(|window| window[0] == "--bind-try"
-            && window[1] == "/home/dev/.claude.json"
+            && window[1] == "/home/dev"
             && window[2] == window[1]));
+        for protected in ["/home/dev/.ssh", "/home/dev/notes"] {
+            assert!(argv.windows(3).any(|window| window[0] == "--ro-bind-try"
+                && window[1] == protected
+                && window[2] == window[1]));
+        }
+        assert!(!argv.windows(3).any(|window| window[0] == "--ro-bind-try"
+            && window[1] == "/home/dev/.claude.json"));
+        assert!(argv.windows(3).any(|window| window[0] == "--bind-try"
+            && window[1] == "/home/dev/.claude"
+            && window[2] == window[1]));
+    }
+
+    #[test]
+    fn linux_config_prefix_requires_a_safe_home_entry_inventory() {
+        let mut missing = request(Platform::Linux, Some("/usr/bin/bwrap"));
+        missing.linux_home_entries = None;
+        assert!(
+            plan(&missing)
+                .into_reject()
+                .is_some_and(|reason| reason.contains("inventory"))
+        );
+
+        for entry in ["relative", "/home/other/entry", "/home/dev/nested/entry"] {
+            let mut invalid = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            invalid.linux_home_entries = Some(vec![PathBuf::from(entry)]);
+            assert!(
+                plan(&invalid)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("直下 path")),
+                "{entry} must fail closed"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let mut non_utf8 = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            non_utf8.linux_home_entries = Some(vec![
+                PathBuf::from("/home/dev").join(OsString::from_vec(vec![0xff])),
+            ]);
+            assert!(
+                plan(&non_utf8)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("直下 path"))
+            );
+        }
+
+        let mut root_home = request(Platform::Linux, Some("/usr/bin/bwrap"));
+        root_home.home = Some(PathBuf::from("/"));
+        root_home.linux_home_entries = Some(Vec::new());
+        assert!(
+            plan(&root_home)
+                .into_reject()
+                .is_some_and(|reason| reason.contains("Linux HOME"))
+        );
+
+        let mut protected_home = request(Platform::Linux, Some("/usr/bin/bwrap"));
+        protected_home.protected_root = Some(PathBuf::from("/home/dev"));
+        assert!(
+            plan(&protected_home)
+                .into_reject()
+                .is_some_and(|reason| reason.contains("Linux HOME"))
+        );
+
+        // `linux_argv` also fails closed when a caller violates the validated
+        // prefix/inventory pairing instead of widening HOME accidentally.
+        let argv = linux_argv(
+            &[],
+            &[PathBuf::from("/home/dev/.claude.json")],
+            None,
+            None,
+            "claude",
+            &[],
+        );
+        assert!(!argv.iter().any(|argument| argument == "--bind-try"));
+    }
+
+    #[test]
+    fn lexical_config_prefix_cannot_overlap_a_protected_workspace() {
+        for mode in [SandboxMode::Session, SandboxMode::Root] {
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.mode = mode;
+            request.protected_root = Some(PathBuf::from("/home/dev/.claude.json-repository"));
+            request.launch_roots.clear();
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("writable prefix"))
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let mut non_utf8_home = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+            non_utf8_home.home = Some(PathBuf::from(OsString::from_vec(vec![b'/', 0xff])));
+            assert!(
+                plan(&non_utf8_home)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("writable prefix"))
+            );
+        }
     }
 
     #[test]

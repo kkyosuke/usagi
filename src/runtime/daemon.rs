@@ -953,15 +953,13 @@ fn validate_root_git_common_dir_policy(
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
-        writable.extend(
-            [
-                claude_sandbox::agent_state_directory(program),
-                claude_sandbox::agent_config_prefix(program),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|granted| home.join(granted)),
-        );
+        writable
+            .extend(claude_sandbox::agent_state_directory(program).map(|state| home.join(state)));
+        if claude_sandbox::agent_config_prefix(program)
+            .is_some_and(|prefix| lexical_prefix_overlaps_path(&home.join(prefix), &common))
+        {
+            return Err(());
+        }
         if cfg!(target_os = "macos") {
             writable.push(home.join("Library/Keychains"));
         }
@@ -978,6 +976,16 @@ fn validate_root_git_common_dir_policy(
         common.starts_with(&root) || root.starts_with(&common)
     });
     (!overlaps).then_some(()).ok_or(())
+}
+
+/// Whether the lexical file family beginning at `prefix` intersects `path`'s
+/// subtree. Non-UTF-8 paths cannot be represented in the launcher argv and are
+/// therefore treated as an overlap (fail closed).
+fn lexical_prefix_overlaps_path(prefix: &Path, path: &Path) -> bool {
+    let Some((prefix_text, path_text)) = prefix.to_str().zip(path.to_str()) else {
+        return true;
+    };
+    path_text.starts_with(prefix_text) || prefix.starts_with(path)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
@@ -1103,22 +1111,28 @@ fn validate_claude_sandbox_policy(
     }
     if let Some(home) = home {
         validate_owned_directory(home)?;
-        // gate は launcher の grant を写す: state directory（subtree）と、その隣に置かれる
-        // global config の path prefix（`~/.claude.json*`）の両方を見る。
-        for granted in [
-            claude_sandbox::agent_state_directory(program),
-            claude_sandbox::agent_config_prefix(program),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let granted = home.join(granted);
+        // State is a path subtree, whereas the global config is a lexical file
+        // family (`~/.claude.json*`). Keep those overlap rules distinct.
+        if let Some(state) = claude_sandbox::agent_state_directory(program) {
+            let granted = home.join(state);
             let granted = granted.canonicalize().unwrap_or(granted);
             if protected_workspace.starts_with(&granted)
                 || (mode == SandboxMode::Root && granted.starts_with(&protected_workspace))
             {
                 return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
             }
+        }
+        if claude_sandbox::agent_config_prefix(program).is_some_and(|prefix| {
+            let granted = home.join(prefix);
+            let protected_in_family = lexical_prefix_overlaps_path(&granted, &protected_workspace);
+            protected_in_family
+                && (protected_workspace
+                    .to_str()
+                    .zip(granted.to_str())
+                    .is_none_or(|(protected, granted)| protected.starts_with(granted))
+                    || mode == SandboxMode::Root)
+        }) {
+            return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
         }
         if cfg!(target_os = "macos") {
             let keychains = home.join("Library/Keychains");
@@ -18774,6 +18788,35 @@ instructions = "{instructions}"
                 expected,
                 "{program} state root against a workspace inside ~/.codex"
             );
+        }
+
+        let prefix_workspace = home.join(".claude.json-repository");
+        std::fs::create_dir_all(prefix_workspace.join(".git")).unwrap();
+        for mode in [SandboxMode::Session, SandboxMode::Root] {
+            assert_eq!(
+                validate_claude_sandbox_policy(&SandboxPolicyInputs {
+                    mode,
+                    program: CLAUDE_PROGRAM,
+                    workspace_root: &prefix_workspace,
+                    launch_roots: &[],
+                    tmpdir: None,
+                    home: Some(&home),
+                    cache_dir: None,
+                    backend: Some(&backend),
+                    passthrough: false,
+                }),
+                Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
+                "the lexical ~/.claude.json* grant must not cover a repository"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let non_utf8 = PathBuf::from(OsString::from_vec(vec![b'/', 0xff]));
+            assert!(lexical_prefix_overlaps_path(&non_utf8, &workspace_root));
         }
     }
 
