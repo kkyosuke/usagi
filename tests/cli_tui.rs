@@ -1865,13 +1865,13 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
         &[OsStr::new("open"), opened.path().as_os_str()],
     );
     assert!(output.status.success(), "{}", stderr(&output));
+    // The project tab owns the workspace label and clips long names. Its
+    // fixture-specific prefix still proves that the opened workspace, not the
+    // launch directory, was rendered.
     assert!(
-        stdout(&output).contains(
-            opened_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .expect("the fixture directory has a name")
-        )
+        stdout(&output).contains("usagi-opened-"),
+        "{}",
+        stdout(&output)
     );
     let recorded: serde_json::Value = serde_json::from_slice(
         &std::fs::read(daemon_fixture::lifecycle_state_path(&channel_data_dir(
@@ -1896,12 +1896,7 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
     );
     assert!(second.status.success(), "{}", stderr(&second));
     assert!(
-        stdout(&second).contains(
-            elsewhere_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .expect("the fixture directory has a name")
-        ),
+        stdout(&second).contains("usagi-elsewhere-"),
         "{}",
         stdout(&second)
     );

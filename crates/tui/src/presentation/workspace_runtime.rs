@@ -3408,7 +3408,7 @@ mod tests {
             None,
         );
         let text = frame.join("\n");
-        assert!(text.contains("atlas"));
+        assert!(!text.contains("atlas"));
         assert!(text.contains("alpha"));
         assert!(text.contains("+ new session"));
     }

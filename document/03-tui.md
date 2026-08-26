@@ -115,9 +115,11 @@ management input](#home-と-target) 参照）。この境界は「テキスト�
 ## project tab と workspace deck
 
 Home の最上段には project tab bar を常時 1 行表示する。deck が 1 件でも `+ Open` を表示し、active tab の既存 Home だけを
-その下へ全面表示する。複数 workspace の session を同じ sidebar に混ぜる aggregate view ではない。tab は deck の安定した順序で
+その下へ全面表示する。通常の sidebar は複数 workspace の session を混ぜないが、全幅の
+[Session Garden](#session-garden) は開いている全 project の session をまとめる。tab は deck の安定した順序で
 1 から採番し、active は accent + bold、inactive は dim で描く。狭幅では active を必ず残す contiguous window へ縮め、隠れた件数を
-`… +N` として示す。描画と click hit-test は同じ canonical path 付き projection を使う。
+`… +N` として示す。描画と click hit-test は同じ canonical path 付き projection を使う。`+ Open` は左右 1 cell の padding を
+含む inline button で、`+`、label、左右の padding のどこを押しても同じ Add workspace overlay を開く。
 
 | 入力 | 動作 |
 |---|---|
@@ -490,10 +492,10 @@ root scope（`session_id: None`）の Agent へ指示を出し、session を作�
 
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
-Unicode display width による clip と hit-test を維持する。workspace breadcrumb、mode toggle、
-pending decision の notice badge、button は 1 つの header layout が表示幅と click range を同時に計算する。
-そのため CJK workspace 名や notice の有無、狭幅による breadcrumb の clip があっても、描画された button / badge
-と hit-test は同じ terminal cell を指す。
+Unicode display width による clip と hit-test を維持する。workspace identity は直上の project tab だけに表示し、
+Home header へ重複する breadcrumb は置かない。mode toggle、pending decision の notice badge、button は 1 つの
+header layout が表示幅と click range を同時に計算する。そのため notice の有無や狭幅での clip があっても、
+描画された button / badge と hit-test は同じ terminal cell を指す。
 
 button の強調は mode toggle と同じ「前面にある面がアクセント」の対比に従う。drawer が閉じているときは
 選択されていない mode chip と同じ dim で描き、Switch / Closeup のどちらでも accent を持たない。drawer を開いた
@@ -881,8 +883,10 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 ## session garden
 
 session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新の coherent Agent inventory・controller が runtime
-ごとに保持する Agent phase だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、
+Home の一時的な全幅レイヤーで、開いている project tab 全件の session を tab 順に並べる。active project は daemon 権威の
+lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase を写し、inactive project は
+最後に準備または active だった daemon snapshot の session / lifecycle を read-only plot として保持する。inactive controller を
+resident にせず、inactive plot に Agent runtime を推測して描かない。背面の route・active target・pane・terminal subscription は変えず、
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
@@ -891,9 +895,11 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新�
 
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。project が複数なら nameplate の先頭へ `project /` を置き、その後を
+`role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
-描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
+描く。inactive project は Agent membership を観測していないため `no agents` と断定せず、`project inactive` と表示する。
+runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
 membership の権威にするので、庭のうさぎは常に「開ける tab を持つ Agent」と一致する。inventory が
@@ -956,12 +962,13 @@ frame loop が monotonic time と user input を観測して経過時間を cont
 |---|---|
 | 任意の key / paste | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
-| うさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
-| 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ session の Closeup へ入るところまでで、tab の選択は動かさない |
+| active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
+| inactive project の区画を click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く |
+| 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ project / session の Closeup へ入るところまでで、tab の選択は動かさない |
 | 区画の外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 
 click は frame を描いたのと同じ layout 関数が返す rectangle に当てて解決する。rectangle は区画に stable
-`SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛し、うさぎは区画の内側にあるので先に判定する。
+`WorkspaceId` / `SessionId`、うさぎ 1 羽に stable `AgentRuntimeId` を束縛し、うさぎは区画の内側にあるので先に判定する。
 controller は画面座標から session 順や羽の順を再計算しないため、CJK label・端末 resize・表示上限で click target が
 ずれない。session の pose（`creating` / `deleting` / `failed`）と PR merge の celebration は session そのものの姿で
 agent 1 体に対応しないため、`AgentRuntimeId` を束縛せず session の訪問だけになる。
@@ -970,9 +977,10 @@ tab の選択も stable identity だけで引く。押されたうさぎの runt
 または会話 lineage（中断 tab）と一致する tab を選び、一致する tab が無ければ（押した瞬間に終了した、pane を
 まだ復元していない）session の Closeup をそのまま残す。位置の近い無関係な tab は選ばない。
 
-click と同時に session が snapshot から消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
+click と同時に session が fresh snapshot から消えていた場合は stale target を実行せず、Garden を閉じるだけにする。
 うさぎの click は sidebar の activation と同じ経路を通るので、使用できない checkout（`failed`）は選択されるが
-attach されない。Garden から daemon command は発行しない。
+attach されない。inactive project の訪問は project tab と同じ prepare → commit 境界を通り、準備に失敗した場合は
+current project を保ったまま project switcher に安全な理由を表示する。session を変更する daemon command は発行しない。
 
 ## PR modal と browser effect
 

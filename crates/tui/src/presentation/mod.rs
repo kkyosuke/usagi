@@ -821,6 +821,18 @@ enum WorkspaceInputRoute {
     Unhandled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GardenProjectVisit {
+    workspace: WorkspaceId,
+    session: SessionId,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GardenInputRoute {
+    Local(Vec<Effect>),
+    Project(GardenProjectVisit),
+}
+
 /// Give an open Garden exclusive ownership of the next user interaction.
 /// Backend/frame ticks are not user activity and keep the screen saver open.
 /// A pointer press also fences the rest of its drag/release gesture so closing
@@ -831,7 +843,7 @@ fn route_garden_input(
     material: Option<&HomeFrameMaterial>,
     key: &Key,
     pointer_gesture: &mut bool,
-) -> Option<Vec<Effect>> {
+) -> Option<GardenInputRoute> {
     if *pointer_gesture && matches!(key, Key::Pointer(_)) {
         if matches!(
             key,
@@ -842,7 +854,7 @@ fn route_garden_input(
         ) {
             *pointer_gesture = false;
         }
-        return Some(Vec::new());
+        return Some(GardenInputRoute::Local(Vec::new()));
     }
     if runtime.state().overlay() != Some(Overlay::Garden) || !is_user_activity(key) {
         return None;
@@ -890,8 +902,18 @@ fn route_garden_input(
         _ => GardenClick::Dismiss,
     };
     let effects = runtime.apply_event(AppEvent::GardenClick(pointer));
+    if let GardenClick::Visit {
+        workspace, session, ..
+    } = pointer
+        && workspace != runtime.state().workspace()
+    {
+        return Some(GardenInputRoute::Project(GardenProjectVisit {
+            workspace,
+            session,
+        }));
+    }
     visit_garden_agent(ui, runtime, pointer);
-    Some(effects)
+    Some(GardenInputRoute::Local(effects))
 }
 
 fn route_workspace_input_before_reducer(
@@ -3762,14 +3784,15 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
 /// controller projection as the interactive loop.
 ///
 /// This is the non-interactive `usagi launch <path>` fallback (no terminal), so
-/// it shows the initial Home surface: root selected/active, the snapshot's
-/// sessions, and the `+ new session` row.
+/// it shows the initial project bar and Home surface: root selected/active, the
+/// snapshot's sessions, and the `+ new session` row.
 #[must_use]
 pub fn render_home_snapshot(
     height: usize,
     width: usize,
     snapshot: &WorkspaceSnapshot,
 ) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(height, width);
     let workspace = WorkspaceView::with_runtime_ids(
         snapshot.workspace.clone(),
         snapshot.state.clone(),
@@ -3800,7 +3823,10 @@ pub fn render_home_snapshot(
         &snapshot.workspace.path,
         &sessions,
     );
-    render_home(height, width, &projection)
+    let mut frame = Vec::with_capacity(height);
+    frame.push(project_bar(&WorkspaceDeck::new(snapshot), width).line);
+    frame.extend(render_home(height.saturating_sub(1), width, &projection));
+    frame
 }
 
 /// Keep the controller's Home rows in step with the daemon session projection
@@ -5191,6 +5217,15 @@ impl HomeFrameMaterial {
             .canonical_garden_now(self.height, self.width, self.now);
         self
     }
+
+    fn with_workspace_deck_garden(mut self, deck: &WorkspaceDeck) -> Self {
+        let Some(active_sessions) = self.projection.garden_sessions().map(<[_]>::to_vec) else {
+            return self;
+        };
+        let (scope, sessions) = deck.garden_projection(&active_sessions);
+        self.projection = self.projection.with_deck_garden(scope, sessions);
+        self
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5996,6 +6031,7 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     runtime.set_pr_auto_open(pr_auto_open);
     let data_home = usagi_core::infrastructure::paths::data_dir().ok();
     let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
@@ -6094,6 +6130,9 @@ fn drive_workspace_controller(
             restore_clock.elapsed(),
         );
         sync_runtime_sessions(&mut runtime, &ui, worktree_names);
+        if let Some(session) = pending_garden_visit.take() {
+            let _ = runtime.apply_event(AppEvent::VisitSession(session));
+        }
         let current_sessions = ui
             .workspace
             .session_ids()
@@ -6223,6 +6262,7 @@ fn drive_workspace_controller(
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {
             sessions = Arc::from(project_controller_sessions(&ui, runtime.state()));
+            deck.update_active_sessions(&sessions);
             metrics_sessions = sessions
                 .iter()
                 .map(|session| (session.id, session.cwd.clone()))
@@ -6289,6 +6329,7 @@ fn drive_workspace_controller(
                 now,
             )
             .with_agent_inventory(ui.agent_inventory())
+            .with_workspace_deck_garden(deck)
             .with_garden_reduced_motion(garden_reduced_motion);
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input
@@ -6524,25 +6565,58 @@ fn drive_workspace_controller(
         // A tick and a resize therefore cost exactly one redraw each, and the
         // only wake left is the explicit one a lifecycle action asks for through
         // `ControllerHostAction`.
-        let input_route = route_garden_input(
+        let garden_route = route_garden_input(
             &mut ui,
             &mut runtime,
             drawn_material.as_ref(),
             &key,
             &mut garden_pointer_gesture,
-        )
-        .map_or_else(
-            || {
-                route_workspace_input_before_reducer(
-                    &mut ui,
-                    &mut runtime,
-                    &mut controls,
-                    term,
-                    &key,
-                )
-            },
-            WorkspaceInputRoute::Garden,
         );
+        if let Some(GardenInputRoute::Project(visit)) = garden_route {
+            let Some(path) = deck
+                .path_for_workspace(visit.workspace)
+                .map(Path::to_path_buf)
+            else {
+                deck.open_switcher();
+                deck.set_notice("That project is no longer open.");
+                garden_pointer_gesture = false;
+                drawn_material = None;
+                frame_material_key = None;
+                continue;
+            };
+            if let Some(prepared) = prepare_deck_workspace(&mut loader, deck, &path)
+                && prepare_activation_settings(
+                    &mut workspace_config,
+                    &mut loader,
+                    deck,
+                    &root_cwd,
+                    &prepared.workspace.path,
+                )
+            {
+                deck.schedule_garden_visit(prepared.workspace.path.clone(), visit.session);
+                return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+            }
+            let notice = deck.notice().map(str::to_owned);
+            deck.open_switcher();
+            if let Some(notice) = notice {
+                deck.set_notice(notice);
+            }
+            garden_pointer_gesture = false;
+            drawn_material = None;
+            frame_material_key = None;
+            continue;
+        }
+        let input_route = match garden_route {
+            Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
+            Some(GardenInputRoute::Project(_)) => unreachable!("project visit returned above"),
+            None => route_workspace_input_before_reducer(
+                &mut ui,
+                &mut runtime,
+                &mut controls,
+                term,
+                &key,
+            ),
+        };
         if input_route == WorkspaceInputRoute::Forwarded {
             continue;
         }
@@ -6575,8 +6649,8 @@ fn drive_workspace_controller(
             runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
             // Header rendering and hit-testing share one layout projection, so
-            // CJK breadcrumbs, notice presence, and narrow clipping cannot move
-            // an action away from its clickable cells.
+            // Notice presence and narrow clipping cannot move an action away
+            // from its clickable cells.
             let header_action = drawn_material.as_ref().and_then(|material| {
                 home_header_action_at(width, &material.projection, column, row)
             });
@@ -7835,8 +7909,8 @@ mod tests {
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, FsSessionWorktreeScanPort, Geometry, GitDiff, IdleWatch,
-        MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
+        FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, Geometry, GitDiff,
+        IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
         PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
@@ -8395,6 +8469,7 @@ mod tests {
         };
         // Agent の居ない session なので、押せるのは区画（agent 無しの訪問）である。
         let visit = Some(GardenClick::Visit {
+            workspace,
             session,
             agent: None,
         });
@@ -8471,7 +8546,7 @@ mod tests {
                     &key,
                     &mut pointer_gesture,
                 ),
-                Some(Vec::new()),
+                Some(GardenInputRoute::Local(Vec::new())),
             );
             assert_eq!(runtime.state().overlay(), None);
             if pointer_gesture {
@@ -8487,11 +8562,126 @@ mod tests {
                         }),
                         &mut pointer_gesture,
                     ),
-                    Some(Vec::new()),
+                    Some(GardenInputRoute::Local(Vec::new())),
                 );
             }
         }
         assert!(!pointer_gesture);
+    }
+
+    #[test]
+    fn garden_frame_material_uses_every_open_projects_projection() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta]).unwrap();
+        let session = alpha.session_ids[0];
+        let sessions = vec![ProjectedSession::from_record(
+            session,
+            &alpha.state.sessions[0],
+        )];
+        let mut runtime = WorkspaceRuntime::new(alpha.workspace_id, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+
+        let material = home_frame_material(
+            24,
+            100,
+            &runtime,
+            "alpha",
+            &alpha.workspace.path,
+            &sessions,
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        )
+        .with_workspace_deck_garden(&deck);
+        let plots = material
+            .projection
+            .garden_sessions()
+            .expect("the idle Home frame is the Garden");
+
+        assert_eq!(plots.len(), 2);
+        assert_eq!(plots[0].label, "alpha / alpha-session");
+        assert_eq!(plots[1].label, "beta / beta-session");
+    }
+
+    #[test]
+    fn garden_routes_an_inactive_projects_plot_to_the_deck_shell() {
+        let workspace = WorkspaceId::new();
+        let foreign_workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let root = PathBuf::from("/tmp/demo");
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let mut material = home_frame_material(
+            24,
+            80,
+            &runtime,
+            "demo",
+            &root,
+            &[],
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        );
+        material.projection = material.projection.with_deck_garden(
+            "2 open projects".to_owned(),
+            vec![(
+                foreign_workspace,
+                crate::presentation::widgets::garden::GardenSession {
+                    id: session,
+                    label: "other / review".to_owned(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: false,
+                    agents: Vec::new(),
+                    pr_merged: false,
+                },
+            )],
+        );
+        let click = (0..24)
+            .flat_map(|row| (0..80).map(move |column| (column, row)))
+            .find(|&(column, row)| {
+                matches!(
+                    garden_click_at(
+                        material.height,
+                        material.width,
+                        &material.projection,
+                        material.now,
+                        column,
+                        row,
+                    ),
+                    Some(GardenClick::Visit { workspace, .. }) if workspace == foreign_workspace
+                )
+            })
+            .expect("the inactive project plot is clickable");
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut pointer_gesture = false;
+
+        assert_eq!(
+            route_garden_input(
+                &mut ui,
+                &mut runtime,
+                Some(&material),
+                &Key::Click {
+                    column: click.0,
+                    row: click.1,
+                },
+                &mut pointer_gesture,
+            ),
+            Some(GardenInputRoute::Project(super::GardenProjectVisit {
+                workspace: foreign_workspace,
+                session,
+            })),
+        );
+        assert_eq!(runtime.state().overlay(), None);
     }
 
     /// Any other press is the documented wake-up: it is consumed, and the Home
@@ -8523,7 +8713,7 @@ mod tests {
             assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
             assert_eq!(
                 route_garden_input(&mut ui, &mut runtime, None, &key, &mut pointer_gesture,),
-                Some(Vec::new()),
+                Some(GardenInputRoute::Local(Vec::new())),
                 "Garden did not consume {key:?}",
             );
             assert_eq!(runtime.state().overlay(), None);
@@ -8540,7 +8730,7 @@ mod tests {
                         }),
                         &mut pointer_gesture,
                     ),
-                    Some(Vec::new()),
+                    Some(GardenInputRoute::Local(Vec::new())),
                 );
             }
             assert!(!pointer_gesture);
@@ -8585,7 +8775,7 @@ mod tests {
                 &pointer(PointerKind::Drag),
                 &mut pointer_gesture,
             ),
-            Some(Vec::new()),
+            Some(GardenInputRoute::Local(Vec::new())),
         );
         assert!(pointer_gesture);
         assert_eq!(
@@ -8596,7 +8786,7 @@ mod tests {
                 &pointer(PointerKind::Up),
                 &mut pointer_gesture,
             ),
-            Some(Vec::new()),
+            Some(GardenInputRoute::Local(Vec::new())),
         );
         assert!(!pointer_gesture);
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -8609,7 +8799,7 @@ mod tests {
                 &pointer(PointerKind::Down),
                 &mut pointer_gesture,
             ),
-            Some(Vec::new()),
+            Some(GardenInputRoute::Local(Vec::new())),
         );
         assert_eq!(runtime.state().overlay(), None);
         assert!(pointer_gesture);
@@ -8621,7 +8811,7 @@ mod tests {
                 &pointer(PointerKind::Drag),
                 &mut pointer_gesture,
             ),
-            Some(Vec::new()),
+            Some(GardenInputRoute::Local(Vec::new())),
         );
         assert!(pointer_gesture);
         assert_eq!(
@@ -8632,7 +8822,7 @@ mod tests {
                 &pointer(PointerKind::Up),
                 &mut pointer_gesture,
             ),
-            Some(Vec::new()),
+            Some(GardenInputRoute::Local(Vec::new())),
         );
         assert!(!pointer_gesture);
         assert_eq!(
@@ -8702,6 +8892,7 @@ mod tests {
         // 区画の click（agent 無し）は tab を動かさない。
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let plot_click = GardenClick::Visit {
+            workspace,
             session,
             agent: None,
         };
@@ -8712,6 +8903,7 @@ mod tests {
         // うさぎの click は、その runtime を持つ tab を選ぶ。
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let rabbit_click = GardenClick::Visit {
+            workspace,
             session,
             agent: Some(runtime_id),
         };
@@ -8722,6 +8914,7 @@ mod tests {
         // 押した瞬間に終了していたうさぎは、無関係な tab を選ばない（選択はそのまま）。
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let gone = GardenClick::Visit {
+            workspace,
             session,
             agent: Some(AgentRuntimeId::new()),
         };
@@ -8746,6 +8939,7 @@ mod tests {
 
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
         let click = GardenClick::Visit {
+            workspace,
             session,
             agent: Some(AgentRuntimeId::new()),
         };
@@ -11194,10 +11388,11 @@ mod tests {
             )
         };
 
-        // Base Home frame: workspace name and session row render.
+        // Base Home frame: project identity stays in the outer tab bar, while
+        // the Home frame renders its session row without a duplicate breadcrumb.
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let base = frame(&runtime, sessions);
-        assert!(base.join("\n").contains("atlas"));
+        assert!(!base.join("\n").contains("atlas"));
         assert!(base.join("\n").contains("alpha"));
 
         // Create form: with no sessions a single Down reaches + new session. It
@@ -23506,9 +23701,13 @@ mod tests {
     #[test]
     fn render_home_snapshot_draws_the_initial_home_surface() {
         // The non-interactive `usagi launch <path>` fallback renders one static
-        // Home frame through the controller projection: the workspace name, its
-        // sessions, and the `+ new session` row.
-        let frame = render_home_snapshot(30, 100, &snapshot("demo")).join("\n");
+        // project bar plus Home frame through the controller projection: the
+        // workspace name, its sessions, and both creation affordances.
+        let rows = render_home_snapshot(30, 100, &snapshot("demo"));
+        assert_eq!(rows.len(), 30);
+        assert!(rows[0].contains("1 demo"));
+        assert!(rows[0].contains("+ Open"));
+        let frame = rows.join("\n");
         assert!(frame.contains("demo"));
         assert!(frame.contains("demo-session"));
         assert!(frame.contains("+ new session"));

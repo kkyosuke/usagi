@@ -1873,6 +1873,9 @@ pub enum AppEvent {
     /// CJK labels, a resize, or the plot cap cannot move a rabbit away from the
     /// session it draws.
     GardenClick(GardenClick),
+    /// Open one stable session without relying on list position. The process
+    /// deck uses this after a Garden visit switched to another workspace.
+    VisitSession(SessionId),
 }
 
 /// What a click on the open Garden landed on.
@@ -1881,14 +1884,16 @@ pub enum AppEvent {
 /// rectangles the garden renderer returns for the frame currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GardenClick {
-    /// A session's plot. Its stable session becomes selected/active and its
-    /// existing Closeup opens.
+    /// A session's plot. Its stable project/session pair becomes the process
+    /// shell's visit target; this reducer activates it only when `workspace`
+    /// names its own Home.
     ///
     /// `agent` is the exact rabbit that was pressed, when the press landed on
     /// one. The reducer's activation does not depend on it: the shell uses it to
     /// focus that Agent's own tab inside the Closeup this activation opens, and
     /// a rabbit whose tab has meanwhile gone simply lands on the session.
     Visit {
+        workspace: WorkspaceId,
         session: SessionId,
         agent: Option<AgentRuntimeId>,
     },
@@ -2991,6 +2996,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
+        AppEvent::VisitSession(session) => visit_session(state, session),
         // A live input is classified by `LiveInputClassifier` before reaching
         // this reducer. It still clears a pending grace, because grace is an
         // event-based one-shot rather than a timeout.
@@ -4866,9 +4872,19 @@ fn update_garden_click(state: &mut AppState, click: GardenClick) -> Vec<Effect> 
         return Vec::new();
     }
     state.overlay = None;
-    let GardenClick::Visit { session, .. } = click else {
+    let GardenClick::Visit {
+        workspace, session, ..
+    } = click
+    else {
         return Vec::new();
     };
+    if workspace != state.workspace {
+        return Vec::new();
+    }
+    visit_session(state, session)
+}
+
+fn visit_session(state: &mut AppState, session: SessionId) -> Vec<Effect> {
     let selection = Selection::Target(Target::Session(session));
     state.select_row(selection);
     if state.selected != selection {
@@ -8739,6 +8755,7 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::GardenClick(GardenClick::Visit {
+                    workspace,
                     session: second,
                     agent: None,
                 })
@@ -8769,6 +8786,40 @@ mod tests {
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
     }
 
+    #[test]
+    fn another_projects_garden_plot_closes_without_targeting_a_local_session() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+        let (selected, active) = (state.selected(), state.active());
+        state.overlay = Some(Overlay::Garden);
+
+        assert!(
+            update(
+                &mut state,
+                AppEvent::GardenClick(GardenClick::Visit {
+                    workspace: WorkspaceId::new(),
+                    session: second,
+                    agent: None,
+                })
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), None);
+        assert_eq!(state.selected(), selected);
+        assert_eq!(state.active(), active);
+    }
+
+    #[test]
+    fn a_deck_visit_opens_a_fresh_workspaces_stable_session() {
+        let (workspace, first, second) = ids();
+        let mut state = sized_home(workspace, vec![first, second], 100, 30);
+
+        assert!(update(&mut state, AppEvent::VisitSession(second)).is_empty());
+        assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+        assert_eq!(state.active(), Some(second));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+    }
+
     /// The press and the snapshot race. A session that left the workspace
     /// between the frame and the click is a stale target: close the garden, run
     /// nothing.
@@ -8783,6 +8834,7 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::GardenClick(GardenClick::Visit {
+                    workspace,
                     session: gone,
                     agent: None,
                 })
@@ -8805,6 +8857,7 @@ mod tests {
 
         for click in [
             GardenClick::Visit {
+                workspace,
                 session,
                 agent: None,
             },
@@ -8836,6 +8889,7 @@ mod tests {
             update(
                 &mut state,
                 AppEvent::GardenClick(GardenClick::Visit {
+                    workspace,
                     session,
                     agent: None,
                 })
