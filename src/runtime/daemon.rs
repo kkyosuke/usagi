@@ -8,8 +8,6 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
@@ -2694,6 +2692,11 @@ type SharedPrInventory = Arc<Mutex<OutputPrProjector<FencedPrInventory<PrInvento
 const PR_REFRESH_TICK: Duration = Duration::from_millis(250);
 const PR_REFRESH_FRESHNESS_MS: u64 = 60_000;
 const PR_REFRESH_PER_TICK: usize = 2;
+/// `gh pr view` returns a compact JSON document. This cap leaves room for a
+/// large check rollup while preventing a broken provider from retaining
+/// unbounded diagnostics in either pipe.
+const PR_PROVIDER_OUTPUT_LIMIT: usize = 256 * 1024;
+const PR_PROVIDER_TERMINATE_GRACE: Duration = Duration::from_millis(100);
 /// How often a serving daemon re-checks that it is still the authority for its
 /// data directory. One second is short enough that an abandoned daemon exits
 /// promptly and long enough that the two `stat`s are free.
@@ -2871,25 +2874,31 @@ impl GhProcessPort for GhProcess {
         timeout_ms: u64,
     ) -> Result<String, Self::Error> {
         let arguments = argv.iter().map(String::as_str).collect::<Vec<_>>();
-        match observe(
+        gh_process_result(observe(
             program,
             &arguments,
             ChildPolicy {
                 timeout: Duration::from_millis(timeout_ms),
-                terminate_grace: Duration::from_millis(100),
-                output_limit: 256 * 1024,
+                terminate_grace: PR_PROVIDER_TERMINATE_GRACE,
+                output_limit: PR_PROVIDER_OUTPUT_LIMIT,
             },
-        ) {
-            ChildObservation::Success(output) => Ok(output),
-            ChildObservation::TimedOut => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "PR provider timed out",
-            )),
-            ChildObservation::OutputTooLarge => Err(std::io::Error::other(
-                "PR provider output exceeded the safe limit",
-            )),
-            _ => Err(std::io::Error::other("PR provider failed")),
-        }
+        ))
+    }
+}
+
+fn gh_process_result(observation: ChildObservation) -> std::io::Result<String> {
+    match observation {
+        ChildObservation::Success(output) => Ok(output),
+        ChildObservation::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "PR provider timed out",
+        )),
+        ChildObservation::SpawnFailed
+        | ChildObservation::ExitFailure
+        | ChildObservation::OutputTooLarge
+        | ChildObservation::InvalidOutput
+        | ChildObservation::EmptyOutput
+        | ChildObservation::ObservationFailed => Err(std::io::Error::other("PR provider failed")),
     }
 }
 
@@ -12788,6 +12797,7 @@ mod tests {
 
     use super::*;
     use std::cell::Cell;
+    use std::process::Command;
     use std::sync::atomic::AtomicUsize;
 
     use usagi_daemon::usecase::generic_terminal::TerminalStoreSnapshot;
@@ -15889,6 +15899,121 @@ mod tests {
             self.unlocked_during_call
                 .store(self.inventory.try_lock().is_ok(), Ordering::Release);
             Ok("{\"title\":\"production\",\"state\":\"MERGED\",\"headRefOid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}".into())
+        }
+    }
+
+    fn run_gh_shell(script: String, timeout_ms: u64) -> std::io::Result<String> {
+        GhProcess.run("/bin/sh", &["-c".into(), script], timeout_ms)
+    }
+
+    fn repeated_gh_output(bytes: usize, stderr: bool) -> String {
+        const CHUNK_BYTES: usize = 4 * 1024;
+        let chunk = "x".repeat(CHUNK_BYTES);
+        let full_chunks = bytes / CHUNK_BYTES;
+        let remainder = bytes % CHUNK_BYTES;
+        format!(
+            "{}chunk='{chunk}'; i=0; while [ \"$i\" -lt {full_chunks} ]; do printf '%s' \"$chunk\"; i=$((i + 1)); done; printf '%.*s' {remainder} \"$chunk\"",
+            if stderr { "exec 1>&2; " } else { "" }
+        )
+    }
+
+    #[test]
+    fn gh_process_normalizes_every_unsafe_observation_without_raw_output() {
+        assert_eq!(
+            gh_process_result(ChildObservation::Success("public-json".into())).unwrap(),
+            "public-json"
+        );
+        let timeout = gh_process_result(ChildObservation::TimedOut).unwrap_err();
+        assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(timeout.to_string(), "PR provider timed out");
+
+        for observation in [
+            ChildObservation::SpawnFailed,
+            ChildObservation::ExitFailure,
+            ChildObservation::OutputTooLarge,
+            ChildObservation::InvalidOutput,
+            ChildObservation::EmptyOutput,
+            ChildObservation::ObservationFailed,
+        ] {
+            let error = gh_process_result(observation).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "PR provider failed");
+        }
+    }
+
+    #[test]
+    fn gh_process_enforces_each_stream_limit_and_safe_failures() {
+        let stdout =
+            run_gh_shell(repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT, false), 5_000).unwrap();
+        assert_eq!(stdout.len(), PR_PROVIDER_OUTPUT_LIMIT);
+        assert!(
+            run_gh_shell(
+                repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT + 1, false),
+                5_000
+            )
+            .is_err()
+        );
+
+        let stderr =
+            run_gh_shell(repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT, true), 5_000).unwrap();
+        assert_eq!(stderr.len(), PR_PROVIDER_OUTPUT_LIMIT);
+        assert!(
+            run_gh_shell(
+                repeated_gh_output(PR_PROVIDER_OUTPUT_LIMIT + 1, true),
+                5_000
+            )
+            .is_err()
+        );
+
+        assert!(run_gh_shell("printf '\\377'".into(), 5_000).is_err());
+        assert!(run_gh_shell("printf secret; exit 7".into(), 5_000).is_err());
+
+        let started = Instant::now();
+        assert!(
+            run_gh_shell(
+                "trap '' TERM; while :; do printf oversized; done".into(),
+                5_000
+            )
+            .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let timeout = run_gh_shell("trap '' TERM; while :; do :; done".into(), 30).unwrap_err();
+        assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn gh_process_cleans_a_descendant_holding_its_capture_pipe() {
+        let fixture = tempfile::tempdir().unwrap();
+        let pid_file = fixture.path().join("descendant-pid");
+        let argv = vec![
+            "-c".into(),
+            "(trap '' TERM; while :; do :; done) & descendant=$!; printf '%s' \"$descendant\" > \"$1\"; printf done"
+                .into(),
+            "usagi-gh-fixture".into(),
+            pid_file.to_string_lossy().into_owned(),
+        ];
+        let started = Instant::now();
+        assert_eq!(GhProcess.run("/bin/sh", &argv, 5_000).unwrap(), "done");
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let pid = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            // SAFETY: signal 0 observes only whether the fixture descendant remains.
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture descendant {pid} was not cleaned up"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
