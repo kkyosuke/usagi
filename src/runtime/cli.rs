@@ -46,6 +46,27 @@ enum Action {
     SelfUpdate,
 }
 
+/// How an MCP stdio process reaches the daemon.
+///
+/// A daemon-provisioned child receives the trusted workspace root in its
+/// environment. The daemon that issued that value is necessarily already
+/// running, and the child must claim its live parent runtime on that exact
+/// daemon, so it only attaches. A manually started `usagi mcp` has no injected
+/// root and retains cold-start authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpDaemonRoute {
+    Attached,
+    Bootstrap,
+}
+
+fn mcp_daemon_route(workspace_root: Option<&std::ffi::OsStr>) -> McpDaemonRoute {
+    if workspace_root.is_some_and(|root| !root.is_empty()) {
+        McpDaemonRoute::Attached
+    } else {
+        McpDaemonRoute::Bootstrap
+    }
+}
+
 impl From<&RunOutcome> for Action {
     fn from(outcome: &RunOutcome) -> Self {
         match outcome {
@@ -74,9 +95,9 @@ mod action_io {
 
     use super::{
         Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
-        LauncherPolicyInputs, RunOutcome, TuiRequest, Write, claude_sandbox, daemon,
-        execute_self_update, exit_code, guard_workspace, tui, write_client_error,
-        write_daemon_outcome,
+        LauncherPolicyInputs, McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox,
+        daemon, execute_self_update, exit_code, guard_workspace, mcp_daemon_route, tui,
+        write_client_error, write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)]
@@ -122,7 +143,24 @@ mod action_io {
             }
             (Action::LaunchMcp, RunOutcome::LaunchMcp) => {
                 let stdin = std::io::stdin();
-                match daemon::policy_client(ClientPolicy::mcp()) {
+                let workspace_root =
+                    std::env::var_os(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
+                let client: Result<Box<dyn DaemonClient>, _> =
+                    match mcp_daemon_route(workspace_root.as_deref()) {
+                        // This child was provisioned by the daemon whose live
+                        // Agent runtime it must claim. It runs in a sandbox that
+                        // deliberately cannot write the data home's
+                        // `bootstrap.lock`; cold-starting here would both fail
+                        // that sandbox boundary and target a daemon that cannot
+                        // know the parent runtime being claimed.
+                        McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp())
+                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                        // A manually started MCP server remains a user entry
+                        // surface and therefore keeps daemon autostart.
+                        McpDaemonRoute::Bootstrap => daemon::policy_client(ClientPolicy::mcp())
+                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                    };
+                match client {
                     Ok(mut client) => {
                         let credential = match client
                             .request(usagi_core::usecase::client::DaemonRequest::McpChildClaim)
@@ -139,7 +177,7 @@ mod action_io {
                                 stdin.lock(),
                                 out,
                                 info.version,
-                                &mut client,
+                                &mut *client,
                                 &credential,
                             )
                         } else {
@@ -149,7 +187,7 @@ mod action_io {
                                 stdin.lock(),
                                 out,
                                 info.version,
-                                &mut client,
+                                &mut *client,
                             )
                         }
                         .map(|()| ExitCode::SUCCESS)
@@ -643,12 +681,25 @@ mod tests {
     use usagi_core::usecase::client::{ClientError, DaemonReply, DaemonRequest};
 
     use super::{
-        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, execute_self_update_with,
-        exit_code, process_outcome, validate_launcher_policy_inputs, write_client_error,
-        write_daemon_outcome,
+        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
+        execute_self_update_with, exit_code, mcp_daemon_route, process_outcome,
+        validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn daemon_provisioned_mcp_attaches_while_manual_mcp_keeps_bootstrap_authority() {
+        assert_eq!(mcp_daemon_route(None), McpDaemonRoute::Bootstrap);
+        assert_eq!(
+            mcp_daemon_route(Some(std::ffi::OsStr::new(""))),
+            McpDaemonRoute::Bootstrap
+        );
+        assert_eq!(
+            mcp_daemon_route(Some(std::ffi::OsStr::new("/workspace"))),
+            McpDaemonRoute::Attached
+        );
+    }
 
     #[test]
     fn launcher_policy_rejects_root_and_symlink_inputs() {

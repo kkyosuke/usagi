@@ -199,9 +199,14 @@ daemon が動いている間は、どれだけ request が無くても idle と�
 workspace は、もう使われていない。`usagi daemon stop` の直後は daemon も broker も残らないため、次の起動は通常の
 client bootstrap が broker を起動し直すところから始まる。
 
-通常 client は従来どおり `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によってその lock を開けない client だけが
-broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の build identity・workspace handshake を通して接続する。
-この fallback は data home、workspace、Git common dir を Agent の writable root へ追加しない。
+cold-start authority を持つ通常 client は `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によって
+その lock を開けない client だけが broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の
+build identity・workspace handshake を通して接続する。この fallback は data home、workspace、Git common dir を Agent の
+writable root へ追加しない。
+
+daemon が provision した MCP child と Agent lifecycle hook は broker を使わず、発行元の既存 daemon へ attach する。
+この child が claim する live Agent runtime は発行元 daemon の process memory にしか存在せず、cold start した別 daemon
+では復元できないためである。MCP の経路分岐は [7. MCP サーバ#起動と経路](07-mcp.md#起動と経路)を正本とする。
 
 active role の `serve` は process lifetime にわたって単一インスタンス lock を保持する。lock が意味するのは
 「この process がこの data directory の **active role** である」ことであり、「この data directory の process が
