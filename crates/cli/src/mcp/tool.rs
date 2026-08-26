@@ -194,6 +194,13 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
 }
 
 fn validate_collection_limits(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    if let Some(maximum) = schema.get("x-maxUtf8Bytes").and_then(Value::as_u64)
+        && value
+            .as_str()
+            .is_some_and(|text| text.len() as u64 > maximum)
+    {
+        return Err(format!("{path} must contain at most {maximum} UTF-8 bytes"));
+    }
     let limits = value
         .as_str()
         .map(|string| {
@@ -263,6 +270,7 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
                     | "maxLength"
                     | "minItems"
                     | "maxItems"
+                    | "x-maxUtf8Bytes"
                     | "default"
                     | "deprecated"
             ) {
@@ -305,13 +313,19 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
             || object
                 .get("maximum")
                 .is_some_and(|value| !value.is_number())
-            || ["minLength", "maxLength", "minItems", "maxItems"]
-                .into_iter()
-                .any(|keyword| {
-                    object
-                        .get(keyword)
-                        .is_some_and(|value| value.as_u64().is_none())
-                })
+            || [
+                "minLength",
+                "maxLength",
+                "minItems",
+                "maxItems",
+                "x-maxUtf8Bytes",
+            ]
+            .into_iter()
+            .any(|keyword| {
+                object
+                    .get(keyword)
+                    .is_some_and(|value| value.as_u64().is_none())
+            })
             || object
                 .get("deprecated")
                 .is_some_and(|value| !value.is_boolean())
