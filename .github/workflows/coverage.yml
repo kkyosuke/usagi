@@ -82,19 +82,6 @@ jobs:
       run: |
         . ./scripts/coverage.sh
         coverage_report --json > coverage.json
-        # Temporary diagnosis for the one summary-only dispatch function.
-        ruby -rjson -e '
-          data = JSON.parse(File.read("coverage.json")).fetch("data").fetch(0)
-          suffix = "crates/core/src/infrastructure/store/dispatch.rs"
-          functions = data.fetch("functions").select do |function|
-            function.fetch("filenames").first.end_with?(suffix)
-          end
-          functions.select { |function| function.fetch("count").zero? }.each do |function|
-            regions = function.fetch("regions")
-            line = regions.empty? ? "?" : regions.first.first
-            puts "DISPATCH_ZERO\t#{line}\t#{function.fetch("name")}"
-          end
-        '
         ruby scripts/coverage-report-comment.rb coverage.json > coverage-comment.md
         cat coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
 
