@@ -3,16 +3,15 @@
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use usagi_core::domain::memory::{Memory, MemorySummary};
 use usagi_core::infrastructure::store::memory::MemoryStore;
 use usagi_core::usecase::memory::{self, MemoryFilter, MemoryPatch};
 
 use crate::mcp::tool::{Tool, ToolError};
 
-fn store() -> MemoryStore {
-    MemoryStore::new(
-        std::env::current_dir().expect("MCP server already resolved its cwd at startup"),
-    )
+fn store(root: &Path) -> MemoryStore {
+    MemoryStore::new(root)
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(params: &str) -> Result<T, ToolError> {
@@ -111,10 +110,10 @@ impl Tool for MemorySave {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"title":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]},"related":{"type":"array","items":{"type":"string"}},"body":{"type":"string"}},"required":["name"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: SaveArgs = parse(params)?;
         let saved = execution(memory::save_partial(
-            &store(),
+            &store(store_root),
             &args.name,
             args.patch,
             Utc::now(),
@@ -136,9 +135,9 @@ impl Tool for MemoryGet {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NameArgs = parse(params)?;
-        let memory = execution(memory::get(&store(), &args.name))?;
+        let memory = execution(memory::get(&store(store_root), &args.name))?;
         memory.as_ref().map_or_else(
             || Ok("null".to_owned()),
             |memory| Ok(output(&MemoryView::from(memory))),
@@ -159,10 +158,10 @@ impl Tool for MemorySearch {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"query":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]}}}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: SearchArgs = parse(params)?;
         let memories = execution(memory::search(
-            &store(),
+            &store(store_root),
             args.query.as_deref().unwrap_or(""),
             &args.filter,
         ))?;
@@ -188,9 +187,9 @@ impl Tool for MemoryDelete {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NameArgs = parse(params)?;
-        let deleted = execution(memory::delete(&store(), &args.name))?;
+        let deleted = execution(memory::delete(&store(store_root), &args.name))?;
         Ok(output(
             &serde_json::json!({"name": args.name, "deleted": deleted}),
         ))

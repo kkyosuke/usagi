@@ -212,6 +212,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
 mod tests {
     use super::{McpToolFamilies, descriptor, registry, registry_with_families, validate_registry};
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use std::path::Path;
     use usagi_core::domain::user_decision::UserDecisionPolicy;
     use usagi_core::usecase::client::SessionAction;
 
@@ -319,7 +320,7 @@ mod tests {
 
             if !name.starts_with("issue_") && !name.starts_with("memory_") {
                 assert!(
-                    matches!(tool.call_store(&serde_json::json!({})), Err(ToolError::Unimplemented(n)) if n == name)
+                    matches!(tool.call_store(&serde_json::json!({}), Path::new(".")), Err(ToolError::Unimplemented(n)) if n == name)
                 );
             }
         }
@@ -490,7 +491,7 @@ mod tests {
     fn registry_rejects_duplicate_name_duplicate_route_and_unadvertised_route() {
         assert_eq!(FixtureTool("description").description(), "fixture");
         assert!(matches!(
-            FixtureTool("call").call("{}"),
+            FixtureTool("call").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         assert!(
@@ -568,11 +569,11 @@ mod tests {
         assert_eq!(UnsupportedSchema.description(), "fixture");
         assert_eq!(SchemaFixture("fixture", "{}").description(), "fixture");
         assert!(matches!(
-            UnsupportedSchema.call("{}"),
+            UnsupportedSchema.call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         assert!(matches!(
-            SchemaFixture("call", "{}").call("{}"),
+            SchemaFixture("call", "{}").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         let unsupported_schema = [ToolDescriptor::new(
@@ -615,13 +616,13 @@ mod tests {
         }
 
         assert!(matches!(
-            super::memory::MemoryGet.call("{}"),
+            super::memory::MemoryGet.call("{}", Path::new(".")),
             Err(ToolError::InvalidParams(_))
         ));
     }
 
     fn assert_invalid_issue_json(tool: &dyn Tool) {
-        let error = tool.call("{").unwrap_err();
+        let error = tool.call("{", Path::new(".")).unwrap_err();
         let actual = std::mem::discriminant(&error);
         let expected = std::mem::discriminant(&ToolError::InvalidParams(String::new()));
         assert_eq!(actual, expected);

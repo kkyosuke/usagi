@@ -5,7 +5,7 @@
 //! 1 接続の lifecycle state と行単位の validation/routing を `handle_line_with_client` に閉じ込め、
 //! `serve` は実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、routing は
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
-//! issue / memory は cwd の core store usecase、session 系は daemon client へ接続し、
+//! issue / memory は接続時に固定した root の core store usecase、session 系は daemon client へ接続し、
 //! tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Read, Write};
@@ -66,6 +66,7 @@ struct ServerCapabilities<'a> {
     runtime_models: &'a RuntimeModelSnapshot,
     tools: McpToolFamilies,
     caller_credential: Option<&'a str>,
+    store_root: &'a Path,
 }
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
@@ -102,8 +103,9 @@ pub fn serve_with_client(
     version: &str,
     client: &mut dyn DaemonClient,
 ) -> io::Result<()> {
+    let store_root = std::env::current_dir()?;
     let workspace_root = resolve_workspace_root(
-        std::env::current_dir()?,
+        store_root.clone(),
         std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
     );
     let global = Storage::open_default()
@@ -115,8 +117,17 @@ pub fn serve_with_client(
     let families = McpToolFamilies::from_settings(&global.with_local(&local));
     let locator = PathExecutableLocator;
     let snapshot = runtime_model_snapshot(&workspace_root, &locator);
-    serve_with_client_and_features_and_caller(
-        input, out, version, client, &snapshot, families, None,
+    serve_with_client_and_capabilities(
+        input,
+        out,
+        version,
+        client,
+        ServerCapabilities {
+            runtime_models: &snapshot,
+            tools: families,
+            caller_credential: None,
+            store_root: &store_root,
+        },
     )
 }
 
@@ -135,26 +146,83 @@ pub fn serve_with_client_and_caller(
     client: &mut dyn DaemonClient,
     caller_credential: &str,
 ) -> io::Result<()> {
+    let store_root = std::env::current_dir()?;
     let workspace_root = resolve_workspace_root(
-        std::env::current_dir()?,
+        store_root.clone(),
         std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
     );
-    let global = Storage::open_default()
-        .and_then(|storage| storage.load_settings())
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let local = WorkspaceSettingsStore::new(&workspace_root)
-        .load()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let families = McpToolFamilies::from_settings(&global.with_local(&local));
-    let snapshot = runtime_model_snapshot(&workspace_root, &PathExecutableLocator);
-    serve_with_client_and_features_and_caller(
+    serve_with_client_and_caller_scoped(
         input,
         out,
         version,
         client,
-        &snapshot,
-        families,
-        Some(caller_credential),
+        caller_credential,
+        &workspace_root,
+        &store_root,
+    )
+}
+
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
+fn serve_with_client_and_caller_scoped(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+    caller_credential: &str,
+    workspace_root: &Path,
+    store_root: &Path,
+) -> io::Result<()> {
+    let global = Storage::open_default()
+        .and_then(|storage| storage.load_settings())
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let local = WorkspaceSettingsStore::new(workspace_root)
+        .load()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let families = McpToolFamilies::from_settings(&global.with_local(&local));
+    let snapshot = runtime_model_snapshot(workspace_root, &PathExecutableLocator);
+    serve_with_client_and_capabilities(
+        input,
+        out,
+        version,
+        client,
+        ServerCapabilities {
+            runtime_models: &snapshot,
+            tools: families,
+            caller_credential: Some(caller_credential),
+            store_root,
+        },
+    )
+}
+
+/// Serves one daemon-claimed MCP child with the store root authenticated by
+/// the daemon. This keeps issue and memory operations bound to the caller's
+/// session even when the provider starts the child from another directory.
+///
+/// # Errors
+///
+/// Returns an I/O error when settings cannot be loaded or the MCP stream
+/// cannot be served.
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
+pub fn serve_with_client_and_caller_at(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+    caller_credential: &str,
+    store_root: &Path,
+) -> io::Result<()> {
+    let workspace_root = resolve_workspace_root(
+        store_root.to_path_buf(),
+        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
+    );
+    serve_with_client_and_caller_scoped(
+        input,
+        out,
+        version,
+        client,
+        caller_credential,
+        &workspace_root,
+        store_root,
     )
 }
 
@@ -198,27 +266,32 @@ pub fn serve_with_client_and_features(
     snapshot: &RuntimeModelSnapshot,
     families: McpToolFamilies,
 ) -> io::Result<()> {
-    serve_with_client_and_features_and_caller(input, out, version, client, snapshot, families, None)
+    let store_root = std::env::current_dir()?;
+    serve_with_client_and_capabilities(
+        input,
+        out,
+        version,
+        client,
+        ServerCapabilities {
+            runtime_models: snapshot,
+            tools: families,
+            caller_credential: None,
+            store_root: &store_root,
+        },
+    )
 }
 
-fn serve_with_client_and_features_and_caller(
+fn serve_with_client_and_capabilities(
     mut input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
     client: &mut dyn DaemonClient,
-    snapshot: &RuntimeModelSnapshot,
-    families: McpToolFamilies,
-    caller_credential: Option<&str>,
+    capabilities: ServerCapabilities<'_>,
 ) -> io::Result<()> {
     // Fail before accepting input if metadata, route, schema, or capability drifted.
-    drop(tools::registry_with_families(families));
+    drop(tools::registry_with_families(capabilities.tools));
     let mut buf = Vec::with_capacity(MAX_STDIO_MESSAGE_BYTES + 1);
     let mut state = ServerState::AwaitingInitialize;
-    let capabilities = ServerCapabilities {
-        runtime_models: snapshot,
-        tools: families,
-        caller_credential,
-    };
     loop {
         buf.clear();
         if read_bounded_line(&mut input, &mut buf)? == 0 {
@@ -282,6 +355,7 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
             runtime_models: &RuntimeModelSnapshot::default(),
             tools: McpToolFamilies::all(),
             caller_credential: None,
+            store_root: Path::new("."),
         },
         &mut state,
     )
@@ -411,6 +485,7 @@ fn respond(
             capabilities.runtime_models,
             capabilities.tools,
             capabilities.caller_credential,
+            capabilities.store_root,
         ),
         "resources/list" => protocol::success(id, resources::list_result()),
         "resources/read" => resources_read(id, params),
@@ -477,6 +552,7 @@ fn tools_call(
     snapshot: &RuntimeModelSnapshot,
     families: McpToolFamilies,
     caller_credential: Option<&str>,
+    store_root: &Path,
 ) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
@@ -528,7 +604,14 @@ fn tools_call(
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    execute_tool(id, descriptor, arguments, client, caller_credential)
+    execute_tool(
+        id,
+        descriptor,
+        arguments,
+        client,
+        caller_credential,
+        store_root,
+    )
 }
 
 fn execute_tool(
@@ -537,6 +620,7 @@ fn execute_tool(
     arguments: Value,
     client: &mut dyn DaemonClient,
     caller_credential: Option<&str>,
+    store_root: &Path,
 ) -> Value {
     match descriptor.route() {
         ToolRoute::AgentInventory => {
@@ -619,7 +703,7 @@ fn execute_tool(
                 }),
             )
         }
-        ToolRoute::Store => store_tool_call(id, descriptor, &arguments),
+        ToolRoute::Store => store_tool_call(id, descriptor, &arguments, store_root),
         ToolRoute::Unavailable(reason) => protocol::error(
             id,
             error_code::INTERNAL_ERROR,
@@ -714,8 +798,13 @@ fn daemon_body_response(id: Value, reply: Result<DaemonReply, ClientError>) -> V
     }
 }
 
-fn store_tool_call(id: Value, descriptor: &ToolDescriptor, arguments: &Value) -> Value {
-    match descriptor.call_store(arguments) {
+fn store_tool_call(
+    id: Value,
+    descriptor: &ToolDescriptor,
+    arguments: &Value,
+    store_root: &Path,
+) -> Value {
+    match descriptor.call_store(arguments, store_root) {
         Ok(result) => protocol::success(
             id,
             json!({"content":[{"type":"text","text":result}], "isError": false}),
@@ -793,7 +882,7 @@ mod tests {
     use crate::mcp::tools::registry;
     use serde_json::Value;
     use std::io::{BufReader, Cursor, ErrorKind, Write};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
@@ -817,7 +906,7 @@ mod tests {
             r#"{"type":"object","properties":{}}"#
         }
 
-        fn call(&self, _params: &str) -> Result<String, ToolError> {
+        fn call(&self, _params: &str, _store_root: &Path) -> Result<String, ToolError> {
             Err((self.0)())
         }
     }
@@ -919,6 +1008,7 @@ mod tests {
                     runtime_models: &RuntimeModelSnapshot::default(),
                     tools: McpToolFamilies::all(),
                     caller_credential: None,
+                    store_root: Path::new("."),
                 },
                 &mut state,
             )
@@ -1172,6 +1262,7 @@ mod tests {
             serde_json::json!({"target":{"continuation": 7}}),
             &mut client,
             None,
+            Path::new("."),
         );
         assert_eq!(invalid_target["error"]["code"], -32602);
         let missing_target = execute_tool(
@@ -1180,6 +1271,7 @@ mod tests {
             serde_json::json!({}),
             &mut client,
             None,
+            Path::new("."),
         );
         assert_eq!(missing_target["error"]["code"], -32602);
 
@@ -1194,6 +1286,7 @@ mod tests {
             serde_json::json!({}),
             &mut client,
             None,
+            Path::new("."),
         );
         assert_eq!(response["error"]["code"], -32603);
         assert!(
@@ -1235,6 +1328,7 @@ mod tests {
                 serde_json::json!({}),
                 &mut client,
                 None,
+                Path::new("."),
             );
             assert_eq!(response["error"]["code"], expected);
         }
@@ -1269,6 +1363,7 @@ mod tests {
             serde_json::json!({"name":"one"}),
             &mut client,
             Some("secret"),
+            Path::new("."),
         );
         assert!(response.get("result").is_some());
         assert!(matches!(
@@ -1287,6 +1382,7 @@ mod tests {
             serde_json::json!({}),
             &mut client,
             Some("secret"),
+            Path::new("."),
         );
         assert!(response.get("result").is_some());
         assert!(matches!(

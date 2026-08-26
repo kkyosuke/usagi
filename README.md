@@ -196,7 +196,8 @@ Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、P
 ## AI エージェントとの連携
 
 daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、
-次のような操作を行える。
+次のような操作を行える。MCP child の cwd が provider によって変わっても、issue / memory の保存先は
+daemon が認証したその session の worktree に固定される。
 
 | 系統 | 用途 |
 |---|---|
