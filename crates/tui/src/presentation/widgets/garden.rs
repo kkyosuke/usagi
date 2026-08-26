@@ -1049,6 +1049,15 @@ mod tests {
     fn narrow_or_short_terminals_do_not_replace_home() {
         assert!(render(MIN_HEIGHT - 1, MIN_WIDTH, "x", &[], 0, false).is_none());
         assert!(render(MIN_HEIGHT, MIN_WIDTH - 1, "x", &[], 0, false).is_none());
+        let minimum = render(MIN_HEIGHT, MIN_WIDTH, "x", &[], 0, false)
+            .expect("the documented minimum leaves one project-bar row above the Garden");
+        assert_eq!(minimum.rows.len(), MIN_HEIGHT);
+        assert!(
+            minimum
+                .rows
+                .iter()
+                .all(|row| display_width(row) == MIN_WIDTH)
+        );
     }
 
     #[test]
