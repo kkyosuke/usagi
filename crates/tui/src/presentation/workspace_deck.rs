@@ -184,6 +184,23 @@ impl WorkspaceDeck {
         self.slots[self.active_index()].path()
     }
 
+    /// Project tab immediately before the active one, wrapping at the start.
+    #[must_use]
+    pub fn previous_path(&self) -> &Path {
+        let index = self
+            .active_index()
+            .checked_sub(1)
+            .unwrap_or(self.slots.len() - 1);
+        self.slots[index].path()
+    }
+
+    /// Project tab immediately after the active one, wrapping at the end.
+    #[must_use]
+    pub fn next_path(&self) -> &Path {
+        let index = (self.active_index() + 1) % self.slots.len();
+        self.slots[index].path()
+    }
+
     #[must_use]
     pub fn path_at(&self, index: usize) -> Option<&Path> {
         self.slots.get(index).map(WorkspaceSlot::path)
@@ -819,6 +836,26 @@ mod tests {
         let absent = snapshot("absent", "/absent");
         deck.activate_snapshot(&absent);
         assert_eq!(deck.active_path(), Path::new("/beta"));
+    }
+
+    #[test]
+    fn adjacent_paths_follow_deck_order_and_wrap() {
+        let alpha = snapshot("alpha", "/alpha");
+        let beta = snapshot("beta", "/beta");
+        let gamma = snapshot("gamma", "/gamma");
+        let mut deck =
+            WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone(), gamma.clone()]).unwrap();
+
+        assert_eq!(deck.previous_path(), Path::new("/gamma"));
+        assert_eq!(deck.next_path(), Path::new("/beta"));
+
+        deck.activate_snapshot(&gamma);
+        assert_eq!(deck.previous_path(), Path::new("/beta"));
+        assert_eq!(deck.next_path(), Path::new("/alpha"));
+
+        let single = WorkspaceDeck::new(&alpha);
+        assert_eq!(single.previous_path(), Path::new("/alpha"));
+        assert_eq!(single.next_path(), Path::new("/alpha"));
     }
 
     #[test]
