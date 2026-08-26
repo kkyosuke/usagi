@@ -390,9 +390,6 @@ impl SupervisorStore {
             .append(true)
             .open(self.journal_path(id))?;
         let mut offset = file.metadata()?.len();
-        if index.journal_len != offset {
-            index = self.rebuild_journal_index(id)?;
-        }
         if index.valid_len < offset {
             file.set_len(index.valid_len)?;
             offset = index.valid_len;
@@ -401,15 +398,13 @@ impl SupervisorStore {
         file.write_all(&bytes)?;
         file.sync_all()?;
         let journal_len = offset + u64::try_from(bytes.len())?;
-        if index.journal_len == offset {
-            index.entries.push(JournalIndexEntry {
-                sequence: event.sequence,
-                offset,
-            });
-            index.journal_len = journal_len;
-            index.valid_len = journal_len;
-            self.write_journal_index(id, &index)?;
-        }
+        index.entries.push(JournalIndexEntry {
+            sequence: event.sequence,
+            offset,
+        });
+        index.journal_len = journal_len;
+        index.valid_len = journal_len;
+        self.write_journal_index(id, &index)?;
         Ok(())
     }
 
@@ -621,12 +616,9 @@ impl SupervisorStore {
                 .set(self.journal_bytes_read.get() + bytes as u64);
             lines.push(line);
         }
-        for (index, line) in lines.iter().enumerate() {
+        for line in &lines {
             if !line.ends_with('\n') {
-                if index + 1 == lines.len() {
-                    break;
-                }
-                bail!("corrupt supervisor event journal");
+                break;
             }
             match serde_json::from_str(line.trim_end_matches('\n')) {
                 Ok(event) => {
@@ -811,6 +803,37 @@ mod tests {
                 .unwrap(),
             (Vec::new(), EventCursor { next_sequence: 3 })
         );
+    }
+
+    #[test]
+    fn journal_rebuild_and_page_reads_fail_closed_on_corrupt_committed_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        fs::create_dir_all(&store.dir).unwrap();
+        let id = SupervisorRunId::new();
+
+        fs::write(store.journal_path(id), "{broken}\n").unwrap();
+        assert!(
+            store
+                .rebuild_journal_index(id)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt supervisor event journal")
+        );
+        assert!(
+            store
+                .read_journal_page(id, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt supervisor event journal")
+        );
+
+        fs::write(
+            store.journal_path(id),
+            serde_json::to_vec(&event(1)).unwrap(),
+        )
+        .unwrap();
+        assert!(store.read_journal_page(id, 0, 1).unwrap().is_empty());
     }
 
     #[test]

@@ -2014,6 +2014,8 @@ mod tests {
             },
         );
         run.applied_events.insert(old.event_id);
+        run.compact_applied_events(&BTreeSet::from([old.event_id]));
+        assert!(run.compacted_event_tombstones.is_empty());
         run.compact_applied_events(&BTreeSet::new());
         assert_eq!(
             run.event_id_status(old.event_id),

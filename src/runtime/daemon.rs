@@ -17976,6 +17976,16 @@ instructions = "{instructions}"
             cold_start_workspace(&daemon, &ClientWorkspace::Unbound, Some(&plain), None).unwrap(),
             plain
         );
+        let missing_opened = directory.path().join("missing-opened");
+        let refusal = cold_start_workspace(
+            &daemon,
+            &ClientWorkspace::Unbound,
+            Some(&missing_opened),
+            None,
+        )
+        .unwrap_err();
+        assert!(is_workspace_mismatch(&refusal));
+        assert!(refusal.message.contains("does not resolve"));
         assert_eq!(
             cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, Some(&repository))
                 .unwrap(),

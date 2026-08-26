@@ -1289,9 +1289,6 @@ impl DispatchStore {
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         let mut offset = file.metadata()?.len();
-        if index.journal_len != offset {
-            index = self.rebuild_inbox_index(caller)?;
-        }
         if index.valid_len < offset {
             file.set_len(index.valid_len)?;
             offset = index.valid_len;
@@ -2957,6 +2954,19 @@ mod tests {
                 .ack_inbox(&caller, InboxCursor { next_sequence: 5 })
                 .is_err()
         );
+        assert!(
+            reopened
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 5 }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained")
+        );
     }
 
     #[test]
@@ -3101,6 +3111,116 @@ mod tests {
         fs::remove_file(store.inbox_path(&caller)).unwrap();
         fs::create_dir(store.inbox_path(&caller)).unwrap();
         assert!(store.inbox(&caller).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn inbox_journal_and_derived_index_corruption_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let path = store.inbox_path(&caller);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        fs::create_dir(&path).unwrap();
+        assert!(store.rebuild_inbox_index(&caller).is_err());
+        fs::remove_dir(&path).unwrap();
+        symlink(&path, &path).unwrap();
+        assert!(store.inbox_index(&caller).is_err());
+        fs::remove_file(&path).unwrap();
+
+        let invalid = InboxRecord {
+            sequence: 0,
+            message: message(OperationId::new(), worker.clone()),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&invalid).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("strictly increasing")
+        );
+
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT + 1).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
+            })
+            .collect::<Vec<_>>();
+        let text = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        fs::write(&path, text).unwrap();
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+
+        let record = InboxRecord {
+            sequence: 7,
+            message: message(OperationId::new(), worker),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        let matching = InboxIndexEntry {
+            sequence: 7,
+            offset: 0,
+            created_at: record.message.created_at,
+            read: false,
+        };
+        let missing_path = tmp.path().join("missing");
+        let missing_store = DispatchStore::new(&missing_path);
+        assert!(
+            missing_store
+                .read_inbox_records(&caller, [&matching])
+                .is_err()
+        );
+        let beyond = InboxIndexEntry {
+            offset: fs::metadata(&path).unwrap().len(),
+            ..matching
+        };
+        assert!(store.read_inbox_records(&caller, [&beyond]).is_err());
+        let mismatched = InboxIndexEntry {
+            sequence: 8,
+            ..matching
+        };
+        assert!(store.read_inbox_records(&caller, [&mismatched]).is_err());
+
+        let index_path = store.inbox_index_path(&caller);
+        if index_path.exists() {
+            fs::remove_file(&index_path).unwrap();
+        }
+        fs::create_dir(&index_path).unwrap();
+        assert!(store.write_inbox_records(&caller, &[record]).is_err());
     }
 
     #[test]

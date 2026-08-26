@@ -1137,6 +1137,22 @@ mod tests {
         scheduler.ensure_start_capacity(&mut state).unwrap();
         assert_eq!(state.starts.len(), MAX_START_RESERVATIONS - 1);
         assert!(state.expired_starts.contains("start-0"));
+
+        let mut missing = RuntimeState::default();
+        for index in 0..=MAX_START_RESERVATIONS {
+            missing.starts.insert(
+                format!("missing-{index}"),
+                StartReservation {
+                    semantic_key: format!("missing-semantic-{index}"),
+                    supervisor_run_id: SupervisorRunId::new(),
+                },
+            );
+        }
+        scheduler.ensure_start_capacity(&mut missing).unwrap();
+        assert_eq!(missing.starts.len(), MAX_START_RESERVATIONS - 1);
+        assert!(missing.expired_starts.contains("missing-0"));
+        assert!(missing.expired_starts.contains("missing-1"));
+
         scheduler.save_state(&state).unwrap();
         assert!(
             scheduler
