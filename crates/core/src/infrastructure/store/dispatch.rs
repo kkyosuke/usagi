@@ -1771,6 +1771,18 @@ mod tests {
             },
         )
     }
+
+    #[test]
+    fn clone_preserves_the_durable_root_without_sharing_test_observation_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        store.inbox_bytes_read.store(7, Ordering::Relaxed);
+
+        let cloned = store.clone();
+
+        assert_eq!(cloned.dir, store.dir);
+        assert_eq!(cloned.inbox_bytes_read.load(Ordering::Relaxed), 0);
+    }
     fn agent(session_id: SessionId, agent_id: AgentId) -> Agent {
         Agent {
             agent_id,
