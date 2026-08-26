@@ -183,7 +183,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
-| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
+| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
 `user_decision_request` の同期応答待ちは decision ごとの process-local 通知へ登録し、resolve / cancel / expire の
@@ -225,7 +225,9 @@ daemon を停止・crash させても teardown は失われない。次の daemo
 dispatch 系は credential から caller と current run を復元する。`session_dispatch` は session を作成または再利用し、
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の
 `agent_complete` / `agent_fail` は保存済み binding の caller inbox へ配送され、`agent_inbox` は認証済み caller 自身の
-inbox だけを返す。最初に受理された `agent_complete.result.pr` が canonical GitHub PR URL の場合は、同じ binding の
+inbox だけを最大100件のstable cursor pageで返す。readにeffectはなく、処理済みpageの`next_cursor`を
+`agent_inbox_ack`へ渡したときだけdurable ACK watermarkが進む。応答を失ったquery、duplicate ACK、daemon restartは同じ
+unread stateへ収束し、retention済みcursorはexpiredとして拒否する。最初に受理された `agent_complete.result.pr` が canonical GitHub PR URL の場合は、同じ binding の
 worker `SessionId` に daemon-owned PR inventory も更新し、TUI の sidebar / PR modal が通常の revision 付き snapshot
 から観測する。短縮参照と不正値は inbox には保持するが inventory へ推測して補完しない。projection が失敗した場合も
 inbox の完了報告は維持して retryable error を返す。同じ report の再送は request の kind や artifact を信用せず、inbox に最初に

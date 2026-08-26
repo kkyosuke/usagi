@@ -613,18 +613,19 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
 | `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership、workspace/session ごとの prompt queue、run retention から独立した immutable session lineage、委譲 admission から child publish までの concurrency reservation。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
-| `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
+| `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable sequence JSONL | caller agent 単位の完了報告 inbox。fsync append、derived offset index、atomic ACK watermark、cross-process lock で、caller の停止中と daemon restart 後にも未 ACK 報告を保持する |
 
 #### durable store の retention
 
-`dispatch.json`・`dispatch-workspaces.json`・inbox・`user-decisions.json` は **書き込みのたびに文書全体を read-modify-write** する。上限が無ければ
-N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続ける。したがって各 store は
+`dispatch.json`・`dispatch-workspaces.json`・`user-decisions.json` は書き込みのたびに bounded 文書を
+read-modify-write する。inbox は sequence journal へ追記し、ACK 済み履歴だけを bounded compaction する。上限が無ければ
+N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続けるため、各 store は
 書き込み経路そのものに上限を持ち、maintenance tick の実行有無に依存しない。
 
 | store | 上限 | 決して落とさないもの |
 |---|---|---|
 | `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
-| inbox | 既読 256 件。総数の上限は 4096 | 未読の報告。未読が上限を超えたときだけ最古の未読を落とし、error log に記録する（silent loss にしない） |
+| inbox | ACK 済み 256 件。総数の上限は 4096、query page は最大 100 件 | 未 ACK の報告。未 ACK だけで上限へ達した append は既存報告を落とさず capacity error で拒否する |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
 | `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
@@ -632,6 +633,11 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
 pending が 1 つの共有文書を無制限に増やすことを防ぐ。拒否は `resource_exhausted` で、durable state を一切変更しない
 ため、人が backlog を消化したあとの retry が安全である。
+
+inbox の query は `sequence -> byte offset` index から `cursor` 位置へ seek し、`limit` 件だけを読む。query 自体は
+既読化せず、処理済み page の `next_cursor` を別の `agent_inbox_ack` effect で送る。ACK は atomic watermark の単調更新で、
+応答 loss 時に同じ page を再読しても未読を失わず、duplicate ACK と restart 後の retry は同じ状態へ収束する。retentionで
+消えた位置を明示 cursor が指す場合は expired として拒否し、先頭へ暗黙に読み替えない。
 
 ### tenant registry
 

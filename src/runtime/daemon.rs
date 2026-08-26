@@ -39,7 +39,7 @@ use usagi_core::infrastructure::ipc::{
     build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
-use usagi_core::infrastructure::store::dispatch::DispatchStore;
+use usagi_core::infrastructure::store::dispatch::{DispatchStore, INBOX_PAGE_MAX, InboxCursor};
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -3299,7 +3299,7 @@ fn spawn_ipc_server(
             tenant: initial.clone(),
             workspaces: Arc::clone(&workspaces),
         },
-        &DispatchStore::new(&data_dir.join("daemon")),
+        &DispatchStore::new(data_dir.join("daemon")),
         &teardown,
     );
     if compensated != 0 {
@@ -4280,7 +4280,7 @@ fn open_agent_runtime(
         pty,
         AgentProfileId::new("codex").expect("literal profile id is canonical"),
         Geometry { cols: 80, rows: 24 },
-        DispatchStore::new(&data_dir.join("daemon")),
+        DispatchStore::new(data_dir.join("daemon")),
         usagi_core::infrastructure::runtime_model::PathExecutableLocator,
         snapshot,
         retention,
@@ -5074,6 +5074,7 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::AgentComplete
                 | DispatchToolAction::AgentFail
                 | DispatchToolAction::AgentInbox
+                | DispatchToolAction::AgentInboxAck
         )
     }) {
         dispatch_agent_tool(
@@ -5144,9 +5145,17 @@ fn dispatch_agent_tool(
     #[derive(Deserialize)]
     struct InboxPayload {
         #[serde(default)]
+        cursor: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
         since: Option<DateTime<Utc>>,
         #[serde(default)]
         unread_only: bool,
+    }
+    #[derive(Deserialize)]
+    struct InboxAckPayload {
+        cursor: u64,
     }
 
     let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -5477,18 +5486,44 @@ fn dispatch_agent_tool(
                 let input = serde_json::from_value::<InboxPayload>(payload).map_err(|_| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_inbox payload")
                 })?;
-                let messages = store
-                    .inbox(&caller)
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
-                    })?
-                    .into_iter()
-                    .filter(|message| !input.unread_only || !message.read)
-                    .filter(|message| input.since.is_none_or(|since| message.created_at > since))
-                    .collect::<Vec<_>>();
+                let page = store
+                    .inbox_page(
+                        &caller,
+                        input
+                            .cursor
+                            .map(|next_sequence| InboxCursor { next_sequence }),
+                        input.limit.unwrap_or(INBOX_PAGE_MAX),
+                        input.unread_only,
+                        input.since,
+                    )
+                    .map_err(|error| map_inbox_query_error(&error))?;
                 Ok((
                     ResponseOutcome::Ok,
-                    serde_json::json!({"messages": messages}),
+                    serde_json::json!({
+                        "messages": page.messages,
+                        "next_cursor": page.next_cursor.next_sequence,
+                        "has_more": page.has_more,
+                    }),
+                ))
+            }
+            DispatchToolAction::AgentInboxAck => {
+                let input = serde_json::from_value::<InboxAckPayload>(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid agent_inbox_ack payload",
+                    )
+                })?;
+                let cursor = store
+                    .ack_inbox(
+                        &caller,
+                        InboxCursor {
+                            next_sequence: input.cursor,
+                        },
+                    )
+                    .map_err(|error| map_inbox_query_error(&error))?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"acked_cursor": cursor.next_sequence}),
                 ))
             }
             _ => Err(ProtocolError::new(
@@ -5525,6 +5560,20 @@ fn project_reported_pr(
         .observe_reported(session, candidate)
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR projection is unavailable"))?;
     Ok(())
+}
+
+fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    let message = error.to_string();
+    if message.starts_with("dispatch inbox cursor")
+        || message.starts_with("dispatch inbox ACK cursor")
+        || message.starts_with("dispatch inbox page limit")
+    {
+        ProtocolError::new(ErrorCode::InvalidArgument, message)
+    } else {
+        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -19617,7 +19666,7 @@ instructions = "{instructions}"
             )
             .unwrap(),
         ));
-        let dispatch = DispatchStore::new(&temporary.path().join("dispatch"));
+        let dispatch = DispatchStore::new(temporary.path().join("dispatch"));
         let teardown = TeardownSignal::new();
         let delegate = |name: &str| {
             let operation = usagi_core::domain::id::OperationId::new();
@@ -19801,7 +19850,7 @@ instructions = "{instructions}"
         assert_eq!(
             reconcile_orphan_delegations(
                 &bound,
-                &DispatchStore::new(&temporary.path().join("dispatch")),
+                &DispatchStore::new(temporary.path().join("dispatch")),
                 &teardown
             ),
             0
@@ -21261,5 +21310,28 @@ instructions = "{instructions}"
         worker.join().unwrap();
 
         assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn inbox_query_errors_preserve_client_faults_and_hide_store_failures() {
+        use usagi_core::infrastructure::ipc::ErrorCode;
+
+        let invalid = map_inbox_query_error(&anyhow::anyhow!(
+            "dispatch inbox cursor expired: earliest retained sequence is 7"
+        ));
+        assert_eq!(invalid.code, ErrorCode::InvalidArgument);
+        assert!(invalid.message.contains("earliest retained sequence is 7"));
+        for message in [
+            "dispatch inbox ACK cursor is outside the published sequence range",
+            "dispatch inbox page limit must be 1..=100",
+        ] {
+            assert_eq!(
+                map_inbox_query_error(&anyhow::anyhow!(message)).code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        let unavailable = map_inbox_query_error(&anyhow::anyhow!("disk secret"));
+        assert_eq!(unavailable.code, ErrorCode::Unavailable);
+        assert_eq!(unavailable.message, "dispatch inbox is unavailable");
     }
 }

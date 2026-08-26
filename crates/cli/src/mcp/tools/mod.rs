@@ -99,6 +99,7 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "agent_complete" => (DispatchRoute(Dispatch::AgentComplete), AgentCredential),
         "agent_fail" => (DispatchRoute(Dispatch::AgentFail), AgentCredential),
         "agent_inbox" => (DispatchRoute(Dispatch::AgentInbox), AgentCredential),
+        "agent_inbox_ack" => (DispatchRoute(Dispatch::AgentInboxAck), AgentCredential),
         "user_decision_request" => (
             DispatchRoute(Dispatch::UserDecisionRequest),
             AgentCredential,
@@ -304,7 +305,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 48); // issue 6 + memory 4 + session 32 + supervisor 6
+        assert_eq!(reg.len(), 49); // issue 6 + memory 4 + session 33 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -400,7 +401,7 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 32);
+        assert_eq!(super::session::tools().len(), 33);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
 
@@ -447,14 +448,14 @@ mod tests {
             memory: false,
             local_llm: false,
         });
-        assert_eq!(neither.len(), 37);
+        assert_eq!(neither.len(), 38);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 48);
+        assert_eq!(registry.len(), 49);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());

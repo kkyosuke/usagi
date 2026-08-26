@@ -103,10 +103,10 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 }
 
 #[test]
-fn production_tools_list_fixes_the_48_tool_schema_contract() {
+fn production_tools_list_fixes_the_49_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 48);
+    assert_eq!(tools.len(), 49);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -127,7 +127,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 37);
+    assert_eq!(names.len(), 38);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -1679,6 +1679,17 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
     assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
+    let next_cursor = page["next_cursor"].as_u64().unwrap();
+    let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));
+    assert!(ack.get("error").is_none(), "{ack}");
+    assert_eq!(tool_text(&ack)["acked_cursor"], next_cursor);
+    assert!(
+        tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     for (tool, arguments) in [
         ("session_get", json!({"name":"mcp-worker"})),
