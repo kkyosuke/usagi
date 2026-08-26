@@ -3655,6 +3655,24 @@ fn registry_contains_path(registry: &[Workspace], path: &Path) -> bool {
     false
 }
 
+fn remove_registry_paths(registry: &mut Vec<Workspace>, removed: &[PathBuf]) {
+    let mut index = 0;
+    while index < registry.len() {
+        let mut matched = false;
+        for path in removed {
+            if registry[index].path == *path {
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            registry.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static SESSION_PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -6344,7 +6362,7 @@ fn drive_workspace_controller(
             }
             if workspace_has_unsaved_surface(&runtime) {
                 deck.open_switcher();
-                deck.set_notice("Save or cancel the current draft before switching projects.");
+                deck.set_notice("Save or cancel the current draft before switching.");
                 drawn_material = None;
                 frame_material_key = None;
                 continue;
@@ -6372,9 +6390,7 @@ fn drive_workspace_controller(
                     if path == deck.active_path() {
                         deck.close_overlay();
                     } else if workspace_has_unsaved_surface(&runtime) {
-                        deck.set_notice(
-                            "Save or cancel the current draft before switching projects.",
-                        );
+                        deck.set_notice("Save or cancel the current draft before switching.");
                     } else if let Some(prepared) = prepare_deck_workspace(&mut loader, deck, &path)
                         && prepare_activation_settings(
                             &mut workspace_config,
@@ -6389,63 +6405,68 @@ fn drive_workspace_controller(
                 }
                 OverlayIntent::Add(paths) => {
                     if !paths.is_empty() {
-                        let current = deck.active_path().to_path_buf();
-                        let mut prepared = Vec::with_capacity(paths.len());
-                        let mut failed = false;
-                        for path in &paths {
-                            let Some(snapshot) = prepare_deck_workspace(&mut loader, deck, path)
-                            else {
-                                failed = true;
-                                break;
-                            };
-                            prepared.push(snapshot);
-                        }
-                        if failed {
-                            if let Some(loader) = loader.as_mut() {
-                                let _ = (**loader).activate_prepared(&current);
+                        if workspace_has_unsaved_surface(&runtime) {
+                            deck.set_notice("Save or cancel the current draft before switching.");
+                        } else {
+                            let current = deck.active_path().to_path_buf();
+                            let mut prepared = Vec::with_capacity(paths.len());
+                            let mut failed = false;
+                            for path in &paths {
+                                let Some(snapshot) =
+                                    prepare_deck_workspace(&mut loader, deck, path)
+                                else {
+                                    failed = true;
+                                    break;
+                                };
+                                prepared.push(snapshot);
                             }
-                            prepared.clear();
-                        }
-                        if let Some(first) = prepared.first().cloned() {
-                            if let Some(loader) = loader.as_mut()
-                                && let Err(error) =
-                                    (**loader).activate_prepared(&first.workspace.path)
-                            {
-                                deck.set_notice(error.to_string());
-                                drawn_material = None;
-                                frame_material_key = None;
-                                continue;
+                            if failed {
+                                if let Some(loader) = loader.as_mut() {
+                                    let _ = (**loader).activate_prepared(&current);
+                                }
+                                prepared.clear();
                             }
-                            if !prepare_batch_settings(
-                                &mut workspace_config,
-                                &mut loader,
-                                deck,
-                                &root_cwd,
-                                &prepared,
-                            ) {
-                                drawn_material = None;
-                                frame_material_key = None;
-                                continue;
+                            if let Some(first) = prepared.first().cloned() {
+                                if let Some(loader) = loader.as_mut()
+                                    && let Err(error) =
+                                        (**loader).activate_prepared(&first.workspace.path)
+                                {
+                                    deck.set_notice(error.to_string());
+                                    drawn_material = None;
+                                    frame_material_key = None;
+                                    continue;
+                                }
+                                if !prepare_batch_settings(
+                                    &mut workspace_config,
+                                    &mut loader,
+                                    deck,
+                                    &root_cwd,
+                                    &prepared,
+                                ) {
+                                    drawn_material = None;
+                                    frame_material_key = None;
+                                    continue;
+                                }
+                                // Batch validation leaves the last member selected;
+                                // the composition created after this return belongs
+                                // to the first newly added tab.
+                                if !prepare_activation_settings(
+                                    &mut workspace_config,
+                                    &mut loader,
+                                    deck,
+                                    &root_cwd,
+                                    &first.workspace.path,
+                                ) {
+                                    drawn_material = None;
+                                    frame_material_key = None;
+                                    continue;
+                                }
+                                deck.append_snapshots(&prepared);
+                                if let Some(loader) = loader.as_mut() {
+                                    let _ = (**loader).record_unite(&deck.paths());
+                                }
+                                return Ok(WorkspaceStep::Activate(Box::new(first)));
                             }
-                            // Batch validation leaves the last member selected;
-                            // the composition created after this return belongs
-                            // to the first newly added tab.
-                            if !prepare_activation_settings(
-                                &mut workspace_config,
-                                &mut loader,
-                                deck,
-                                &root_cwd,
-                                &first.workspace.path,
-                            ) {
-                                drawn_material = None;
-                                frame_material_key = None;
-                                continue;
-                            }
-                            deck.append_snapshots(&prepared);
-                            if let Some(loader) = loader.as_mut() {
-                                let _ = (**loader).record_unite(&deck.paths());
-                            }
-                            return Ok(WorkspaceStep::Activate(Box::new(first)));
                         }
                     }
                 }
@@ -6459,9 +6480,7 @@ fn drive_workspace_controller(
                             return Ok(WorkspaceStep::Back);
                         };
                         if workspace_has_unsaved_surface(&runtime) {
-                            deck.set_notice(
-                                "Save or cancel the current draft before closing this project.",
-                            );
+                            deck.set_notice("Save or cancel the current draft before closing.");
                         } else if let Some(prepared) =
                             prepare_deck_workspace(&mut loader, deck, &replacement)
                             && prepare_activation_settings(
@@ -7553,10 +7572,12 @@ pub fn run_screen_graph_with_backend(
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
+                    remove_registry_paths(&mut registry, &removed);
                 }
                 OpenStep::ConfirmUnregister(path) => {
                     let removed = loader.unregister(&[path])?;
                     open.remove_paths(&removed);
+                    remove_registry_paths(&mut registry, &removed);
                 }
             },
             Screen::New => match step_new(&mut new_form, key) {
@@ -7837,7 +7858,7 @@ mod tests {
         new_project_notice, play_startup_splash, poll_and_project_terminals,
         prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
         prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
-        render_controller_frame, render_home_material, render_home_snapshot,
+        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
         reset_projection_build_counts, restore_open_panes, retarget_director_chords,
         route_garden_input, route_workspace_input_before_reducer, run as run_from_start,
         run_screen_graph_with_backend, run_with_settings,
@@ -22872,8 +22893,13 @@ mod tests {
             Key::Down,
             Key::CtrlD,
             Key::Enter,
-            Key::Quit,
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
         ]);
+        confirm.size = Some((24, 80));
         let mut confirm_loader = FakeLoader::default();
         run(
             &mut confirm,
@@ -22892,6 +22918,13 @@ mod tests {
         );
         assert!(confirm.frames[4].join("\n").contains("alpha"));
         assert!(!confirm.frames[4].join("\n").contains("beta"));
+        let add = confirm
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .find(|frame| frame.contains("Add workspace"))
+            .expect("the project add overlay opens");
+        assert!(!add.contains("beta"));
     }
 
     #[test]
@@ -24746,6 +24779,59 @@ mod tests {
     }
 
     #[test]
+    fn project_add_preserves_an_open_workspace_draft() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::Agent),
+            Key::Paste("keep-me".to_owned()),
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert_eq!(factory.drops_at_create, vec![0]);
+        assert!(
+            term.frames.iter().any(|frame| {
+                contains_wrapped(
+                    &frame.join("\n"),
+                    "Save or cancel the current draft before switching.",
+                )
+            }),
+            "{:#?}",
+            term.frames
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("keep-me"))
+        );
+    }
+
+    #[test]
     fn project_bar_click_adds_and_activates_the_project_identity_it_rendered() {
         let mut term = FakeTerminal::with_keys(&[
             Key::Char('o'),
@@ -24892,6 +24978,13 @@ mod tests {
             std::slice::from_ref(&alpha.workspace),
             Path::new("/tmp/beta"),
         ));
+
+        let beta = snapshot("beta");
+        let mut registry = vec![alpha.workspace, beta.workspace.clone()];
+        remove_registry_paths(&mut registry, &[]);
+        remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/missing")]);
+        remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/alpha")]);
+        assert_eq!(registry, vec![beta.workspace]);
     }
 
     #[test]
