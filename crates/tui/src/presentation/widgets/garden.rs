@@ -1200,6 +1200,8 @@ mod tests {
         };
 
         assert_eq!(first.max_scroll, 1);
+        assert!(first.rows.join("\n").contains("1-4 / 5"));
+        assert!(shifted.rows.join("\n").contains("3-5 / 5"));
         for session in &sessions[2..4] {
             let before = plot_for(&first, session.id);
             let after = plot_for(&shifted, session.id);
