@@ -1783,12 +1783,12 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
     assert!(refusal.message.contains(&served_root), "{refusal:?}");
 
     // The daemon keeps serving its own workspace after the refusal.
-    assert!(
-        connect(daemon_fixture::client_workspace(
-            &home.production_data_dir()
-        ))
-        .is_ok()
-    );
+    let initial_connection = connect(daemon_fixture::client_workspace(
+        &home.production_data_dir(),
+    ));
+    if let Err(error) = initial_connection {
+        panic!("{error}");
+    }
 }
 
 /// One daemon holds several workspaces at once: selecting a workspace it has not
@@ -1836,6 +1836,26 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     let second = daemon_fixture::short_dir("usagi-second-");
     assert!(connect(selected(second.path())).is_ok());
 
+    // Status asks the live registry, rather than reconstructing ownership from
+    // state subtrees left on disk, and lists both canonical roots.
+    let status = home.run_in_production(&[OsStr::new("daemon"), OsStr::new("status")]);
+    assert!(status.status.success(), "{}", stderr(&status));
+    let status = stdout(&status);
+    let initial_root = usagi_core::infrastructure::paths::wire_workspace_root(
+        usagi_core::infrastructure::paths::canonical_workspace_root(home.workspace()).unwrap(),
+    );
+    let second_root = usagi_core::infrastructure::paths::wire_workspace_root(
+        usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap(),
+    );
+    assert!(
+        status.contains(&format!("tenant: {initial_root}")),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!("tenant: {second_root}")),
+        "{status}"
+    );
+
     // A workspace another process fences is refused alone: the refusal names it,
     // and the workspaces this daemon holds keep answering.
     let fenced = daemon_fixture::short_dir("usagi-fenced-");
@@ -1855,6 +1875,27 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     );
     drop(held);
     assert!(connect(selected(second.path())).is_ok());
+
+    // Explicit retirement gives back only the selected fence. The initial
+    // tenant keeps answering while another process immediately acquires the
+    // retired root, proving the daemon did not retain it.
+    let retired = home.run_in_production(&[
+        OsStr::new("daemon"),
+        OsStr::new("retire"),
+        second.path().as_os_str(),
+    ]);
+    assert!(retired.status.success(), "{}", stderr(&retired));
+    assert!(stdout(&retired).contains(&second_root));
+    let second_fence = hold_workspace_fence(
+        &usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap(),
+    );
+    let initial_connection = connect(ClientWorkspace::Bound {
+        root: initial_root.clone(),
+    });
+    if let Err(error) = initial_connection {
+        panic!("{error}");
+    }
+    drop(second_fence);
 
     // Each adopted workspace has its own state subtree, so neither is described
     // by the other's lifecycle document.

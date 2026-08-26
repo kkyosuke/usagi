@@ -604,6 +604,16 @@ impl SessionRuntime {
             .any(|operation| !operation.status.terminal()))
     }
 
+    /// Number of durable managed sessions retained by this workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::Storage`] when the lifecycle document
+    /// cannot be read.
+    pub fn session_count(&self) -> Result<usize, SessionRuntimeError> {
+        Ok(self.state()?.sessions.len())
+    }
+
     /// Returns the durable workspace identity this runtime bound.
     ///
     /// A daemon that owns several workspaces routes a fenced request to the

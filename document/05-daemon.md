@@ -166,7 +166,8 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | コマンド | 動作 |
 |---|---|
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
-| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。stale は owner 消滅と PID 再利用を区別した文言で報告し、どちらも reclaimable であることを示す |
+| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
+| `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。`--force` は live runtime を明示的に破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
@@ -663,7 +664,7 @@ daemon process（machine あたり 1 つ）
 | 起動 | 起動時 cwd の workspace を **initial tenant** として登録する。fence は `serve` が既に取得しているので取り直さない（同じ process が同じ node へ 2 本目の `flock` を試すと拒否される） |
 | adopt | client が `selected` で申告した workspace を、その handshake の中で adopt する。canonical 化 → workspace fence 取得 → state subtree 解決 → lifecycle document open → 登録の順で、`serve` の取得順と同じである |
 | 拒否 | fence を別 process が持つ、root が解決できない、tenant 上限（既定 32）に達した場合は **その workspace だけ**を typed refusal にする。保持中の tenant の接続は影響を受けない |
-| retire | 何もすることが無い状態が 10 分続いた workspace を返す（[遊休 workspace の retire](#遊休-workspace-の-retire)） |
+| retire | 何もすることが無い状態が 10 分続いた workspace を自動的に返す（[遊休 workspace の retire](#遊休-workspace-の-retire)）。または `daemon retire <path>` が参照中でない 1 tenant を即時に返す。live runtime は `--force` でその workspace のものだけを terminate / reap し、起動 workspace と未完了 lifecycle work は force でも返さない |
 | 停止 | shutdown は全 tenant を閉じ、fence を返す |
 
 adopt は client の handshake の中で走るため、fence の待ち時間は起動時（departing owner を待つ 2 秒）より短い
@@ -692,6 +693,11 @@ state subtree から root を引き当てて adopt し直すので、開き直�
 逆順（runtime の lock → scope 解決 → registry）で進むため、registry の lock を持ったまま観測すると 2 つの順序が
 交差して process 全体が停止する。sweep は「候補の選定（lock 内）→ 観測（lock 外）→ 確定（lock 内で再確認）」の
 3 相で行い、確定時に参照数と fence を読み直す。
+
+`daemon status` / `daemon retire` は workspace resource を選ばない unbound tenant IPC を共有する。inventory の正本は
+ディスクに残る `w/<digest>/root.json` ではなく、稼働中 process の registry である。明示 retire は registry 内で対象を
+`retiring` にして新しい resolution を止め、lock 外で lifecycle / runtime を確認・cleanup してから同じ entry と fence を
+落とす。cleanup が失敗した場合は entry を再び解決可能に戻すため、race した handshake が解放途中の runtime を掴まない。
 
 **daemon 全体で 1 つしかない registry の prune は、保持中の workspace ではなく「この data directory が知っている
 workspace すべて」で判定する**。PR inventory の記録は session を key にし、Agent / dispatch inventory は workspace

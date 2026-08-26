@@ -17,7 +17,7 @@ use usagi_core::domain::{
     },
     id::{
         AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, SessionId,
-        TerminalRef,
+        TerminalRef, WorkspaceId,
     },
     terminal_launch::TerminalKind,
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
@@ -1043,16 +1043,43 @@ impl RuntimeCoordinator {
         store: &mut dyn RuntimeStore,
         spawner: &mut dyn PtySpawner,
     ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
+        self.close_matching(
+            |record| record.runtime.session_id == Some(session),
+            store,
+            spawner,
+        )
+    }
+
+    /// Terminates and forgets every Agent runtime owned by one workspace.
+    pub fn close_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
+        self.close_matching(
+            |record| record.runtime.terminal.workspace_id == workspace,
+            store,
+            spawner,
+        )
+    }
+
+    fn close_matching(
+        &mut self,
+        selected: impl Fn(&DurableRuntimeRecord) -> bool,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
         let targets = self
             .records
             .iter()
-            .filter(|(_, record)| record.runtime.session_id == Some(session))
+            .filter(|(_, record)| selected(record))
             .map(|(key, record)| (key.clone(), record.clone()))
             .collect::<Vec<_>>();
         let mut terminate_failed = false;
 
         for (_, record) in &targets {
-            if record.state == RuntimeState::Running {
+            if runtime_state_requires_termination(record.state) {
                 if spawner.terminate_reap(&record.runtime.terminal).is_err() {
                     terminate_failed = true;
                     continue;
@@ -1602,6 +1629,18 @@ impl RuntimeCoordinator {
             )),
         }
     }
+}
+
+const fn runtime_state_requires_termination(state: RuntimeState) -> bool {
+    matches!(
+        state,
+        RuntimeState::Running
+            | RuntimeState::ReconcileRequired(
+                ReconcileState::SpawnAmbiguous
+                    | ReconcileState::PersistAfterSpawn
+                    | ReconcileState::OrphanRunning
+            )
+    )
 }
 
 fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
@@ -2414,6 +2453,41 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_workspace_leaves_another_workspaces_live_agent_untouched() {
+        let first_request = request();
+        let second_request = request();
+        let (first, first_fence) = refs(&first_request);
+        let (second, second_fence) = refs(&second_request);
+        let mut coordinator = RuntimeCoordinator::new(2, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        for (request, runtime, fence) in [
+            (&first_request, first.clone(), first_fence),
+            (&second_request, second.clone(), second_fence),
+        ] {
+            launch(
+                &mut coordinator,
+                request,
+                runtime,
+                fence,
+                &mut spawner,
+                &mut store,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            coordinator
+                .close_workspace(first.terminal.workspace_id, &mut store, &mut spawner)
+                .unwrap(),
+            [first]
+        );
+        assert!(spawner.terminated);
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+        assert_eq!(coordinator.snapshot().records[0].runtime, second);
+    }
+
+    #[test]
     fn closing_a_session_forgets_an_agent_that_already_exited() {
         let request = request();
         let session = request.scope.session_id.unwrap();
@@ -2468,6 +2542,37 @@ mod tests {
             ))
         );
         assert_eq!(coordinator.snapshot().records.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_session_does_not_forget_an_ambiguous_spawn() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        coordinator
+            .records
+            .get_mut(&runtime.agent_runtime_id.as_str())
+            .unwrap()
+            .state = RuntimeState::ReconcileRequired(ReconcileState::PersistAfterSpawn);
+
+        assert!(
+            coordinator
+                .close_session(session, &mut store, &mut spawner)
+                .is_err()
+        );
+        assert_eq!(coordinator.snapshot().records[0].runtime, runtime);
     }
 
     #[test]

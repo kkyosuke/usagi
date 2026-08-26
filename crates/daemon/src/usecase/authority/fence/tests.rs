@@ -200,6 +200,24 @@ fn an_unnameable_request_is_control_so_every_non_active_role_refuses_it() {
     }
 }
 
+#[test]
+fn tenant_inventory_is_read_only_but_retirement_is_control() {
+    assert_eq!(
+        classify_request(
+            &json!({"kind": "tenant", "action": "inventory"}),
+            OwnedRuntime::Own
+        ),
+        (RequestClass::Inventory, ResourceOwner::Unscoped)
+    );
+    assert_eq!(
+        classify_request(
+            &json!({"kind": "tenant", "action": "retire"}),
+            OwnedRuntime::Own
+        ),
+        (RequestClass::Control, ResourceOwner::Unscoped)
+    );
+}
+
 /// A terminal body whose `action` this build cannot name is IO on a named
 /// runtime, not a scope query — so the generation that owns nothing refuses it
 /// rather than answering it.

@@ -121,6 +121,17 @@ pub enum AdoptError {
     Storage(String),
 }
 
+/// Why an explicit tenant retirement was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetireError {
+    /// This daemon does not currently hold the requested root.
+    NotFound,
+    /// The startup workspace is fenced by `serve` for the process lifetime.
+    Initial,
+    /// A connection or worker is currently serving this tenant.
+    Busy,
+}
+
 impl std::fmt::Display for AdoptError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -282,6 +293,10 @@ struct Held<R> {
     /// as soon as it has work again, so the idle period a retirement waits for
     /// is continuous rather than cumulative.
     idle_since: Option<DateTime<Utc>>,
+    /// Set while explicit retirement performs runtime cleanup without holding
+    /// the registry lock. Resolution excludes the entry during this interval,
+    /// so no new request can acquire it between the busy check and removal.
+    retiring: bool,
 }
 
 #[cfg(test)]
@@ -357,6 +372,7 @@ where
     pub fn owner_of(&self, path: &Path) -> Option<Tenant<O::Runtime>> {
         self.with_held(|held| {
             held.values()
+                .filter(|entry| !entry.retiring)
                 .filter(|entry| path.starts_with(entry.tenant.root()))
                 .max_by_key(|entry| entry.tenant.root().components().count())
                 .map(|entry| entry.tenant.clone())
@@ -369,6 +385,7 @@ where
     pub fn by_workspace_id(&self, workspace_id: WorkspaceId) -> Option<Tenant<O::Runtime>> {
         self.with_held(|held| {
             held.values()
+                .filter(|entry| !entry.retiring)
                 .find(|entry| entry.tenant.workspace_id() == workspace_id)
                 .map(|entry| entry.tenant.clone())
         })
@@ -377,13 +394,62 @@ where
     /// The tenant adopted for exactly `workspace_root`.
     #[must_use]
     pub fn tenant(&self, workspace_root: &Path) -> Option<Tenant<O::Runtime>> {
-        self.with_held(|held| held.get(workspace_root).map(|entry| entry.tenant.clone()))
+        self.with_held(|held| {
+            held.get(workspace_root)
+                .filter(|entry| !entry.retiring)
+                .map(|entry| entry.tenant.clone())
+        })
     }
 
     /// Every adopted workspace, ordered by root so an inventory is stable.
     #[must_use]
     pub fn adopted(&self) -> Vec<Tenant<O::Runtime>> {
-        self.with_held(|held| held.values().map(|entry| entry.tenant.clone()).collect())
+        self.with_held(|held| {
+            held.values()
+                .filter(|entry| !entry.retiring)
+                .map(|entry| entry.tenant.clone())
+                .collect()
+        })
+    }
+
+    /// Atomically stop new resolutions and return the tenant to clean up.
+    ///
+    /// The returned handle is the caller's cleanup authority. It must finish
+    /// with either [`Self::complete_retire`] or [`Self::cancel_retire`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal when the root is absent, is the process's
+    /// initial tenant, or still has a connection / cleanup owner.
+    pub fn begin_retire(&self, workspace_root: &Path) -> Result<Tenant<O::Runtime>, RetireError> {
+        let mut held = self.lock();
+        let entry = held.get_mut(workspace_root).ok_or(RetireError::NotFound)?;
+        if entry.fence.is_none() {
+            return Err(RetireError::Initial);
+        }
+        if entry.retiring || entry.tenant.referenced_elsewhere() {
+            return Err(RetireError::Busy);
+        }
+        entry.retiring = true;
+        Ok(entry.tenant.clone())
+    }
+
+    /// Commit an explicit retirement after its runtime cleanup succeeded.
+    pub fn complete_retire(&self, workspace_root: &Path) -> bool {
+        let mut held = self.lock();
+        if held.get(workspace_root).is_some_and(|entry| entry.retiring) {
+            held.remove(workspace_root);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Re-open resolution when explicit runtime cleanup failed.
+    pub fn cancel_retire(&self, workspace_root: &Path) {
+        if let Some(entry) = self.lock().get_mut(workspace_root) {
+            entry.retiring = false;
+        }
     }
 
     /// Give `workspace_root` back, releasing its fence.
@@ -421,7 +487,9 @@ where
         let candidates = {
             let held = self.lock();
             held.iter()
-                .filter(|(_, entry)| entry.fence.is_some() && !entry.tenant.referenced_elsewhere())
+                .filter(|(_, entry)| {
+                    entry.fence.is_some() && !entry.retiring && !entry.tenant.referenced_elsewhere()
+                })
                 .map(|(root, entry)| {
                     (
                         root.clone(),
@@ -450,6 +518,7 @@ where
         for (root, entry) in held.iter_mut() {
             let still_idle = idle.contains(root)
                 && entry.fence.is_some()
+                && !entry.retiring
                 && !entry.tenant.referenced_elsewhere();
             if still_idle {
                 let since = *entry.idle_since.get_or_insert(now);
@@ -498,6 +567,7 @@ where
                 tenant: tenant.clone(),
                 fence,
                 idle_since: None,
+                retiring: false,
             },
         );
         Ok(tenant)
@@ -876,6 +946,52 @@ mod tests {
         assert_eq!(live.load(Ordering::SeqCst), 1);
 
         assert!(registry.retire(Path::new("/workspace/one")));
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn explicit_retirement_is_typed_and_excludes_the_root_during_cleanup() {
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let (registry, live) = fixture(daemon.path(), WorkspaceFenceOutcome::Acquired, 8);
+        let initial = registry
+            .adopt_initial(Path::new("/workspace/initial"))
+            .unwrap();
+        let held = registry.adopt(Path::new("/workspace/one")).unwrap();
+
+        assert_eq!(
+            registry.begin_retire(Path::new("/workspace/missing")),
+            Err(RetireError::NotFound)
+        );
+        assert_eq!(
+            registry.begin_retire(Path::new("/workspace/initial")),
+            Err(RetireError::Initial)
+        );
+        assert_eq!(
+            registry.begin_retire(Path::new("/workspace/one")),
+            Err(RetireError::Busy),
+            "an outstanding connection handle must fence retirement"
+        );
+        drop((initial, held));
+
+        let cleanup = registry.begin_retire(Path::new("/workspace/one")).unwrap();
+        assert!(registry.tenant(Path::new("/workspace/one")).is_none());
+        assert_eq!(registry.adopted().len(), 1);
+        assert_eq!(
+            registry.adopted()[0].root(),
+            Path::new("/workspace/initial")
+        );
+        assert_eq!(
+            registry.begin_retire(Path::new("/workspace/one")),
+            Err(RetireError::Busy)
+        );
+        registry.cancel_retire(Path::new("/workspace/one"));
+        drop(cleanup);
+        assert!(registry.tenant(Path::new("/workspace/one")).is_some());
+
+        let cleanup = registry.begin_retire(Path::new("/workspace/one")).unwrap();
+        assert!(registry.complete_retire(Path::new("/workspace/one")));
+        assert!(!registry.complete_retire(Path::new("/workspace/one")));
+        drop(cleanup);
         assert_eq!(live.load(Ordering::SeqCst), 0);
     }
 
