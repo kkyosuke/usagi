@@ -670,14 +670,9 @@ fn available_plot(
     }
     let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
-        let status = if session.agents_observed {
-            "no agents"
-        } else {
-            "project inactive"
-        };
         return (
             [
-                centered(PLOT_WIDTH, &Style::new().dim().paint(status)),
+                centered(PLOT_WIDTH, &Style::new().dim().paint("no agents")),
                 " ".repeat(PLOT_WIDTH),
                 " ".repeat(PLOT_WIDTH),
                 " ".repeat(PLOT_WIDTH),
