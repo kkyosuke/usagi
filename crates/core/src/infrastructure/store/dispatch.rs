@@ -1643,7 +1643,7 @@ impl DispatchStore {
         }
         let path = self.inbox_path(caller);
         let mut file =
-            fs::File::open(&path).with_context(|| format!("failed to read {}", path.display()))?;
+            fs::File::open(&path).context(format!("failed to read {}", path.display()))?;
         let mut records = Vec::new();
         for entry in entries {
             file.seek(SeekFrom::Start(entry.offset))?;
