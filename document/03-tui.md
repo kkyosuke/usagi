@@ -322,6 +322,8 @@ managed session が無い Home は Closeup を開かず、これらの effect �
 daemon snapshot または lifecycle refresh で selected / active session が消えたか使用不能になった場合、
 表示順上の surviving session へ決定的に着地する。surviving session が無ければ selected は
 `+ new session`、active は `None` となり、削除済み session を target にした古い local state を実行に使わない。
+削除要求を受理した後も `deleting` 行が snapshot に残る間は selected cursor をその stable identity に保持し、
+行が消えた refresh で初めて surviving session へ移す。
 
 Home の mode は Switch と Closeup である。**右ペインは、その pane が入力を所有していない間つねに dim で
 表示する**（tab strip、content、footer を含む）。active な明度へ戻すのは、Closeup で選択中の tab が live
@@ -420,7 +422,9 @@ ANSI span の reset 後にも dim を再適用するため、Git の色 span が
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。session 行を
 選択中の `x` は `session remove`、`Shift`+`x`（`X`）は `session remove -f` を実行する。`+ new session`
-行では削除しない。TUI の force は削除全体に効き、未コミットの変更を持つ worktree だけでなく、基点へ
+行では削除しない。削除要求後は対象の `deleting` 行に cursor を表示したままにし、削除完了で行が消えた時点で
+隣の surviving session（無ければ `+ new session`）へ移す。TUI の force は削除全体に効き、未コミットの変更を持つ
+worktree だけでなく、基点へ
 マージされていない session ブランチも破棄する（`git branch -d` ではなく `-D`）。したがって `X` は、
 worktree の撤去だけが済んでブランチ削除で `failed` に落ちた session も 1 回で片付けられる。`x` は
 両方とも安全側で、未マージのブランチが残っていれば削除は `failed` になる。`Ctrl-Q` は exit prompt を開く（離脱と終了の区別は

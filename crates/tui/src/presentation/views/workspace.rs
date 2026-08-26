@@ -2459,10 +2459,11 @@ fn home_row_lines_at(
         let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
         let badge = role_badge(session);
         let label = widgets::shimmer_text_with(&organization_label(session), frame, wave);
+        let marker = home_row_marker(row, selected, false);
         return vec![
             widgets::pad_to_width(
                 &format!(
-                    "  {} {label}{badge}",
+                    "{marker} {} {label}{badge}",
                     Role::Danger.style().bold().paint("✂")
                 ),
                 width,
@@ -3321,6 +3322,49 @@ mod tests {
                 home_row_height(Selection::Target(Target::Session(session)))
             );
         }
+    }
+
+    #[test]
+    fn removing_session_row_keeps_the_switch_cursor_visible() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut removing = projected_session(session, "going", "/work/going");
+        removing.removing = true;
+        let state = AppState::home(workspace, vec![session]);
+        let selected = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            std::slice::from_ref(&removing),
+        );
+        let row = Selection::Target(Target::Session(session));
+        let selected_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &selected,
+            row,
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        assert!(strip(&selected_lines[0]).starts_with('\u{f0907}'));
+
+        let mut unselected_state = state;
+        let _ = update(&mut unselected_state, AppEvent::Key(AppKey::Down));
+        let unselected = HomeProjection::from_state(
+            &unselected_state,
+            "atlas",
+            Path::new("/work"),
+            std::slice::from_ref(&removing),
+        );
+        let unselected_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &unselected,
+            row,
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        assert!(!strip(&unselected_lines[0]).starts_with('\u{f0907}'));
     }
 
     #[test]
