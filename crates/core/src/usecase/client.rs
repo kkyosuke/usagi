@@ -252,6 +252,7 @@ pub enum DispatchToolAction {
     AgentComplete,
     AgentFail,
     AgentInbox,
+    AgentInboxAck,
     UserDecisionRequest,
     UserDecisionGet,
     UserDecisionList,
@@ -2986,6 +2987,12 @@ mod deadline_and_retry_tests {
                 payload: session_payload(),
                 caller_context: None,
             },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::AgentInbox,
+                operation_id: String::new(),
+                payload: session_payload(),
+                caller_context: None,
+            },
             DaemonRequest::SupervisorTool {
                 action: SupervisorToolAction::List,
                 operation_id: String::new(),
@@ -3050,6 +3057,12 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentComplete,
+                operation_id: "op".into(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::AgentInboxAck,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,

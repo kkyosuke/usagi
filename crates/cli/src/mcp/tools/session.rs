@@ -37,6 +37,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(AgentComplete),
         Box::new(AgentFail),
         Box::new(AgentInbox),
+        Box::new(AgentInboxAck),
         Box::new(UserDecisionRequest),
         Box::new(UserDecisionGet),
         Box::new(UserDecisionList),
@@ -283,10 +284,22 @@ impl Tool for AgentInbox {
         "agent_inbox"
     }
     fn description(&self) -> &'static str {
-        "caller 自身の durable inbox を返す"
+        "caller 自身の durable inbox をACKせずbounded pageで返す"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"since":{"type":"string"},"unread_only":{"type":"boolean"}},"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"cursor":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":100},"since":{"type":"string"},"unread_only":{"type":"boolean"}},"additionalProperties":false}"#
+    }
+}
+pub struct AgentInboxAck;
+impl Tool for AgentInboxAck {
+    fn name(&self) -> &'static str {
+        "agent_inbox_ack"
+    }
+    fn description(&self) -> &'static str {
+        "agent_inboxで処理済みのnext_cursorまでをdurableにACKする"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"cursor":{"type":"integer","minimum":1}},"required":["cursor"],"additionalProperties":false}"#
     }
 }
 

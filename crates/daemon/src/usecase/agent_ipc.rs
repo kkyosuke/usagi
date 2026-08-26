@@ -307,7 +307,7 @@ impl AgentRuntime {
             default_profile,
             geometry,
             DispatchStore::new(
-                &std::env::temp_dir().join(format!("usagi-dispatch-{}", AgentRuntimeId::new())),
+                std::env::temp_dir().join(format!("usagi-dispatch-{}", AgentRuntimeId::new())),
             ),
         )
     }
@@ -3180,11 +3180,22 @@ fn stale_terminal() -> ProtocolError {
     ProtocolError::new(ErrorCode::StaleTarget, "agent terminal reference is stale")
 }
 
-fn map_dispatch_storage_error(_: anyhow::Error) -> ProtocolError {
-    ProtocolError::new(
-        ErrorCode::Unavailable,
-        "daemon could not persist dispatch state",
-    )
+fn map_dispatch_storage_error(error: anyhow::Error) -> ProtocolError {
+    let capacity = error
+        .to_string()
+        .starts_with("dispatch inbox capacity is exhausted");
+    drop(error);
+    if capacity {
+        ProtocolError::new(
+            ErrorCode::ResourceExhausted,
+            "dispatch inbox capacity is exhausted by unacknowledged messages",
+        )
+    } else {
+        ProtocolError::new(
+            ErrorCode::Unavailable,
+            "daemon could not persist dispatch state",
+        )
+    }
 }
 
 fn dispatch_agent_not_found() -> ProtocolError {
@@ -3769,7 +3780,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
         )
     }
@@ -4172,7 +4183,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
             snapshot,
         )
@@ -4188,7 +4199,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             locator,
         )
     }
@@ -4207,7 +4218,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("codex").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
         )
     }
@@ -5318,7 +5329,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
         );
         let workspace = WorkspaceId::new();
@@ -6130,7 +6141,7 @@ mod tests {
             },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
         )));
         let operation = OperationId::new().to_string();
         let launch = intent(None);
@@ -6800,7 +6811,7 @@ mod tests {
             .unwrap()
             .operation
             .clone();
-        runtime.dispatch = DispatchStore::new(&tempfile::tempdir().unwrap().keep());
+        runtime.dispatch = DispatchStore::new(tempfile::tempdir().unwrap().keep());
         runtime.mcp_callers.insert(
             "missing-binding".into(),
             McpCaller {
@@ -8006,7 +8017,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
             RuntimeStoreSnapshot {
                 schema_version: 99,
@@ -8039,7 +8050,7 @@ mod tests {
             Pty::default(),
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(&tempfile::tempdir().unwrap().keep()),
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
             PathExecutableLocator,
             RuntimeStoreSnapshot::default(),
             retention.clone(),
@@ -8690,6 +8701,13 @@ mod tests {
         assert_eq!(
             map_dispatch_storage_error(anyhow::anyhow!("store failpoint")).code,
             ErrorCode::Unavailable
+        );
+        assert_eq!(
+            map_dispatch_storage_error(anyhow::anyhow!(
+                "dispatch inbox capacity is exhausted by unacknowledged messages"
+            ))
+            .code,
+            ErrorCode::ResourceExhausted
         );
     }
 

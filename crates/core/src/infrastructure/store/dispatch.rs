@@ -2,13 +2,17 @@
 //!
 //! The legacy-compatible dispatch registry and its workspace ownership sidecar
 //! are atomically replaced JSON documents under one cross-process lock. Each
-//! caller inbox is a locked, atomically replaced JSONL file so a crash cannot
-//! expose a partial delivery and concurrent daemon commands cannot lose one
-//! another's updates.
+//! caller inbox is an fsynced sequence journal with a derived offset index and
+//! an atomic ACK watermark. The same lock serializes append, ACK, migration and
+//! compaction so concurrent daemon commands cannot lose one another's updates.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -24,6 +28,8 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
 const INBOX_DIR: &str = "inbox";
+const INBOX_INDEX_SUFFIX: &str = ".index.json";
+const INBOX_ACK_SUFFIX: &str = ".ack.json";
 
 /// How many finished dispatch runs the registry keeps.
 ///
@@ -38,12 +44,12 @@ const RUN_RETENTION: usize = 256;
 /// How many already-read messages one caller's inbox keeps.
 const INBOX_READ_RETENTION: usize = 256;
 
-/// The hard ceiling on one caller's inbox, unread messages included.
-///
-/// Read messages are dropped first and this bound is never reached in ordinary
-/// use. It exists because "never drop an unread message" alone is not a bound: a
-/// caller that never reads its inbox would otherwise grow it without limit.
+/// The hard ceiling on one caller's inbox, unread messages included. Read
+/// messages are compacted first; if every slot is unacknowledged, append is
+/// rejected without evicting or mutating an existing report.
 const INBOX_HARD_LIMIT: usize = 4096;
+/// Maximum messages returned by one public inbox page.
+pub const INBOX_PAGE_MAX: usize = 100;
 /// Reserved inbox segment for a workspace-root caller. A `SessionId` is always a
 /// lowercase UUID, so this non-UUID literal can never collide with one.
 const ROOT_INBOX_SEGMENT: &str = "workspace-root";
@@ -52,6 +58,69 @@ const ROOT_INBOX_SEGMENT: &str = "workspace-root";
 /// `None` is the workspace root; `Some` is the session's UUID.
 fn session_segment(session_id: Option<SessionId>) -> String {
     session_id.map_or_else(|| ROOT_INBOX_SEGMENT.to_owned(), |id| id.as_str())
+}
+
+/// Stable position of the next inbox message to inspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxCursor {
+    pub next_sequence: u64,
+}
+
+/// One bounded inbox query result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxPage {
+    pub messages: Vec<InboxMessage>,
+    pub next_cursor: InboxCursor,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InboxRecord {
+    sequence: u64,
+    #[serde(flatten)]
+    message: InboxMessage,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct InboxIndexEntry {
+    sequence: u64,
+    offset: u64,
+    created_at: DateTime<Utc>,
+    read: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct InboxIndex {
+    journal_len: u64,
+    valid_len: u64,
+    entries: Vec<InboxIndexEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct InboxAck {
+    next_sequence: u64,
+}
+
+impl Default for InboxAck {
+    fn default() -> Self {
+        Self { next_sequence: 1 }
+    }
+}
+
+fn next_inbox_sequence(entries: &[InboxIndexEntry]) -> Result<u64> {
+    entries.last().map_or(Ok(1), |entry| {
+        entry
+            .sequence
+            .checked_add(1)
+            .context("inbox sequence exhausted")
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InboxLine {
+    Record(InboxRecord),
+    Legacy(InboxMessage),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,15 +391,20 @@ pub struct QueuedPrompt {
 }
 
 /// File-backed durable dispatch state rooted at the daemon state directory.
-#[derive(Clone)]
 pub struct DispatchStore {
     dir: PathBuf,
+    #[cfg(test)]
+    inbox_bytes_read: AtomicU64,
 }
 
 impl DispatchStore {
     #[must_use]
-    pub fn new(dir: &Path) -> Self {
-        Self { dir: dir.into() }
+    pub fn new(dir: impl AsRef<Path>) -> Self {
+        Self {
+            dir: dir.as_ref().into(),
+            #[cfg(test)]
+            inbox_bytes_read: AtomicU64::new(0),
+        }
     }
 
     #[must_use]
@@ -542,6 +616,20 @@ impl DispatchStore {
             .join(INBOX_DIR)
             .join(session_segment(caller.session_id))
             .join(format!("{}.jsonl", caller.agent_id.as_str()))
+    }
+
+    fn inbox_index_path(&self, caller: &CallerRef) -> PathBuf {
+        let path = self.inbox_path(caller);
+        let mut value = path.into_os_string();
+        value.push(INBOX_INDEX_SUFFIX);
+        PathBuf::from(value)
+    }
+
+    fn inbox_ack_path(&self, caller: &CallerRef) -> PathBuf {
+        let path = self.inbox_path(caller);
+        let mut value = path.into_os_string();
+        value.push(INBOX_ACK_SUFFIX);
+        PathBuf::from(value)
     }
 
     /// Upserts an agent by its never-reused incarnation ID.
@@ -1178,23 +1266,182 @@ impl DispatchStore {
     /// # Errors
     ///
     /// Returns an error when the inbox cannot be locked, read, or written.
-    pub fn append_inbox(&self, caller: &CallerRef, message: InboxMessage) -> Result<()> {
+    #[allow(clippy::too_many_lines)]
+    pub fn append_inbox(&self, caller: &CallerRef, mut message: InboxMessage) -> Result<()> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let path = self.inbox_path(caller);
-        let mut messages = Self::read_inbox(&path)?;
-        messages.push(message);
-        // Bounding here is what turns an append from O(history) into O(bound):
-        // the whole file is rewritten each time, so without it N deliveries cost
-        // O(N²) and a long-lived caller's inbox never stops getting slower.
-        retain_bounded_inbox(&mut messages);
-        Self::write_inbox(&path, &messages)
+        let mut index = self.inbox_index(caller)?;
+        let ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        let read_count = index
+            .entries
+            .iter()
+            .filter(|entry| entry.read || entry.sequence < ack.next_sequence)
+            .count();
+        if read_count > INBOX_READ_RETENTION || index.entries.len() >= INBOX_HARD_LIMIT {
+            index = self.compact_inbox(caller, &index, ack)?;
+        }
+        if index.entries.len() >= INBOX_HARD_LIMIT {
+            anyhow::bail!("dispatch inbox capacity is exhausted by unacknowledged messages");
+        }
+
+        let parent = path.parent().context("dispatch inbox path has no parent")?;
+        fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut offset = file.metadata()?.len();
+        if index.valid_len < offset {
+            file.set_len(index.valid_len)?;
+            offset = index.valid_len;
+            index.journal_len = offset;
+        }
+        let sequence = next_inbox_sequence(&index.entries)?;
+        message.read = false;
+        let record = InboxRecord { sequence, message };
+        let mut bytes = serde_json::to_vec(&record)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        let journal_len = offset + u64::try_from(bytes.len())?;
+        index.entries.push(InboxIndexEntry {
+            sequence,
+            offset,
+            created_at: record.message.created_at,
+            read: false,
+        });
+        index.journal_len = journal_len;
+        index.valid_len = journal_len;
+        self.write_inbox_index(caller, &index)
     }
 
+    /// Returns a stable, bounded page without acknowledging it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid/expired cursor or unreadable state.
+    pub fn inbox_page(
+        &self,
+        caller: &CallerRef,
+        cursor: Option<InboxCursor>,
+        limit: usize,
+        unread_only: bool,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<InboxPage> {
+        if !(1..=INBOX_PAGE_MAX).contains(&limit) {
+            anyhow::bail!("dispatch inbox page limit must be 1..={INBOX_PAGE_MAX}");
+        }
+        if cursor.is_some_and(|value| value.next_sequence == 0) {
+            anyhow::bail!("dispatch inbox cursor sequence must be positive");
+        }
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let index = self.inbox_index(caller)?;
+        let ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        let end = next_inbox_sequence(&index.entries)?;
+        if cursor.is_some_and(|value| value.next_sequence > end) {
+            anyhow::bail!("dispatch inbox cursor is outside the retained sequence range");
+        }
+        let Some(first) = index.entries.first() else {
+            let next_sequence = cursor.map_or(ack.next_sequence, |value| value.next_sequence);
+            return Ok(InboxPage {
+                messages: Vec::new(),
+                next_cursor: InboxCursor { next_sequence },
+                has_more: false,
+            });
+        };
+        if cursor.is_some_and(|value| value.next_sequence < first.sequence) {
+            anyhow::bail!(
+                "dispatch inbox cursor expired: earliest retained sequence is {}",
+                first.sequence
+            );
+        }
+        let mut start = cursor.map_or(first.sequence, |value| value.next_sequence);
+        if unread_only {
+            start = start.max(ack.next_sequence);
+        }
+        if let Some(since) = since {
+            let since_sequence = index
+                .entries
+                .iter()
+                .find(|entry| entry.created_at > since)
+                .map_or(end, |entry| entry.sequence);
+            start = start.max(since_sequence);
+        }
+        let selected = index
+            .entries
+            .iter()
+            .filter(|entry| entry.sequence >= start)
+            .filter(|entry| since.is_none_or(|value| entry.created_at > value))
+            .filter(|entry| !unread_only || (!entry.read && entry.sequence >= ack.next_sequence))
+            .take(limit + 1)
+            .copied()
+            .collect::<Vec<_>>();
+        let has_more = selected.len() > limit;
+        let page_entries = &selected[..selected.len().min(limit)];
+        let mut records = self.read_inbox_records(caller, page_entries)?;
+        for record in &mut records {
+            record.message.read = record.message.read || record.sequence < ack.next_sequence;
+        }
+        let next_sequence = if has_more {
+            records
+                .last()
+                .context("dispatch inbox page cursor has no returned record")?
+                .sequence
+                + 1
+        } else {
+            end.max(start)
+        };
+        Ok(InboxPage {
+            messages: records.into_iter().map(|record| record.message).collect(),
+            next_cursor: InboxCursor { next_sequence },
+            has_more,
+        })
+    }
+
+    /// Advances the caller's durable ACK watermark. Repeating the same or an
+    /// older ACK is effect-free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cursor is outside the published inbox range or
+    /// the ACK state cannot be persisted.
+    pub fn ack_inbox(&self, caller: &CallerRef, cursor: InboxCursor) -> Result<InboxCursor> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let index = self.inbox_index(caller)?;
+        let end = next_inbox_sequence(&index.entries)?;
+        if cursor.next_sequence == 0 || cursor.next_sequence > end {
+            anyhow::bail!("dispatch inbox ACK cursor is outside the published sequence range");
+        }
+        let mut ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        if cursor.next_sequence > ack.next_sequence {
+            ack.next_sequence = cursor.next_sequence;
+            let path = self.inbox_ack_path(caller);
+            let parent = path
+                .parent()
+                .context("dispatch inbox ACK path has no parent")?;
+            json_file::write_atomic(parent, &path, &ack)?;
+        }
+        Ok(InboxCursor {
+            next_sequence: ack.next_sequence,
+        })
+    }
+
+    /// Compatibility projection for internal exact-run recovery. Public callers
+    /// use [`Self::inbox_page`] so response work is bounded by a page.
+    ///
     /// # Errors
     ///
     /// Returns an error when the inbox cannot be read.
     pub fn inbox(&self, caller: &CallerRef) -> Result<Vec<InboxMessage>> {
-        Self::read_inbox(&self.inbox_path(caller))
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let index = self.inbox_index(caller)?;
+        let ack = self.read_inbox_ack(caller)?;
+        Self::validate_inbox_ack(ack, &index)?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
+        for record in &mut records {
+            record.message.read = record.message.read || record.sequence < ack.next_sequence;
+        }
+        Ok(records.into_iter().map(|record| record.message).collect())
     }
 
     /// # Errors
@@ -1215,20 +1462,30 @@ impl DispatchStore {
     /// Returns an error when the inbox cannot be locked, read, or written.
     pub fn mark_inbox_read(&self, caller: &CallerRef, run_id: OperationId) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.dir)?;
-        let path = self.inbox_path(caller);
-        let mut messages = Self::read_inbox(&path)?;
+        let index = self.inbox_index(caller)?;
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
         let mut changed = false;
-        for message in &mut messages {
-            if message.run_id == run_id && !message.read {
-                message.read = true;
+        for record in &mut records {
+            if record.message.run_id == run_id && !record.message.read {
+                record.message.read = true;
                 changed = true;
             }
         }
         if changed {
-            // Marking read is what makes a message evictable, so the bound is
-            // applied on this write too and not only when one is appended.
-            retain_bounded_inbox(&mut messages);
-            Self::write_inbox(&path, &messages)?;
+            let mut remove = records
+                .iter()
+                .filter(|record| record.message.read)
+                .count()
+                .saturating_sub(INBOX_READ_RETENTION);
+            records.retain(|record| {
+                if record.message.read && remove > 0 {
+                    remove -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            self.write_inbox_records(caller, &records)?;
         }
         Ok(changed)
     }
@@ -1257,72 +1514,238 @@ impl DispatchStore {
         json_file::write_atomic(&self.dir, &self.workspace_registry_path(), registry)
     }
 
-    fn read_inbox(path: &Path) -> Result<Vec<InboxMessage>> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    fn read_inbox_ack(&self, caller: &CallerRef) -> Result<InboxAck> {
+        Ok(json_file::read(&self.inbox_ack_path(caller))?.unwrap_or_default())
+    }
+
+    fn validate_inbox_ack(ack: InboxAck, index: &InboxIndex) -> Result<()> {
+        let end = next_inbox_sequence(&index.entries)?;
+        if ack.next_sequence == 0 || ack.next_sequence > end {
+            anyhow::bail!("dispatch inbox ACK state is outside the published sequence range");
+        }
+        Ok(())
+    }
+
+    fn inbox_index(&self, caller: &CallerRef) -> Result<InboxIndex> {
+        let journal_len = match fs::metadata(self.inbox_path(caller)) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InboxIndex::default());
+            }
+            Err(error) => return Err(error).context("failed to inspect dispatch inbox"),
+        };
+        if let Ok(Some(index)) = json_file::read::<InboxIndex>(&self.inbox_index_path(caller))
+            && index.journal_len == journal_len
+            && index.valid_len <= index.journal_len
+            && index.entries.first().is_none_or(|entry| entry.offset == 0)
+            && index.entries.first().is_none_or(|entry| entry.sequence > 0)
+            && index
+                .entries
+                .last()
+                .is_none_or(|entry| entry.offset < index.valid_len)
+            && index
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence && pair[0].offset < pair[1].offset)
+        {
+            return Ok(index);
+        }
+        self.rebuild_inbox_index(caller)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn rebuild_inbox_index(&self, caller: &CallerRef) -> Result<InboxIndex> {
+        let path = self.inbox_path(caller);
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(InboxIndex::default());
+            }
             Err(error) => return Err(error).context(format!("failed to read {}", path.display())),
         };
-        text.lines()
-            .map(|line| {
-                serde_json::from_str(line).context("failed to parse dispatch inbox message")
-            })
-            .collect()
+        let journal_len = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
+        let mut index = InboxIndex {
+            journal_len,
+            ..InboxIndex::default()
+        };
+        let mut records = Vec::new();
+        let mut migrated = false;
+        loop {
+            let offset = index.valid_len;
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            #[cfg(test)]
+            self.inbox_bytes_read
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            // A terminating LF is the journal commit marker. A writer crash can
+            // leave a complete-looking JSON value at EOF, but it was not
+            // durably published and must be truncated by the next append.
+            if !line.ends_with('\n') {
+                break;
+            }
+            let record = match serde_json::from_str::<InboxLine>(line.trim_end_matches('\n')) {
+                Ok(InboxLine::Record(record)) => record,
+                Ok(InboxLine::Legacy(message)) => {
+                    migrated = true;
+                    InboxRecord {
+                        sequence: next_inbox_sequence(&index.entries)?,
+                        message,
+                    }
+                }
+                Err(error) => return Err(error).context("failed to parse dispatch inbox message"),
+            };
+            // Compaction removes acknowledged/read records without renumbering:
+            // cursors already handed to callers must remain stable. The retained
+            // journal can therefore start above one or contain gaps, but sequence
+            // identity must stay positive and strictly increasing.
+            if record.sequence == 0
+                || index
+                    .entries
+                    .last()
+                    .is_some_and(|entry| record.sequence <= entry.sequence)
+            {
+                anyhow::bail!("dispatch inbox sequence is not strictly increasing");
+            }
+            if records.len() >= INBOX_HARD_LIMIT {
+                anyhow::bail!("dispatch inbox exceeds its hard limit");
+            }
+            index.entries.push(InboxIndexEntry {
+                sequence: record.sequence,
+                offset,
+                created_at: record.message.created_at,
+                read: record.message.read,
+            });
+            index.valid_len += u64::try_from(bytes)?;
+            records.push(record);
+        }
+        if migrated {
+            return self.write_inbox_records(caller, &records);
+        }
+        self.write_inbox_index(caller, &index)?;
+        Ok(index)
     }
 
-    fn write_inbox(path: &Path, messages: &[InboxMessage]) -> Result<()> {
-        let parent = path.parent().expect("inbox path has a parent");
+    fn write_inbox_index(&self, caller: &CallerRef, index: &InboxIndex) -> Result<()> {
+        json_file::write_atomic_cache(&self.dir, &self.inbox_index_path(caller), index)
+    }
+
+    fn read_inbox_records(
+        &self,
+        caller: &CallerRef,
+        entries: &[InboxIndexEntry],
+    ) -> Result<Vec<InboxRecord>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.inbox_path(caller);
+        let mut file =
+            fs::File::open(&path).context(format!("failed to read {}", path.display()))?;
+        let mut records = Vec::new();
+        for entry in entries {
+            file.seek(SeekFrom::Start(entry.offset))?;
+            let mut reader = BufReader::new(&file);
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 || !line.ends_with('\n') {
+                anyhow::bail!("dispatch inbox index points beyond its journal");
+            }
+            #[cfg(test)]
+            self.inbox_bytes_read
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+            let record: InboxRecord = serde_json::from_str(line.trim_end_matches('\n'))
+                .context("failed to parse indexed dispatch inbox message")?;
+            if record.sequence != entry.sequence {
+                anyhow::bail!("dispatch inbox index does not match its journal");
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
+    fn write_inbox_records(
+        &self,
+        caller: &CallerRef,
+        records: &[InboxRecord],
+    ) -> Result<InboxIndex> {
+        let path = self.inbox_path(caller);
+        let parent = path.parent().context("dispatch inbox path has no parent")?;
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
-        let mut text = messages
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        if !text.is_empty() {
+        let mut offset = 0_u64;
+        let mut text = String::new();
+        let mut entries = Vec::with_capacity(records.len());
+        for record in records {
+            entries.push(InboxIndexEntry {
+                sequence: record.sequence,
+                offset,
+                created_at: record.message.created_at,
+                read: record.message.read,
+            });
+            let line = serde_json::to_string(record)?;
+            offset += u64::try_from(line.len() + 1)?;
+            text.push_str(&line);
             text.push('\n');
         }
-        json_file::write_text_atomic(path, &text)
+        // The index is a disposable cache. Remove it before replacing the
+        // journal so a crash cannot leave a same-length stale index that later
+        // causes committed records to be hidden or truncated.
+        match fs::remove_file(self.inbox_index_path(caller)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to retire dispatch inbox index"),
+        }
+        json_file::write_text_atomic(&path, &text)?;
+        let index = InboxIndex {
+            journal_len: offset,
+            valid_len: offset,
+            entries,
+        };
+        self.write_inbox_index(caller, &index)?;
+        Ok(index)
     }
-}
 
-/// Bound one caller's inbox with the shipped limits.
-fn retain_bounded_inbox(messages: &mut Vec<InboxMessage>) {
-    retain_inbox_within(messages, INBOX_READ_RETENTION, INBOX_HARD_LIMIT);
-}
-
-/// Bound one caller's inbox, dropping read messages before unread ones.
-///
-/// An unread message is a report its caller has not seen, so it outranks every
-/// read one however old. "Never drop unread" is not by itself a bound, though: a
-/// caller that never reads would grow its inbox forever. Past `hard_limit` the
-/// oldest unread messages go too, and the drop is recorded so the loss is
-/// inspectable rather than silent.
-///
-/// The limits are parameters so the shipped ones can stay at values a real
-/// caller never reaches while the policy itself is still exercised directly.
-/// Driving `hard_limit` through the store would mean appending thousands of
-/// messages, each of which rewrites the whole file.
-fn retain_inbox_within(messages: &mut Vec<InboxMessage>, read_retention: usize, hard_limit: usize) {
-    let read_count = messages.iter().filter(|message| message.read).count();
-    let mut over_read = read_count.saturating_sub(read_retention);
-    if over_read > 0 {
-        messages.retain(|message| {
-            if over_read > 0 && message.read {
-                over_read -= 1;
-                return false;
+    fn compact_inbox(
+        &self,
+        caller: &CallerRef,
+        index: &InboxIndex,
+        ack: InboxAck,
+    ) -> Result<InboxIndex> {
+        let mut records = self.read_inbox_records(caller, &index.entries)?;
+        let read_count = records
+            .iter()
+            .filter(|record| record.message.read || record.sequence < ack.next_sequence)
+            .count();
+        let retention_excess = read_count.saturating_sub(INBOX_READ_RETENTION);
+        let capacity_excess = records
+            .len()
+            .saturating_add(1)
+            .saturating_sub(INBOX_HARD_LIMIT)
+            .min(read_count);
+        let mut remove = retention_excess.max(capacity_excess);
+        if remove == 0 {
+            return Ok(index.clone());
+        }
+        records.retain_mut(|record| {
+            let read = record.message.read || record.sequence < ack.next_sequence;
+            record.message.read = read;
+            if read && remove > 0 {
+                remove -= 1;
+                false
+            } else {
+                true
             }
-            true
         });
+        self.write_inbox_records(caller, &records)
     }
-    let over_hard = messages.len().saturating_sub(hard_limit);
-    if over_hard == 0 {
-        return;
+}
+
+impl Clone for DispatchStore {
+    fn clone(&self) -> Self {
+        Self::new(&self.dir)
     }
-    crate::infrastructure::error_log::ErrorLog::record(&format!(
-        "dispatch inbox reached its {hard_limit} message ceiling; \
-         dropping the {over_hard} oldest unread message(s)"
-    ));
-    messages.drain(..over_hard);
 }
 
 #[cfg(test)]
@@ -1347,6 +1770,18 @@ mod tests {
                 agent_id: agent,
             },
         )
+    }
+
+    #[test]
+    fn clone_preserves_the_durable_root_without_sharing_test_observation_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        store.inbox_bytes_read.store(7, Ordering::Relaxed);
+
+        let cloned = store.clone();
+
+        assert_eq!(cloned.dir, store.dir);
+        assert_eq!(cloned.inbox_bytes_read.load(Ordering::Relaxed), 0);
     }
     fn agent(session_id: SessionId, agent_id: AgentId) -> Agent {
         Agent {
@@ -2445,6 +2880,193 @@ mod tests {
     }
 
     #[test]
+    fn inbox_pages_and_explicit_ack_converge_without_response_loss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        assert!(
+            store
+                .inbox_page(&caller, None, 1, true, None)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        for limit in [0, INBOX_PAGE_MAX + 1] {
+            assert!(store.inbox_page(&caller, None, limit, false, None).is_err());
+        }
+        let run_ids = (0..3).map(|_| OperationId::new()).collect::<Vec<_>>();
+        for run_id in &run_ids {
+            store
+                .append_inbox(&caller, message(*run_id, worker.clone()))
+                .unwrap();
+        }
+
+        let first = store.inbox_page(&caller, None, 2, true, None).unwrap();
+        assert_eq!(
+            first
+                .messages
+                .iter()
+                .map(|item| item.run_id)
+                .collect::<Vec<_>>(),
+            run_ids[..2]
+        );
+        assert!(first.has_more);
+        assert_eq!(first.next_cursor.next_sequence, 3);
+        let since_epoch = Utc.timestamp_opt(0, 0).single().unwrap();
+        let page = store.inbox_page(&caller, None, 2, false, Some(since_epoch));
+        assert_eq!(page.unwrap().messages.len(), 2);
+        assert!(
+            store
+                .inbox_page(&caller, None, 2, false, Some(now()))
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert_eq!(
+            store.inbox_page(&caller, None, 2, true, None).unwrap(),
+            first,
+            "a lost response without ACK must replay the same page"
+        );
+
+        assert_eq!(
+            store.ack_inbox(&caller, first.next_cursor).unwrap(),
+            first.next_cursor
+        );
+        assert_eq!(
+            store.ack_inbox(&caller, first.next_cursor).unwrap(),
+            first.next_cursor
+        );
+        let reopened = DispatchStore::new(tmp.path());
+        let unread = reopened.inbox_page(&caller, None, 2, true, None).unwrap();
+        assert_eq!(unread.messages.len(), 1);
+        assert_eq!(unread.messages[0].run_id, run_ids[2]);
+        assert_eq!(unread.next_cursor.next_sequence, 4);
+        reopened.ack_inbox(&caller, unread.next_cursor).unwrap();
+        assert!(
+            reopened
+                .inbox_page(&caller, None, 2, true, None)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 0 }),
+                    1,
+                    false,
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            reopened
+                .ack_inbox(&caller, InboxCursor { next_sequence: 5 })
+                .is_err()
+        );
+        assert!(
+            reopened
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 5 }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained")
+        );
+    }
+
+    #[test]
+    fn indexed_inbox_pages_read_only_page_records_and_legacy_files_migrate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
+            })
+            .collect::<Vec<_>>();
+        let index = store.write_inbox_records(&caller, &records).unwrap();
+
+        store.inbox_bytes_read.store(0, Ordering::Relaxed);
+        let page = store
+            .inbox_page(
+                &caller,
+                Some(InboxCursor {
+                    next_sequence: u64::try_from(INBOX_HARD_LIMIT - 99).unwrap(),
+                }),
+                INBOX_PAGE_MAX,
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(page.messages.len(), INBOX_PAGE_MAX);
+        assert!(!page.has_more);
+        assert!(store.inbox_bytes_read.load(Ordering::Relaxed) * 20 < index.journal_len);
+        fs::write(store.inbox_index_path(&caller), "{broken").unwrap();
+        assert_eq!(
+            store
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor {
+                        next_sequence: u64::try_from(INBOX_HARD_LIMIT).unwrap(),
+                    }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.inbox_index(&caller).unwrap().entries.len(),
+            INBOX_HARD_LIMIT
+        );
+
+        let legacy_caller = CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        };
+        let legacy = [
+            message(OperationId::new(), worker.clone()),
+            message(OperationId::new(), worker),
+        ];
+        let text = legacy
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        let path = store.inbox_path(&legacy_caller);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        assert_eq!(
+            store
+                .inbox_page(&legacy_caller, None, 10, false, None)
+                .unwrap()
+                .messages,
+            legacy
+        );
+        assert!(fs::read_to_string(path).unwrap().contains("\"sequence\":1"));
+    }
+
+    #[test]
     fn locked_mutations_do_not_lose_concurrent_inbox_writes() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(DispatchStore::new(tmp.path()));
@@ -2471,17 +3093,174 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_invalid_inboxes_are_handled() {
+    fn missing_torn_and_invalid_inboxes_are_handled() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
-        let (_, _, caller) = ids();
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
         assert!(store.inbox(&caller).unwrap().is_empty());
         fs::create_dir_all(store.inbox_path(&caller).parent().unwrap()).unwrap();
-        fs::write(store.inbox_path(&caller), "broken\n").unwrap();
+        fs::write(store.inbox_path(&caller), "broken\nalso-broken\n").unwrap();
         assert!(store.inbox(&caller).is_err());
+        fs::write(store.inbox_path(&caller), "{final-torn").unwrap();
+        assert!(store.inbox(&caller).unwrap().is_empty());
+        let complete_but_uncommitted = serde_json::to_string(&InboxRecord {
+            sequence: 1,
+            message: message(OperationId::new(), worker.clone()),
+        })
+        .unwrap();
+        fs::write(store.inbox_path(&caller), complete_but_uncommitted).unwrap();
+        assert!(store.inbox(&caller).unwrap().is_empty());
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker))
+            .unwrap();
+        assert_eq!(store.inbox(&caller).unwrap().len(), 1);
+        assert!(
+            fs::read_to_string(store.inbox_path(&caller))
+                .unwrap()
+                .ends_with('\n')
+        );
         fs::remove_file(store.inbox_path(&caller)).unwrap();
         fs::create_dir(store.inbox_path(&caller)).unwrap();
         assert!(store.inbox(&caller).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn inbox_journal_and_derived_index_corruption_fail_closed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let path = store.inbox_path(&caller);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        fs::create_dir(&path).unwrap();
+        assert!(store.rebuild_inbox_index(&caller).is_err());
+        fs::remove_dir(&path).unwrap();
+        symlink(&path, &path).unwrap();
+        assert!(store.rebuild_inbox_index(&caller).is_err());
+        assert!(store.inbox_index(&caller).is_err());
+        fs::remove_file(&path).unwrap();
+
+        let invalid = InboxRecord {
+            sequence: 0,
+            message: message(OperationId::new(), worker.clone()),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&invalid).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("strictly increasing")
+        );
+
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT + 1).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
+            })
+            .collect::<Vec<_>>();
+        let text = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        fs::write(&path, text).unwrap();
+        assert!(
+            store
+                .rebuild_inbox_index(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+
+        let record = InboxRecord {
+            sequence: 7,
+            message: message(OperationId::new(), worker),
+        };
+        fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        let matching = InboxIndexEntry {
+            sequence: 7,
+            offset: 0,
+            created_at: record.message.created_at,
+            read: false,
+        };
+        let missing_path = tmp.path().join("missing");
+        let missing_store = DispatchStore::new(&missing_path);
+        assert!(
+            missing_store
+                .read_inbox_records(&caller, &[matching])
+                .is_err()
+        );
+        let beyond = InboxIndexEntry {
+            offset: fs::metadata(&path).unwrap().len(),
+            ..matching
+        };
+        assert!(store.read_inbox_records(&caller, &[beyond]).is_err());
+        let mismatched = InboxIndexEntry {
+            sequence: 8,
+            ..matching
+        };
+        assert!(store.read_inbox_records(&caller, &[mismatched]).is_err());
+
+        let index_path = store.inbox_index_path(&caller);
+        fs::write(&index_path, b"stale-index").unwrap();
+        fs::remove_file(&index_path).unwrap();
+        fs::create_dir(&index_path).unwrap();
+        assert!(store.write_inbox_records(&caller, &[record]).is_err());
+    }
+
+    #[test]
+    fn corrupt_ack_state_fails_closed_without_hiding_unread_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+            .unwrap();
+        let path = store.inbox_ack_path(&caller);
+        fs::write(&path, r#"{"next_sequence":99}"#).unwrap();
+
+        assert!(store.inbox_page(&caller, None, 1, true, None).is_err());
+        assert!(store.inbox(&caller).is_err());
+        assert!(
+            store
+                .append_inbox(&caller, message(OperationId::new(), worker))
+                .is_err()
+        );
+        assert_eq!(store.inbox_index(&caller).unwrap().entries.len(), 1);
     }
 
     #[test]
@@ -2777,9 +3556,8 @@ mod tests {
         );
     }
 
-    /// An append rewrites the whole inbox file, so an unbounded inbox costs
-    /// O(N²) over N deliveries. An unread report is not history, though: it is a
-    /// result its caller has not seen.
+    /// An unread report is not history, so acknowledged/read records are the
+    /// only records eligible for bounded compaction.
     #[test]
     fn a_read_inbox_is_bounded_and_unread_reports_outrank_every_read_one() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2816,52 +3594,82 @@ mod tests {
             "an unread report was dropped to make room for read ones"
         );
         assert!(inbox.len() <= INBOX_HARD_LIMIT);
+
+        // Read retention can leave a stable-sequence gap after an unread record.
+        // Losing the disposable index must not make that authoritative journal
+        // impossible to rebuild on restart.
+        fs::remove_file(store.inbox_index_path(&caller)).unwrap();
+        let reopened = DispatchStore::new(tmp.path());
+        assert!(
+            reopened
+                .inbox(&caller)
+                .unwrap()
+                .iter()
+                .any(|item| item.run_id == awaited && !item.read)
+        );
     }
 
-    /// "Never drop unread" is not a bound on its own: a caller that never reads
-    /// would grow its inbox forever. The ceiling is the backstop, and what it
-    /// drops is recorded rather than lost silently.
     #[test]
-    fn the_inbox_ceiling_drops_the_oldest_unread_only_after_every_read_one() {
-        let (session, agent_id, _) = ids();
+    fn the_inbox_ceiling_backpressures_unread_and_recycles_acknowledged_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
         let worker = WorkerRef {
             session_id: Some(session),
             agent_id,
         };
-        let mut messages: Vec<InboxMessage> = (0..10)
-            .map(|index| {
-                let mut item = message(OperationId::new(), worker.clone());
-                item.read = index % 2 == 0;
-                item.summary = format!("m{index}");
-                item
+        let records = (1..=u64::try_from(INBOX_HARD_LIMIT).unwrap())
+            .map(|sequence| InboxRecord {
+                sequence,
+                message: message(OperationId::new(), worker.clone()),
             })
-            .collect();
-        let oldest_unread = messages
-            .iter()
-            .find(|item| !item.read)
-            .map(|item| item.summary.clone())
+            .collect::<Vec<_>>();
+        store.write_inbox_records(&caller, &records).unwrap();
+        let before = fs::read(store.inbox_path(&caller)).unwrap();
+
+        assert!(
+            store
+                .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("unacknowledged")
+        );
+        assert_eq!(fs::read(store.inbox_path(&caller)).unwrap(), before);
+        assert_eq!(
+            store.inbox_index(&caller).unwrap().entries.len(),
+            INBOX_HARD_LIMIT
+        );
+
+        store
+            .ack_inbox(&caller, InboxCursor { next_sequence: 2 })
             .unwrap();
-
-        // Exactly at the ceiling nothing is dropped: the bound is "no more
-        // than", not "fewer than".
-        let mut at_ceiling = messages.clone();
-        let ceiling = at_ceiling.len();
-        retain_inbox_within(&mut at_ceiling, 100, ceiling);
-        assert_eq!(at_ceiling.len(), 10);
-
-        // Read messages go first, and only what is still over the ceiling comes
-        // out of the unread ones.
-        retain_inbox_within(&mut messages, 2, 4);
-        assert_eq!(messages.len(), 4);
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker))
+            .unwrap();
+        let index = store.inbox_index(&caller).unwrap();
+        assert_eq!(index.entries.len(), INBOX_HARD_LIMIT);
+        assert_eq!(index.entries.first().unwrap().sequence, 2);
         assert!(
-            messages.iter().filter(|item| item.read).count() <= 2,
-            "read messages were kept past their retention"
+            store
+                .inbox_page(
+                    &caller,
+                    Some(InboxCursor { next_sequence: 1 }),
+                    1,
+                    false,
+                    None,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("cursor expired")
         );
-        assert!(
-            !messages.iter().any(|item| item.summary == oldest_unread),
-            "the ceiling dropped a newer unread message before the oldest"
-        );
-        // What survives is the newest of what was there.
-        assert_eq!(messages.last().unwrap().summary, "m9");
+
+        // Prefix compaction also advances the first retained sequence. The
+        // index is derived state, so deleting it must still allow exact rebuild.
+        fs::remove_file(store.inbox_index_path(&caller)).unwrap();
+        let reopened = DispatchStore::new(tmp.path());
+        let rebuilt = reopened.inbox_index(&caller).unwrap();
+        assert_eq!(rebuilt.entries.len(), INBOX_HARD_LIMIT);
+        assert_eq!(rebuilt.entries.first().unwrap().sequence, 2);
+        assert_eq!(rebuilt.entries.last().unwrap().sequence, 4097);
     }
 }

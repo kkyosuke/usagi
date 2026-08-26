@@ -394,7 +394,27 @@ mod tests {
         remove_worktree,
     };
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::{GitOutput, GitRunner};
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+
+    struct FallibleGit {
+        responses: RefCell<Vec<anyhow::Result<GitOutput>>>,
+    }
+
+    impl FallibleGit {
+        fn new(responses: Vec<anyhow::Result<GitOutput>>) -> Self {
+            Self {
+                responses: RefCell::new(responses),
+            }
+        }
+    }
+
+    impl GitRunner for FallibleGit {
+        fn run(&self, _repo: &Path, _args: &[&str]) -> anyhow::Result<GitOutput> {
+            self.responses.borrow_mut().remove(0)
+        }
+    }
 
     #[test]
     fn add_worktree_builds_the_expected_command_with_a_base() {
@@ -473,6 +493,88 @@ mod tests {
             ["worktree", "remove", "--force", "--", "/dest"]
         );
         assert_eq!(git.calls.borrow()[6], ["branch", "-D", "--", "b"]);
+    }
+
+    #[test]
+    fn runner_errors_are_compensated_and_cleanup_failures_are_reported() {
+        let revision_error = FallibleGit::new(vec![Err(anyhow::anyhow!("rev-parse unavailable"))]);
+        assert!(
+            add_worktree(
+                &revision_error,
+                Path::new("/repo"),
+                Path::new("/dest"),
+                "b",
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("rev-parse unavailable")
+        );
+
+        let commit = "e".repeat(40);
+        let registration_error = FallibleGit::new(vec![
+            Ok(ok(&commit)),
+            Ok(ok("")),
+            Ok(ok("")),
+            Err(anyhow::anyhow!("registration I/O failed")),
+            Err(anyhow::anyhow!("worktree list I/O failed")),
+            Err(anyhow::anyhow!("branch cleanup I/O failed")),
+        ]);
+        let error = add_worktree(
+            &registration_error,
+            Path::new("/repo"),
+            Path::new("/dest"),
+            "b",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("registration I/O failed"), "{error}");
+        assert!(error.contains("worktree list I/O failed"), "{error}");
+        assert!(error.contains("branch cleanup I/O failed"), "{error}");
+
+        let materialization_error = FallibleGit::new(vec![
+            Ok(ok(&commit)),
+            Ok(ok("")),
+            Ok(ok("")),
+            Ok(ok("")),
+            Ok(ok("")),
+            Err(anyhow::anyhow!("materialization I/O failed")),
+            Err(anyhow::anyhow!("worktree cleanup I/O failed")),
+            Err(anyhow::anyhow!("branch cleanup I/O failed")),
+        ]);
+        let error = add_worktree(
+            &materialization_error,
+            Path::new("/repo"),
+            Path::new("/dest"),
+            "b",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("materialization I/O failed"), "{error}");
+        assert!(error.contains("worktree cleanup I/O failed"), "{error}");
+        assert!(error.contains("branch cleanup I/O failed"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_worktree_propagates_destination_metadata_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let blocked = root.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let result = add_worktree(
+            &FakeGit::new(vec![]),
+            Path::new("/repo"),
+            &blocked.join("dest"),
+            "b",
+            None,
+        );
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

@@ -374,7 +374,7 @@ mod tests {
                 },
                 now
             ),
-            Err(UserDecisionError::FreeformNotAllowed)
+            Err(UserDecisionError::InvalidRequest)
         );
         item.expires_at = Some(now);
         assert_eq!(

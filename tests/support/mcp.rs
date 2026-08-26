@@ -8,7 +8,7 @@
 
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::{agent::AgentProfileId, settings::Settings};
+use usagi_core::infrastructure::ipc::ClientWorkspace;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
@@ -25,7 +26,7 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 
-use super::daemon::{Channel, reap, usagi_command};
+use super::daemon::{Channel, HeavyE2eLock, heavy_e2e_lock, reap, usagi_command};
 
 /// Claude は必ず OS sandbox launcher の中で起動するため、`bwrap` を持たない Linux CI では
 /// fail-closed で起動が拒否される。この debug ビルド専用 seam は launcher と `--settings` フックの
@@ -57,6 +58,7 @@ pub struct McpHarness {
     fixture_mcp_input: PathBuf,
     fixture_mcp_output: PathBuf,
     process: McpProcess,
+    _heavy_e2e: HeavyE2eLock,
 }
 
 #[derive(Clone)]
@@ -116,6 +118,7 @@ impl McpHarness {
         tool_availability: Option<(bool, bool)>,
         all_agents: bool,
     ) -> Self {
+        let heavy_e2e = heavy_e2e_lock();
         let workspace = short_dir("usagi-mcp-workspace-");
         git(workspace.path(), &["init", "-q"]);
         git(
@@ -216,10 +219,11 @@ impl McpHarness {
             std::env::var("PATH").unwrap_or_default()
         );
         // A real managed session is reached only after its repository root has
-        // been adopted. These fixtures create a raw Git worktree directly, so
-        // establish that same root ownership before asking the session-scoped
-        // MCP client to bind. Cold-start admission intentionally refuses an
-        // otherwise unknown `.usagi/sessions/*` path.
+        // been adopted. `daemon start` deliberately starts without selecting a
+        // workspace, so follow it with the same explicit Selected handshake a
+        // surface uses before asking the session-scoped MCP client to bind.
+        // Cold-start admission intentionally refuses an otherwise unknown
+        // `.usagi/sessions/*` path.
         if session.is_some() {
             let status = usagi_command(
                 home.path(),
@@ -234,13 +238,37 @@ impl McpHarness {
             .status()
             .expect("fixture daemon starts from its repository root");
             assert!(status.success(), "fixture root daemon did not start");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let stream = loop {
+                if let Ok(stream) = connect_current(&channel.data_dir(home.path())) {
+                    break stream;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture daemon socket was not published"
+                );
+                thread::sleep(Duration::from_millis(20));
+            };
+            let _opening = IpcClient::connect(
+                stream,
+                "mcp-fixture-workspace-opener".into(),
+                OperationId::new().to_string(),
+                ClientPolicy::cli(),
+                shipping_build_identity(),
+                ClientWorkspace::Selected {
+                    root: usagi_core::infrastructure::paths::wire_workspace_root(
+                        workspace.path().canonicalize().unwrap(),
+                    ),
+                },
+            )
+            .expect("fixture explicitly opens its repository root");
         }
         let mut child = usagi_command(home.path(), channel, &cwd, &["mcp".as_ref()])
             .env("PATH", &path)
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("shipping usagi mcp process starts");
         let stdin = child.stdin.take().unwrap();
@@ -261,6 +289,7 @@ impl McpHarness {
                 stdout: Box::new(stdout),
                 next_id: 1,
             },
+            _heavy_e2e: heavy_e2e,
         };
         let initialized = harness.request(
             "initialize",
@@ -287,11 +316,18 @@ impl McpHarness {
         self.process.stdin.flush().unwrap();
         let mut line = String::new();
         self.process.stdout.read_line(&mut line).unwrap();
-        assert!(
-            !line.is_empty(),
-            "MCP process closed before response {id}: {}",
-            fs::read_to_string(&self.fixture_log).unwrap_or_default()
-        );
+        if line.is_empty() {
+            let mut stderr = String::new();
+            if let Some(child) = self.process.child.as_mut()
+                && let Some(mut pipe) = child.stderr.take()
+            {
+                pipe.read_to_string(&mut stderr).unwrap();
+            }
+            panic!(
+                "MCP process closed before response {id}: fixture={} stderr={stderr}",
+                fs::read_to_string(&self.fixture_log).unwrap_or_default()
+            );
+        }
         let response: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["id"], id);
         response

@@ -1084,7 +1084,7 @@ terminal environment が guard の前提を差し替えない。
 ## 入口面 MCP の tool dispatch
 
 dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
-`agent_complete`、`agent_fail`、`agent_inbox` は tool schema と daemon IPC request 型を公開する。
+`agent_complete`、`agent_fail`、`agent_inbox`、`agent_inbox_ack` は tool schema と daemon IPC request 型を公開する。
 daemon は private caller credential を live runtime と照合し、session lifecycle、Agent runtime、dispatch
 store と caller inbox を一つの durable 経路として compose する。credential の無い呼び出しや current run と
 一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。

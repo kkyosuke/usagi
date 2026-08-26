@@ -1,13 +1,13 @@
 ---
 number: 676
 title: fix(core): dispatch registry / inbox を retention と pagination で bounded にする
-status: todo
+status: doing
 priority: high
 labels: [review, v2, core, daemon, mcp, dispatch, resource, retention]
 dependson: []
 related: [321, 323, 402, 518, 526]
 created_at: 2026-08-13T22:32:31.381136+00:00
-updated_at: 2026-08-23T23:22:34.965949+00:00
+updated_at: 2026-08-26T00:00:00+00:00
 ---
 
 ## Finding（P1 resource / durability）
@@ -51,7 +51,20 @@ O(N²) の成長そのものを止める retention を入れた。
       read より常に優先して保持し、`INBOX_HARD_LIMIT`（4096）超過時だけ最古の unread を
       落として error log に記録する（silent loss にしない）。append 1 回の cost が
       履歴総量に比例しなくなり、累積 O(N²) が O(N) になった。
-- [ ] `agent_inbox` の bounded page limit / stable cursor / 明示 ACK — **未対応**。
-      retention とは別の API 変更で、この issue に残るスコープはこれである。
-- [ ] 全履歴 rewrite を避ける crash-safe append/index/compaction（上限付き rewrite で
-      cost は bounded になったが、append そのものは依然 rewrite である）
+- [x] `agent_inbox` の bounded page limit / stable cursor / 明示 ACK（2026-08-26対応）。
+- [x] 全履歴 rewrite を避ける crash-safe append/index/compaction（2026-08-26対応）。
+
+## 2026-08-26 対応
+
+- [x] inbox recordへ単調sequenceを付け、derived offset indexからcursor位置へseekして最大100件だけを
+      read/parseするbounded page APIへ変更した。旧raw JSONLは最初のaccessでsequence journalへ移行する。
+- [x] queryと分離したatomic ACK watermarkを追加した。query応答loss、duplicate ACK、restart後retryは同じ
+      unread stateへ収束し、retention済みcursorはtyped expiredになる。
+- [x] appendをfsync付きJSONL追記へ変更し、ACK済み履歴だけを最新256件へatomic compactする。derived indexは
+      stale/corrupt時にauthoritative journalから再構築する。
+- [x] 4,096件が未ACKだけで埋まった場合は最古messageを落とさず、新規appendをcapacity errorでeffect-zeroにする。
+- [x] `agent_inbox`のcursor/limitと独立した`agent_inbox_ack`をMCP schemaからdaemon/storeまで配線した。
+
+page/ACKとappend costはboundedになったが、元の受入条件にあるregistry/inboxのserialized byte・age上限、
+small-budgetで10万件相当を流すstress fixtureは未対応である。件数だけでは1 recordの巨大化をboundできないため、
+このissueは`doing`を維持する。
