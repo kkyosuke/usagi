@@ -31,7 +31,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | worker dispatch | `session_dispatch` | session を作成または再利用し、worker PTY と run/binding を durable に記録する |
 | worker の観測 | `session_get` / `agent_list` / `agent_get` | dispatch store の agent と run を返す |
 | worker の報告 | `agent_complete` / `agent_fail` | authenticated current run の報告を保存済み caller inbox へ配送する |
-| caller の受信 | `agent_inbox` | authenticated caller 自身の durable inbox を返す |
+| caller の受信 | `agent_inbox` / `agent_inbox_ack` | authenticated caller 自身の durable inbox をbounded pageで読み、処理後に明示ACKする |
 
 ## observe と prompt
 
@@ -122,8 +122,10 @@ current run と dispatch 時の binding を照合し、元 caller の inbox へ�
 
 ## caller inbox を読む
 
-caller は `agent_inbox {"unread_only":true}` で自分宛ての報告を読む。`since` には RFC 3339 timestamp を
-指定できる。worker が報告せず終了した場合も daemon が `no_report` を配送する。
+caller は `agent_inbox {"unread_only":true,"limit":100}` で自分宛ての報告を読む。応答の`next_cursor`を次の
+pageの`cursor`に使い、messageを処理し終えた後だけ`agent_inbox_ack {"cursor":<next_cursor>}`へ渡す。queryだけでは
+既読にならないため、応答を失った場合は同じcursorで安全に再読できる。`since`にはRFC 3339 timestampを指定できる。
+workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 
 ## session を作成する
 

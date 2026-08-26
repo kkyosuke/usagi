@@ -39,7 +39,7 @@ use usagi_core::infrastructure::ipc::{
     build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
-use usagi_core::infrastructure::store::dispatch::DispatchStore;
+use usagi_core::infrastructure::store::dispatch::{DispatchStore, INBOX_PAGE_MAX, InboxCursor};
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -1852,7 +1852,35 @@ impl TenantWorkspaces {
 /// its own workspace. It is not one: it belongs to the workspace that created
 /// it, which must already be adopted for the worktree to exist.
 fn adoptable_workspace_root(path: &Path) -> Option<PathBuf> {
-    (!is_session_worktree_path(path) && path.join(".git").exists()).then(|| path.to_path_buf())
+    (path.is_absolute() && !is_session_worktree_path(path) && path.join(".git").exists())
+        .then(|| path.to_path_buf())
+}
+
+/// The workspace a bound declaration may open implicitly.
+///
+/// A running daemon's handshake and a client's cold-start preflight share this
+/// decision, so daemon liveness cannot change the meaning of the same cwd.
+fn implicit_bound_workspace(daemon_dir: &Path, declared: &Path) -> Option<PathBuf> {
+    workspace_state::owner(daemon_dir, declared)
+        .ok()
+        .flatten()
+        .map(|known| known.root().to_path_buf())
+        .or_else(|| adoptable_workspace_root(declared))
+}
+
+fn unopened_bound_workspace_refusal(
+    declared: &Path,
+    served: &[String],
+) -> usagi_core::infrastructure::ipc::ProtocolError {
+    usagi_core::infrastructure::ipc::workspace_refusal_serving(
+        &format!(
+            "this daemon has not opened {}; run this from a repository root \
+             to open it, or open it explicitly with `usagi open {}`",
+            paths::wire_workspace_root(declared),
+            paths::wire_workspace_root(declared)
+        ),
+        served,
+    )
 }
 
 /// Whether `path` is at or below a `\.usagi/sessions/<name>` worktree.
@@ -1927,22 +1955,8 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                 //    MCP client start working in a fresh clone without opening it
                 //    in the TUI first — and only the path itself is ever
                 //    considered, never an ancestor ([`adoptable_workspace_root`]).
-                let opening = workspace_state::owner(&self.daemon_dir, &declared)
-                    .ok()
-                    .flatten()
-                    .map(|known| known.root().to_path_buf())
-                    .or_else(|| adoptable_workspace_root(&declared))
-                    .ok_or_else(|| {
-                        usagi_core::infrastructure::ipc::workspace_refusal_serving(
-                            &format!(
-                                "this daemon has not opened {}; run this from a repository root \
-                                 to open it, or open it explicitly with `usagi open {}`",
-                                paths::wire_workspace_root(&declared),
-                                paths::wire_workspace_root(&declared)
-                            ),
-                            &self.served(),
-                        )
-                    })?;
+                let opening = implicit_bound_workspace(&self.daemon_dir, &declared)
+                    .ok_or_else(|| unopened_bound_workspace_refusal(&declared, &self.served()))?;
                 self.tenants.adopt(&opening).map_err(|error| {
                     usagi_core::infrastructure::ipc::workspace_refusal_serving(
                         &error.to_string(),
@@ -3285,7 +3299,7 @@ fn spawn_ipc_server(
             tenant: initial.clone(),
             workspaces: Arc::clone(&workspaces),
         },
-        &DispatchStore::new(&data_dir.join("daemon")),
+        &DispatchStore::new(data_dir.join("daemon")),
         &teardown,
     );
     if compensated != 0 {
@@ -4266,7 +4280,7 @@ fn open_agent_runtime(
         pty,
         AgentProfileId::new("codex").expect("literal profile id is canonical"),
         Geometry { cols: 80, rows: 24 },
-        DispatchStore::new(&data_dir.join("daemon")),
+        DispatchStore::new(data_dir.join("daemon")),
         usagi_core::infrastructure::runtime_model::PathExecutableLocator,
         snapshot,
         retention,
@@ -5060,6 +5074,7 @@ fn dispatch_dispatch_tool(
                 | DispatchToolAction::AgentComplete
                 | DispatchToolAction::AgentFail
                 | DispatchToolAction::AgentInbox
+                | DispatchToolAction::AgentInboxAck
         )
     }) {
         dispatch_agent_tool(
@@ -5130,9 +5145,17 @@ fn dispatch_agent_tool(
     #[derive(Deserialize)]
     struct InboxPayload {
         #[serde(default)]
+        cursor: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
         since: Option<DateTime<Utc>>,
         #[serde(default)]
         unread_only: bool,
+    }
+    #[derive(Deserialize)]
+    struct InboxAckPayload {
+        cursor: u64,
     }
 
     let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -5463,18 +5486,44 @@ fn dispatch_agent_tool(
                 let input = serde_json::from_value::<InboxPayload>(payload).map_err(|_| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_inbox payload")
                 })?;
-                let messages = store
-                    .inbox(&caller)
-                    .map_err(|_| {
-                        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
-                    })?
-                    .into_iter()
-                    .filter(|message| !input.unread_only || !message.read)
-                    .filter(|message| input.since.is_none_or(|since| message.created_at > since))
-                    .collect::<Vec<_>>();
+                let page = store
+                    .inbox_page(
+                        &caller,
+                        input
+                            .cursor
+                            .map(|next_sequence| InboxCursor { next_sequence }),
+                        input.limit.unwrap_or(INBOX_PAGE_MAX),
+                        input.unread_only,
+                        input.since,
+                    )
+                    .map_err(|error| map_inbox_query_error(&error))?;
                 Ok((
                     ResponseOutcome::Ok,
-                    serde_json::json!({"messages": messages}),
+                    serde_json::json!({
+                        "messages": page.messages,
+                        "next_cursor": page.next_cursor.next_sequence,
+                        "has_more": page.has_more,
+                    }),
+                ))
+            }
+            DispatchToolAction::AgentInboxAck => {
+                let input = serde_json::from_value::<InboxAckPayload>(payload).map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid agent_inbox_ack payload",
+                    )
+                })?;
+                let cursor = store
+                    .ack_inbox(
+                        &caller,
+                        InboxCursor {
+                            next_sequence: input.cursor,
+                        },
+                    )
+                    .map_err(|error| map_inbox_query_error(&error))?;
+                Ok((
+                    ResponseOutcome::Ok,
+                    serde_json::json!({"acked_cursor": cursor.next_sequence}),
                 ))
             }
             _ => Err(ProtocolError::new(
@@ -5511,6 +5560,20 @@ fn project_reported_pr(
         .observe_reported(session, candidate)
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "PR projection is unavailable"))?;
     Ok(())
+}
+
+fn map_inbox_query_error(error: &anyhow::Error) -> usagi_core::infrastructure::ipc::ProtocolError {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    let message = error.to_string();
+    if message.starts_with("dispatch inbox cursor")
+        || message.starts_with("dispatch inbox ACK cursor")
+        || message.starts_with("dispatch inbox page limit")
+    {
+        ProtocolError::new(ErrorCode::InvalidArgument, message)
+    } else {
+        ProtocolError::new(ErrorCode::Unavailable, "dispatch inbox is unavailable")
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -10587,25 +10650,46 @@ fn bootstrap_broker_address(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bootstrap_broker_address_is_fenced_by_workspace_and_executable
-fn broker_workspace(workspace: &ClientWorkspace) -> std::io::Result<PathBuf> {
-    let root = match workspace {
-        ClientWorkspace::Bound { root } | ClientWorkspace::Selected { root }
-            if !root.is_empty() =>
-        {
-            root
+/// Resolves the workspace a client may use to cold-start a daemon before any
+/// lifecycle child, workspace fence, or project-local `.usagi` path exists.
+fn cold_start_workspace(
+    daemon_dir: &Path,
+    workspace: &ClientWorkspace,
+    opened: Option<&Path>,
+    ambient_cwd: Option<&Path>,
+) -> Result<PathBuf, usagi_core::infrastructure::ipc::ProtocolError> {
+    if let Some(opened) = opened {
+        return paths::canonical_workspace_root(opened).map_err(|_| {
+            usagi_core::infrastructure::ipc::workspace_refusal(
+                "the selected workspace does not resolve on this machine",
+                &paths::wire_workspace_root(opened),
+            )
+        });
+    }
+    match workspace {
+        ClientWorkspace::Selected { root } => TenantWorkspaces::canonical(root),
+        ClientWorkspace::Bound { root } => {
+            // Match the running resolver: a teardown may already have removed
+            // an Agent worktree, but its declared spelling can still belong to
+            // a durably adopted workspace.
+            let declared =
+                paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
+            implicit_bound_workspace(daemon_dir, &declared)
+                .ok_or_else(|| unopened_bound_workspace_refusal(&declared, &[]))
         }
-        ClientWorkspace::Bound { .. }
-        | ClientWorkspace::Selected { .. }
-        | ClientWorkspace::Unbound => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "daemon bootstrap broker requires a canonical workspace",
-            ));
-        }
-    };
-    paths::canonical_workspace_root(root)
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))
+        ClientWorkspace::Unbound => ambient_cwd
+            .ok_or_else(|| {
+                usagi_core::infrastructure::ipc::workspace_refusal_serving(
+                    "a cold start requires a resolvable working directory",
+                    &[],
+                )
+            })
+            .and_then(|cwd| {
+                let declared = TenantWorkspaces::canonical(&paths::wire_workspace_root(cwd))?;
+                implicit_bound_workspace(daemon_dir, &declared)
+                    .ok_or_else(|| unopened_bound_workspace_refusal(&declared, &[]))
+            }),
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
@@ -10627,14 +10711,9 @@ fn request_bootstrap_broker(address: &BootstrapBrokerAddress, request: u8) -> st
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
-fn request_broker_start(
-    data_dir: &Path,
-    workspace: &ClientWorkspace,
-    exe: &Path,
-) -> std::io::Result<()> {
-    let workspace = broker_workspace(workspace)?;
+fn request_broker_start(data_dir: &Path, workspace: &Path, exe: &Path) -> std::io::Result<()> {
     let exe = exe.canonicalize()?;
-    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
+    let address = bootstrap_broker_address(data_dir, workspace, &exe);
     request_bootstrap_broker(&address, BROKER_START)?;
     for _ in 0..BROKER_READINESS_ATTEMPTS {
         if usagi_daemon::infrastructure::unix_transport::connect_current(data_dir).is_ok() {
@@ -10831,6 +10910,21 @@ impl BrokerActivity {
         }
         self.signal.notify_all();
     }
+
+    /// Wait for the next idle poll unless shutdown was already requested.
+    ///
+    /// The predicate is checked while holding the same mutex that [`Self::stop`]
+    /// updates. This closes the stop-before-wait window: a notification may be
+    /// coalesced or arrive before this method locks, but the state transition
+    /// itself cannot be missed.
+    fn wait_for_poll(&self, poll: Duration) -> Option<Duration> {
+        let state = self.state.lock().ok()?;
+        let (state, _) = self
+            .signal
+            .wait_timeout_while(state, poll, |state| !state.stopped)
+            .ok()?;
+        (!state.stopped).then(|| state.last.elapsed())
+    }
 }
 
 /// Watch an idle broker and ask it to retire once nothing needs it.
@@ -10850,18 +10944,9 @@ fn spawn_broker_idle_watch(
     let data_dir = data_dir.to_path_buf();
     std::thread::spawn(move || {
         loop {
-            let Ok(state) = activity.state.lock() else {
+            let Some(idle_for) = activity.wait_for_poll(idle.poll) else {
                 return;
             };
-            let Ok((state, _)) = activity.signal.wait_timeout(state, idle.poll) else {
-                return;
-            };
-            if state.stopped {
-                return;
-            }
-            let idle_for = state.last.elapsed();
-            // The daemon probe is IO, so the lock is released before it runs.
-            drop(state);
             let daemon_live =
                 usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
             if broker_may_retire(idle_for, idle.timeout, daemon_live) {
@@ -11839,12 +11924,24 @@ pub(crate) fn lane_socket(client: &LaneClient) -> &std::os::unix::net::UnixStrea
 // LLVM counts the deadline-stream instantiation as uncovered for branches the
 // UnixStream instantiation already exercises through the integration suite.
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=cli_tui_pty
+#[allow(clippy::too_many_lines)] // Lock, broker, lifecycle start, and rollover share one workspace snapshot.
 fn bootstrap_client<S: Read + Write>(
     workspace: &ClientWorkspace,
     connect: impl Fn(&Path, &BuildIdentity) -> std::io::Result<IpcClient<S>>,
 ) -> Result<IpcClient<S>, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let opened = opened_workspace();
+    let ambient_cwd = std::env::current_dir().ok();
+    let launch_workspace = || {
+        cold_start_workspace(
+            &data_dir.join("daemon"),
+            workspace,
+            opened.as_deref(),
+            ambient_cwd.as_deref(),
+        )
+        .map_err(ClientError::Protocol)
+    };
     let exe =
         std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let expected_build = current_build();
@@ -11852,7 +11949,8 @@ fn bootstrap_client<S: Read + Write>(
         match acquire_bootstrap_lock_io_within(&data_dir, PrivateLockWait::BOOTSTRAP) {
             Ok(lock) => lock,
             Err(lock_error) if lock_error.kind() == std::io::ErrorKind::PermissionDenied => {
-                if request_broker_start(&data_dir, workspace, &exe).is_err() {
+                let broker_workspace = launch_workspace()?;
+                if request_broker_start(&data_dir, &broker_workspace, &exe).is_err() {
                     return Err(map_bootstrap_lock_error(&lock_error));
                 }
                 for _ in 0..40 {
@@ -11897,7 +11995,10 @@ fn bootstrap_client<S: Read + Write>(
     let channel = runtime_channel();
     let connection = bootstrap::connect_or_start(
         || connect(&data_dir, &expected_build),
-        || run_lifecycle(&exe, "start"),
+        || {
+            let workspace = launch_workspace().map_err(std::io::Error::other)?;
+            run_lifecycle(&exe, "start", &workspace)
+        },
         || recover_stale_client_endpoint(&data_dir),
         &expected_build,
         channel,
@@ -11917,7 +12018,10 @@ fn bootstrap_client<S: Read + Write>(
                 // census picks a cold transition only when nothing is live, and a
                 // seamless rollover keeps the old PTY masters alive otherwise
                 // (#507 / #559).
-                || run_lifecycle_with(&exe, &["daemon", "restart"], "restart"),
+                || {
+                    let workspace = launch_workspace().map_err(std::io::Error::other)?;
+                    run_lifecycle_with(&exe, &["daemon", "restart"], "restart", &workspace)
+                },
                 &expected_build,
                 IpcClient::server_build,
                 may_attempt,
@@ -12638,13 +12742,18 @@ fn lifecycle_command(exe: &Path, args: &[&str], opened: Option<PathBuf>) -> std:
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
-fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
-    run_lifecycle_with(exe, &["daemon", command], command)
+fn run_lifecycle(exe: &Path, command: &str, workspace: &Path) -> std::io::Result<()> {
+    run_lifecycle_with(exe, &["daemon", command], command, workspace)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused
-fn run_lifecycle_with(exe: &Path, args: &[&str], command: &str) -> std::io::Result<()> {
-    let status = lifecycle_command(exe, args, opened_workspace()).status()?;
+fn run_lifecycle_with(
+    exe: &Path,
+    args: &[&str],
+    command: &str,
+    workspace: &Path,
+) -> std::io::Result<()> {
+    let status = lifecycle_command(exe, args, Some(workspace.to_path_buf())).status()?;
     status
         .success()
         .then_some(())
@@ -17869,32 +17978,92 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn bootstrap_broker_requires_a_named_workspace() {
+    fn cold_start_uses_the_running_handshakes_implicit_workspace_rule() {
+        use usagi_core::infrastructure::ipc::{
+            ClientWorkspace, ErrorCode, SideEffect, is_workspace_mismatch,
+        };
+
         let directory = tempfile::tempdir_in("/tmp").unwrap();
-        let canonical = directory.path().canonicalize().unwrap();
-        for workspace in [
-            ClientWorkspace::Bound {
-                root: paths::wire_workspace_root(&canonical),
-            },
-            ClientWorkspace::Selected {
-                root: paths::wire_workspace_root(&canonical),
-            },
-        ] {
-            assert_eq!(broker_workspace(&workspace).unwrap(), canonical);
-        }
+        let daemon = directory.path().join("data/daemon");
+        let plain = directory.path().join("plain");
+        let repository = directory.path().join("repository");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        let plain = plain.canonicalize().unwrap();
+        let repository = repository.canonicalize().unwrap();
+        let bound = |path: &Path| ClientWorkspace::Bound {
+            root: paths::wire_workspace_root(path),
+        };
+
+        let refusal = cold_start_workspace(&daemon, &bound(&plain), None, None).unwrap_err();
+        assert!(is_workspace_mismatch(&refusal));
+        assert_eq!(refusal.code, ErrorCode::PermissionDenied);
+        assert_eq!(refusal.side_effect, SideEffect::None);
+        assert!(refusal.message.contains("repository root"));
+        assert!(!plain.join(".usagi").exists());
+        assert!(
+            cold_start_workspace(
+                &daemon,
+                &ClientWorkspace::Bound {
+                    root: String::new(),
+                },
+                None,
+                None,
+            )
+            .is_err()
+        );
+
         assert_eq!(
-            broker_workspace(&ClientWorkspace::Unbound)
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidInput
+            cold_start_workspace(&daemon, &bound(&repository), None, None).unwrap(),
+            repository
+        );
+        let worktree = directory.path().join(".usagi/sessions/worker");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let worktree = worktree.canonicalize().unwrap();
+        assert!(cold_start_workspace(&daemon, &bound(&worktree), None, None).is_err());
+
+        let selected = ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(&plain),
+        };
+        assert_eq!(
+            cold_start_workspace(&daemon, &selected, None, None).unwrap(),
+            plain
         );
         assert_eq!(
-            broker_workspace(&ClientWorkspace::Bound {
-                root: String::new(),
-            })
-            .unwrap_err()
-            .kind(),
-            std::io::ErrorKind::InvalidInput
+            cold_start_workspace(&daemon, &ClientWorkspace::Unbound, Some(&plain), None).unwrap(),
+            plain
+        );
+        let missing_opened = directory.path().join("missing-opened");
+        let refusal = cold_start_workspace(
+            &daemon,
+            &ClientWorkspace::Unbound,
+            Some(&missing_opened),
+            None,
+        )
+        .unwrap_err();
+        assert!(is_workspace_mismatch(&refusal));
+        assert!(refusal.message.contains("does not resolve"));
+        assert_eq!(
+            cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, Some(&repository))
+                .unwrap(),
+            repository
+        );
+        assert!(
+            cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, Some(&plain)).is_err()
+        );
+        assert!(cold_start_workspace(&daemon, &ClientWorkspace::Unbound, None, None).is_err());
+
+        workspace_state::resolve(&daemon, &plain).unwrap();
+        let child = plain.join("nested");
+        std::fs::create_dir(&child).unwrap();
+        assert_eq!(
+            cold_start_workspace(&daemon, &bound(&child), None, None).unwrap(),
+            plain
+        );
+        let removed_child = plain.join("removed-session");
+        assert_eq!(
+            cold_start_workspace(&daemon, &bound(&removed_child), None, None).unwrap(),
+            plain
         );
     }
 
@@ -17959,11 +18128,41 @@ instructions = "{instructions}"
 
         fixture.server.join().unwrap().unwrap();
         assert!(!fixture.address.socket.exists());
+        let replacement_lock = FileInstanceLock {
+            path: fixture.address.lock.clone(),
+            held: RefCell::new(None),
+        };
+        assert!(
+            replacement_lock.acquire().unwrap(),
+            "a retired broker still held its instance lock"
+        );
         assert!(
             std::os::unix::net::UnixStream::connect(&fixture.address.socket).is_err(),
             "a retired broker still answered"
         );
         fixture.workspace_dir.close().unwrap();
+    }
+
+    /// A condition-variable notification is not durable, so this regression
+    /// repeatedly puts `stop` before the waiter. The state predicate must make
+    /// every wait return immediately even though no later notification exists.
+    #[test]
+    fn broker_stop_before_wait_cannot_lose_shutdown() {
+        for _ in 0..128 {
+            let activity = Arc::new(BrokerActivity::started());
+            activity.stop();
+            let waiter = Arc::clone(&activity);
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let _ = finished_tx.send(waiter.wait_for_poll(Duration::from_secs(3600)));
+            });
+
+            assert_eq!(
+                finished_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                None
+            );
+            thread.join().unwrap();
+        }
     }
 
     /// With no daemon to outlive and no request to serve, the broker is holding
@@ -19534,7 +19733,7 @@ instructions = "{instructions}"
             )
             .unwrap(),
         ));
-        let dispatch = DispatchStore::new(&temporary.path().join("dispatch"));
+        let dispatch = DispatchStore::new(temporary.path().join("dispatch"));
         let teardown = TeardownSignal::new();
         let delegate = |name: &str| {
             let operation = usagi_core::domain::id::OperationId::new();
@@ -19718,7 +19917,7 @@ instructions = "{instructions}"
         assert_eq!(
             reconcile_orphan_delegations(
                 &bound,
-                &DispatchStore::new(&temporary.path().join("dispatch")),
+                &DispatchStore::new(temporary.path().join("dispatch")),
                 &teardown
             ),
             0
@@ -21178,5 +21377,28 @@ instructions = "{instructions}"
         worker.join().unwrap();
 
         assert_eq!(*cleaned.lock().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn inbox_query_errors_preserve_client_faults_and_hide_store_failures() {
+        use usagi_core::infrastructure::ipc::ErrorCode;
+
+        let invalid = map_inbox_query_error(&anyhow::anyhow!(
+            "dispatch inbox cursor expired: earliest retained sequence is 7"
+        ));
+        assert_eq!(invalid.code, ErrorCode::InvalidArgument);
+        assert!(invalid.message.contains("earliest retained sequence is 7"));
+        for message in [
+            "dispatch inbox ACK cursor is outside the published sequence range",
+            "dispatch inbox page limit must be 1..=100",
+        ] {
+            assert_eq!(
+                map_inbox_query_error(&anyhow::anyhow!(message)).code,
+                ErrorCode::InvalidArgument
+            );
+        }
+        let unavailable = map_inbox_query_error(&anyhow::anyhow!("disk secret"));
+        assert_eq!(unavailable.code, ErrorCode::Unavailable);
+        assert_eq!(unavailable.message, "dispatch inbox is unavailable");
     }
 }

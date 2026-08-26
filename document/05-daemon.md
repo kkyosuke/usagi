@@ -204,9 +204,14 @@ daemon が動いている間は、どれだけ request が無くても idle と�
 workspace は、もう使われていない。`usagi daemon stop` の直後は daemon も broker も残らないため、次の起動は通常の
 client bootstrap が broker を起動し直すところから始まる。
 
-通常 client は従来どおり `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によってその lock を開けない client だけが
-broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の build identity・workspace handshake を通して接続する。
-この fallback は data home、workspace、Git common dir を Agent の writable root へ追加しない。
+cold-start authority を持つ通常 client は `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によって
+その lock を開けない client だけが broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の
+build identity・workspace handshake を通して接続する。この fallback は data home、workspace、Git common dir を Agent の
+writable root へ追加しない。
+
+daemon が provision した MCP child と Agent lifecycle hook は broker を使わず、発行元の既存 daemon へ attach する。
+この child が claim する live Agent runtime は発行元 daemon の process memory にしか存在せず、cold start した別 daemon
+では復元できないためである。MCP の経路分岐は [7. MCP サーバ#起動と経路](07-mcp.md#起動と経路)を正本とする。
 
 active role の `serve` は process lifetime にわたって単一インスタンス lock を保持する。lock が意味するのは
 「この process がこの data directory の **active role** である」ことであり、「この data directory の process が
@@ -268,6 +273,12 @@ workspace root の解決は process ごとに 1 回だけ行い、fence と sess
 `sessions.json` に durable な `repository_root` があればそれが勝つ（[workspace state subtree](#workspace-state-subtree)、
 [session tree と ignore rules](#session-tree-と-ignore-rules)）。したがって subdirectory や session worktree から
 起動しても、runtime が所有しない workspace を fence することはない。
+
+client 起点の auto-start はこの process-side 解決より前に
+[workspace fence の cold-start preflight](04-ipc.md#workspace-fence)を通る。`bound` cwd は、既存の adopted root の
+最長一致か、その cwd 自身が repository root の場合だけ lifecycle child を起動できる。明示的な `selected` open は
+repository でない directory も許可する。この preflight は lifecycle child より前なので、拒否した cwd に fence や
+project-local `.usagi` を残さない。
 
 workspace fence の node には、取得した owner が自分の pid を 1 行書く。別の data directory の daemon は互いの
 `daemon.json` を読めないため、この hint が cross-mode の唯一の発見経路である（`daemon status` は自分の mode の
@@ -607,25 +618,31 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
 | `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership、workspace/session ごとの prompt queue、run retention から独立した immutable session lineage、委譲 admission から child publish までの concurrency reservation。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
-| `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
+| `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable sequence JSONL | caller agent 単位の完了報告 inbox。fsync append、derived offset index、atomic ACK watermark、cross-process lock で、caller の停止中と daemon restart 後にも未 ACK 報告を保持する |
 
 #### durable store の retention
 
-`dispatch.json`・`dispatch-workspaces.json`・inbox・`user-decisions.json` は **書き込みのたびに文書全体を read-modify-write** する。上限が無ければ
-N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続ける。したがって各 store は
+`dispatch.json`・`dispatch-workspaces.json`・`user-decisions.json` は書き込みのたびに bounded 文書を
+read-modify-write する。inbox は sequence journal へ追記し、ACK 済み履歴だけを bounded compaction する。上限が無ければ
+N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続けるため、各 store は
 書き込み経路そのものに上限を持ち、maintenance tick の実行有無に依存しない。
 
 | store | 上限 | 決して落とさないもの |
 |---|---|---|
 | `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
-| inbox | 既読 256 件。総数の上限は 4096 | 未読の報告。未読が上限を超えたときだけ最古の未読を落とし、error log に記録する（silent loss にしない） |
+| inbox | ACK 済み 256 件。総数の上限は 4096、query page は最大 100 件 | 未 ACK の報告。未 ACK だけで上限へ達した append は既存報告を落とさず capacity error で拒否する |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
-| `supervisor-runs/` | 終了済み run 128 件（snapshot / journal / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run |
+| `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
 未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
 pending が 1 つの共有文書を無制限に増やすことを防ぐ。拒否は `resource_exhausted` で、durable state を一切変更しない
 ため、人が backlog を消化したあとの retry が安全である。
+
+inbox の query は `sequence -> byte offset` index から `cursor` 位置へ seek し、`limit` 件だけを読む。query 自体は
+既読化せず、処理済み page の `next_cursor` を別の `agent_inbox_ack` effect で送る。ACK は atomic watermark の単調更新で、
+応答 loss 時に同じ page を再読しても未読を失わず、duplicate ACK と restart 後の retry は同じ状態へ収束する。retentionで
+消えた位置を明示 cursor が指す場合は expired として拒否し、先頭へ暗黙に読み替えない。
 
 ### tenant registry
 
@@ -1542,6 +1559,18 @@ safe completion summary、DAG state、decision generation を含む wake reserva
 parent wake effect を実行する。reservation は child run と parent generation で一意なので、duplicate event、
 ACK loss、daemon restart は同じ wake を二重に作らない。parent runtime の再解決・restart は wake adapter が
 保存済み provenance だけを使って行い、session 名から target を推測しない。
+
+`supervisor-scheduler.json` は start reservation を最大256件、wake reservation を最大512件に制限する。
+終了 run の start と配送済み wake は固定長 tombstone へ移して retry を `expired` として effect-zero にし、
+live run / 未配送 wake だけで上限へ達した場合はそれらを捨てず、新規 start / wake を capacity error で拒否する。
+`supervisor_start` は初期 task 128件、依存128件、Task ID 128 UTF-8 bytes、instruction / root task 16 KiB、
+artifact contract 4 KiB、idempotency key / policy selector 256 bytes を上限とし、永続化前に検証する。
+
+event journal は sequence→byte offset の derived index を持つ。`supervisor_events(after_sequence, limit)` は
+cursor の offset へ直接 seek し、最大100件の要求 page だけを read / parse する。index がない旧 journal は一度だけ
+走査して再構築し、以後は page size に比例する。compaction より古い cursor は、残存先頭へ黙って進めず
+`cursor expired` を返す。journal は4,096件で最新2,048件へ atomic compact し、replay checkpoint を先に offset 0へ
+置くことで、compact 中の crash でも current snapshot への duplicate replayだけに収束する。
 
 ## supervisor policy and verification
 

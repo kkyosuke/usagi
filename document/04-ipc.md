@@ -195,8 +195,15 @@ repository に**立っている**ことは、どの workspace を指している
 
 この制限は **`bound` による暗黙の adopt にだけ**掛かる。「repository でなければ workspace になれない」という規則では
 ない。`usagi open <path>` と TUI の Open / New は `selected` を申告する明示的な操作であり、対象が repository か
-どうかを問わない。daemon が起動時 cwd を initial tenant にする経路も同じく制限しない。制限の根拠は
-「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
+どうかを問わない。制限の根拠は「repository かどうか」ではなく「利用者がその workspace を指したと言えるか」である。
+
+client が daemon を auto-start する前にも、同じ `bound` 解決を read-only preflight として行う。かつて adopt した
+workspace の最長一致、または申告 path 自身が repository の場合だけ、その解決済み root を lifecycle child と
+bootstrap broker の cwd にする。どちらでもない場合は handshake と同じ `workspace-mismatch` / effect none を返し、
+child、workspace fence、project-local `.usagi` を作らない。`selected` と、選択済み root に対する `unbound` readiness は
+明示操作なので従来どおり任意の canonical directory を起動 root にできる。Doctor のように選択を持たない `unbound`
+lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
+生死に依存しない。
 
 `selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。
@@ -335,11 +342,16 @@ request 送信前に lane を確立できなかった場合は effect が確定�
 
 ### bootstrap section の bounded wait
 
-connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、client は `bootstrap.lock` の
+connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、**cold-start authority を持つ** client は `bootstrap.lock` の
 cross-process section を取る。この section と、private directory の setup section（`ensure_private_dir` が親
 ディレクトリに取る flock）は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
 ディレクトリはマシン全体で共有されるため、blocking にすると MCP server / CLI / rollover のいずれかが section に
 いる間、UI 経路の接続確立が無期限に待ってしまう。保持したまま wedge したプロセスがいれば永久に待つ。
+
+daemon が provision した MCP child と Agent lifecycle hook は、発行元 daemon の live runtime に結び付くため、既存
+endpoint へ attach するだけでこの section に入らない。これらは daemon が動いていることを前提とする resident child であり、
+別 daemon を cold start しても claim 対象の runtime は存在しない。MCP の手動起動との分岐は
+[7. MCP サーバ#起動と経路](07-mcp.md#起動と経路)を正本とする。
 
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|

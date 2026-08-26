@@ -1,13 +1,13 @@
 ---
 number: 675
 title: fix(core): product-owned Git から repository-local helper 実行を無効化する
-status: todo
+status: done
 priority: high
 labels: [review, v2, core, daemon, git, security, integrity]
 dependson: []
 related: [605, 631]
 created_at: 2026-08-13T22:28:26.087856+00:00
-updated_at: 2026-08-23T23:22:34.965949+00:00
+updated_at: 2026-08-25T23:01:39+00:00
 ---
 
 ## Finding（P1 security / integrity）
@@ -66,8 +66,9 @@ git command を組み立てる唯一の経路なので、全 call site が同じ
 - [x] optional index lock を取らない（`GIT_OPTIONAL_LOCKS=0`）
 - [x] private remote clone の transport 契約を回帰させない（system/global config は
       意図的に残す。credential helper と SSH 設定は利用者のものを使う）
-- [ ] tracked `.gitattributes` + `filter.<driver>.smudge/process` — **未対応**。
-      driver 名を repository が任意に選べるため固定 key の上書きでは無効化できない。
-      filter process を起動しない materialization 手順、または許可済み built-in だけを
-      使う別境界が必要で、この issue に残る唯一のスコープはこれである。
-- [ ] `git worktree add` 失敗後の partial effect の compensation
+- [x] tracked `.gitattributes` + `filter.<driver>.smudge/process`。baseをexact commitへ固定してtracked
+      filter属性をcheckout前に拒否し、さらに実効設定のdriverを列挙する。`--no-checkout`でmetadataを
+      作った後、各driverをcommand scopeで無効化した`read-tree -u`だけをmaterialization境界にするため、
+      local/global attributes経由でもfilter processは起動しない。
+- [x] `git worktree add` / materialization失敗後のpartial effectを、事前に独立作成して所有権を確定した
+      branchと、Git登録が一致するworktreeに限定してcompensationする。

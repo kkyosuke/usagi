@@ -64,7 +64,7 @@ Home の基本操作は次のとおり。
 | 操作 | 動作 |
 |---|---|
 | `↑` / `↓`、`j` / `k` | session を選ぶ |
-| `←` / `→`、`h` / `l` | Preview / Terminal / Diff / Notes を切り替える |
+| `←` / `→` | Switch で前 / 次の project tab へ移動する |
 | `Enter` / `t` | 選択した session の Closeup を開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
 | `Ctrl-O` → `+` | workspace を project tab として追加する |

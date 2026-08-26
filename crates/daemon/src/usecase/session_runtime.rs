@@ -2099,8 +2099,11 @@ mod tests {
 
     struct BranchExistsGit;
     fn checkout_validation_output(args: &[&str]) -> Option<GitOutput> {
-        if matches!(args, ["rev-parse", "--verify", expression] if expression.ends_with("^{commit}"))
-        {
+        if matches!(
+            args,
+            ["rev-parse", "--verify", "--end-of-options", expression]
+                if expression.ends_with("^{commit}")
+        ) {
             return Some(GitOutput {
                 success: true,
                 stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -2132,6 +2135,15 @@ mod tests {
         fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
             if let Some(output) = checkout_validation_output(args) {
                 return Ok(output);
+            }
+            if matches!(args, ["branch", "--", ..] | ["branch", "-D", "--", ..])
+                || matches!(args, ["worktree", "list", "--porcelain"])
+            {
+                return Ok(GitOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
             }
             Ok(GitOutput {
                 success: false,
@@ -2546,7 +2558,7 @@ mod tests {
                 .unwrap_err(),
             SessionRuntimeError::SessionWorkspaceCreationFailed {
                 name: "one".into(),
-                detail: "no".into(),
+                detail: "git worktree branch creation failed: no".into(),
             }
         );
         assert_eq!(
@@ -2740,6 +2752,21 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             ScriptedGit::new([
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
                 ScriptedGitResult::Output {
                     success: true,
                     stdout: "",
@@ -3110,9 +3137,9 @@ instructions = "direct"
         let created = first
             .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
             .unwrap();
-        // Resolve + attribute scan + add. The replay below performs none of
-        // them.
-        assert_eq!(first_calls.load(Ordering::SeqCst), 3);
+        // Resolve + attribute scan + branch + metadata + config + checkout. The
+        // replay below performs none of them.
+        assert_eq!(first_calls.load(Ordering::SeqCst), 6);
         drop(first);
 
         let replay_calls = Arc::new(AtomicUsize::new(0));
@@ -3167,9 +3194,9 @@ instructions = "direct"
                 .unwrap_err(),
             SessionRuntimeError::IdempotencyConflict
         );
-        // Resolve + attribute scan + failed add + exact partial-registration
-        // probe. The replay above performs none of them.
-        assert_eq!(first_calls.load(Ordering::SeqCst), 4);
+        // Resolve + attribute scan + failed branch creation. The replay above
+        // performs none of them.
+        assert_eq!(first_calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             first.state().unwrap().operations[0].status,
             OperationStatus::Failed
@@ -3535,22 +3562,21 @@ instructions = "direct"
             "guide"
         );
         let calls = git.calls.lock().unwrap();
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 6);
         assert_eq!(
-            calls.last(),
+            calls.get(3),
             Some(&(
                 nested_repo,
                 vec![
                     "worktree".into(),
                     "add".into(),
-                    "-b".into(),
-                    "usagi/feature".into(),
+                    "--no-checkout".into(),
                     "--".into(),
                     destination
                         .join("services/api")
                         .to_string_lossy()
                         .into_owned(),
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    "usagi/feature".into(),
                 ],
             ))
         );

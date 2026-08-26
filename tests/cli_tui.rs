@@ -1274,6 +1274,56 @@ fn a_client_started_daemon_binds_the_fixture_workspace_root() {
     stop_daemon(&home);
 }
 
+#[test]
+fn bound_non_repository_is_refused_before_and_after_daemon_cold_start() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let plain = daemon_fixture::short_dir("usagi-plain-cwd-");
+    let request = [
+        OsStr::new("session"),
+        OsStr::new("remove"),
+        OsStr::new("missing"),
+    ];
+
+    let cold = home.run_at(plain.path(), &request);
+    assert_eq!(cold.status.code(), Some(1), "{}", stderr(&cold));
+    assert!(
+        stderr(&cold).contains("workspace-mismatch"),
+        "{}",
+        stderr(&cold)
+    );
+    assert!(
+        stderr(&cold).contains("repository root"),
+        "{}",
+        stderr(&cold)
+    );
+    assert!(!plain.path().join(".usagi").exists());
+    assert!(!home.data_dir().join("daemon/daemon.json").exists());
+
+    // The fixture workspace is a repository, so the same bound request may
+    // cold-start the daemon there. Liveness must not change the plain cwd's
+    // typed refusal or create project-local state in it.
+    let started = run_with_home(&request, &home);
+    assert_eq!(started.status.code(), Some(1), "{}", stderr(&started));
+    assert_daemon_running(&home);
+    let live = home.run_at(plain.path(), &request);
+    assert_eq!(live.status.code(), Some(1), "{}", stderr(&live));
+    assert!(
+        stderr(&live).contains("workspace-mismatch"),
+        "{}",
+        stderr(&live)
+    );
+    assert!(
+        stderr(&live).contains("repository root"),
+        "{}",
+        stderr(&live)
+    );
+    assert!(!plain.path().join(".usagi").exists());
+    stop_daemon(&home);
+}
+
 /// `daemon replace` performs the replacement its trigger keys, on exactly the
 /// path `daemon restart` takes — there is no second, unguarded route to
 /// `stop` → fresh `start` (#507).

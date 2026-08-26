@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use usagi_core::infrastructure::git::{
-    GitOutput, GitRunner, add_worktree, confined_git_command, remove_worktree,
+    GitOutput, GitRunner, add_worktree, confined_git_command, delete_branch, remove_worktree,
 };
 use usagi_core::infrastructure::paths::STATE_DIR;
 
@@ -74,7 +74,32 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
             return add_worktree(git, workspace_root, destination, branch, None);
         }
         std::fs::create_dir_all(destination)?;
-        mirror_directory(self, git, workspace_root, destination, branch)
+        let mut created = Vec::new();
+        let result = mirror_directory(self, git, workspace_root, destination, branch, &mut created);
+        if let Err(error) = result {
+            let mut cleanup = Vec::new();
+            for (repository, worktree) in created.into_iter().rev() {
+                if let Err(error) = remove_worktree(git, &repository, &worktree, true) {
+                    cleanup.push(error.to_string());
+                }
+                if let Err(error) = delete_branch(git, &repository, branch, true) {
+                    cleanup.push(error.to_string());
+                }
+            }
+            if let Err(remove_error) = std::fs::remove_dir_all(destination)
+                && remove_error.kind() != std::io::ErrorKind::NotFound
+            {
+                cleanup.push(remove_error.to_string());
+            }
+            if cleanup.is_empty() {
+                return Err(error);
+            }
+            return Err(anyhow::anyhow!(
+                "{error}; compensation failed: {}",
+                cleanup.join("; ")
+            ));
+        }
+        Ok(())
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
@@ -105,6 +130,7 @@ fn mirror_directory(
     source: &Path,
     destination: &Path,
     branch: &str,
+    created: &mut Vec<(PathBuf, PathBuf)>,
 ) -> anyhow::Result<()> {
     let mut entries = std::fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -122,9 +148,10 @@ fn mirror_directory(
             }
             if io.is_repo_root(&source) {
                 add_worktree(git, &source, &target, branch, None)?;
+                created.push((source, target));
             } else {
                 std::fs::create_dir_all(&target)?;
-                mirror_directory(io, git, &source, &target, branch)?;
+                mirror_directory(io, git, &source, &target, branch, created)?;
             }
         } else {
             std::fs::copy(source, target)?;

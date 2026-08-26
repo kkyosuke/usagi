@@ -183,10 +183,18 @@ impl DaemonHome {
         let home = short_dir("usagi-");
         std::fs::set_permissions(home.path(), private_dir_mode())
             .expect("private daemon data directory");
-        Self {
-            home,
-            workspace: short_dir("usagi-workspace-"),
-        }
+        let workspace = short_dir("usagi-workspace-");
+        let initialized = Command::new("git")
+            .args(["init", "-q"])
+            .arg(workspace.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .expect("fixture repository initialization runs");
+        assert!(initialized.success(), "fixture repository initialization");
+        Self { home, workspace }
     }
 
     /// `$USAGI_HOME`。

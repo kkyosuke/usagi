@@ -99,6 +99,7 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "agent_complete" => (DispatchRoute(Dispatch::AgentComplete), AgentCredential),
         "agent_fail" => (DispatchRoute(Dispatch::AgentFail), AgentCredential),
         "agent_inbox" => (DispatchRoute(Dispatch::AgentInbox), AgentCredential),
+        "agent_inbox_ack" => (DispatchRoute(Dispatch::AgentInboxAck), AgentCredential),
         "user_decision_request" => (
             DispatchRoute(Dispatch::UserDecisionRequest),
             AgentCredential,
@@ -212,6 +213,7 @@ mod tests {
     use super::{McpToolFamilies, descriptor, registry, registry_with_families, validate_registry};
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use std::path::Path;
+    use usagi_core::domain::user_decision::UserDecisionPolicy;
     use usagi_core::usecase::client::SessionAction;
 
     struct FixtureTool(&'static str);
@@ -304,7 +306,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 48); // issue 6 + memory 4 + session 32 + supervisor 6
+        assert_eq!(reg.len(), 49); // issue 6 + memory 4 + session 33 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -324,12 +326,83 @@ mod tests {
         }
     }
 
+    #[test]
+    fn user_decision_schemas_publish_and_enforce_the_domain_policy_ceilings() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["title"]["maxLength"],
+            UserDecisionPolicy::TITLE_MAX_BYTES
+        );
+        assert_eq!(
+            properties["title"]["x-maxUtf8Bytes"],
+            UserDecisionPolicy::TITLE_MAX_BYTES
+        );
+        assert_eq!(
+            properties["prompt"]["maxLength"],
+            UserDecisionPolicy::PROMPT_MAX_BYTES
+        );
+        assert_eq!(
+            properties["options"]["maxItems"],
+            UserDecisionPolicy::OPTION_COUNT_MAX
+        );
+        let option = &properties["options"]["items"]["properties"];
+        assert_eq!(
+            option["id"]["maxLength"],
+            UserDecisionPolicy::OPTION_ID_MAX_BYTES
+        );
+        assert_eq!(
+            option["label"]["maxLength"],
+            UserDecisionPolicy::OPTION_LABEL_MAX_BYTES
+        );
+        assert_eq!(
+            option["description"]["maxLength"],
+            UserDecisionPolicy::OPTION_DESCRIPTION_MAX_BYTES
+        );
+        assert_eq!(
+            properties["idempotency_key"]["maxLength"],
+            UserDecisionPolicy::IDEMPOTENCY_KEY_MAX_BYTES
+        );
+
+        let overlong = serde_json::json!({
+            "title": "t".repeat(UserDecisionPolicy::TITLE_MAX_BYTES + 1),
+            "prompt": "prompt",
+            "options": [],
+        });
+        assert!(request.validate(&overlong, &schema).is_err());
+        let multibyte = serde_json::json!({
+            "title": "界".repeat(UserDecisionPolicy::TITLE_MAX_BYTES / 3 + 1),
+            "prompt": "prompt",
+            "options": [],
+        });
+        assert!(request.validate(&multibyte, &schema).is_err());
+
+        let resolve = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_resolve")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let overlong = serde_json::json!({
+            "decision_id": "00000000-0000-0000-0000-000000000000",
+            "answer": {
+                "kind": "freeform",
+                "text": "a".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES + 1),
+            },
+        });
+        assert!(resolve.validate(&overlong, &schema).is_err());
+    }
+
     /// 系統ごとの tool 数を固定する（IF の増減に気づけるように）。
     #[test]
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 32);
+        assert_eq!(super::session::tools().len(), 33);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
 
@@ -376,14 +449,14 @@ mod tests {
             memory: false,
             local_llm: false,
         });
-        assert_eq!(neither.len(), 37);
+        assert_eq!(neither.len(), 38);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 48);
+        assert_eq!(registry.len(), 49);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());

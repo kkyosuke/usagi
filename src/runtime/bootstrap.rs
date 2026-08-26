@@ -92,7 +92,7 @@ where
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            start().map_err(BootstrapError::Start)?;
+            start().map_err(start_error)?;
             let stream = wait_for_stream!(connect);
             require_expected_build(build_of(&stream), expected_build)?;
             Ok(stream)
@@ -100,7 +100,7 @@ where
         Err(error) if can_attempt_stale_recovery(error.kind()) => {
             match recover_stale().map_err(BootstrapError::Recovery)? {
                 StaleRecovery::Recovered => {
-                    start().map_err(BootstrapError::Start)?;
+                    start().map_err(start_error)?;
                     let stream = wait_for_stream!(connect);
                     require_expected_build(build_of(&stream), expected_build)?;
                     Ok(stream)
@@ -134,7 +134,7 @@ where
     R: FnMut() -> io::Result<()>,
     B: Fn(&S) -> &BuildIdentity,
 {
-    restart().map_err(BootstrapError::Restart)?;
+    restart().map_err(restart_error)?;
     let stream = wait_for_stream!(connect);
     require_expected_build(build_of(&stream), expected_build)?;
     Ok(stream)
@@ -258,6 +258,20 @@ fn workspace_refusal(error: &io::Error) -> Option<ProtocolError> {
         ClientError::Protocol(refusal) if is_workspace_mismatch(refusal) => Some(refusal.clone()),
         _ => None,
     }
+}
+
+fn start_error(error: io::Error) -> BootstrapError {
+    workspace_refusal(&error).map_or(
+        BootstrapError::Start(error),
+        BootstrapError::WorkspaceMismatch,
+    )
+}
+
+fn restart_error(error: io::Error) -> BootstrapError {
+    workspace_refusal(&error).map_or(
+        BootstrapError::Restart(error),
+        BootstrapError::WorkspaceMismatch,
+    )
 }
 
 /// A safe, classified bootstrap failure. No variant permits local lifecycle or
@@ -911,10 +925,34 @@ mod tests {
             refusal.message
         );
 
+        // A cold-start preflight runs only after endpoint absence is known. Its
+        // typed refusal must survive the lifecycle callback's io boundary.
+        let preflight = connect_or_start(
+            || Err::<Endpoint, _>(io::Error::from(io::ErrorKind::NotFound)),
+            || Err(io::Error::other(ClientError::Protocol(refusal.clone()))),
+            recovery_error,
+            &expected,
+            "local",
+            false,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(workspace_mismatch(preflight).unwrap(), refusal);
+
         // An explicit cold replacement is refused for the same reason.
         let restart_error =
             restart_and_connect(refused, || Ok(()), &expected, endpoint_build).unwrap_err();
         assert!(workspace_mismatch(restart_error).is_some());
+        let reconnect = || Ok(endpoint("unused", "current"));
+        assert_eq!(reconnect().unwrap().name, "unused");
+        let restart_preflight = restart_and_connect(
+            reconnect,
+            || Err(io::Error::other(ClientError::Protocol(refusal.clone()))),
+            &expected,
+            endpoint_build,
+        )
+        .unwrap_err();
+        assert_eq!(workspace_mismatch(restart_preflight).unwrap(), refusal);
 
         // Only this refusal is reclassified. Every other typed client failure
         // keeps its existing connect handling, so the fence cannot swallow an

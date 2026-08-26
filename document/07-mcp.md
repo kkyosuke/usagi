@@ -22,9 +22,18 @@
 ## 起動と経路
 
 `usagi mcp` は合成ルートが stdin/stdout を束ねて serve ループを回す（エージェントが spawn する
-stdio プロセスで、CLI からは隠している）。起動時に daemon へ接続し、停止中なら autostart する。
-daemon に接続できなければ stdio serve ループを開始しない（[2. アーキテクチャ](02-architecture.md)、
-[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。
+stdio プロセスで、CLI からは隠している）。接続経路は起動元で分かれる。
+
+| 起動元 | daemon 接続 | daemon 不在時 |
+|---|---|---|
+| daemon-provisioned Agent の MCP child（非空の trusted `USAGI_WORKSPACE_ROOT` を注入済み） | 発行元 daemon の既存 endpoint へ attach し、`bootstrap.lock` と bootstrap broker を使わない | stdio serve を開始せず失敗する |
+| 手動の `usagi mcp` | 通常の daemon bootstrap を通る | daemon を autostart してから接続する |
+
+daemon-provisioned child が attach だけを行うのは、その child が claim する live Agent runtime と caller slot が発行元
+daemon の process memory にしか存在しないためである。別 daemon を cold start しても claim は成立しない。また Agent の
+sandbox は data home への書き込みを許さないため、`bootstrap.lock` を要求すると発行元 daemon が健全でも MCP server が
+起動不能になる。どちらの経路も daemon に接続できなければ stdio serve ループを開始しない
+（[2. アーキテクチャ](02-architecture.md)、[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。
 
 合成ルートは完全な process argv の解析に成功してから daemon bootstrap と stdio serve を始める。
 MCP 入口の文法・usage error・終了 status は
@@ -174,7 +183,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
-| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
+| `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
 `user_decision_request` の同期応答待ちは decision ごとの process-local 通知へ登録し、resolve / cancel / expire の
@@ -187,6 +196,9 @@ list、または同じ idempotency key の request で同じ decision を観測�
 decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
 2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
 NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
+MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開し、domain/store も UTF-8 byte 数で再検証する。
+上限超過は decision、outbox、waiter を作らず `InvalidArgument` になり、既存の durable document に違反があれば
+再起動後も巨大な値を再公開せず fail closed にする。
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
@@ -213,7 +225,9 @@ daemon を停止・crash させても teardown は失われない。次の daemo
 dispatch 系は credential から caller と current run を復元する。`session_dispatch` は session を作成または再利用し、
 その session worktree で worker PTY を起動して run/agent/binding を durable に保存する。worker の
 `agent_complete` / `agent_fail` は保存済み binding の caller inbox へ配送され、`agent_inbox` は認証済み caller 自身の
-inbox だけを返す。最初に受理された `agent_complete.result.pr` が canonical GitHub PR URL の場合は、同じ binding の
+inbox だけを最大100件のstable cursor pageで返す。readにeffectはなく、処理済みpageの`next_cursor`を
+`agent_inbox_ack`へ渡したときだけdurable ACK watermarkが進む。応答を失ったquery、duplicate ACK、daemon restartは同じ
+unread stateへ収束し、retention済みcursorはexpiredとして拒否する。最初に受理された `agent_complete.result.pr` が canonical GitHub PR URL の場合は、同じ binding の
 worker `SessionId` に daemon-owned PR inventory も更新し、TUI の sidebar / PR modal が通常の revision 付き snapshot
 から観測する。短縮参照と不正値は inbox には保持するが inventory へ推測して補完しない。projection が失敗した場合も
 inbox の完了報告は維持して retryable error を返す。同じ report の再送は request の kind や artifact を信用せず、inbox に最初に
@@ -266,7 +280,7 @@ durable journal にその由来が記録されており、dispatch store にそ�
 同じ operation id での retry は二重作成しない。create は lifecycle journal から、dispatch は記録済みの結末から
 replay される。
 
-`supervisor_start` は root task と初期 DAG を snapshot と append-only event journal に保存し、同じ
+`supervisor_start` は bounded な root task と初期 DAG を snapshot と compacting event journal に保存し、同じ
 `idempotency_key` の再送では同じ run を返す。get/list/events の応答は instruction body を含まない安全な
 projection である。caller provenance は daemon 発行の live MCP credential が解決する root/session と Agent、
 および handshake で検証済みの client incarnation の組である。socket の `ConnectionId` は含めないため、同じ MCP

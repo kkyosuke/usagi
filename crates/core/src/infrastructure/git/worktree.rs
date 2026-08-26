@@ -5,6 +5,7 @@
 //! [`GitRunner`], so the branching on git's stderr (an already-removed worktree,
 //! a failed add) is exercised in unit tests without a real repository.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -38,12 +39,22 @@ pub fn add_worktree(
     base: Option<&str>,
 ) -> Result<()> {
     let dest = dest.to_str().context("worktree path is not valid UTF-8")?;
-    if std::fs::symlink_metadata(dest).is_ok() {
-        bail!("git worktree destination is already occupied");
+    match std::fs::symlink_metadata(dest) {
+        Ok(_) => bail!("git worktree destination is already occupied"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     let revision = base.unwrap_or("HEAD");
     let commit_expression = format!("{revision}^{{commit}}");
-    let resolved = runner.run(repo, &["rev-parse", "--verify", &commit_expression])?;
+    let resolved = runner.run(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &commit_expression,
+        ],
+    )?;
     if !resolved.success {
         bail!(
             "git worktree base resolution failed: {}",
@@ -58,29 +69,176 @@ pub fn add_worktree(
         bail!("git worktree base resolution returned an invalid object id");
     }
     reject_checkout_filters(runner, repo, commit)?;
-    // `--` keeps a leading-`-` path or base from being parsed as an option.
-    let mut args = vec!["worktree", "add", "-b", branch, "--", dest];
-    // Use the exact commit whose attributes were inspected. A mutable branch
-    // cannot change between validation and checkout.
-    args.push(commit);
-    let output = runner.run(repo, &args)?;
+
+    // Branch creation is an independent atomic effect. Success proves that this
+    // invocation owns the branch, and the exact inspected commit prevents a
+    // mutable base ref from changing between policy validation and checkout.
+    let output = runner.run(repo, &["branch", "--", branch, commit])?;
     if !output.success {
-        // Git can publish the worktree metadata before a later checkout error.
-        // Compensate only when list output proves that the previously absent
-        // exact destination, branch, and inspected commit are all ours.
-        if list_worktrees(runner, repo).is_ok_and(|worktrees| {
-            worktrees.iter().any(|worktree| {
-                worktree.path == Path::new(dest)
-                    && worktree.branch.as_deref() == Some(branch)
-                    && worktree.head.as_deref() == Some(commit)
-            })
-        }) && remove_worktree(runner, repo, Path::new(dest), true).is_ok()
-        {
-            let _ = delete_branch(runner, repo, branch, true);
+        bail!(
+            "git worktree branch creation failed: {}",
+            output.stderr.trim()
+        );
+    }
+
+    // Create only worktree metadata. Materialisation is deliberately separate,
+    // so no checkout filter can run before its effective driver is disabled.
+    let output = match runner.run(
+        repo,
+        &["worktree", "add", "--no-checkout", "--", dest, branch],
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(compensate_failed_add(
+                runner,
+                repo,
+                Path::new(dest),
+                branch,
+                commit,
+                false,
+                &error.to_string(),
+            ));
         }
-        bail!("git worktree add failed: {}", output.stderr.trim());
+    };
+    if !output.success {
+        return Err(compensate_failed_add(
+            runner,
+            repo,
+            Path::new(dest),
+            branch,
+            commit,
+            false,
+            output.stderr.trim(),
+        ));
+    }
+
+    materialize_worktree(runner, repo, Path::new(dest), branch, commit)
+}
+
+fn materialize_worktree(
+    runner: &dyn GitRunner,
+    repo: &Path,
+    destination: &Path,
+    branch: &str,
+    commit: &str,
+) -> Result<()> {
+    let drivers = match configured_filter_drivers(runner, destination) {
+        Ok(drivers) => drivers,
+        Err(error) => {
+            return Err(compensate_failed_add(
+                runner,
+                repo,
+                destination,
+                branch,
+                commit,
+                true,
+                &error.to_string(),
+            ));
+        }
+    };
+    let mut checkout_args = Vec::with_capacity(drivers.len() * 6 + 4);
+    for driver in drivers {
+        checkout_args.extend([
+            "-c".to_owned(),
+            format!("filter.{driver}.smudge="),
+            "-c".to_owned(),
+            format!("filter.{driver}.process="),
+            "-c".to_owned(),
+            format!("filter.{driver}.required=false"),
+        ]);
+    }
+    checkout_args.extend(
+        ["read-tree", "--reset", "-u", "HEAD"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    let checkout_refs = checkout_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = match runner.run(destination, &checkout_refs) {
+        Ok(output) => output,
+        Err(error) => {
+            return Err(compensate_failed_add(
+                runner,
+                repo,
+                destination,
+                branch,
+                commit,
+                true,
+                &error.to_string(),
+            ));
+        }
+    };
+    if !output.success {
+        return Err(compensate_failed_add(
+            runner,
+            repo,
+            destination,
+            branch,
+            commit,
+            true,
+            output.stderr.trim(),
+        ));
     }
     Ok(())
+}
+
+/// Driver names present in the new worktree's complete effective Git config.
+fn configured_filter_drivers(runner: &dyn GitRunner, repo: &Path) -> Result<BTreeSet<String>> {
+    let output = runner.run(repo, &["config", "--null", "--name-only", "--list"])?;
+    if !output.success {
+        bail!(
+            "could not inspect checkout filter policy: {}",
+            output.stderr.trim()
+        );
+    }
+    Ok(output
+        .stdout
+        .split('\0')
+        .filter_map(|key| {
+            let (section, key) = key.split_once('.')?;
+            if !section.eq_ignore_ascii_case("filter") {
+                return None;
+            }
+            let (driver, _) = key.rsplit_once('.')?;
+            (!driver.is_empty()).then(|| driver.to_owned())
+        })
+        .collect())
+}
+
+/// Roll back only the branch and registered worktree this invocation created.
+fn compensate_failed_add(
+    runner: &dyn GitRunner,
+    repo: &Path,
+    destination: &Path,
+    branch: &str,
+    commit: &str,
+    registration_succeeded: bool,
+    failure: &str,
+) -> anyhow::Error {
+    let mut cleanup = Vec::new();
+    let registered = registration_succeeded
+        || match list_worktrees(runner, repo) {
+            Ok(worktrees) => worktrees.iter().any(|worktree| {
+                worktree.path == destination
+                    && worktree.branch.as_deref() == Some(branch)
+                    && worktree.head.as_deref() == Some(commit)
+            }),
+            Err(error) => {
+                cleanup.push(error.to_string());
+                false
+            }
+        };
+    if registered && let Err(error) = remove_worktree(runner, repo, destination, true) {
+        cleanup.push(error.to_string());
+    }
+    if let Err(error) = delete_branch(runner, repo, branch, true) {
+        cleanup.push(error.to_string());
+    }
+    let cleanup = if cleanup.is_empty() {
+        String::new()
+    } else {
+        format!("; compensation failed: {}", cleanup.join("; "))
+    };
+    anyhow::anyhow!("git worktree add failed: {failure}{cleanup}")
 }
 
 fn reject_checkout_filters(runner: &dyn GitRunner, repo: &Path, commit: &str) -> Result<()> {
@@ -236,12 +394,32 @@ mod tests {
         remove_worktree,
     };
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::{GitOutput, GitRunner};
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+
+    struct FallibleGit {
+        responses: RefCell<Vec<anyhow::Result<GitOutput>>>,
+    }
+
+    impl FallibleGit {
+        fn new(responses: Vec<anyhow::Result<GitOutput>>) -> Self {
+            Self {
+                responses: RefCell::new(responses),
+            }
+        }
+    }
+
+    impl GitRunner for FallibleGit {
+        fn run(&self, _repo: &Path, _args: &[&str]) -> anyhow::Result<GitOutput> {
+            self.responses.borrow_mut().remove(0)
+        }
+    }
 
     #[test]
     fn add_worktree_builds_the_expected_command_with_a_base() {
         let commit = "a".repeat(40);
-        let git = FakeGit::new(vec![ok(&commit), ok(""), ok("")]);
+        let git = FakeGit::new(vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")]);
         add_worktree(
             &git,
             Path::new("/repo"),
@@ -251,15 +429,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            git.calls.borrow()[2],
-            vec![
-                "worktree",
-                "add",
-                "-b",
-                "usagi/x",
-                "--",
-                "/repo/.usagi/sessions/x",
-                commit.as_str()
+            git.calls.borrow().as_slice(),
+            &[
+                vec!["rev-parse", "--verify", "--end-of-options", "main^{commit}"],
+                vec!["ls-tree", "-rz", "--name-only", commit.as_str()],
+                vec!["branch", "--", "usagi/x", commit.as_str()],
+                vec![
+                    "worktree",
+                    "add",
+                    "--no-checkout",
+                    "--",
+                    "/repo/.usagi/sessions/x",
+                    "usagi/x"
+                ],
+                vec!["config", "--null", "--name-only", "--list"],
+                vec!["read-tree", "--reset", "-u", "HEAD"]
             ]
         );
     }
@@ -267,24 +451,23 @@ mod tests {
     #[test]
     fn add_worktree_omits_the_base_when_none_and_reports_failure() {
         let commit = "b".repeat(40);
-        let git = FakeGit::new(vec![ok(&commit), ok(""), ok("")]);
+        let git = FakeGit::new(vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")]);
         add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None).unwrap();
         assert_eq!(
             git.calls.borrow()[2],
-            vec!["worktree", "add", "-b", "b", "--", "/dest", commit.as_str()]
+            vec!["branch", "--", "b", commit.as_str()]
         );
 
         let failed_commit = "c".repeat(40);
         let bad = FakeGit::new(vec![
             ok(&failed_commit),
             ok(""),
-            fail("fatal: branch 'b' already exists"),
-            ok(""),
+            fail("branch already exists"),
         ]);
         let err = add_worktree(&bad, Path::new("/repo"), Path::new("/dest"), "b", None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("git worktree add failed"));
+        assert!(err.contains("branch creation failed"));
         assert!(err.contains("already exists"));
     }
 
@@ -294,6 +477,7 @@ mod tests {
         let listing = format!("worktree /dest\nHEAD {commit}\nbranch refs/heads/b\n\n");
         let git = FakeGit::new(vec![
             ok(&commit),
+            ok(""),
             ok(""),
             fail("checkout failed"),
             ok(&listing),
@@ -305,10 +489,161 @@ mod tests {
             .to_string();
         assert!(error.contains("checkout failed"));
         assert_eq!(
-            git.calls.borrow()[4],
+            git.calls.borrow()[5],
             ["worktree", "remove", "--force", "--", "/dest"]
         );
-        assert_eq!(git.calls.borrow()[5], ["branch", "-D", "--", "b"]);
+        assert_eq!(git.calls.borrow()[6], ["branch", "-D", "--", "b"]);
+    }
+
+    #[test]
+    fn runner_errors_are_compensated_and_cleanup_failures_are_reported() {
+        let revision_error = FallibleGit::new(vec![Err(anyhow::anyhow!("rev-parse unavailable"))]);
+        assert!(
+            add_worktree(
+                &revision_error,
+                Path::new("/repo"),
+                Path::new("/dest"),
+                "b",
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("rev-parse unavailable")
+        );
+
+        let commit = "e".repeat(40);
+        let registration_error = FallibleGit::new(vec![
+            Ok(ok(&commit)),
+            Ok(ok("")),
+            Ok(ok("")),
+            Err(anyhow::anyhow!("registration I/O failed")),
+            Err(anyhow::anyhow!("worktree list I/O failed")),
+            Err(anyhow::anyhow!("branch cleanup I/O failed")),
+        ]);
+        let error = add_worktree(
+            &registration_error,
+            Path::new("/repo"),
+            Path::new("/dest"),
+            "b",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("registration I/O failed"), "{error}");
+        assert!(error.contains("worktree list I/O failed"), "{error}");
+        assert!(error.contains("branch cleanup I/O failed"), "{error}");
+
+        let materialization_error = FallibleGit::new(vec![
+            Ok(ok(&commit)),
+            Ok(ok("")),
+            Ok(ok("")),
+            Ok(ok("")),
+            Ok(ok("")),
+            Err(anyhow::anyhow!("materialization I/O failed")),
+            Err(anyhow::anyhow!("worktree cleanup I/O failed")),
+            Err(anyhow::anyhow!("branch cleanup I/O failed")),
+        ]);
+        let error = add_worktree(
+            &materialization_error,
+            Path::new("/repo"),
+            Path::new("/dest"),
+            "b",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("materialization I/O failed"), "{error}");
+        assert!(error.contains("worktree cleanup I/O failed"), "{error}");
+        assert!(error.contains("branch cleanup I/O failed"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_worktree_propagates_destination_metadata_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let blocked = root.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let result = add_worktree(
+            &FakeGit::new(vec![]),
+            Path::new("/repo"),
+            &blocked.join("dest"),
+            "b",
+            None,
+        );
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn materialization_disables_every_effective_filter_driver() {
+        let commit = "f".repeat(40);
+        let git = FakeGit::new(vec![
+            ok(&commit),
+            ok(""),
+            ok(""),
+            ok(""),
+            ok(
+                "Filter.pwn.smudge\0filter.pwn.process\0filter.lfs.clean\0filter.invalid\0filter..smudge\0",
+            ),
+            ok(""),
+        ]);
+
+        add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None).unwrap();
+
+        assert_eq!(
+            git.calls.borrow()[5],
+            vec![
+                "-c",
+                "filter.lfs.smudge=",
+                "-c",
+                "filter.lfs.process=",
+                "-c",
+                "filter.lfs.required=false",
+                "-c",
+                "filter.pwn.smudge=",
+                "-c",
+                "filter.pwn.process=",
+                "-c",
+                "filter.pwn.required=false",
+                "read-tree",
+                "--reset",
+                "-u",
+                "HEAD"
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_discovery_and_materialization_failures_are_compensated() {
+        for (failure_at, expected) in [
+            (4, "could not inspect checkout filter policy"),
+            (5, "materialization failed"),
+        ] {
+            let commit = "a".repeat(40);
+            let mut outputs = vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")];
+            outputs[failure_at] = fail(if failure_at == 4 {
+                "config is invalid"
+            } else {
+                "materialization failed"
+            });
+            outputs.extend([ok(""), ok("")]);
+            let git = FakeGit::new(outputs);
+
+            let error = add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None)
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains(expected), "{error}");
+            let calls = git.calls.borrow();
+            assert_eq!(
+                calls[calls.len() - 2],
+                ["worktree", "remove", "--force", "--", "/dest"]
+            );
+            assert_eq!(calls[calls.len() - 1], ["branch", "-D", "--", "b"]);
+        }
     }
 
     #[test]

@@ -19,9 +19,11 @@ use usagi_core::{
         agent::{InboxKind, RunStatus},
         id::OperationId,
         supervisor::{
-            EscalationDecision, RunProvenance, SupervisorEvent, SupervisorEventKind,
-            SupervisorEventSource, SupervisorRun, SupervisorRunId, SupervisorRunQuery,
-            SupervisorRunState, TaskId, TaskNode, TaskState,
+            EscalationDecision, MAX_ARTIFACT_CONTRACT_BYTES, MAX_INITIAL_TASKS,
+            MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_TEXT_BYTES, MAX_TASK_DEPENDENCIES,
+            RunProvenance, SupervisorEvent, SupervisorEventKind, SupervisorEventSource,
+            SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId,
+            TaskNode, TaskState,
         },
     },
     infrastructure::{
@@ -67,6 +69,10 @@ pub trait DecisionWaker {
 struct RuntimeState {
     wakes: BTreeMap<String, WakeReservation>,
     starts: BTreeMap<String, StartReservation>,
+    #[serde(default)]
+    expired_wakes: KeyTombstones,
+    #[serde(default)]
+    expired_starts: KeyTombstones,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WakeReservation {
@@ -77,6 +83,101 @@ struct WakeReservation {
 struct StartReservation {
     semantic_key: String,
     supervisor_run_id: SupervisorRunId,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct KeyTombstones {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    words: Vec<u64>,
+}
+
+const TOMBSTONE_WORDS: usize = 512;
+const TOMBSTONE_HASHES: u64 = 4;
+#[cfg(not(test))]
+const MAX_START_RESERVATIONS: usize = 256;
+#[cfg(test)]
+const MAX_START_RESERVATIONS: usize = 8;
+#[cfg(not(test))]
+const MAX_WAKE_RESERVATIONS: usize = 512;
+#[cfg(test)]
+const MAX_WAKE_RESERVATIONS: usize = 8;
+#[cfg(not(test))]
+const RETAIN_DELIVERED_WAKES: usize = 128;
+#[cfg(test)]
+const RETAIN_DELIVERED_WAKES: usize = 4;
+
+impl KeyTombstones {
+    fn bit(key: &str, seed: u64) -> usize {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for byte in key.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        usize::try_from(hash % (TOMBSTONE_WORDS as u64 * 64)).expect("bit index fits")
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.words.len() == TOMBSTONE_WORDS
+            && (0..TOMBSTONE_HASHES).all(|seed| {
+                let bit = Self::bit(key, seed);
+                self.words[bit / 64] & (1_u64 << (bit % 64)) != 0
+            })
+    }
+
+    fn insert(&mut self, key: &str) {
+        self.words.resize(TOMBSTONE_WORDS, 0);
+        self.words.truncate(TOMBSTONE_WORDS);
+        for seed in 0..TOMBSTONE_HASHES {
+            let bit = Self::bit(key, seed);
+            self.words[bit / 64] |= 1_u64 << (bit % 64);
+        }
+    }
+}
+
+impl RuntimeState {
+    fn validate_limits(&self) -> Result<()> {
+        let tombstones_are_valid = |tombstones: &KeyTombstones| {
+            tombstones.words.is_empty() || tombstones.words.len() == TOMBSTONE_WORDS
+        };
+        if self.starts.len() > MAX_START_RESERVATIONS
+            || self.wakes.len() > MAX_WAKE_RESERVATIONS
+            || !tombstones_are_valid(&self.expired_starts)
+            || !tombstones_are_valid(&self.expired_wakes)
+        {
+            anyhow::bail!("supervisor runtime metadata exceeds or violates its hard limit");
+        }
+        Ok(())
+    }
+
+    fn compact_delivered_wakes(&mut self) {
+        let undelivered = self
+            .wakes
+            .values()
+            .filter(|reservation| !reservation.delivered)
+            .count();
+        let keep_delivered = RETAIN_DELIVERED_WAKES.min(
+            MAX_WAKE_RESERVATIONS
+                .saturating_sub(undelivered)
+                .min(self.wakes.len()),
+        );
+        let remove = self
+            .wakes
+            .values()
+            .filter(|reservation| reservation.delivered)
+            .count()
+            .saturating_sub(keep_delivered);
+        let keys = self
+            .wakes
+            .iter()
+            .filter(|(_, reservation)| reservation.delivered)
+            .take(remove)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.wakes.remove(&key);
+            self.expired_wakes.insert(&key);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +191,60 @@ pub struct InitialTask {
     pub instruction: String,
     #[serde(default = "default_artifact_contract")]
     pub required_artifact_contract: String,
+}
+
+fn bounded_nonempty(name: &str, value: &str, max: usize) -> Result<()> {
+    if value.trim().is_empty() || value.len() > max {
+        anyhow::bail!("invalid {name}: expected 1..={max} UTF-8 bytes");
+    }
+    Ok(())
+}
+
+fn validate_start_input(
+    operation_id: &str,
+    root_task: &str,
+    initial_tasks: &[InitialTask],
+    policy_selector: Option<&str>,
+) -> Result<()> {
+    bounded_nonempty(
+        "supervisor idempotency key",
+        operation_id,
+        MAX_SUPERVISOR_KEY_BYTES,
+    )?;
+    bounded_nonempty("supervisor root task", root_task, MAX_SUPERVISOR_TEXT_BYTES)?;
+    if initial_tasks.len() > MAX_INITIAL_TASKS {
+        anyhow::bail!("invalid initial task count: maximum is {MAX_INITIAL_TASKS}");
+    }
+    if let Some(policy_selector) = policy_selector {
+        bounded_nonempty(
+            "supervisor policy selector",
+            policy_selector,
+            MAX_SUPERVISOR_KEY_BYTES,
+        )?;
+    }
+    for task in initial_tasks {
+        TaskId::new(&task.task_id).map_err(anyhow::Error::msg)?;
+        if let Some(parent) = &task.parent_task_id {
+            TaskId::new(parent).map_err(anyhow::Error::msg)?;
+        }
+        if task.dependencies.len() > MAX_TASK_DEPENDENCIES {
+            anyhow::bail!("invalid task dependency count: maximum is {MAX_TASK_DEPENDENCIES}");
+        }
+        for dependency in &task.dependencies {
+            TaskId::new(dependency).map_err(anyhow::Error::msg)?;
+        }
+        bounded_nonempty(
+            "supervisor task instruction",
+            &task.instruction,
+            MAX_SUPERVISOR_TEXT_BYTES,
+        )?;
+        bounded_nonempty(
+            "supervisor artifact contract",
+            &task.required_artifact_contract,
+            MAX_ARTIFACT_CONTRACT_BYTES,
+        )?;
+    }
+    Ok(())
 }
 
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=start_rejects_an_unresolvable_initial_dag
@@ -150,6 +305,12 @@ impl SupervisorRuntime {
         policy_selector: Option<String>,
         now: DateTime<Utc>,
     ) -> Result<SupervisorRunQuery> {
+        validate_start_input(
+            operation_id,
+            &root_task,
+            &initial_tasks,
+            policy_selector.as_deref(),
+        )?;
         let mut semantic_key = String::new();
         push_semantic_component(&mut semantic_key, caller);
         push_semantic_component(&mut semantic_key, &root_task);
@@ -176,6 +337,10 @@ impl SupervisorRuntime {
             Some(existing) if existing.semantic_key == semantic_key => existing.clone(),
             Some(_) => anyhow::bail!("operation id was reused with a different supervisor start"),
             None => {
+                if state.expired_starts.contains(operation_id) {
+                    anyhow::bail!("supervisor start idempotency window expired");
+                }
+                self.ensure_start_capacity(&mut state)?;
                 let reservation = StartReservation {
                     semantic_key,
                     supervisor_run_id: SupervisorRunId::new(),
@@ -536,23 +701,33 @@ impl SupervisorRuntime {
         let outcome = self.outcome(child_run, kind)?;
         let key = format!("{}:{}:{}", child_run, parent_id.0, parent.generation);
         let mut state = self.load_state()?;
-        state.wakes.entry(key).or_insert_with(|| WakeReservation {
-            wake: DecisionWake {
-                supervisor_run_id: run.supervisor_run_id,
-                parent_task_id: parent_id.clone(),
-                parent_generation: parent.generation,
-                parent: parent_provenance,
-                child_run_id: child_run,
-                outcome,
-                dag: run
-                    .tasks
-                    .iter()
-                    .map(|(id, task)| (id.clone(), task.state))
-                    .collect(),
-                remaining_budget_summary: "policy has not configured a budget".into(),
+        if state.wakes.contains_key(&key) || state.expired_wakes.contains(&key) {
+            return Ok(());
+        }
+        state.compact_delivered_wakes();
+        if state.wakes.len() >= MAX_WAKE_RESERVATIONS {
+            anyhow::bail!("supervisor wake reservation capacity is exhausted");
+        }
+        state.wakes.insert(
+            key,
+            WakeReservation {
+                wake: DecisionWake {
+                    supervisor_run_id: run.supervisor_run_id,
+                    parent_task_id: parent_id.clone(),
+                    parent_generation: parent.generation,
+                    parent: parent_provenance,
+                    child_run_id: child_run,
+                    outcome,
+                    dag: run
+                        .tasks
+                        .iter()
+                        .map(|(id, task)| (id.clone(), task.state))
+                        .collect(),
+                    remaining_budget_summary: "policy has not configured a budget".into(),
+                },
+                delivered: false,
             },
-            delivered: false,
-        });
+        );
         self.save_state(&state)
     }
     fn outcome(&self, child: OperationId, fallback: InboxKind) -> Result<WakeOutcome> {
@@ -582,14 +757,47 @@ impl SupervisorRuntime {
             changed = true;
         }
         if changed {
+            state.compact_delivered_wakes();
             self.save_state(&state)?;
         }
         Ok(())
     }
+
+    fn ensure_start_capacity(&self, state: &mut RuntimeState) -> Result<()> {
+        if state.starts.len() < MAX_START_RESERVATIONS {
+            return Ok(());
+        }
+        let mut recyclable = Vec::new();
+        for (key, reservation) in &state.starts {
+            match self.supervisor.load(reservation.supervisor_run_id)? {
+                None => recyclable.push((None, key.clone())),
+                Some(run) if run.state.terminal() => {
+                    recyclable.push((run.terminal_at.or(Some(run.updated_at)), key.clone()));
+                }
+                Some(_) => {}
+            }
+        }
+        recyclable.sort_by_key(|(terminal_at, key)| (*terminal_at, key.clone()));
+        for (_, key) in recyclable {
+            if state.starts.len() < MAX_START_RESERVATIONS {
+                break;
+            }
+            state.starts.remove(&key);
+            state.expired_starts.insert(&key);
+        }
+        if state.starts.len() >= MAX_START_RESERVATIONS {
+            anyhow::bail!("supervisor start reservation capacity is exhausted");
+        }
+        Ok(())
+    }
+
     fn load_state(&self) -> Result<RuntimeState> {
-        Ok(json_file::read(&self.state_path)?.unwrap_or_default())
+        let state: RuntimeState = json_file::read(&self.state_path)?.unwrap_or_default();
+        state.validate_limits()?;
+        Ok(state)
     }
     fn save_state(&self, state: &RuntimeState) -> Result<()> {
+        state.validate_limits()?;
         json_file::write_atomic(
             self.state_path.parent().expect("state path has parent"),
             &self.state_path,
@@ -711,6 +919,28 @@ mod tests {
         }
     }
 
+    fn wake_reservation(index: usize, delivered: bool) -> WakeReservation {
+        let run = SupervisorRunId::new();
+        let parent = TaskId::new(format!("parent-{index}")).unwrap();
+        let child = OperationId::new();
+        WakeReservation {
+            wake: DecisionWake {
+                supervisor_run_id: run,
+                parent_task_id: parent.clone(),
+                parent_generation: 1,
+                parent: provenance(run, &parent, None, OperationId::new()),
+                child_run_id: child,
+                outcome: WakeOutcome {
+                    kind: InboxKind::Completed,
+                    summary: "done".into(),
+                },
+                dag: Vec::new(),
+                remaining_budget_summary: "none".into(),
+            },
+            delivered,
+        }
+    }
+
     #[test]
     fn terminal_statuses_and_sources_preserve_the_safe_completion_vocabulary() {
         assert_eq!(terminal(RunStatus::Running), None);
@@ -735,6 +965,298 @@ mod tests {
             SupervisorEventSource::DispatchFailure
         );
         assert_eq!(source(InboxKind::NoReport), SupervisorEventSource::NoReport);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Every field/count boundary belongs to one admission matrix.
+    fn start_input_limits_are_utf8_byte_bounds_before_any_durable_effect() {
+        let exact_root = format!("{}a", "う".repeat((MAX_SUPERVISOR_TEXT_BYTES - 1) / 3));
+        let exact_id = format!(
+            "{}aa",
+            "う".repeat((usagi_core::domain::supervisor::MAX_TASK_ID_BYTES - 2) / 3)
+        );
+        let task = InitialTask {
+            task_id: exact_id,
+            parent_task_id: None,
+            dependencies: Vec::new(),
+            instruction: "work".into(),
+            required_artifact_contract: "none".into(),
+        };
+        assert_eq!(exact_root.len(), MAX_SUPERVISOR_TEXT_BYTES);
+        validate_start_input(
+            "operation",
+            &exact_root,
+            std::slice::from_ref(&task),
+            Some("policy"),
+        )
+        .unwrap();
+        assert!(
+            validate_start_input("operation", &(exact_root + "x"), &[task], None)
+                .unwrap_err()
+                .to_string()
+                .contains("root task")
+        );
+        assert!(
+            validate_start_input(&"x".repeat(MAX_SUPERVISOR_KEY_BYTES + 1), "root", &[], None,)
+                .is_err()
+        );
+        assert!(
+            validate_start_input(
+                "operation",
+                "root",
+                &vec![
+                    InitialTask {
+                        task_id: "task".into(),
+                        parent_task_id: None,
+                        dependencies: Vec::new(),
+                        instruction: "work".into(),
+                        required_artifact_contract: "none".into(),
+                    };
+                    MAX_INITIAL_TASKS + 1
+                ],
+                None,
+            )
+            .is_err()
+        );
+        for invalid in [
+            InitialTask {
+                task_id: "x".repeat(usagi_core::domain::supervisor::MAX_TASK_ID_BYTES + 1),
+                parent_task_id: None,
+                dependencies: Vec::new(),
+                instruction: "work".into(),
+                required_artifact_contract: "none".into(),
+            },
+            InitialTask {
+                task_id: "task".into(),
+                parent_task_id: Some(
+                    "x".repeat(usagi_core::domain::supervisor::MAX_TASK_ID_BYTES + 1),
+                ),
+                dependencies: Vec::new(),
+                instruction: "work".into(),
+                required_artifact_contract: "none".into(),
+            },
+            InitialTask {
+                task_id: "task".into(),
+                parent_task_id: None,
+                dependencies: vec!["dependency".into(); MAX_TASK_DEPENDENCIES + 1],
+                instruction: "work".into(),
+                required_artifact_contract: "none".into(),
+            },
+            InitialTask {
+                task_id: "task".into(),
+                parent_task_id: None,
+                dependencies: vec![
+                    "x".repeat(usagi_core::domain::supervisor::MAX_TASK_ID_BYTES + 1),
+                ],
+                instruction: "work".into(),
+                required_artifact_contract: "none".into(),
+            },
+            InitialTask {
+                task_id: "task".into(),
+                parent_task_id: None,
+                dependencies: Vec::new(),
+                instruction: "x".repeat(MAX_SUPERVISOR_TEXT_BYTES + 1),
+                required_artifact_contract: "none".into(),
+            },
+            InitialTask {
+                task_id: "task".into(),
+                parent_task_id: None,
+                dependencies: Vec::new(),
+                instruction: "work".into(),
+                required_artifact_contract: "x".repeat(MAX_ARTIFACT_CONTRACT_BYTES + 1),
+            },
+        ] {
+            assert!(validate_start_input("operation", "root", &[invalid], None).is_err());
+        }
+        assert!(validate_start_input("operation", "root", &[], Some("")).is_err());
+
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        assert!(
+            scheduler
+                .start(
+                    "caller",
+                    "operation",
+                    "x".repeat(MAX_SUPERVISOR_TEXT_BYTES + 1),
+                    Vec::new(),
+                    None,
+                    now(),
+                )
+                .is_err()
+        );
+        assert!(!scheduler.state_path.exists());
+        assert!(!temp.path().join("supervisor-runs").exists());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Start and wake retention share one durable metadata contract.
+    fn runtime_metadata_compacts_safe_history_and_backpressures_live_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let mut state = RuntimeState::default();
+
+        for index in 0..MAX_START_RESERVATIONS {
+            let run = SupervisorRun::new(
+                "caller".into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now(),
+            );
+            scheduler.supervisor.initialize(&run).unwrap();
+            state.starts.insert(
+                format!("start-{index}"),
+                StartReservation {
+                    semantic_key: format!("semantic-{index}"),
+                    supervisor_run_id: run.supervisor_run_id,
+                },
+            );
+        }
+        assert!(
+            scheduler
+                .ensure_start_capacity(&mut state)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+
+        let first_id = state.starts["start-0"].supervisor_run_id;
+        let mut finished = scheduler.supervisor.load(first_id).unwrap().unwrap();
+        finished.state = SupervisorRunState::Succeeded;
+        finished.terminal_at = Some(now());
+        json_file::write_atomic(
+            scheduler
+                .supervisor
+                .snapshot_path(first_id)
+                .parent()
+                .unwrap(),
+            &scheduler.supervisor.snapshot_path(first_id),
+            &finished,
+        )
+        .unwrap();
+        scheduler.ensure_start_capacity(&mut state).unwrap();
+        assert_eq!(state.starts.len(), MAX_START_RESERVATIONS - 1);
+        assert!(state.expired_starts.contains("start-0"));
+
+        let mut missing = RuntimeState::default();
+        for index in 0..=MAX_START_RESERVATIONS {
+            missing.starts.insert(
+                format!("missing-{index}"),
+                StartReservation {
+                    semantic_key: format!("missing-semantic-{index}"),
+                    supervisor_run_id: SupervisorRunId::new(),
+                },
+            );
+        }
+        scheduler.ensure_start_capacity(&mut missing).unwrap();
+        assert_eq!(missing.starts.len(), MAX_START_RESERVATIONS - 1);
+        assert!(missing.expired_starts.contains("missing-0"));
+        assert!(missing.expired_starts.contains("missing-1"));
+
+        scheduler.save_state(&state).unwrap();
+        assert!(
+            scheduler
+                .start("caller", "start-0", "root".into(), Vec::new(), None, now(),)
+                .unwrap_err()
+                .to_string()
+                .contains("idempotency window expired")
+        );
+
+        for index in 0..MAX_WAKE_RESERVATIONS {
+            state
+                .wakes
+                .insert(format!("wake-{index:02}"), wake_reservation(index, true));
+        }
+        state.compact_delivered_wakes();
+        assert_eq!(state.wakes.len(), RETAIN_DELIVERED_WAKES);
+        assert!(state.expired_wakes.contains("wake-00"));
+
+        state.wakes.clear();
+        for index in 0..=MAX_WAKE_RESERVATIONS {
+            state.wakes.insert(
+                format!("pending-{index:02}"),
+                wake_reservation(index, false),
+            );
+        }
+        state.compact_delivered_wakes();
+        assert_eq!(state.wakes.len(), MAX_WAKE_RESERVATIONS + 1);
+        assert!(
+            scheduler
+                .save_state(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+
+        let run_id = SupervisorRunId::new();
+        let parent_id = TaskId::new("parent-capacity").unwrap();
+        let child = OperationId::new();
+        let mut run = SupervisorRun::new_with_id(
+            run_id,
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let mut parent = task(run_id, "parent-capacity", None);
+        parent.state = TaskState::AwaitingDecision;
+        run.tasks.insert(parent_id.clone(), parent);
+        run.provenance.insert(
+            parent_id.clone(),
+            provenance(run_id, &parent_id, None, OperationId::new()),
+        );
+        state.wakes.clear();
+        state.wakes = (0..MAX_WAKE_RESERVATIONS)
+            .map(|index| (format!("full-{index}"), wake_reservation(index, false)))
+            .collect();
+        scheduler.save_state(&state).unwrap();
+        assert!(
+            scheduler
+                .reserve_parent_wake(&mut run, &parent_id, child, InboxKind::Completed, now(),)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+        state.wakes.clear();
+        let wake_key = format!("{}:{}:{}", child, parent_id.0, 1);
+        state.expired_wakes.insert(&wake_key);
+        scheduler.save_state(&state).unwrap();
+        scheduler
+            .reserve_parent_wake(&mut run, &parent_id, child, InboxKind::Completed, now())
+            .unwrap();
+        assert!(scheduler.load_state().unwrap().wakes.is_empty());
+    }
+
+    #[test]
+    fn oversized_or_malformed_runtime_metadata_fails_closed_on_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let mut state = RuntimeState {
+            wakes: (0..=MAX_WAKE_RESERVATIONS)
+                .map(|index| (format!("pending-{index}"), wake_reservation(index, false)))
+                .collect(),
+            ..RuntimeState::default()
+        };
+        json_file::write_atomic(temp.path(), &scheduler.state_path, &state).unwrap();
+        assert!(
+            scheduler
+                .load_state()
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+
+        state.wakes.clear();
+        state.expired_starts.words.push(1);
+        json_file::write_atomic(temp.path(), &scheduler.state_path, &state).unwrap();
+        assert!(
+            scheduler
+                .load_state()
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
     }
 
     #[test]
