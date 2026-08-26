@@ -71,8 +71,8 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, GardenClick, NewRequest, Notice, OperationResult, Overlay, PendingToken, RoleChoice,
-    SessionRoleCatalog, SessionRoleProjection, Target,
+    Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken,
+    RoleChoice, Route, SessionRoleCatalog, SessionRoleProjection, Target,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -3501,8 +3501,9 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         Key::Resize | Key::Other => return Some(AppEvent::Tick),
         Key::Up => AppKey::Up,
         Key::Down => AppKey::Down,
-        // Left/Right move the focus inside a horizontal choice (the Yes/No quit
-        // confirmation); the reducer ignores them elsewhere. Tab motion between
+        // Switch-mode Left/Right is consumed by the process-level project deck
+        // before this mapping. When the keys reach the reducer they move a
+        // horizontal choice such as the quit confirmation. Tab motion between
         // live tabs stays Ctrl-N/P.
         Key::Left => AppKey::Left,
         Key::Right => AppKey::Right,
@@ -5984,6 +5985,21 @@ impl IdleWatch {
     }
 }
 
+fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Option<PathBuf> {
+    if deck.overlay_open()
+        || state.overlay().is_some()
+        || state.director_drawer_open()
+        || state.route() != Route::Home(HomeMode::Switch)
+    {
+        return None;
+    }
+    match key {
+        Key::Left => Some(deck.previous_path().to_path_buf()),
+        Key::Right => Some(deck.next_path().to_path_buf()),
+        _ => None,
+    }
+}
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -6391,14 +6407,16 @@ fn drive_workspace_controller(
         };
         let key = adjust_project_bar_pointer(raw_key);
 
-        // Project actions are process-level. They win over every workspace
-        // surface, including a focused live PTY and Director.
+        // Leader shortcuts and project-bar clicks are process-level and win over
+        // every workspace surface, including a focused live PTY and Director.
+        // Plain arrows are deliberately local to unobscured Switch mode.
+        let switch_arrow_target = switch_arrow_target(deck, runtime.state(), &key);
         let direct_target = match (&key, &bar_target) {
             (Key::Live(LiveTerminalAction::ActivateWorkspace(number)), _) => deck
                 .path_at(usize::from(number.saturating_sub(1)))
                 .map(Path::to_path_buf),
             (_, Some(ProjectBarTarget::Workspace(path))) => Some(path.clone()),
-            _ => None,
+            _ => switch_arrow_target,
         };
         let opens_add = matches!(key, Key::Live(LiveTerminalAction::OpenWorkspace))
             || matches!(bar_target, Some(ProjectBarTarget::Add));
@@ -8009,7 +8027,7 @@ mod tests {
         AgentTabSlotIntent, AgentTabTargetProjection,
     };
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
+        AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
         GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay, PendingToken,
         RoleEditorScope, Route, SessionCreateIntent, SessionRoleCatalog, TabDirection, Target,
     };
@@ -25101,6 +25119,105 @@ mod tests {
                 RESIDENT_PORTS_PER_COMPOSITION,
                 2 * RESIDENT_PORTS_PER_COMPOSITION,
             ]
+        );
+    }
+
+    #[test]
+    fn switch_arrows_follow_project_tab_order_and_wrap() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Left,
+            Key::Right,
+            Key::Right,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                vec![ws("alpha"), ws("beta")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(
+            loader.opened,
+            vec![
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
+                PathBuf::from("/tmp/beta"),
+                PathBuf::from("/tmp/alpha"),
+            ]
+        );
+        assert_eq!(
+            factory.drops_at_create,
+            vec![
+                0,
+                RESIDENT_PORTS_PER_COMPOSITION,
+                2 * RESIDENT_PORTS_PER_COMPOSITION,
+                3 * RESIDENT_PORTS_PER_COMPOSITION,
+                4 * RESIDENT_PORTS_PER_COMPOSITION,
+            ]
+        );
+    }
+
+    #[test]
+    fn switch_arrows_are_owned_only_by_unobscured_switch_mode() {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let gamma = snapshot("gamma");
+        let deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta, gamma]).unwrap();
+        let mut state = AppState::home(alpha.workspace_id, alpha.session_ids.clone());
+
+        assert_eq!(
+            super::switch_arrow_target(&deck, &state, &Key::Left),
+            Some(PathBuf::from("/tmp/gamma"))
+        );
+        assert_eq!(
+            super::switch_arrow_target(&deck, &state, &Key::Right),
+            Some(PathBuf::from("/tmp/beta"))
+        );
+        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Up), None);
+
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Key(AppKey::Enter),
+        );
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Right), None);
+
+        let mut state = AppState::home(alpha.workspace_id, alpha.session_ids.clone());
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Key(AppKey::CtrlQ),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        assert_eq!(super::switch_arrow_target(&deck, &state, &Key::Left), None);
+
+        let mut overlay_deck = deck;
+        overlay_deck.open_switcher();
+        let state = AppState::home(alpha.workspace_id, alpha.session_ids);
+        assert_eq!(
+            super::switch_arrow_target(&overlay_deck, &state, &Key::Right),
+            None
         );
     }
 

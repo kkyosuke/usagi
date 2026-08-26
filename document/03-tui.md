@@ -168,7 +168,11 @@ production fallback stub は持たない。
 | `quit` | `q` / `y` | この TUI client を終了する |
 | `stay` | `n` / `Esc` | この workspace に留まる |
 
-離脱と終了はどちらも **active workspace のために確立した資源をすべて落とす**。project tab の切替も同じ detach 境界を使う。terminal lane・poll lane・
+Switch の `←` / `→` は exit prompt を開かず、隣の project tab へ直接移動する。数字 shortcut や
+tab click と同じく target を先に prepare し、成功した場合だけ現在の workspace loop を抜ける。次の
+composition は teardown 完了後に開始し、prepare が失敗した場合は現在の workspace と tab を保つ。
+
+離脱、左右移動、終了はいずれも **active workspace のために確立した資源をすべて落とす**。terminal lane・poll lane・
 pane launch client・restore client の接続、Home の 3 つの[背景観測 lane](#home-frame-loop-と背景観測-lane)、
 metrics lane はいずれも workspace の frame loop が所有しており、loop を抜けることが teardown そのものである。
 したがって**次の workspace を開く時点で、前の workspace の port・pump・worker は 1 つも残っていない**。
@@ -330,6 +334,10 @@ scroll、tab close / reorder、text selection、copy、link open は入力を受
 | Closeup で pending / interrupted tab を選択中（live terminal viewport が無い） | Closeup の management input |
 | overlay・Closeup action modal が前面にある | その overlay |
 | [指示モード](#指示モードdirector-mode)の drawer が開いている | drawer の root conversation |
+
+Switch の `←` / `→` は、上部に開いている project tab の安定した並びで前 / 次へ移動する。端では
+反対側へ循環し、tab が 1 件だけなら no-op になる。overlay、Closeup、編集欄、Director drawer が
+前面にある間はそれぞれが左右キーを所有し、project tab の移動には使わない。
 
 Overview、Closeup action、PR、preview、text、notes、
 environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
