@@ -144,6 +144,8 @@ pub struct VtScreen {
     scroll_bottom: usize,
     /// DECCKM: cursor keys use SS3 instead of CSI while enabled.
     application_cursor: bool,
+    /// DECSET 2004: pasted text must be surrounded by bracketed-paste markers.
+    bracketed_paste: bool,
     /// Concrete DEC mouse tracking mode; only its matching reset disables it.
     mouse_protocol_mode: checkpoint::MouseProtocolMode,
     /// Coordinate encoding selected by DECSET 1005/1006.
@@ -325,6 +327,7 @@ impl VtScreen {
             scroll_top: 0,
             scroll_bottom: rows - 1,
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: checkpoint::MouseProtocolMode::None,
             mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
             primary_screen: None,
@@ -424,6 +427,12 @@ impl VtScreen {
     #[must_use]
     pub const fn application_cursor(&self) -> bool {
         self.application_cursor
+    }
+
+    /// Whether a program requested bracketed-paste input.
+    #[must_use]
+    pub const fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     /// Whether a program requested DEC mouse reports.
@@ -837,6 +846,7 @@ impl VtScreen {
                 1003 => self.mouse_protocol_mode = checkpoint::MouseProtocolMode::AnyMotion,
                 1005 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Utf8,
                 1006 => self.mouse_encoding = checkpoint::MouseProtocolEncoding::Sgr,
+                2004 => self.bracketed_paste = true,
                 47 | 1047 | 1049 => self.enter_alternate_screen(),
                 _ => {}
             }
@@ -865,6 +875,7 @@ impl VtScreen {
                 1006 if self.mouse_encoding == checkpoint::MouseProtocolEncoding::Sgr => {
                     self.mouse_encoding = checkpoint::MouseProtocolEncoding::Default;
                 }
+                2004 => self.bracketed_paste = false,
                 47 | 1047 | 1049 => self.leave_alternate_screen(),
                 _ => {}
             }
@@ -1085,6 +1096,7 @@ impl VtScreen {
                 utf8_needed: self.utf8_needed as u8,
             },
             application_cursor: self.application_cursor,
+            bracketed_paste: self.bracketed_paste,
             mouse_protocol_mode: self.mouse_protocol_mode,
             mouse_encoding: self.mouse_encoding,
             styles: styles.table,
@@ -1146,6 +1158,7 @@ impl VtScreen {
         screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
         screen.utf8_needed = cp.decoder.utf8_needed as usize;
         screen.application_cursor = cp.application_cursor;
+        screen.bracketed_paste = cp.bracketed_paste;
         screen.mouse_protocol_mode = cp.mouse_protocol_mode;
         screen.mouse_encoding = cp.mouse_encoding;
 
@@ -1915,18 +1928,21 @@ mod tests {
     #[test]
     fn dec_input_modes_follow_program_requests_and_checkpoint() {
         let mut screen = VtScreen::new(2, 8);
-        screen.advance(b"\x1b[?1h\x1b[?1000h\x1b[?1006h");
+        screen.advance(b"\x1b[?1h\x1b[?1000h\x1b[?1006h\x1b[?2004h");
         assert!(screen.application_cursor());
+        assert!(screen.bracketed_paste());
         assert!(screen.mouse_protocol());
         assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Sgr);
 
         let restored = VtScreen::from_checkpoint(&screen.checkpoint()).expect("input modes");
         assert!(restored.application_cursor());
+        assert!(restored.bracketed_paste());
         assert!(restored.mouse_protocol());
         assert_eq!(restored.mouse_encoding(), MouseProtocolEncoding::Sgr);
 
-        screen.advance(b"\x1b[?1l\x1b[?1000l\x1b[?1006l");
+        screen.advance(b"\x1b[?1l\x1b[?1000l\x1b[?1006l\x1b[?2004l");
         assert!(!screen.application_cursor());
+        assert!(!screen.bracketed_paste());
         assert!(!screen.mouse_protocol());
         assert_eq!(screen.mouse_encoding(), MouseProtocolEncoding::Default);
 
@@ -2201,12 +2217,14 @@ mod tests {
             .remove("scrollback_origin");
         let legacy_object = legacy.as_object_mut().expect("checkpoint object");
         legacy_object.remove("application_cursor");
+        legacy_object.remove("bracketed_paste");
         legacy_object.remove("mouse_protocol_mode");
         legacy_object.remove("mouse_encoding");
         let legacy: ScreenCheckpoint =
             serde_json::from_value(legacy).expect("legacy checkpoint decodes");
         assert_eq!(legacy.primary.scrollback_origin, 0);
         assert!(!legacy.application_cursor);
+        assert!(!legacy.bracketed_paste);
         assert_eq!(legacy.mouse_protocol_mode, MouseProtocolMode::None);
         assert_eq!(legacy.mouse_encoding, MouseProtocolEncoding::Default);
     }
@@ -2320,6 +2338,7 @@ mod tests {
                 utf8_needed: 0,
             },
             application_cursor: false,
+            bracketed_paste: false,
             mouse_protocol_mode: checkpoint::MouseProtocolMode::None,
             mouse_encoding: checkpoint::MouseProtocolEncoding::Default,
         }

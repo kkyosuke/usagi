@@ -574,16 +574,20 @@ const PASTE_START: &str = "\x1b[200~";
 /// Bracketed-paste end marker (DECSET 2004).
 const PASTE_END: &str = "\x1b[201~";
 
-/// Wrap a paste payload in bracketed-paste markers so a program that enabled
-/// bracketed paste (agent CLIs such as `claude` / `codex`) inserts the
-/// multi-line text as one block instead of submitting on every embedded newline.
+/// Encode a paste payload for the input mode requested by the focused program.
+/// A bracketed-paste consumer (agent CLIs such as `claude` / `codex`) receives
+/// one marked block; a program that did not opt in receives the original bytes,
+/// without visible `ESC[200~` / `ESC[201~` text being added.
 ///
-/// Any [`PASTE_END`] marker inside `text` is removed first: leaving it in would
-/// let pasted content close the paste early and have its tail run as live
-/// keystrokes (paste injection), so — like real terminals — the embedded
-/// terminator is neutralised.
+/// In bracketed mode, any [`PASTE_END`] marker inside `text` is removed first:
+/// leaving it in would let pasted content close the paste early and have its
+/// tail run as live keystrokes (paste injection), so — like real terminals —
+/// the embedded terminator is neutralised.
 #[must_use]
-pub fn encode_bracketed_paste(text: &str) -> Vec<u8> {
+pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
     let body = text.replace(PASTE_END, "");
     let mut out = Vec::with_capacity(PASTE_START.len() + body.len() + PASTE_END.len());
     out.extend_from_slice(PASTE_START.as_bytes());
@@ -599,9 +603,17 @@ mod tests {
     const T0: Duration = Duration::ZERO;
 
     #[test]
+    fn paste_without_program_opt_in_preserves_the_payload() {
+        assert_eq!(
+            encode_paste("line1\nline2\x1b[201~tail", false),
+            b"line1\nline2\x1b[201~tail".to_vec()
+        );
+    }
+
+    #[test]
     fn bracketed_paste_wraps_a_multi_line_payload_in_markers() {
         assert_eq!(
-            encode_bracketed_paste("line1\nline2"),
+            encode_paste("line1\nline2", true),
             b"\x1b[200~line1\nline2\x1b[201~".to_vec()
         );
     }
@@ -609,7 +621,7 @@ mod tests {
     #[test]
     fn bracketed_paste_strips_embedded_end_markers_to_block_injection() {
         assert_eq!(
-            encode_bracketed_paste("safe\x1b[201~rm -rf /\r"),
+            encode_paste("safe\x1b[201~rm -rf /\r", true),
             b"\x1b[200~saferm -rf /\r\x1b[201~".to_vec()
         );
     }

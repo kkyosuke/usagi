@@ -87,8 +87,7 @@ use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand
 use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
-use crate::usecase::application::terminal_screen::TerminalBuffer;
-use crate::usecase::application::terminal_screen::TerminalInputModes;
+use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::TerminalSelection;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
@@ -647,18 +646,23 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive. Reserved prefix actions ([`Key::Live`]) do not reach the shell;
 /// all other keys, including global controls, do while Closeup owns the pane.
+#[cfg(test)]
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
+    key_to_terminal_bytes_for_mode(key, false)
+}
+
+fn key_to_terminal_bytes_for_mode(key: Key, bracketed_paste: bool) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
         Key::Management { passthrough, .. } => {
             return (!passthrough.is_empty()).then_some(passthrough);
         }
-        // Forward a paste as one bracketed-paste block so an agent that requested
-        // the mode inserts the multi-line text instead of submitting on every
-        // embedded newline (the fix for pasting clipboard into the agent).
+        // Mark a paste only when the focused program requested DECSET 2004.
+        // Otherwise those control sequences can become visible `200~` / `201~`
+        // text in a shell or an Agent that has not enabled bracketed paste yet.
         Key::Paste(text) => {
             return (!text.is_empty())
-                .then(|| crate::usecase::terminal_input::encode_bracketed_paste(&text));
+                .then(|| crate::usecase::terminal_input::encode_paste(&text, bracketed_paste));
         }
         Key::Char(ch) => ch.to_string().into_bytes(),
         Key::Enter => b"\r".to_vec(),
@@ -717,12 +721,20 @@ fn forward_live_terminal_input(
         }
         return true;
     }
-    let Some((terminal, bytes)) = runtime
+    let Some(terminal) = runtime
         .wants_live_input()
         .then(|| runtime.focused_terminal())
         .flatten()
-        .zip(key_to_terminal_bytes(key.clone()))
     else {
+        return false;
+    };
+    // Mode lookup walks the attached terminal set, so keep ordinary keystrokes
+    // on their existing direct path and consult it only for a paste.
+    let bracketed_paste = matches!(key, Key::Paste(_))
+        && ui
+            .terminal_input_modes(&terminal)
+            .is_some_and(|modes| modes.paste == PasteMode::Bracketed);
+    let Some(bytes) = key_to_terminal_bytes_for_mode(key.clone(), bracketed_paste) else {
         return false;
     };
     // The stream port is resident, so a launch in flight never drops a
@@ -4709,7 +4721,7 @@ fn close_focused_terminal_pane(
     // normal exit observation then removes the authoritative tab and refreshes
     // sidebar/Garden membership.
     if let Some(terminal) = runtime.focused_agent_terminal() {
-        let ctrl_d = key_to_terminal_bytes(Key::CtrlD)
+        let ctrl_d = key_to_terminal_bytes_for_mode(Key::CtrlD, false)
             .expect("Ctrl-D always has a live-terminal byte encoding");
         if let Err(message) = ui.send_terminal_bytes(&terminal, &ctrl_d) {
             runtime.surface_focused_pane_feedback(message);
@@ -7968,13 +7980,14 @@ mod tests {
         drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
         garden_click_at, garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
-        new_project_notice, play_startup_splash, poll_and_project_terminals,
-        prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
-        prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
-        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
-        reset_projection_build_counts, restore_open_panes, retarget_director_chords,
-        route_garden_input, route_workspace_input_before_reducer, run as run_from_start,
-        run_screen_graph_with_backend, run_with_settings,
+        key_to_terminal_bytes_for_mode, new_project_notice, play_startup_splash,
+        poll_and_project_terminals, prepare_activation_settings, prepare_batch_settings,
+        prepare_deck_workspace, prepare_workspace_deck, projection_build_counts, recent_paths,
+        registry_contains_path, remove_registry_paths, render_controller_frame,
+        render_home_material, render_home_snapshot, reset_projection_build_counts,
+        restore_open_panes, retarget_director_chords, route_garden_input,
+        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -15380,6 +15393,48 @@ mod tests {
             rows_len,
             scroll,
         ));
+    }
+
+    #[test]
+    fn paste_markers_follow_the_focused_programs_bracketed_paste_mode() {
+        for (replay, expected) in [
+            (b"agent".as_slice(), b"one\ntwo".to_vec()),
+            (
+                b"\x1b[?2004hagent".as_slice(),
+                b"\x1b[200~one\ntwo\x1b[201~".to_vec(),
+            ),
+            (
+                b"\x1b[?2004h\x1b[?2004lagent".as_slice(),
+                b"one\ntwo".to_vec(),
+            ),
+        ] {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let terminal = live_terminal_ref(workspace, session);
+            let inputs = Arc::new(Mutex::new(Vec::new()));
+            let (mut ui, runtime) = focused_live_pane(
+                workspace,
+                session,
+                terminal.clone(),
+                Box::new(WheelRecordingPort {
+                    terminal,
+                    replay: replay.to_vec(),
+                    inputs: Arc::clone(&inputs),
+                    input_error: false,
+                }),
+            );
+            let mut controls = LiveTerminalControls::default();
+            let mut term = FakeTerminal::default();
+
+            assert!(forward_live_terminal_input(
+                &mut ui,
+                &runtime,
+                &mut controls,
+                &mut term,
+                &Key::Paste("one\ntwo".to_owned()),
+            ));
+            assert_eq!(*inputs.lock().unwrap(), vec![expected]);
+        }
     }
 
     /// `Ctrl-O b` is the way back to live output. A scrolled viewport holds its
@@ -23613,10 +23668,14 @@ mod tests {
             }),
             Some(vec![0x13])
         );
-        // A paste is wrapped in bracketed-paste markers so the agent inserts the
-        // multi-line text as one block; an empty paste sends nothing.
+        // A program that did not request bracketed paste gets the raw payload;
+        // an opted-in Agent gets one marked block. An empty paste sends nothing.
         assert_eq!(
             key_to_terminal_bytes(Key::Paste("a\nb".to_owned())),
+            Some(b"a\nb".to_vec())
+        );
+        assert_eq!(
+            key_to_terminal_bytes_for_mode(Key::Paste("a\nb".to_owned()), true),
             Some(b"\x1b[200~a\nb\x1b[201~".to_vec())
         );
         assert_eq!(key_to_terminal_bytes(Key::Paste(String::new())), None);
