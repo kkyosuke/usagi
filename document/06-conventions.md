@@ -386,7 +386,12 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/coverage.yml` | PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR コメント + Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
 | `.github/workflows/markdown-link-check.yml` | `main` への push / PR | Markdown 対象差分ではリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証し、全差分で `markdown-link-check` aggregate を報告 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
+| `.github/workflows/security-audit.yml` | 毎週 / 手動 | `Cargo.lock` を RustSec advisory database と照合する。PR / `main` push では `test.yml` の policy check として同じ audit を実行し、required `test` aggregate が結果を伝播する |
 
+- Rust 依存は Dependabot が毎週更新 PR を作り、GitHub Actions の参照も同じ周期で更新する。RustSec advisory を一時的に
+  除外するときは `.github/security-audit-exceptions.json` に advisory ID、GitHub handle の `owner`、ISO 形式の `expires`、
+  具体的な `rationale` を登録する。`expires` は検証日から 90 日以内とし、期限切れ・必須項目欠落・未知フィールド・重複は
+  audit 前の checker が拒否する。更新には改めて owner と rationale のレビューを必要とし、恒久的な除外は認めない。
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 - `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の正本へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
