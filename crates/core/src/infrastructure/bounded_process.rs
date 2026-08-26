@@ -476,4 +476,43 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(1));
     }
+
+    #[test]
+    fn bounded_input_normalizes_nonzero_broken_pipe_and_descendant_cleanup() {
+        assert_eq!(
+            write_stdin_bounded(
+                "sh",
+                &["-c", "cat >/dev/null; exit 7"],
+                b"payload",
+                16,
+                policy()
+            ),
+            ChildInputExecution::ExitFailure
+        );
+
+        let oversized_pipe_write = vec![b'x'; 1024 * 1024];
+        assert_eq!(
+            write_stdin_bounded(
+                "sh",
+                &["-c", "exec 0<&-; sleep 0.05"],
+                &oversized_pipe_write,
+                oversized_pipe_write.len(),
+                policy(),
+            ),
+            ChildInputExecution::ObservationFailed
+        );
+
+        let started = Instant::now();
+        assert_eq!(
+            write_stdin_bounded(
+                "sh",
+                &["-c", "(trap '' TERM; sleep 30) & exit 0"],
+                b"payload",
+                16,
+                policy(),
+            ),
+            ChildInputExecution::Success
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

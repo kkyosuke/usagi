@@ -46,7 +46,7 @@ mod real_io {
         )
     }
 
-    fn write_with(command: &ClipboardCommand, text: &str) -> Result<(), String> {
+    pub(super) fn write_with(command: &ClipboardCommand, text: &str) -> Result<(), String> {
         let outcome = write_stdin_bounded(
             command.program,
             command.arguments,
@@ -235,5 +235,19 @@ mod tests {
             error,
             "clipboard is unavailable (wl-copy failed; xclip failed; xsel failed)"
         );
+    }
+
+    #[test]
+    fn a_hung_backend_returns_within_the_owned_deadline() {
+        let command = ClipboardCommand {
+            program: "sh",
+            arguments: &["-c", "trap '' TERM; (trap '' TERM; sleep 30) & wait"],
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            real_io::write_with(&command, "copy me"),
+            Err("sh timed out".to_owned())
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
