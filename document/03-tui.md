@@ -890,9 +890,10 @@ resident にせず、inactive plot に Agent runtime を推測して描かない
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
-区画が端末に収まらない場合は固定容量で切り捨てず、全 session を page に分ける。footer の `← Prev` / `Next →` button、
-または `←` / `→` key で page を移動でき、最後の project を含む全 session が Garden 内から到達可能である。page button は
-左右 1 cell の padding を含む描画範囲全体を click target にし、先頭・末尾の無効な方向を押しても Garden を閉じない。
+区画は端末の縦方向へ収まる数を1列として tab 順に上から下、次に右へ並べる。横方向に収まらない場合は固定容量で
+切り捨てず、footer の `← Scroll` / `Scroll →` button または `←` / `→` key で viewport を1 plot列ずつ動かす。
+footer は表示中のsession範囲と全件数を示し、最後のprojectを含む全sessionへGarden内から到達できる。scroll button は
+左右1cellのpaddingを含む描画範囲全体をclick targetにし、左右端の無効な方向を押してもGardenを閉じない。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
@@ -968,8 +969,8 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 
 | 入力 | 挙動 |
 |---|---|
-| `←` / `→` | 前後の Garden page へ移る。先頭・末尾では現在の page に留まり、Garden を閉じない |
-| footer の `← Prev` / `Next →` を click | button の左右 padding を含む範囲で前後の page へ移る。無効な方向は現在の page に留まる |
+| `←` / `→` | Garden を1 plot列ずつ横スクロールする。左右端では現在位置に留まり、Gardenを閉じない |
+| footer の `← Scroll` / `Scroll →` を click | buttonの左右paddingを含む範囲で1 plot列ずつ横スクロールする。無効な方向は現在位置に留まる |
 | 上記以外の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |

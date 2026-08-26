@@ -57,7 +57,7 @@ use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
     self, GitDiff, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
-    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_page_action,
+    Workspace as WorkspaceView, garden_click_at, garden_fits, garden_scroll_action,
     home_header_action_at, render_home, render_home_at, right_pane_tab_at, terminal_point_at,
 };
 use crate::presentation::widgets::modal::{self, ConfirmationView};
@@ -913,7 +913,7 @@ fn route_garden_input(
         }
         Key::Left | Key::Right => material
             .and_then(|material| {
-                garden_page_action(
+                garden_scroll_action(
                     material.height,
                     material.width,
                     &material.projection,
@@ -8694,7 +8694,7 @@ mod tests {
     }
 
     #[test]
-    fn garden_arrow_routes_to_the_next_drawn_page_without_waking_home() {
+    fn garden_arrow_scrolls_one_drawn_column_without_waking_home() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -8747,7 +8747,7 @@ mod tests {
             Some(GardenInputRoute::Local(Vec::new())),
         );
         assert_eq!(runtime.state().overlay(), Some(Overlay::Garden));
-        assert_eq!(runtime.state().garden_page(), 1);
+        assert_eq!(runtime.state().garden_scroll(), 1);
     }
 
     #[test]

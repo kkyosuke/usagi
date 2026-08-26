@@ -338,9 +338,9 @@ pub struct HomeProjection {
     /// more open projects contribute cached plots.
     garden_scope: String,
     garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
-    /// Renderer-independent page request owned by the controller. The Garden
-    /// layout clamps it against the current terminal capacity and session count.
-    garden_page: usize,
+    /// Renderer-independent horizontal column offset owned by the controller. The
+    /// Garden layout clamps it against the current terminal capacity and session count.
+    garden_scroll: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
@@ -571,7 +571,7 @@ impl HomeProjection {
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
             garden_workspaces,
-            garden_page: state.garden_page(),
+            garden_scroll: state.garden_scroll(),
             garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
             closeup_modal: None,
@@ -634,11 +634,11 @@ impl HomeProjection {
             return now;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        let Some(tick) = widgets::garden::canonical_tick_page(
+        let Some(tick) = widgets::garden::canonical_tick_scrolled(
             height,
             width,
             sessions,
-            self.garden_page,
+            self.garden_scroll,
             garden_tick(now),
             self.garden_motion.is_reduced(),
         ) else {
@@ -1912,12 +1912,12 @@ fn garden_frame(
 ) -> Option<widgets::garden::GardenFrame> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render_page(
+    widgets::garden::render_scrolled(
         height,
         width,
         &home.garden_scope,
         sessions,
-        home.garden_page,
+        home.garden_scroll,
         garden_tick(now),
         home.garden_motion.is_reduced(),
     )
@@ -1955,11 +1955,11 @@ pub fn garden_click_at(
     let frame = garden_frame(raw_height, raw_width, home, now)?;
     let (column, row) = (usize::from(column), usize::from(row));
     if let Some(hitbox) = frame
-        .page_hitboxes
+        .scroll_hitboxes
         .iter()
         .find(|hitbox| hitbox.contains(column, row))
     {
-        return Some(GardenClick::Page(hitbox.page));
+        return Some(GardenClick::Scroll(hitbox.scroll));
     }
     Some(
         frame
@@ -1980,10 +1980,10 @@ pub fn garden_click_at(
     )
 }
 
-/// Resolve a Garden page arrow against the same clamped page represented by the
-/// current frame. Boundary arrows target the current page and remain consumed.
+/// Resolve a Garden scroll arrow against the same clamped viewport represented by
+/// the current frame. Boundary arrows target the current offset and remain consumed.
 #[must_use]
-pub fn garden_page_action(
+pub fn garden_scroll_action(
     raw_height: usize,
     raw_width: usize,
     home: &HomeProjection,
@@ -1991,12 +1991,12 @@ pub fn garden_page_action(
     forward: bool,
 ) -> Option<GardenClick> {
     let frame = garden_frame(raw_height, raw_width, home, now)?;
-    let page = if forward {
-        (frame.page + 1).min(frame.page_count - 1)
+    let scroll = if forward {
+        (frame.scroll + 1).min(frame.max_scroll)
     } else {
-        frame.page.saturating_sub(1)
+        frame.scroll.saturating_sub(1)
     };
-    Some(GardenClick::Page(page))
+    Some(GardenClick::Scroll(scroll))
 }
 
 /// controller projection の Home frame を描く。
@@ -2928,9 +2928,9 @@ mod tests {
         HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
         SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
         Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        garden_click_at, garden_fits, garden_frame, garden_page_action, garden_tick, health_badge,
-        health_reason_label, home_header_action_at, home_header_layout, home_left_pane,
-        home_row_height, home_row_lines_at, home_viewport_start, load_style,
+        garden_click_at, garden_fits, garden_frame, garden_scroll_action, garden_tick,
+        health_badge, health_reason_label, home_header_action_at, home_header_layout,
+        home_left_pane, home_row_height, home_row_lines_at, home_viewport_start, load_style,
         new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
         render_home_at, resume_label, right_pane_tab_at, role_identity, short_id,
         sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
@@ -4799,12 +4799,12 @@ mod tests {
         );
         assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
         assert_eq!(garden_click_at(12, 100, &home, now(), 10, 10), None);
-        assert_eq!(garden_page_action(24, 100, &plain, now(), true), None);
-        assert_eq!(garden_page_action(12, 100, &home, now(), true), None);
+        assert_eq!(garden_scroll_action(24, 100, &plain, now(), true), None);
+        assert_eq!(garden_scroll_action(12, 100, &home, now(), true), None);
     }
 
     #[test]
-    fn garden_pages_reach_later_projects_with_keyboard_and_footer_buttons() {
+    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
         let active_workspace = WorkspaceId::new();
         let mut state = AppState::home(active_workspace, Vec::new());
         let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -4834,30 +4834,39 @@ mod tests {
                 .with_deck_garden("5 open projects".to_owned(), rows.clone())
         };
         let first = project(&state);
-        let first_frame = garden_frame(23, 80, &first, now()).expect("first page fits");
-        assert_eq!(first_frame.page, 0);
-        assert_eq!(first_frame.page_count, 2);
+        let first_frame = garden_frame(23, 80, &first, now()).expect("first viewport fits");
+        assert_eq!(first_frame.scroll, 0);
+        assert_eq!(first_frame.max_scroll, 1);
         assert_eq!(first_frame.hitboxes.len(), 4);
         assert_eq!(
-            garden_page_action(23, 80, &first, now(), true),
-            Some(GardenClick::Page(1))
+            garden_scroll_action(23, 80, &first, now(), true),
+            Some(GardenClick::Scroll(1))
         );
 
-        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Page(1)));
+        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(1)));
         let second = project(&state);
-        let second_frame = garden_frame(23, 80, &second, now()).expect("second page fits");
-        assert_eq!(second_frame.page, 1);
-        assert_eq!(second_frame.hitboxes.len(), 1);
-        assert_eq!(second_frame.hitboxes[0].session_id, later_session);
-        assert_eq!(
-            garden_page_action(23, 80, &second, now(), false),
-            Some(GardenClick::Page(0))
+        let second_frame = garden_frame(23, 80, &second, now()).expect("shifted viewport fits");
+        assert_eq!(second_frame.scroll, 1);
+        assert_eq!(second_frame.hitboxes.len(), 3);
+        assert!(
+            second_frame
+                .hitboxes
+                .iter()
+                .any(|hitbox| hitbox.session_id == later_session)
         );
         assert_eq!(
-            garden_page_action(23, 80, &second, now(), true),
-            Some(GardenClick::Page(1))
+            garden_scroll_action(23, 80, &second, now(), false),
+            Some(GardenClick::Scroll(0))
         );
-        let plot = second_frame.hitboxes[0];
+        assert_eq!(
+            garden_scroll_action(23, 80, &second, now(), true),
+            Some(GardenClick::Scroll(1))
+        );
+        let plot = *second_frame
+            .hitboxes
+            .iter()
+            .find(|hitbox| hitbox.session_id == later_session)
+            .expect("later project is visible after scrolling");
         assert_eq!(
             garden_click_at(
                 23,
@@ -4874,8 +4883,8 @@ mod tests {
             })
         );
 
-        let previous = second_frame.page_hitboxes[0];
-        let next = second_frame.page_hitboxes[1];
+        let previous = second_frame.scroll_hitboxes[0];
+        let next = second_frame.scroll_hitboxes[1];
         assert_eq!(
             garden_click_at(
                 23,
@@ -4885,7 +4894,7 @@ mod tests {
                 u16::try_from(previous.column).expect("fits u16"),
                 u16::try_from(previous.row).expect("fits u16"),
             ),
-            Some(GardenClick::Page(0))
+            Some(GardenClick::Scroll(0))
         );
         // The disabled boundary button remains a consumed no-op rather than
         // dismissing the Garden through the generic background click.
@@ -4898,7 +4907,7 @@ mod tests {
                 u16::try_from(next.column).expect("fits u16"),
                 u16::try_from(next.row).expect("fits u16"),
             ),
-            Some(GardenClick::Page(1))
+            Some(GardenClick::Scroll(1))
         );
     }
 

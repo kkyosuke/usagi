@@ -120,17 +120,17 @@ impl GardenHitbox {
     }
 }
 
-/// Garden footer の page button と、押したときに表示する page。
+/// Garden footer の横スクロール button と、押したときの列 offset。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GardenPageHitbox {
-    pub page: usize,
+pub struct GardenScrollHitbox {
+    pub scroll: usize,
     pub column: usize,
     pub row: usize,
     pub width: usize,
     pub height: usize,
 }
 
-impl GardenPageHitbox {
+impl GardenScrollHitbox {
     #[must_use]
     pub const fn contains(self, column: usize, row: usize) -> bool {
         column >= self.column
@@ -147,12 +147,12 @@ pub struct GardenFrame {
     /// うさぎの rectangle は必ず、それを含む区画の rectangle より **先** に並ぶ。
     /// click 解決は最初に当たったものを採るため、うさぎが区画に優先する。
     pub hitboxes: Vec<GardenHitbox>,
-    /// Footer の previous / next button。描画した span と click 範囲を共有する。
-    pub page_hitboxes: Vec<GardenPageHitbox>,
-    /// 描画した 0-based page。要求値が範囲外なら最後の page へ clamp する。
-    pub page: usize,
-    /// 空の Garden も 1 page と数える。
-    pub page_count: usize,
+    /// Footer の左 / 右 scroll button。描画した span と click 範囲を共有する。
+    pub scroll_hitboxes: Vec<GardenScrollHitbox>,
+    /// 描画した左端の 0-based plot 列。要求値が範囲外なら末尾へ clamp する。
+    pub scroll: usize,
+    /// 左端にできる最大の plot 列 offset。
+    pub max_scroll: usize,
     /// 端末に収まらず描画しなかった session 数。
     pub hidden_sessions: usize,
 }
@@ -180,8 +180,20 @@ struct PlacedRabbit {
 struct GardenLayout {
     content_width: usize,
     columns: usize,
+    plot_rows: usize,
     garden_height: usize,
-    capacity: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GardenViewport {
+    scroll: usize,
+    max_scroll: usize,
+    visible_start: usize,
+    visible_end: usize,
+    used_rows: usize,
+    used_columns: usize,
+    grid_top: usize,
+    row_left: usize,
 }
 
 fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
@@ -195,9 +207,40 @@ fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
     Some(GardenLayout {
         content_width,
         columns,
+        plot_rows,
         garden_height,
-        capacity: columns.saturating_mul(plot_rows),
     })
+}
+
+fn garden_viewport(
+    layout: GardenLayout,
+    session_count: usize,
+    requested_scroll: usize,
+) -> GardenViewport {
+    let total_columns = session_count.div_ceil(layout.plot_rows);
+    let max_scroll = total_columns.saturating_sub(layout.columns);
+    let scroll = requested_scroll.min(max_scroll);
+    let visible_start = scroll.saturating_mul(layout.plot_rows).min(session_count);
+    let visible_end = (scroll + layout.columns)
+        .saturating_mul(layout.plot_rows)
+        .min(session_count);
+    let visible = visible_end.saturating_sub(visible_start);
+    let used_rows = visible.min(layout.plot_rows);
+    let used_columns = visible.div_ceil(layout.plot_rows);
+    GardenViewport {
+        scroll,
+        max_scroll,
+        visible_start,
+        visible_end,
+        used_rows,
+        used_columns,
+        grid_top: HEADER_ROWS + layout.garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2,
+        row_left: SIDE_PADDING
+            + layout
+                .content_width
+                .saturating_sub(used_columns * PLOT_WIDTH)
+                / 2,
+    }
 }
 
 /// Garden を描画する。最小サイズに満たない場合は `None` を返す。
@@ -210,7 +253,7 @@ pub fn render(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    render_page(
+    render_scrolled(
         height,
         width,
         workspace_name,
@@ -221,29 +264,30 @@ pub fn render(
     )
 }
 
-/// Garden の指定 page を描画する。page は現在の session 数に合わせて clamp する。
+/// Garden を指定した plot 列から描画する。offset は現在の session 数に合わせて clamp する。
 #[must_use]
-pub fn render_page(
+pub fn render_scrolled(
     height: usize,
     width: usize,
     workspace_name: &str,
     sessions: &[GardenSession],
-    requested_page: usize,
+    requested_scroll: usize,
     tick: u64,
     reduced_motion: bool,
 ) -> Option<GardenFrame> {
-    let GardenLayout {
-        content_width,
-        columns,
-        garden_height,
-        capacity,
-    } = garden_layout(height, width)?;
-    let page_count = sessions.len().div_ceil(capacity).max(1);
-    let page = requested_page.min(page_count - 1);
-    let page_start = page.saturating_mul(capacity).min(sessions.len());
-    let page_end = (page_start + capacity).min(sessions.len());
-    let page_sessions = &sessions[page_start..page_end];
-    let visible = page_sessions.len();
+    let layout = garden_layout(height, width)?;
+    let GardenViewport {
+        scroll,
+        max_scroll,
+        visible_start,
+        visible_end,
+        used_rows,
+        used_columns,
+        grid_top,
+        row_left,
+    } = garden_viewport(layout, sessions.len(), requested_scroll);
+    let visible_sessions = &sessions[visible_start..visible_end];
+    let visible = visible_sessions.len();
     let hidden_sessions = sessions.len().saturating_sub(visible);
 
     let mut rows = Vec::with_capacity(height);
@@ -252,32 +296,34 @@ pub fn render_page(
     rows.push(" ".repeat(width));
 
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
-    let used_rows = visible.div_ceil(columns);
-    let grid_top = HEADER_ROWS + garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2;
     rows.resize_with(grid_top, || " ".repeat(width));
 
     let mut hitboxes = Vec::with_capacity(visible * (1 + MAX_VISIBLE_AGENTS));
+    let plots = visible_sessions
+        .iter()
+        .map(|session| plot(session, tick, reduced_motion))
+        .collect::<Vec<_>>();
     for plot_row in 0..used_rows {
-        let start = plot_row * columns;
-        let end = (start + columns).min(visible);
-        // 埋まった列数ではなく、その行に実際に並ぶ数で中央へ寄せる。容量ぶんの幅で
-        // 中央寄せすると、session が列数に満たない行が左へ寄って庭が偏る。
-        let row_left = SIDE_PADDING + content_width.saturating_sub((end - start) * PLOT_WIDTH) / 2;
-        let plots = page_sessions[start..end]
-            .iter()
-            .map(|session| plot(session, tick, reduced_motion))
-            .collect::<Vec<_>>();
         for local_row in 0..PLOT_CONTENT_ROWS {
             let mut line = " ".repeat(row_left);
-            for plot in &plots {
-                line.push_str(&pad_to_width(&plot.rows[local_row], PLOT_WIDTH));
+            for column in 0..used_columns {
+                let index = column * layout.plot_rows + plot_row;
+                if let Some(plot) = plots.get(index) {
+                    line.push_str(&pad_to_width(&plot.rows[local_row], PLOT_WIDTH));
+                } else {
+                    line.push_str(&" ".repeat(PLOT_WIDTH));
+                }
             }
             rows.push(pad_to_width(&line, width));
         }
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
-        rows.push(ground_row(width, content_width));
-        for (column, (session, plot)) in page_sessions[start..end].iter().zip(&plots).enumerate() {
+        rows.push(ground_row(width, layout.content_width));
+        for column in 0..used_columns {
+            let index = column * layout.plot_rows + plot_row;
+            let Some((session, plot)) = visible_sessions.get(index).zip(plots.get(index)) else {
+                continue;
+            };
             let plot_column = row_left + column * PLOT_WIDTH;
             let plot_row_top = grid_top + plot_row * PLOT_HEIGHT;
             // うさぎは区画の内側にあるので、区画より先に積む（click 解決は最初に
@@ -312,10 +358,18 @@ pub fn render_page(
 
     let footer_start = height - FOOTER_ROWS;
     rows.resize_with(footer_start, || " ".repeat(width));
-    let (page_footer, page_hitboxes) = page_footer(width, footer_start, page, page_count);
-    rows.push(page_footer);
-    let help = if page_count > 1 {
-        "Garden · ←/→ page · click to visit · Esc to return"
+    let (scroll_footer, scroll_hitboxes) = scroll_footer(
+        width,
+        footer_start,
+        scroll,
+        max_scroll,
+        visible_start,
+        visible_end,
+        sessions.len(),
+    );
+    rows.push(scroll_footer);
+    let help = if max_scroll > 0 {
+        "Garden · ←/→ scroll · click to visit · Esc to return"
     } else {
         "Garden · click a usagi to visit · any key to return"
     };
@@ -324,28 +378,31 @@ pub fn render_page(
     Some(GardenFrame {
         rows,
         hitboxes,
-        page_hitboxes,
-        page,
-        page_count,
+        scroll_hitboxes,
+        scroll,
+        max_scroll,
         hidden_sessions,
     })
 }
 
-fn page_footer(
+fn scroll_footer(
     width: usize,
     row: usize,
-    page: usize,
-    page_count: usize,
-) -> (String, Vec<GardenPageHitbox>) {
-    if page_count <= 1 {
+    scroll: usize,
+    max_scroll: usize,
+    visible_start: usize,
+    visible_end: usize,
+    session_count: usize,
+) -> (String, Vec<GardenScrollHitbox>) {
+    if max_scroll == 0 {
         return (" ".repeat(width), Vec::new());
     }
 
-    let previous = InlineButton::new("← Prev");
-    let next = InlineButton::new("Next →");
+    let previous = InlineButton::new("← Scroll");
+    let next = InlineButton::new("Scroll →");
     let previous_rendered = previous.render(
         width,
-        if page == 0 {
+        if scroll == 0 {
             Style::new().dim()
         } else {
             Role::Feature.style()
@@ -353,15 +410,18 @@ fn page_footer(
     );
     let next_rendered = next.render(
         width,
-        if page + 1 == page_count {
+        if scroll == max_scroll {
             Style::new().dim()
         } else {
             Role::Feature.style()
         },
     );
-    let indicator = Style::new()
-        .dim()
-        .paint(&format!("· Page {}/{} ·", page + 1, page_count));
+    let indicator = Style::new().dim().paint(&format!(
+        "· {}-{} / {} ·",
+        visible_start + 1,
+        visible_end,
+        session_count
+    ));
     let content_width = previous_rendered
         .width
         .saturating_add(display_width(&indicator))
@@ -383,15 +443,15 @@ fn page_footer(
     (
         line,
         vec![
-            GardenPageHitbox {
-                page: page.saturating_sub(1),
+            GardenScrollHitbox {
+                scroll: scroll.saturating_sub(1),
                 column: left,
                 row,
                 width: previous_rendered.width,
                 height: 1,
             },
-            GardenPageHitbox {
-                page: (page + 1).min(page_count - 1),
+            GardenScrollHitbox {
+                scroll: (scroll + 1).min(max_scroll),
                 column: next_column,
                 row,
                 width: next_rendered.width,
@@ -414,25 +474,22 @@ pub fn canonical_tick(
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
-    canonical_tick_page(height, width, sessions, 0, tick, reduced_motion)
+    canonical_tick_scrolled(height, width, sessions, 0, tick, reduced_motion)
 }
 
-/// [`canonical_tick`] for the page currently visible in the Garden.
+/// [`canonical_tick`] for the horizontally scrolled Garden viewport.
 #[must_use]
-pub fn canonical_tick_page(
+pub fn canonical_tick_scrolled(
     height: usize,
     width: usize,
     sessions: &[GardenSession],
-    requested_page: usize,
+    requested_scroll: usize,
     tick: u64,
     reduced_motion: bool,
 ) -> Option<u64> {
     let layout = garden_layout(height, width)?;
-    let page_count = sessions.len().div_ceil(layout.capacity).max(1);
-    let page = requested_page.min(page_count - 1);
-    let start = page.saturating_mul(layout.capacity).min(sessions.len());
-    let end = (start + layout.capacity).min(sessions.len());
-    let sessions = &sessions[start..end];
+    let viewport = garden_viewport(layout, sessions.len(), requested_scroll);
+    let sessions = &sessions[viewport.visible_start..viewport.visible_end];
     if reduced_motion || !sessions.iter().any(session_may_animate) {
         return Some(0);
     }
@@ -892,7 +949,8 @@ fn centered(width: usize, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GROUND, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render, render_page,
+        GROUND, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render,
+        render_scrolled,
     };
     use crate::presentation::widgets::display_width;
     use usagi_core::domain::id::{AgentRuntimeId, SessionId};
@@ -1064,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_is_paged_deterministically_and_every_session_is_reachable() {
+    fn overflow_scrolls_one_column_at_a_time_and_every_session_is_reachable() {
         let sessions = (0..20)
             .map(|index| {
                 session(
@@ -1075,43 +1133,48 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let first = render_page(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
-        let second = render_page(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
+        let first = render_scrolled(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
+        let second = render_scrolled(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
         assert_eq!(first, second);
-        assert_eq!(first.page, 0);
-        assert_eq!(first.page_count, 10);
-        assert!(first.rows.join("\n").contains("Page 1/10"));
+        assert_eq!(first.scroll, 0);
+        assert_eq!(first.max_scroll, 18);
+        assert!(first.rows.join("\n").contains("1-2 / 20"));
         assert!(!first.rows.join("\n").contains("session-2"));
 
-        let last =
-            render_page(14, 64, "x", &sessions, usize::MAX, 3, false).expect("last page fits");
-        assert_eq!(last.page, 9);
-        assert!(last.rows.join("\n").contains("Page 10/10"));
+        let shifted =
+            render_scrolled(14, 64, "x", &sessions, 1, 3, false).expect("shifted viewport fits");
+        assert!(shifted.rows.join("\n").contains("session-1"));
+        assert!(shifted.rows.join("\n").contains("session-2"));
+
+        let last = render_scrolled(14, 64, "x", &sessions, usize::MAX, 3, false)
+            .expect("last viewport fits");
+        assert_eq!(last.scroll, 18);
+        assert!(last.rows.join("\n").contains("19-20 / 20"));
         assert!(last.rows.join("\n").contains("session-19"));
-        assert_eq!(last.page_hitboxes.len(), 2);
-        assert_eq!(last.page_hitboxes[0].page, 8);
-        assert_eq!(last.page_hitboxes[1].page, 9);
-        for hitbox in &last.page_hitboxes {
+        assert_eq!(last.scroll_hitboxes.len(), 2);
+        assert_eq!(last.scroll_hitboxes[0].scroll, 17);
+        assert_eq!(last.scroll_hitboxes[1].scroll, 18);
+        for hitbox in &last.scroll_hitboxes {
             assert!(hitbox.contains(hitbox.column, hitbox.row));
             assert!(!hitbox.contains(hitbox.column + hitbox.width, hitbox.row));
         }
 
-        let reachable = (0..first.page_count)
-            .flat_map(|page| {
-                let frame =
-                    render_page(14, 64, "x", &sessions, page, 3, false).expect("every page fits");
+        let reachable = (0..=first.max_scroll)
+            .flat_map(|scroll| {
+                let frame = render_scrolled(14, 64, "x", &sessions, scroll, 3, false)
+                    .expect("every viewport fits");
                 plots(&frame)
                     .into_iter()
                     .map(|hitbox| hitbox.session_id)
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             reachable,
             sessions
                 .iter()
                 .map(|session| session.id)
-                .collect::<Vec<_>>()
+                .collect::<std::collections::BTreeSet<_>>()
         );
     }
 
@@ -1702,8 +1765,8 @@ mod tests {
             super::canonical_tick(14, 64, &sessions, 1, false)
         );
         assert_ne!(
-            super::canonical_tick_page(14, 64, &sessions, 1, 0, false),
-            super::canonical_tick_page(14, 64, &sessions, 1, 1, false)
+            super::canonical_tick_scrolled(14, 64, &sessions, 1, 0, false),
+            super::canonical_tick_scrolled(14, 64, &sessions, 1, 1, false)
         );
         assert_ne!(
             super::canonical_tick(24, 100, &sessions, 0, false),
@@ -1811,18 +1874,19 @@ mod tests {
     }
 
     #[test]
-    fn a_partly_filled_row_stays_centered_on_a_wide_terminal() {
-        // 145 桁は plot 5 列ぶん入るが、session は 2 つしかない。容量ぶんの幅で中央寄せ
-        // すると 2 羽が左へ寄って庭が偏るので、その行に実際に並ぶ数で中央へ寄せる。
+    fn a_partly_filled_column_stays_centered_on_a_wide_terminal() {
+        // 145 桁は plot 5 列ぶん入るが、session は 2 つしかない。横スクロールでは
+        // 縦を先に埋めるため、2 羽の 1 列を庭の中央へ寄せる。
         let sessions = fixtures()[..2].to_vec();
         let frame = render(41, 145, "x", &sessions, 1, false).expect("garden fits");
         let plots = plots(&frame);
         assert_eq!(plots.len(), 2);
+        assert_eq!(plots[0].column, plots[1].column);
         let left = plots[0].column;
-        let right_gap = 145 - (plots[1].column + plots[1].width);
+        let right_gap = 145 - (plots[0].column + plots[0].width);
         assert!(
             left.abs_diff(right_gap) <= 1,
-            "the row is off-centre: {left} left vs {right_gap} right"
+            "the column is off-centre: {left} left vs {right_gap} right"
         );
 
         // 地面は庭の幅いっぱいに伸び、うさぎの数で途切れない。

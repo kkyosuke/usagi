@@ -1,6 +1,6 @@
 use usagi_core::domain::id::{AgentRuntimeId, SessionId};
 use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
-use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render_page};
+use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession, render_scrolled};
 
 fn main() {
     let sessions = [
@@ -69,10 +69,10 @@ fn main() {
         0,
         (1, false),
     );
-    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 2 plot ずつ
-    // page に分かれる。先頭と末尾を出し、全 session へ到達できることを眺める。
-    scene_page(
-        "64x14 terminal · Garden page 1/3",
+    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 2 plot が見える。
+    // 左右端を出し、1 列ずつ横スクロールして全 session へ到達できることを眺める。
+    scene_scrolled(
+        "64x14 terminal · Garden left edge",
         13,
         64,
         &sessions,
@@ -80,12 +80,12 @@ fn main() {
         1,
         false,
     );
-    scene_page(
-        "64x14 terminal · Garden page 3/3",
+    scene_scrolled(
+        "64x14 terminal · Garden right edge",
         13,
         64,
         &sessions,
-        2,
+        4,
         1,
         false,
     );
@@ -99,15 +99,15 @@ fn scene(
     tick: u64,
     reduced_motion: bool,
 ) {
-    scene_page(caption, height, width, sessions, 0, tick, reduced_motion);
+    scene_scrolled(caption, height, width, sessions, 0, tick, reduced_motion);
 }
 
-fn scene_page(
+fn scene_scrolled(
     caption: &str,
     height: usize,
     width: usize,
     sessions: &[GardenSession],
-    page: usize,
+    scroll: usize,
     tick: u64,
     reduced_motion: bool,
 ) {
@@ -117,7 +117,7 @@ fn scene_page(
         width,
         "my-project",
         sessions,
-        page,
+        scroll,
         (tick, reduced_motion),
     );
 }
@@ -128,11 +128,11 @@ fn scene_in_scope(
     width: usize,
     scope: &str,
     sessions: &[GardenSession],
-    page: usize,
+    scroll: usize,
     animation: (u64, bool),
 ) {
     let (tick, reduced_motion) = animation;
-    let frame = render_page(height, width, scope, sessions, page, tick, reduced_motion)
+    let frame = render_scrolled(height, width, scope, sessions, scroll, tick, reduced_motion)
         .expect("the sample uses Garden-compatible terminal sizes");
     println!("--- {caption} ---");
     println!("{}\n", frame.rows.join("\n"));
