@@ -918,7 +918,10 @@ PR refresh/freshness 契約の正本はこの節である。daemon は committed
 schedule を進める。
 同じ URL が複数 chunk または複数 session から登録されても scheduler は identity 単位で coalesce し、1 tick
 につき最大 2 identity を canonical URL 順に claim し、2 request を並行実行する。remote provider は shell を介さない固定 argv の
-`gh pr view <canonical-url> --json title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock
+`gh pr view <canonical-url> --json title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider は request ごとの
+process group で起動し、stdout / stderr を並行して drain しながら各 256 KiB まで保持する。timeout、どちらかの stream の
+上限超過、観測失敗では TERM、100 ms の grace、KILL の順に group 全体を停止して parent を reap する。parent が先に終了して
+descendant が pipe を保持した場合も同じ回収を行い、raw output や実行環境を error へ載せない。provider 実行中は inventory lock
 を保持しないため、slow provider が terminal output の commit や IPC snapshot を停止させない。
 
 | 結果 | durable snapshot | 次回 schedule |

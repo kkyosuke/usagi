@@ -8,6 +8,8 @@
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -84,19 +86,26 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
         terminate_and_reap(&mut child, policy.terminate_grace);
         return ChildObservation::ObservationFailed;
     };
+    let output_exceeded = Arc::new(AtomicBool::new(false));
+    let stdout_exceeded = Arc::clone(&output_exceeded);
     let stdout = thread::spawn(move || {
         let mut stdout = stdout;
-        capture(&mut stdout, policy.output_limit)
+        capture(&mut stdout, policy.output_limit, &stdout_exceeded)
     });
+    let stderr_exceeded = Arc::clone(&output_exceeded);
     let stderr = thread::spawn(move || {
         let mut stderr = stderr;
-        capture(&mut stderr, policy.output_limit)
+        capture(&mut stderr, policy.output_limit, &stderr_exceeded)
     });
 
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
+            Ok(None) if output_exceeded.load(Ordering::Acquire) => {
+                terminate_and_reap(&mut child, policy.terminate_grace);
+                break Err(ChildObservation::OutputTooLarge);
+            }
             Ok(None) if Instant::now() < deadline => {
                 thread::sleep(
                     Duration::from_millis(5)
@@ -164,18 +173,25 @@ pub fn write_stdin_bounded(
     };
     let input = input.to_vec();
     let writer = thread::spawn(move || stdin.write_all(&input).is_ok());
+    let output_exceeded = Arc::new(AtomicBool::new(false));
+    let stdout_exceeded = Arc::clone(&output_exceeded);
     let stdout = thread::spawn(move || {
         let mut stdout = stdout;
-        capture(&mut stdout, policy.output_limit)
+        capture(&mut stdout, policy.output_limit, &stdout_exceeded)
     });
+    let stderr_exceeded = Arc::clone(&output_exceeded);
     let stderr = thread::spawn(move || {
         let mut stderr = stderr;
-        capture(&mut stderr, policy.output_limit)
+        capture(&mut stderr, policy.output_limit, &stderr_exceeded)
     });
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
+            Ok(None) if output_exceeded.load(Ordering::Acquire) => {
+                terminate_and_reap(&mut child, policy.terminate_grace);
+                break Err(ChildInputExecution::OutputTooLarge);
+            }
             Ok(None) if Instant::now() < deadline => thread::sleep(
                 Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
             ),
@@ -241,12 +257,13 @@ fn close_descendant_resources(
     signal_group(pid, libc::SIGKILL);
 }
 
-fn capture(reader: &mut dyn Read, limit: usize) -> Capture {
+fn capture(reader: &mut dyn Read, limit: usize, exceeded_signal: &AtomicBool) -> Capture {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
     let mut exceeded = false;
     let mut buffer = [0_u8; 8 * 1024];
     loop {
         let Ok(read) = reader.read(&mut buffer) else {
+            exceeded_signal.store(true, Ordering::Release);
             return Capture {
                 bytes: retained,
                 exceeded: true,
@@ -259,6 +276,9 @@ fn capture(reader: &mut dyn Read, limit: usize) -> Capture {
         let keep = remaining.min(read);
         retained.extend_from_slice(&buffer[..keep]);
         exceeded |= keep < read;
+        if exceeded {
+            exceeded_signal.store(true, Ordering::Release);
+        }
     }
     Capture {
         bytes: retained,
@@ -378,23 +398,44 @@ mod tests {
     }
 
     #[test]
+    fn output_overflow_terminates_before_the_provider_deadline() {
+        let started = Instant::now();
+        let result = observe(
+            "sh",
+            &["-c", "trap '' TERM; yes oversized"],
+            ChildPolicy {
+                timeout: Duration::from_secs(5),
+                ..policy()
+            },
+        );
+        assert_eq!(result, ChildObservation::OutputTooLarge);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn capture_bounds_memory_and_normalizes_read_failures() {
+        let exceeded = AtomicBool::new(false);
         let mut exact = std::io::Cursor::new(b"1234");
-        let captured = capture(&mut exact, 4);
+        let captured = capture(&mut exact, 4, &exceeded);
         assert_eq!(captured.bytes, b"1234");
         assert!(!captured.exceeded);
+        assert!(!exceeded.load(Ordering::Acquire));
 
+        let exceeded = AtomicBool::new(false);
         let mut oversized = std::io::Cursor::new(b"12345");
-        let captured = capture(&mut oversized, 4);
+        let captured = capture(&mut oversized, 4, &exceeded);
         assert_eq!(captured.bytes, b"1234");
         assert!(captured.exceeded);
+        assert!(exceeded.load(Ordering::Acquire));
 
+        let exceeded = AtomicBool::new(false);
         let mut failing = FailingReader {
             returned_bytes: false,
         };
-        let captured = capture(&mut failing, 4);
+        let captured = capture(&mut failing, 4, &exceeded);
         assert_eq!(captured.bytes, b"ok");
         assert!(captured.exceeded);
+        assert!(exceeded.load(Ordering::Acquire));
     }
 
     #[test]
@@ -473,6 +514,22 @@ mod tests {
                 },
             ),
             ChildInputExecution::TimedOut
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let started = Instant::now();
+        assert_eq!(
+            write_stdin_bounded(
+                "sh",
+                &["-c", "cat >/dev/null; trap '' TERM; yes oversized"],
+                b"payload",
+                16,
+                ChildPolicy {
+                    timeout: Duration::from_secs(5),
+                    ..policy()
+                },
+            ),
+            ChildInputExecution::OutputTooLarge
         );
         assert!(started.elapsed() < Duration::from_secs(1));
     }
