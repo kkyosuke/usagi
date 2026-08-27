@@ -339,9 +339,9 @@ pub enum DaemonCommand {
         #[arg(long)]
         force: bool,
     },
-    /// macOS `LaunchAgent` を install する
+    /// macOS `LaunchAgent` / Linux systemd user service を install する
     InstallService,
-    /// macOS `LaunchAgent` を uninstall する
+    /// macOS `LaunchAgent` / Linux systemd user service を uninstall する
     UninstallService,
 }
 
@@ -963,6 +963,28 @@ mod tests {
         assert_eq!(outcome, RunOutcome::Exit(0));
         assert!(err.is_empty());
         assert!(!out.is_empty());
+    }
+
+    /// daemon service の help は実装済みの macOS / Linux を両方示す。
+    #[test]
+    fn daemon_service_help_names_both_supported_platforms() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "daemon", "--help"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let help = String::from_utf8(out).unwrap();
+
+        assert_eq!(outcome, RunOutcome::Exit(0));
+        assert!(err.is_empty());
+        assert!(help.contains("macOS `LaunchAgent` / Linux systemd user service を install する"));
+        assert!(
+            help.contains("macOS `LaunchAgent` / Linux systemd user service を uninstall する")
+        );
     }
 
     /// `--version` フラグと `version` サブコマンドはどちらも注入された配布 version を出す。
