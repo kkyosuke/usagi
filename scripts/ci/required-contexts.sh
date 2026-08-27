@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=${REQUIRED_CONTEXTS_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
 contract="$repo_root/.github/required-contexts.json"
+jq_command=${REQUIRED_CONTEXTS_JQ:-jq}
 
 usage() {
   cat >&2 <<'EOF'
@@ -15,6 +16,17 @@ usage:
   required-contexts.sh verify-ruleset READBACK
 EOF
   exit 2
+}
+
+require_jq() {
+  command -v "$jq_command" >/dev/null 2>&1 || {
+    echo "required-contexts.sh: '$jq_command' is required for $1" >&2
+    exit 127
+  }
+}
+
+jq_run() {
+  "$jq_command" "$@"
 }
 
 classify_paths() {
@@ -58,11 +70,11 @@ audit_workflows() {
       echo "job '$job' must declare stable name '$context' in $workflow" >&2
       return 1
     }
-  done < <(jq -r '.required_status_checks[] | [.context, .workflow, .job] | @tsv' "$contract")
+  done < <(jq_run -r '.required_status_checks[] | [.context, .workflow, .job] | @tsv' "$contract")
 }
 
 mutable_ruleset() {
-  jq '{name, target, enforcement, bypass_actors, conditions, rules}' "$1"
+  jq_run '{name, target, enforcement, bypass_actors, conditions, rules}' "$1"
 }
 
 case "${1:-}" in
@@ -96,17 +108,19 @@ case "${1:-}" in
     ;;
   audit-workflows)
     test "$#" -eq 1 || usage
+    require_jq "$1"
     audit_workflows
     ;;
   prepare-ruleset)
     test "$#" -eq 4 || usage
+    require_jq "$1"
     snapshot=$2 update=$3 rollback=$4
-    test "$(jq -r '.id' "$snapshot")" = "$(jq -r '.ruleset_id' "$contract")" || {
+    test "$(jq_run -r '.id' "$snapshot")" = "$(jq_run -r '.ruleset_id' "$contract")" || {
       echo "snapshot ruleset id does not match contract" >&2
       exit 1
     }
     mutable_ruleset "$snapshot" > "$rollback"
-    jq --slurpfile contract "$contract" '
+    jq_run --slurpfile contract "$contract" '
       .rules |= map(
         if .type == "required_status_checks" then
           .parameters.required_status_checks = (
@@ -119,7 +133,8 @@ case "${1:-}" in
     ;;
   verify-ruleset)
     test "$#" -eq 2 || usage
-    jq -e --slurpfile contract "$contract" '
+    require_jq "$1"
+    jq_run -e --slurpfile contract "$contract" '
       .id == $contract[0].ruleset_id
       and .enforcement == "active"
       and .bypass_actors == $contract[0].bypass_actors

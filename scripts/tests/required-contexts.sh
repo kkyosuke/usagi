@@ -45,6 +45,17 @@ if "$subject" report false success skipped failure 2>/dev/null; then
   exit 1
 fi
 
+if output=$(REQUIRED_CONTEXTS_JQ=missing-jq-command "$subject" audit-workflows 2>&1); then
+  echo "audit-workflows accepted a missing jq command" >&2
+  exit 1
+fi
+grep -Fq "'missing-jq-command' is required for audit-workflows" <<<"$output"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "required context fixtures passed (jq-dependent cases skipped: install jq to run them)"
+  exit 0
+fi
+
 audit_root="$tmp/audit-repo"
 mkdir -p "$audit_root/.github/workflows"
 cp "$repo_root/.github/required-contexts.json" "$audit_root/.github/required-contexts.json"
