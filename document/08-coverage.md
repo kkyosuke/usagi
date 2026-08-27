@@ -15,17 +15,22 @@ v2 の `#[coverage(off)]` の移行 inventory。許可条件と更新手順の�
 
 ## 基準値
 
-2026-07-21 の inventory 開始時点では v2 に 892 件あり、後続変更で 1 件が加わった。#485 で core の 220 件、
-#486 で daemon の decision logic と重複 exclusion 130 件、#487 で TUI の `migration_debt` 487 件を返済した。
-残る 129 件は registry 48 件（daemon 10、root・CLI 38）と、理由・代替テストを source に併記した inline metadata
-81 件（daemon 6、TUI 75）である。例外はすべて 2027-01-31 に期限切れとなる。
+2026-07-21 の inventory 開始時点では v2 に 892 件あり、#485–#487 と後続の root・CLI 返済で一度は
+129 件まで減った。その後の実装で例外が再び増え、2026-08-27 の source scan は 484 件である。inline metadata や
+allowlist 登録は item の責務が許可理由に適合する証明ではないため、増加分を返済済みとは扱わない。
+
+[`coverage-off-budget.json`](../coverage-off-budget.json) が owner / path ごとの現在件数を列挙する機械可読な
+inventory である。`scripts/coverage-off-lint.rb` は source scan と全件一致することを検証し、属性の追加・削除・移動で
+inventory が更新されていない変更を拒否する。budget の更新は件数変更を review 上で明示するためのもので、増加を
+正当化するものではない。
 
 | owner | 件数 | 返済先 |
 |---|---:|---|
-| TUI | 75 | #487 で返済済み。理由付き inline 例外のみ |
-| daemon | 16 | #486 で返済済み。real IO / composition の理由付き例外のみ |
-| root・CLI | 38 | 下表で許可候補と削除対象を review |
-| **合計** | **129** | registry entry または source inline metadata に全 symbol を列挙 |
+| core | 9 | parser / validation / persistence 判断を優先して再審査 |
+| daemon | 335 | `src/runtime/daemon.rs` の composition 集中を最優先で分離・再審査 |
+| root・CLI | 21 | process / stdio 合成と pure helper を分離して再審査 |
+| TUI | 119 | presentation / production adapter と reducer の境界を再審査 |
+| **合計** | **484** | 詳細は machine-readable inventory に全 path と件数を列挙 |
 
 ## 領域別返済順序
 
@@ -42,9 +47,9 @@ stale symbol として CI が失敗する。
 
 ## TUI の返済結果
 
-TUI の残存 75 件は理由付きの `composition`、`real_io`、`generic_monomorphization` 例外である。
-各属性の inline metadata が理由・owner・期限・証拠 test の正本となる。
-controller reducer、Effect executor、entry selection、completion、input classifier、error projection には例外を残さない。
+#487 では controller reducer、Effect routing、presentation 分岐を coverage 対象へ戻したが、その後の実装を含む
+現行 scan は owner `tui` を 119 件数える。理由付き metadata があっても自動的に許可済みとはせず、controller reducer、
+Effect executor、entry selection、completion、input classifier、error projection に例外を残さない方針で再審査する。
 production graph の検査方法は [Production screen graph harness](03-tui.md#production-screen-graph-harness) を参照する。
 
 ## root・CLI の返済結果
@@ -55,17 +60,7 @@ runtime executable snapshot を束ねる `serve_with_client` を `composition` �
 単相化される issue adapter の `cfg(test)` instance だけを `generic_monomorphization` 例外とし、shipping instance は coverage
 対象に保つ。direct unit と production E2E の双方で parser・store error・projection を検証する。
 
-#626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。
-残す registry entry は production の process・filesystem・環境を束ねる module または最終 composition だけである。
-
-| path | coverage 対象へ戻した責務 | 残存例外 |
-|---|---|---|
-| `crates/cli/src/**` | #625 で parser・route selection・schema projection・caller policy・error mapping | MCP composition と test-build 単相化の 2 件 |
-| `src/main.rs` | なし（argv・stdio の最終合成だけを持つ） | `main` 1 件（`composition`） |
-| `src/runtime/bootstrap.rs` | expected build 判定、readiness 上限・workspace refusal・error mapping、test module | この返済対象は 0 件。別 owner の generic 単相化 2 件だけ残る |
-| `src/runtime/cli.rs` | 全 `RunOutcome` から typed action への routing | parser/stdio の `dispatch` と production action IO module の 2 件（`composition`） |
-| `src/runtime/clipboard.rs` | platform command ordering、input limit、typed child outcome、fallback、partial/all failure、deadline の集約 | 環境参照・clipboard process module 1 件（`real_io`、process-group cleanup は共有 bounded process でも検証） |
-| `src/runtime/launchd.rs` | plist path・escaping・生成、install/uninstall の存在判定と error propagation | home・filesystem・`launchctl` module 1 件（`real_io`） |
-
-root・CLI 側で残す 7 件は `coverage-off-allowlist.json` に owner `root-cli`、期限 2027-01-31、
-対応する shipping/fake test を登録する。bootstrap の generic 単相化 2 件は owner `daemon` の既存例外である。
+#626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。現行 scan は
+owner `root-cli` を 21 件数えるため、過去の返済結果を現在の残存許可数としては使わない。path 別の現在件数は
+`coverage-off-budget.json` を正本とし、production の process・filesystem・環境を束ねる item と pure helper を
+再分離する。

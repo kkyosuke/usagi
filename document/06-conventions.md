@@ -224,7 +224,9 @@ fn read_real_pty() { /* OS call only */ }
 凍結されており、これは新規に選べる許可理由ではない。返済時はテストを追加して属性と registry entry を同じ変更で
 削除するか、上記 3 理由のいずれかを証拠テストとともに登録し直す。追加・削除後は `ruby scripts/coverage-off-lint.rb`
 を実行する。source だけの追加、registry だけ残る stale symbol、重複、理由・owner・期限・テスト証跡の欠落、期限切れ、
-許可外理由は CI を失敗させる。現行 debt の領域別 inventory と返済順序は
+許可外理由に加え、[`coverage-off-budget.json`](../coverage-off-budget.json) の owner / path 別 inventory と一致しない
+件数変更は CI を失敗させる。budget 更新は増減を review 上で明示するだけで、許可理由の適合確認を代替しない。
+現行 debt の領域別 inventory と返済順序は
 [8. coverage exclusion inventory](08-coverage.md) を参照する。
 
 ## 変更箇所からの推奨テスト

@@ -15,15 +15,32 @@ ATTRIBUTE = /^\s*#!?\[(?:coverage\(off\)|cfg_attr\(test,\s*coverage\(off\)\))\]/
 INLINE = /\/\/\s*coverage:\s*(.+)$/
 IGNORED_ROOTS = %w[.git target].freeze
 
-Options = Struct.new(:root, :manifest, :today, :generate, keyword_init: true)
+Options = Struct.new(
+  :root,
+  :manifest,
+  :budget,
+  :today,
+  :generate,
+  :generate_budget,
+  keyword_init: true
+)
 
 def parse_options
-  options = Options.new(root: ".", manifest: "coverage-off-allowlist.json", today: Date.today, generate: false)
+  options = Options.new(
+    root: ".",
+    manifest: "coverage-off-allowlist.json",
+    budget: "coverage-off-budget.json",
+    today: Date.today,
+    generate: false,
+    generate_budget: false
+  )
   OptionParser.new do |parser|
     parser.on("--root PATH") { |value| options.root = value }
     parser.on("--manifest PATH") { |value| options.manifest = value }
+    parser.on("--budget PATH", "Use 'none' to disable budget validation") { |value| options.budget = value }
     parser.on("--today YYYY-MM-DD") { |value| options.today = Date.iso8601(value) }
     parser.on("--generate") { options.generate = true }
+    parser.on("--generate-budget") { options.generate_budget = true }
   end.parse!
   options
 rescue Date::Error => error
@@ -134,6 +151,28 @@ def generated_manifest(records)
   {"version" => 1, "entries" => entries}
 end
 
+def resolved_metadata(records, entries)
+  by_key = entries.to_h { |entry| [record_key(entry), entry] }
+  records.each_with_object([]) do |record, resolved|
+    metadata = record["inline"] || by_key[record_key(record)]
+    resolved << [record, metadata] if metadata
+  end
+end
+
+def generated_budget(records, entries)
+  resolved = resolved_metadata(records, entries)
+  owners = Hash.new(0)
+  resolved.each { |_, metadata| owners[metadata["owner"]] += 1 }
+  paths = Hash.new(0)
+  records.each { |record| paths[record["path"]] += 1 }
+  {
+    "version" => 1,
+    "total" => records.length,
+    "owners" => owners.sort.to_h,
+    "paths" => paths.sort.to_h
+  }
+end
+
 def validate_metadata(metadata, location, today, debt_allowed: false)
   errors = []
   required = %w[reason owner expires]
@@ -157,6 +196,60 @@ def validate_metadata(metadata, location, today, debt_allowed: false)
     end
   end
   errors
+end
+
+def compare_inventory(expected, actual, label)
+  errors = []
+  (expected.keys | actual.keys).sort.each do |key|
+    expected_count = expected[key]
+    actual_count = actual[key]
+    if expected_count.nil?
+      errors << "coverage budget: unreviewed #{label} #{key.inspect} has #{actual_count} exclusions"
+    elsif actual_count.nil?
+      errors << "coverage budget: stale #{label} #{key.inspect} expected #{expected_count} exclusions"
+    elsif expected_count != actual_count
+      errors << "coverage budget: #{label} #{key.inspect} expected #{expected_count}, scanned #{actual_count}"
+    end
+  end
+  errors
+end
+
+def validate_budget(options, records, entries)
+  return [] if options.budget == "none"
+
+  budget_path = File.expand_path(options.budget, options.root)
+  budget = JSON.parse(File.read(budget_path, encoding: Encoding::UTF_8))
+  errors = []
+  errors << "#{options.budget}: version must be 1" unless budget["version"] == 1
+  unless budget["total"].is_a?(Integer) && budget["total"] >= 0
+    errors << "#{options.budget}: total must be a non-negative integer"
+  end
+  owners = budget["owners"]
+  paths = budget["paths"]
+  errors << "#{options.budget}: owners must be an object" unless owners.is_a?(Hash)
+  errors << "#{options.budget}: paths must be an object" unless paths.is_a?(Hash)
+  return errors unless errors.empty?
+
+  {"owners" => owners, "paths" => paths}.each do |group, inventory|
+    inventory.each do |key, count|
+      unless key.is_a?(String) && !key.empty? && count.is_a?(Integer) && count.positive?
+        errors << "#{options.budget}: #{group} entries require a name and a positive integer"
+      end
+    end
+  end
+  return errors unless errors.empty?
+
+  inventory = generated_budget(records, entries)
+  if budget["total"] != inventory["total"]
+    errors << "coverage budget: total expected #{budget['total']}, scanned #{inventory['total']}"
+  end
+  errors.concat(compare_inventory(owners, inventory["owners"], "owner"))
+  errors.concat(compare_inventory(paths, inventory["paths"], "path"))
+  errors
+rescue Errno::ENOENT => error
+  ["coverage-off-lint: #{error.message}"]
+rescue JSON::ParserError => error
+  ["#{options.budget}: invalid JSON: #{error.message}"]
 end
 
 def validate(options, records, scan_errors)
@@ -205,6 +298,7 @@ def validate(options, records, scan_errors)
   by_key.each_key do |key|
     errors << "#{options.manifest}: stale symbol #{key.join(':')}" unless source_keys.include?(key)
   end
+  errors.concat(validate_budget(options, records, entries))
   errors
 rescue Errno::ENOENT => error
   ["coverage-off-lint: #{error.message}"]
@@ -217,6 +311,13 @@ records, scan_errors = scan(File.expand_path(options.root))
 if options.generate
   abort scan_errors.join("\n") unless scan_errors.empty?
   puts JSON.pretty_generate(generated_manifest(records))
+  exit
+end
+if options.generate_budget
+  abort scan_errors.join("\n") unless scan_errors.empty?
+  manifest_path = File.expand_path(options.manifest, options.root)
+  manifest = JSON.parse(File.read(manifest_path, encoding: Encoding::UTF_8))
+  puts JSON.pretty_generate(generated_budget(records, manifest.fetch("entries")))
   exit
 end
 
