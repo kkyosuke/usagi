@@ -32,7 +32,7 @@ usagi は workspace の骨組み（[2. アーキテクチャ](02-architecture.md
 | `usagi open [path]` | `path` の workspace を登録・最終利用日時更新して Workspace 画面を開く。`path` 省略時はカレントディレクトリを使う |
 | `usagi config` | Config 画面を対話的に表示する（scope を Tab で切替、`↑↓` で項目を選び `←→` で変更、dirty 時だけ Save で保存。`Esc` で Welcome へ、`Ctrl-C` で終了） |
 | `usagi doctor` | Doctor TUI を起動画面に選ぶ |
-| `usagi update` | GitHub Releases の最新バイナリを download して `~/.usagi/bin/` へ導入する。`usagi update -v` は release 一覧を5行固定で表示し、`↑` / `↓` で選択して Enter で選んだ版を導入する。反映には再起動が必要 |
+| `usagi update` | GitHub Releases の最新バイナリを download して `~/.usagi/bin/` へ導入する。`usagi update -v` は release 一覧を5行固定で表示し、`↑` / `↓` で選択して Enter で選んだ版を導入する。更新後の CLI は次回起動から使われる。起動中の TUI は開き直し、古い daemon は `usagi doctor --fix` で入れ替える |
 | `usagi version` / `usagi --version` | 配布 version を表示する |
 | `usagi daemon start` | daemon をバックグラウンドで起動し、登録された pid を表示する。すでに稼働中ならその pid を表示する |
 | `usagi daemon stop` | 稼働中の daemon を終了する。live な Agent / generic terminal を持つ daemon は拒否し、`--force` で明示的に手放したときだけ停止する。stale な lifecycle record は回収する |
