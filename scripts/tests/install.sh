@@ -344,6 +344,53 @@ PY
 grep -q 'downgrade cancelled' "$CASE_DIR/cancel.out"
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 3.0.0" ]
 
+prepare_case interactive-cancel
+python3 - "$INSTALLER" "$HOME_DIR" "$FIXTURE_DIR" "$FAKE_BIN" "$CWD_DIR" > "$CASE_DIR/cancel.out" <<'PY'
+import os
+import pty
+import select
+import sys
+import time
+
+installer, home, fixture, fake_bin, cwd = sys.argv[1:]
+env = os.environ.copy()
+env.update(HOME=home, FIXTURE_DIR=fixture, PATH=f"{fake_bin}:{env['PATH']}")
+env.pop("USAGI_HOME", None)
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(cwd)
+    os.execvpe("bash", ["bash", installer, "--select-version"], env)
+
+captured = bytearray()
+deadline = time.time() + 10
+sent = False
+status = None
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.1)
+    if ready:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            chunk = b""
+        captured.extend(chunk)
+        if not sent and b"usagi update" in captured and captured.count(b"\n") >= 12:
+            os.write(fd, b"q")
+            sent = True
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        break
+else:
+    os.kill(pid, 9)
+    raise SystemExit("interactive cancellation timed out")
+
+if status is None or os.waitstatus_to_exitcode(status) != 0:
+    sys.stderr.buffer.write(captured)
+    raise SystemExit("release selection cancellation was not successful")
+sys.stdout.buffer.write(captured)
+PY
+grep -q 'release selection cancelled' "$CASE_DIR/cancel.out"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 1.0.0" ]
+
 prepare_case bad-checksum
 printf '%064d  %s\n' 0 "$ASSET" > "$FIXTURE_DIR/$ASSET.sha256"
 expect_failure
