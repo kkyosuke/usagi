@@ -640,8 +640,8 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 
 | store | 上限 | 決して落とさないもの |
 |---|---|---|
-| `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
-| inbox | ACK 済み 256 件。総数の上限は 4096、query page は最大 100 件 | 未 ACK の報告。未 ACK だけで上限へ達した append は既存報告を落とさず capacity error で拒否する |
+| dispatch registry | `dispatch.json` と `dispatch-workspaces.json` は各 2 MiB。終了済み run は 256 件、365 日を超えた履歴を古い順に破棄し、byte pressure でも最新 32 件を replay 用に残す | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
+| caller inbox | 1 caller あたり 4 MiB / 4096 件、ACK 済み 256 件、履歴 365 日。query page は最大 100 件 | 未 ACK の報告。count / byte 上限を保護対象だけで満たす append は既存報告を落とさず capacity error で拒否する |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
 | `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
@@ -649,6 +649,10 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
 pending が 1 つの共有文書を無制限に増やすことを防ぐ。拒否は `resource_exhausted` で、durable state を一切変更しない
 ため、人が backlog を消化したあとの retry が安全である。
+
+dispatch registry と inbox は書き込み前に pretty JSON / JSONL の実 byte 数を検証する。count / age / byte の順で
+安全な終了済み・ACK 済み履歴だけを compact し、それでも上限を満たせない mutation は `resource_exhausted` として
+effect zero で拒否する。既存ファイルが byte 上限を超えている場合も全体を parse せず fail-closed にする。
 
 inbox の query は `sequence -> byte offset` index から `cursor` 位置へ seek し、`limit` 件だけを読む。query 自体は
 既読化せず、処理済み page の `next_cursor` を別の `agent_inbox_ack` effect で送る。ACK は atomic watermark の単調更新で、
