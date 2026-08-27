@@ -31,6 +31,12 @@ const INBOX_DIR: &str = "inbox";
 const INBOX_INDEX_SUFFIX: &str = ".index.json";
 const INBOX_ACK_SUFFIX: &str = ".ack.json";
 
+/// Serialized ceilings keep one long-lived daemon from turning retained
+/// dispatch state into an unbounded parse, rewrite, or IPC response cost.
+const REGISTRY_HARD_BYTES: u64 = 2 * 1024 * 1024;
+const WORKSPACE_REGISTRY_HARD_BYTES: u64 = 2 * 1024 * 1024;
+const INBOX_HARD_BYTES: u64 = 4 * 1024 * 1024;
+
 /// How many finished dispatch runs the registry keeps.
 ///
 /// Every mutation replaces this whole document, so history that is never dropped
@@ -40,9 +46,16 @@ const INBOX_ACK_SUFFIX: &str = ".ack.json";
 /// caller can still find the run it is talking about; past that window the run
 /// is history, and history belongs in the inbox that already recorded it.
 const RUN_RETENTION: usize = 256;
+/// A byte-pressure prune keeps this many newest terminal runs available for
+/// duplicate report and reconnect replay. If protected/live state alone exceeds
+/// the byte ceiling, the new mutation is rejected without replacing the file.
+const RUN_REPLAY_FLOOR: usize = 32;
+const HISTORY_MAX_AGE_SECONDS: i64 = 365 * 24 * 60 * 60;
 
 /// How many already-read messages one caller's inbox keeps.
 const INBOX_READ_RETENTION: usize = 256;
+/// A byte-pressure compaction keeps this many newest acknowledged reports.
+const INBOX_READ_REPLAY_FLOOR: usize = 0;
 
 /// The hard ceiling on one caller's inbox, unread messages included. Read
 /// messages are compacted first; if every slot is unacknowledged, append is
@@ -53,6 +66,40 @@ pub const INBOX_PAGE_MAX: usize = 100;
 /// Reserved inbox segment for a workspace-root caller. A `SessionId` is always a
 /// lowercase UUID, so this non-UUID literal can never collide with one.
 const ROOT_INBOX_SEGMENT: &str = "workspace-root";
+
+#[derive(Clone, Copy)]
+struct DispatchStoreLimits {
+    registry_bytes: u64,
+    workspace_registry_bytes: u64,
+    inbox_bytes: u64,
+    run_retention: usize,
+    run_replay_floor: usize,
+    inbox_read_retention: usize,
+    inbox_read_replay_floor: usize,
+    inbox_count: usize,
+    history_max_age_seconds: i64,
+}
+
+impl Default for DispatchStoreLimits {
+    fn default() -> Self {
+        Self {
+            registry_bytes: REGISTRY_HARD_BYTES,
+            workspace_registry_bytes: WORKSPACE_REGISTRY_HARD_BYTES,
+            inbox_bytes: INBOX_HARD_BYTES,
+            run_retention: RUN_RETENTION,
+            run_replay_floor: RUN_REPLAY_FLOOR,
+            inbox_read_retention: INBOX_READ_RETENTION,
+            inbox_read_replay_floor: INBOX_READ_REPLAY_FLOOR,
+            inbox_count: INBOX_HARD_LIMIT,
+            history_max_age_seconds: HISTORY_MAX_AGE_SECONDS,
+        }
+    }
+}
+
+fn serialized_document_len(value: &impl Serialize) -> Result<u64> {
+    let text = serde_json::to_string_pretty(value)?;
+    Ok(u64::try_from(text.len().saturating_add(1))?)
+}
 
 /// Maps an optional owning session to its durable inbox directory segment.
 /// `None` is the workspace root; `Some` is the session's UUID.
@@ -239,6 +286,13 @@ pub enum CredentialProvenance {
 }
 
 impl Registry {
+    fn remove_run_at(&mut self, index: usize) {
+        let dropped = self.runs.remove(index).run_id;
+        self.bindings.retain(|binding| binding.run_id != dropped);
+        self.admissions
+            .retain(|admission| admission.operation_id != dropped);
+    }
+
     fn reserve_admission(
         &mut self,
         agent: Agent,
@@ -318,7 +372,7 @@ impl Registry {
     /// reuses so a relaunch keeps its identity, and dropping it would mint a new
     /// `AgentId` on every restart. Their count is bounded by the sessions,
     /// runtimes and models in play rather than by how many dispatches have run.
-    fn retain_bounded(&mut self) {
+    fn retain_count_bounded(&mut self, retention: usize) {
         let terminal_run = |run: &DispatchRun| {
             matches!(
                 run.status,
@@ -326,7 +380,7 @@ impl Registry {
             )
         };
         let terminal_count = self.runs.iter().filter(|run| terminal_run(run)).count();
-        let mut over = terminal_count.saturating_sub(RUN_RETENTION);
+        let mut over = terminal_count.saturating_sub(retention);
         if over == 0 {
             return;
         }
@@ -348,6 +402,52 @@ impl Registry {
             .retain(|binding| !dropped.contains(&binding.run_id));
         self.admissions
             .retain(|admission| !dropped.contains(&admission.operation_id));
+    }
+
+    fn drop_oldest_terminal_run(&mut self, replay_floor: usize) -> bool {
+        let terminal = |run: &DispatchRun| {
+            matches!(
+                run.status,
+                RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+            )
+        };
+        if self.runs.iter().filter(|run| terminal(run)).count() <= replay_floor {
+            return false;
+        }
+        let index = self
+            .runs
+            .iter()
+            .position(terminal)
+            .expect("terminal count was computed from the same run list");
+        self.remove_run_at(index);
+        true
+    }
+
+    fn retain_age_bounded(&mut self, cutoff: DateTime<Utc>, replay_floor: usize) {
+        loop {
+            let terminal_count = self
+                .runs
+                .iter()
+                .filter(|run| {
+                    matches!(
+                        run.status,
+                        RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+                    )
+                })
+                .count();
+            if terminal_count <= replay_floor {
+                return;
+            }
+            let Some(index) = self.runs.iter().position(|run| {
+                matches!(
+                    run.status,
+                    RunStatus::Completed | RunStatus::Failed | RunStatus::NoReport
+                ) && run.ended_at.is_some_and(|ended_at| ended_at < cutoff)
+            }) else {
+                return;
+            };
+            self.remove_run_at(index);
+        }
     }
 
     fn reconcile_incomplete_admissions(&mut self) -> usize {
@@ -393,6 +493,7 @@ pub struct QueuedPrompt {
 /// File-backed durable dispatch state rooted at the daemon state directory.
 pub struct DispatchStore {
     dir: PathBuf,
+    limits: DispatchStoreLimits,
     #[cfg(test)]
     inbox_bytes_read: AtomicU64,
 }
@@ -402,7 +503,17 @@ impl DispatchStore {
     pub fn new(dir: impl AsRef<Path>) -> Self {
         Self {
             dir: dir.as_ref().into(),
+            limits: DispatchStoreLimits::default(),
             #[cfg(test)]
+            inbox_bytes_read: AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limits(dir: impl AsRef<Path>, limits: DispatchStoreLimits) -> Self {
+        Self {
+            dir: dir.as_ref().into(),
+            limits,
             inbox_bytes_read: AtomicU64::new(0),
         }
     }
@@ -519,7 +630,7 @@ impl DispatchStore {
                 .position(|item| item.session_id == session_id)
         {
             registry.prompts.remove(index);
-            json_file::write_atomic(&self.dir, &self.registry_path(), registry)?;
+            self.write_registry(registry)?;
         }
         Ok(queued.into_legacy_shape())
     }
@@ -585,7 +696,7 @@ impl DispatchStore {
                     .position(|item| item.session_id == session_id)
                 {
                     registry.prompts.remove(index);
-                    json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+                    self.write_registry(&mut registry)?;
                 }
             }
             json_file::write_atomic(
@@ -603,7 +714,7 @@ impl DispatchStore {
                 .position(|item| item.session_id == session_id)
             {
                 let prompt = registry.prompts.remove(index);
-                json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+                self.write_registry(&mut registry)?;
                 return Ok(Some(prompt));
             }
         }
@@ -660,8 +771,9 @@ impl DispatchStore {
         workspace_registry
             .agent_workspaces
             .insert(agent.agent_id, workspace_id);
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
         self.write_workspace_registry(&workspace_registry)?;
-        registry.retain_bounded();
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(agent)
     }
@@ -728,8 +840,9 @@ impl DispatchStore {
         // can leave only an inert mapping to a nonexistent Agent; the
         // inverse order could publish an unowned Agent that a later
         // workspace might incorrectly adopt.
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
         self.write_workspace_registry(&workspace_registry)?;
-        registry.retain_bounded();
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(agent)
     }
@@ -785,8 +898,7 @@ impl DispatchStore {
             .copied())
     }
 
-    fn persist_binding_lineage(
-        &self,
+    fn record_binding_lineage(
         registry: &mut WorkspaceRegistry,
         binding: &DispatchBinding,
     ) -> Result<()> {
@@ -799,8 +911,7 @@ impl DispatchStore {
             workspace_id,
             binding.worker.session_id,
             binding.caller.session_id,
-        )?;
-        self.write_workspace_registry(registry)
+        )
     }
 
     /// Atomically reserves one delegation concurrency slot until the caller
@@ -1052,8 +1163,10 @@ impl DispatchStore {
         let child = binding.worker.session_id;
         let parent = binding.caller.session_id;
         record_lineage(&mut workspace_registry, workspace_id, child, parent)?;
-        self.write_workspace_registry(&workspace_registry)?;
         let reservation = registry.reserve_admission(agent, run, binding, admission);
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&workspace_registry)?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(reservation)
     }
@@ -1068,7 +1181,7 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let committed = registry.commit_admission(operation_id);
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(committed)
     }
 
@@ -1083,7 +1196,7 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let failed = registry.fail_admission(operation_id);
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(failed)
     }
 
@@ -1106,7 +1219,7 @@ impl DispatchStore {
             workspace_registry.delegation_reservations.clear();
             self.write_workspace_registry(&workspace_registry)?;
         }
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(reconciled)
     }
 
@@ -1212,8 +1325,7 @@ impl DispatchStore {
             changed = true;
         }
         if changed {
-            registry.retain_bounded();
-            json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+            self.write_registry(&mut registry)?;
         }
         Ok(changed)
     }
@@ -1225,7 +1337,7 @@ impl DispatchStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
         let mut workspace_registry = self.load_workspace_registry()?;
-        self.persist_binding_lineage(&mut workspace_registry, &binding)?;
+        Self::record_binding_lineage(&mut workspace_registry, &binding)?;
         if let Some(existing) = registry
             .bindings
             .iter_mut()
@@ -1235,7 +1347,9 @@ impl DispatchStore {
         } else {
             registry.bindings.push(binding.clone());
         }
-        registry.retain_bounded();
+        self.prepare_registry(&mut registry)?;
+        self.validate_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&workspace_registry)?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(binding)
     }
@@ -1278,13 +1392,39 @@ impl DispatchStore {
             .iter()
             .filter(|entry| entry.read || entry.sequence < ack.next_sequence)
             .count();
-        if read_count > INBOX_READ_RETENTION || index.entries.len() >= INBOX_HARD_LIMIT {
-            index = self.compact_inbox(caller, &index, ack)?;
+        let history_cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(
+                self.limits.history_max_age_seconds,
+            ))
+            .context("dispatch inbox age limit is outside the clock range")?;
+        let aged_read = index.entries.iter().any(|entry| {
+            (entry.read || entry.sequence < ack.next_sequence) && entry.created_at < history_cutoff
+        });
+        if read_count > self.limits.inbox_read_retention
+            || index.entries.len() >= self.limits.inbox_count
+            || aged_read
+        {
+            index = self.compact_inbox(caller, &index, ack, 0)?;
         }
-        if index.entries.len() >= INBOX_HARD_LIMIT {
+        if index.entries.len() >= self.limits.inbox_count {
             anyhow::bail!("dispatch inbox capacity is exhausted by unacknowledged messages");
         }
 
+        let sequence = next_inbox_sequence(&index.entries)?;
+        message.read = false;
+        let record = InboxRecord { sequence, message };
+        let mut bytes = serde_json::to_vec(&record)?;
+        bytes.push(b'\n');
+        let encoded_len = u64::try_from(bytes.len())?;
+        if encoded_len > self.limits.inbox_bytes {
+            anyhow::bail!("dispatch inbox capacity is exhausted by one oversized message");
+        }
+        if index.valid_len.saturating_add(encoded_len) > self.limits.inbox_bytes {
+            index = self.compact_inbox(caller, &index, ack, encoded_len)?;
+            if index.valid_len.saturating_add(encoded_len) > self.limits.inbox_bytes {
+                anyhow::bail!("dispatch inbox capacity is exhausted by unacknowledged messages");
+            }
+        }
         let parent = path.parent().context("dispatch inbox path has no parent")?;
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -1294,16 +1434,11 @@ impl DispatchStore {
             offset = index.valid_len;
             index.journal_len = offset;
         }
-        let sequence = next_inbox_sequence(&index.entries)?;
-        message.read = false;
-        let record = InboxRecord { sequence, message };
-        let mut bytes = serde_json::to_vec(&record)?;
-        bytes.push(b'\n');
         file.write_all(&bytes)?;
         file.sync_all()?;
         let journal_len = offset + u64::try_from(bytes.len())?;
         index.entries.push(InboxIndexEntry {
-            sequence,
+            sequence: record.sequence,
             offset,
             created_at: record.message.created_at,
             read: false,
@@ -1476,7 +1611,7 @@ impl DispatchStore {
                 .iter()
                 .filter(|record| record.message.read)
                 .count()
-                .saturating_sub(INBOX_READ_RETENTION);
+                .saturating_sub(self.limits.inbox_read_retention);
             records.retain(|record| {
                 if record.message.read && remove > 0 {
                     remove -= 1;
@@ -1497,21 +1632,77 @@ impl DispatchStore {
         // Bounding on every write makes the bound a property of the document
         // rather than of a maintenance tick that may never run on a daemon that
         // is restarted often.
-        registry.retain_bounded();
-        json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
+        self.write_registry(&mut registry)?;
         Ok(result)
     }
 
     fn load_registry(&self) -> Result<Registry> {
+        Self::ensure_file_within(
+            &self.registry_path(),
+            self.limits.registry_bytes,
+            "dispatch registry",
+        )?;
         Ok(json_file::read(&self.registry_path())?.unwrap_or_default())
     }
 
     fn load_workspace_registry(&self) -> Result<WorkspaceRegistry> {
+        Self::ensure_file_within(
+            &self.workspace_registry_path(),
+            self.limits.workspace_registry_bytes,
+            "dispatch workspace registry",
+        )?;
         Ok(json_file::read(&self.workspace_registry_path())?.unwrap_or_default())
     }
 
     fn write_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
+        self.validate_workspace_registry(registry)?;
         json_file::write_atomic(&self.dir, &self.workspace_registry_path(), registry)
+    }
+
+    fn validate_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
+        let bytes = serialized_document_len(registry)?;
+        if bytes > self.limits.workspace_registry_bytes {
+            anyhow::bail!("dispatch workspace registry capacity is exhausted");
+        }
+        Ok(())
+    }
+
+    fn write_registry(&self, registry: &mut Registry) -> Result<()> {
+        self.prepare_registry(registry)?;
+        json_file::write_atomic(&self.dir, &self.registry_path(), registry)
+    }
+
+    fn prepare_registry(&self, registry: &mut Registry) -> Result<()> {
+        registry.retain_count_bounded(self.limits.run_retention);
+        let cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(
+                self.limits.history_max_age_seconds,
+            ))
+            .context("dispatch history age limit is outside the clock range")?;
+        registry.retain_age_bounded(cutoff, self.limits.run_replay_floor);
+        loop {
+            let bytes = serialized_document_len(&*registry)?;
+            if bytes <= self.limits.registry_bytes {
+                return Ok(());
+            }
+            registry
+                .drop_oldest_terminal_run(self.limits.run_replay_floor)
+                .then_some(())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("dispatch registry capacity is exhausted by protected records")
+                })?;
+        }
+    }
+
+    fn ensure_file_within(path: &Path, maximum: u64, label: &str) -> Result<()> {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.len() > maximum => {
+                anyhow::bail!("{label} exceeds its serialized byte limit")
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("failed to inspect {label}")),
+        }
     }
 
     fn read_inbox_ack(&self, caller: &CallerRef) -> Result<InboxAck> {
@@ -1528,7 +1719,8 @@ impl DispatchStore {
 
     fn inbox_index(&self, caller: &CallerRef) -> Result<InboxIndex> {
         let journal_len = match fs::metadata(self.inbox_path(caller)) {
-            Ok(metadata) => metadata.len(),
+            Ok(metadata) if metadata.len() <= self.limits.inbox_bytes => metadata.len(),
+            Ok(_) => anyhow::bail!("dispatch inbox exceeds its serialized byte limit"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(InboxIndex::default());
             }
@@ -1610,7 +1802,7 @@ impl DispatchStore {
             {
                 anyhow::bail!("dispatch inbox sequence is not strictly increasing");
             }
-            if records.len() >= INBOX_HARD_LIMIT {
+            if records.len() >= self.limits.inbox_count {
                 anyhow::bail!("dispatch inbox exceeds its hard limit");
             }
             index.entries.push(InboxIndexEntry {
@@ -1671,6 +1863,9 @@ impl DispatchStore {
         caller: &CallerRef,
         records: &[InboxRecord],
     ) -> Result<InboxIndex> {
+        if records.len() > self.limits.inbox_count {
+            anyhow::bail!("dispatch inbox exceeds its hard limit");
+        }
         let path = self.inbox_path(caller);
         let parent = path.parent().context("dispatch inbox path has no parent")?;
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
@@ -1688,6 +1883,9 @@ impl DispatchStore {
             offset += u64::try_from(line.len() + 1)?;
             text.push_str(&line);
             text.push('\n');
+        }
+        if offset > self.limits.inbox_bytes {
+            anyhow::bail!("dispatch inbox exceeds its serialized byte limit");
         }
         // The index is a disposable cache. Remove it before replacing the
         // journal so a crash cannot leave a same-length stale index that later
@@ -1712,24 +1910,66 @@ impl DispatchStore {
         caller: &CallerRef,
         index: &InboxIndex,
         ack: InboxAck,
+        required_bytes: u64,
     ) -> Result<InboxIndex> {
         let mut records = self.read_inbox_records(caller, &index.entries)?;
-        let read_count = records
+        let is_read =
+            |record: &InboxRecord| record.message.read || record.sequence < ack.next_sequence;
+        let read_count = records.iter().filter(|record| is_read(record)).count();
+        // Keep the journal tail when it is eligible for compaction. Besides
+        // preserving the next sequence after index rebuild, this prevents a
+        // crash between compaction and append from leaving an ACK watermark
+        // above an empty journal's published range. An unread tail already
+        // provides that durable sequence floor.
+        let sequence_floor = usize::from(records.last().is_some_and(&is_read));
+        let replay_floor = self.limits.inbox_read_replay_floor.max(sequence_floor);
+        let removable = read_count.saturating_sub(replay_floor);
+        let retention_excess = read_count
+            .saturating_sub(self.limits.inbox_read_retention)
+            .min(removable);
+        let cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(
+                self.limits.history_max_age_seconds,
+            ))
+            .context("dispatch inbox age limit is outside the clock range")?;
+        let age_excess = records
             .iter()
-            .filter(|record| record.message.read || record.sequence < ack.next_sequence)
-            .count();
-        let retention_excess = read_count.saturating_sub(INBOX_READ_RETENTION);
+            .filter(|record| is_read(record) && record.message.created_at < cutoff)
+            .count()
+            .min(removable);
         let capacity_excess = records
             .len()
             .saturating_add(1)
-            .saturating_sub(INBOX_HARD_LIMIT)
-            .min(read_count);
-        let mut remove = retention_excess.max(capacity_excess);
+            .saturating_sub(self.limits.inbox_count)
+            .min(removable);
+        let record_bytes = records
+            .iter()
+            .map(|record| -> Result<u64> {
+                let bytes = serde_json::to_vec(record)?;
+                Ok(u64::try_from(bytes.len() + 1)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut retained_bytes = record_bytes.iter().copied().sum::<u64>();
+        let read_bytes = records
+            .iter()
+            .zip(&record_bytes)
+            .filter_map(|(record, bytes)| is_read(record).then_some(*bytes))
+            .collect::<Vec<_>>();
+        let mut remove = retention_excess.max(capacity_excess).max(age_excess);
+        for bytes in read_bytes.iter().take(remove) {
+            retained_bytes = retained_bytes.saturating_sub(*bytes);
+        }
+        while remove < removable
+            && retained_bytes.saturating_add(required_bytes) > self.limits.inbox_bytes
+        {
+            retained_bytes = retained_bytes.saturating_sub(read_bytes[remove]);
+            remove += 1;
+        }
         if remove == 0 {
             return Ok(index.clone());
         }
         records.retain_mut(|record| {
-            let read = record.message.read || record.sequence < ack.next_sequence;
+            let read = is_read(record);
             record.message.read = read;
             if read && remove > 0 {
                 remove -= 1;
@@ -1744,7 +1984,12 @@ impl DispatchStore {
 
 impl Clone for DispatchStore {
     fn clone(&self) -> Self {
-        Self::new(&self.dir)
+        Self {
+            dir: self.dir.clone(),
+            limits: self.limits,
+            #[cfg(test)]
+            inbox_bytes_read: AtomicU64::new(0),
+        }
     }
 }
 
@@ -3671,5 +3916,352 @@ mod tests {
         assert_eq!(rebuilt.entries.len(), INBOX_HARD_LIMIT);
         assert_eq!(rebuilt.entries.first().unwrap().sequence, 2);
         assert_eq!(rebuilt.entries.last().unwrap().sequence, 4097);
+    }
+
+    #[test]
+    fn small_serialized_budgets_bound_registry_and_inbox_history() {
+        let registry_tmp = tempfile::tempdir().unwrap();
+        let mut limits = DispatchStoreLimits {
+            registry_bytes: 1_600,
+            run_retention: 128,
+            run_replay_floor: 1,
+            history_max_age_seconds: 0,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(registry_tmp.path(), limits);
+        let workspace = WorkspaceId::new();
+        let (session, agent_id, caller) = ids();
+        store
+            .upsert_agent(workspace, agent(session, agent_id))
+            .unwrap();
+        for _ in 0..128 {
+            store
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id,
+                    prompt: "terminal history".repeat(12),
+                    started_at: now(),
+                    ended_at: Some(now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+        let registry = store.load_registry().unwrap();
+        assert!(registry.runs.len() < 128);
+        assert!(fs::metadata(store.registry_path()).unwrap().len() <= limits.registry_bytes);
+
+        let before = fs::read(store.registry_path()).unwrap();
+        let error = store
+            .upsert_run(DispatchRun {
+                run_id: OperationId::new(),
+                agent_id,
+                prompt: "live".repeat(usize::try_from(limits.registry_bytes).unwrap()),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("protected records"));
+        assert_eq!(fs::read(store.registry_path()).unwrap(), before);
+
+        let inbox_tmp = tempfile::tempdir().unwrap();
+        limits.inbox_bytes = 1_600;
+        limits.inbox_count = 64;
+        limits.inbox_read_retention = 64;
+        limits.inbox_read_replay_floor = 0;
+        let inbox_store = DispatchStore::with_limits(inbox_tmp.path(), limits);
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        for _ in 0..128 {
+            let run_id = OperationId::new();
+            inbox_store
+                .append_inbox(&caller, message(run_id, worker.clone()))
+                .unwrap();
+            inbox_store.mark_inbox_read(&caller, run_id).unwrap();
+        }
+        let index = inbox_store.inbox_index(&caller).unwrap();
+        assert!(index.entries.len() < 128);
+        assert!(!index.entries.is_empty());
+        assert!(index.valid_len <= limits.inbox_bytes);
+
+        let last_sequence = index.entries.last().unwrap().sequence;
+        let next_run = OperationId::new();
+        inbox_store
+            .append_inbox(&caller, message(next_run, worker))
+            .unwrap();
+        let rebuilt = {
+            fs::remove_file(inbox_store.inbox_index_path(&caller)).unwrap();
+            DispatchStore::with_limits(inbox_tmp.path(), limits)
+                .inbox_index(&caller)
+                .unwrap()
+        };
+        assert_eq!(rebuilt.entries.last().unwrap().sequence, last_sequence + 1);
+    }
+
+    #[test]
+    fn serialized_capacity_refusals_leave_existing_state_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut limits = DispatchStoreLimits {
+            inbox_bytes: 1_100,
+            inbox_count: 64,
+            inbox_read_retention: 64,
+            inbox_read_replay_floor: 1,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(tmp.path(), limits);
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let mut accepted = 0;
+        loop {
+            let before = fs::read(store.inbox_path(&caller)).unwrap_or_default();
+            match store.append_inbox(&caller, message(OperationId::new(), worker.clone())) {
+                Ok(()) => accepted += 1,
+                Err(error) => {
+                    assert!(error.to_string().contains("capacity is exhausted"));
+                    assert_eq!(fs::read(store.inbox_path(&caller)).unwrap(), before);
+                    break;
+                }
+            }
+            assert!(accepted < limits.inbox_count);
+        }
+        assert!(accepted > 0);
+
+        limits.registry_bytes = 1;
+        limits.workspace_registry_bytes = 1;
+        limits.inbox_bytes = 1;
+        let empty = tempfile::tempdir().unwrap();
+        let store = DispatchStore::with_limits(empty.path(), limits);
+        assert!(
+            store
+                .upsert_agent(WorkspaceId::new(), agent(session, AgentId::new()))
+                .is_err()
+        );
+        assert!(!store.registry_path().exists());
+        assert!(!store.workspace_registry_path().exists());
+
+        fs::write(store.registry_path(), "not-json").unwrap();
+        assert!(
+            store
+                .agents()
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        fs::write(store.workspace_registry_path(), "not-json").unwrap();
+        assert!(
+            store
+                .agents_in_workspace(WorkspaceId::new())
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        let inbox_path = store.inbox_path(&caller);
+        fs::create_dir_all(inbox_path.parent().unwrap()).unwrap();
+        fs::write(inbox_path, "not-json\n").unwrap();
+        assert!(
+            store
+                .inbox(&caller)
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+    }
+
+    #[test]
+    fn inbox_byte_pressure_compacts_only_read_history_before_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let first_run = OperationId::new();
+        let second_run = OperationId::new();
+        let third_run = OperationId::new();
+        let first = message(first_run, worker.clone());
+        let second = message(second_run, worker.clone());
+        let third = message(third_run, worker);
+        let line_len = |sequence, message: InboxMessage| {
+            let mut bytes = serde_json::to_vec(&InboxRecord { sequence, message }).unwrap();
+            bytes.push(b'\n');
+            u64::try_from(bytes.len()).unwrap()
+        };
+        let mut read_first = first.clone();
+        read_first.read = true;
+        let first_and_second = line_len(1, read_first) + line_len(2, second.clone());
+        let second_and_third = line_len(2, second.clone()) + line_len(3, third.clone());
+        let limits = DispatchStoreLimits {
+            inbox_bytes: first_and_second.max(second_and_third),
+            inbox_count: 64,
+            inbox_read_retention: 64,
+            inbox_read_replay_floor: 0,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(tmp.path(), limits);
+        store.append_inbox(&caller, first).unwrap();
+        assert!(store.mark_inbox_read(&caller, first_run).unwrap());
+        store.append_inbox(&caller, second).unwrap();
+        store.append_inbox(&caller, third).unwrap();
+
+        let index = store.inbox_index(&caller).unwrap();
+        assert_eq!(
+            index
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(index.valid_len <= limits.inbox_bytes);
+        let retained = store.inbox(&caller).unwrap();
+        assert!(!retained.iter().any(|message| message.run_id == first_run));
+        assert!(retained.iter().any(|message| message.run_id == second_run));
+        assert!(retained.iter().any(|message| message.run_id == third_run));
+    }
+
+    #[test]
+    fn each_serialized_capacity_boundary_has_typed_effect_zero_refusal() {
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+
+        let oversized_tmp = tempfile::tempdir().unwrap();
+        let oversized = DispatchStore::with_limits(
+            oversized_tmp.path(),
+            DispatchStoreLimits {
+                inbox_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            oversized
+                .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("one oversized message")
+        );
+        assert!(!oversized.inbox_path(&caller).exists());
+
+        let workspace_tmp = tempfile::tempdir().unwrap();
+        let workspace_limited = DispatchStore::with_limits(
+            workspace_tmp.path(),
+            DispatchStoreLimits {
+                workspace_registry_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            workspace_limited
+                .upsert_agent(WorkspaceId::new(), agent(session, AgentId::new()))
+                .unwrap_err()
+                .to_string()
+                .contains("workspace registry capacity is exhausted")
+        );
+        assert!(!workspace_limited.registry_path().exists());
+        assert!(!workspace_limited.workspace_registry_path().exists());
+
+        let records = vec![
+            InboxRecord {
+                sequence: 1,
+                message: message(OperationId::new(), worker.clone()),
+            },
+            InboxRecord {
+                sequence: 2,
+                message: message(OperationId::new(), worker),
+            },
+        ];
+        let count_tmp = tempfile::tempdir().unwrap();
+        let count_limited = DispatchStore::with_limits(
+            count_tmp.path(),
+            DispatchStoreLimits {
+                inbox_count: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            count_limited
+                .write_inbox_records(&caller, &records)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+        assert!(!count_limited.inbox_path(&caller).exists());
+
+        let bytes_tmp = tempfile::tempdir().unwrap();
+        let bytes_limited = DispatchStore::with_limits(
+            bytes_tmp.path(),
+            DispatchStoreLimits {
+                inbox_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            bytes_limited
+                .write_inbox_records(&caller, &records[..1])
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        assert!(!bytes_limited.inbox_path(&caller).exists());
+    }
+
+    #[test]
+    fn byte_pruning_removes_terminal_run_lineage_from_one_ssot_path() {
+        let (session, agent_id, caller) = ids();
+        let run_id = OperationId::new();
+        let mut registry = Registry {
+            runs: vec![DispatchRun {
+                run_id,
+                agent_id,
+                prompt: "done".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            }],
+            bindings: vec![DispatchBinding {
+                run_id,
+                caller,
+                worker: WorkerRef {
+                    session_id: Some(session),
+                    agent_id,
+                },
+            }],
+            admissions: vec![AgentAdmissionReservation {
+                operation_id: run_id,
+                semantic_key: "key".into(),
+                credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+            }],
+            ..Registry::default()
+        };
+        assert!(registry.drop_oldest_terminal_run(0));
+        assert!(registry.runs.is_empty());
+        assert!(registry.bindings.is_empty());
+        assert!(registry.admissions.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serialized_limit_metadata_errors_keep_the_io_context() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("state.json");
+        fs::write(&path, "{}").unwrap();
+        let mode = fs::metadata(&blocked).unwrap().permissions().mode();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = DispatchStore::ensure_file_within(&path, 1024, "dispatch fixture");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            format!("{:#}", result.unwrap_err()).contains("failed to inspect dispatch fixture")
+        );
     }
 }
