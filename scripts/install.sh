@@ -35,17 +35,18 @@ fail() {
 }
 
 select_release() {
-    local releases release_count selected=1 window_start=1 key sequence version
+    local releases release_count selected=1 window_start=1 key sequence version current_version action
     if [ ! -r /dev/tty ]; then
         fail "a terminal is required to select a release"
     fi
     releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | awk '!seen[$0]++')"
     [ -n "$releases" ] || fail "could not find any stable releases"
     release_count="$(printf '%s\n' "$releases" | wc -l | tr -d ' ')"
+    current_version="$(read_version "$TARGET")"
 
     SELECTOR_ACTIVE=1
     printf '\033[?25l' > /dev/tty
-    render_release_selector "$releases" "$release_count" "$selected" "$window_start" 0
+    render_release_selector "$releases" "$release_count" "$selected" "$window_start" 0 "$current_version"
     while true; do
         IFS= read -rsn1 key < /dev/tty || fail "could not read release selection"
         case "$key" in
@@ -75,13 +76,43 @@ select_release() {
         elif [ "$selected" -ge $((window_start + 5)) ]; then
             window_start=$((selected - 4))
         fi
-        render_release_selector "$releases" "$release_count" "$selected" "$window_start" 1
+        render_release_selector "$releases" "$release_count" "$selected" "$window_start" 1 "$current_version"
     done
     printf '\033[?25h' > /dev/tty
     SELECTOR_ACTIVE=0
     version="$(printf '%s\n' "$releases" | sed -n "${selected}p")"
     [ -n "$version" ] || fail "invalid release selection"
+    action="$(release_action "$current_version" "$version")"
+    case "$action" in
+        downgrade)
+            printf 'Confirm downgrade from v%s to v%s? [y/N] ' "$current_version" "$version" > /dev/tty
+            IFS= read -rsn1 key < /dev/tty || fail "could not read downgrade confirmation"
+            printf '\n' > /dev/tty
+            case "$key" in
+                y|Y) ;;
+                *) printf 'downgrade cancelled\n' > /dev/tty; exit 0 ;;
+            esac
+            ;;
+    esac
     USAGI_VERSION="v${version}"
+}
+
+release_action() {
+    local current=$1 selected=$2
+    if [ -z "$current" ]; then
+        printf 'install\n'
+    elif [ "$current" = "$selected" ]; then
+        printf 'reinstall\n'
+    else
+        awk -v current="$current" -v selected="$selected" 'BEGIN {
+            split(current, a, "."); split(selected, b, ".");
+            for (i = 1; i <= 3; i++) {
+                if ((a[i] + 0) < (b[i] + 0)) { print "upgrade"; exit }
+                if ((a[i] + 0) > (b[i] + 0)) { print "downgrade"; exit }
+            }
+            print "reinstall"
+        }'
+    fi
 }
 
 resolve_latest_release() {
@@ -95,18 +126,25 @@ resolve_latest_release() {
 }
 
 render_release_selector() {
-    local releases=$1 release_count=$2 selected=$3 window_start=$4 redraw=$5
-    local row index version marker badge c_reset c_bold c_pink c_cyan c_dim
+    local releases=$1 release_count=$2 selected=$3 window_start=$4 redraw=$5 current_version=$6
+    local row index version marker badge action action_text current_text c_reset c_bold c_pink c_cyan c_dim
     c_reset=$'\033[0m'
     c_bold=$'\033[1m'
     c_pink=$'\033[95m'
     c_cyan=$'\033[96m'
     c_dim=$'\033[2m'
 
-    [ "$redraw" -eq 0 ] || printf '\033[12A' > /dev/tty
+    version="$(printf '%s\n' "$releases" | sed -n "${selected}p")"
+    action="$(release_action "$current_version" "$version")"
+    if [ -n "$current_version" ]; then current_text="v${current_version}"; else current_text="not installed"; fi
+    action_text="${action} v${version}"
+
+    [ "$redraw" -eq 0 ] || printf '\033[14A' > /dev/tty
     printf '%s╭─ usagi update ────────────────────────────╮%s\n' "$c_pink" "$c_reset" > /dev/tty
     printf '│ %sChoose a version%s                          │\n' "$c_bold" "$c_reset" > /dev/tty
     printf '│ %s↑/↓ move  •  Enter install  •  q cancel%s   │\n' "$c_dim" "$c_reset" > /dev/tty
+    printf '│ Current: %-32.32s │\n' "$current_text" > /dev/tty
+    printf '│ Action: %-33.33s │\n' "$action_text" > /dev/tty
     printf '%s├───────────────────────────────────────────┤%s\n' "$c_pink" "$c_reset" > /dev/tty
     row=0
     while [ "$row" -lt 5 ]; do
