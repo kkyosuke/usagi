@@ -1,7 +1,7 @@
 //! Pull request modal（PR ポップアップ）。
 //!
-//! workspace のセッションで見つかった Pull Request を一覧し、選んだ PR の詳細（番号・状態・
-//! URL）を見る中央モーダル。↑↓ で選ぶ。中央に浮かぶ枠付きダイアログとして描く（枠・配置は
+//! workspace のセッションで見つかった Pull Request を repository ごとに一覧し、番号・状態・
+//! title・remote status を見る中央モーダル。↑↓ で選ぶ。中央に浮かぶ枠付きダイアログとして描く（枠・配置は
 //! 共通の [`modal`] widget に委譲）。
 //!
 //! 一覧する PR は core domain の [`PrLink`] を持つ。状態 [`PrModal`] は端末 IO を持たない
@@ -19,6 +19,8 @@ const INNER_WIDTH: usize = 72;
 /// 一度に表示する Pull Request の最大数。
 const MAX_VISIBLE: usize = 6;
 const BODY_HEIGHT: usize = 11;
+const FOOTER_HEIGHT: usize = 3;
+const LIST_HEIGHT: usize = BODY_HEIGHT - FOOTER_HEIGHT;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -216,29 +218,64 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
     let hint = hint.map_or_else(String::new, |hint| {
         format!("  {}", Style::new().dim().paint(hint))
     });
-    let repo = Style::new().dim().paint(repository(&pr.url));
     let remote = Style::new().dim().paint(&remote_summary(pr));
     modal::content_line(
-        &format!("{marker} {number} {badge} {repo} · {title}  {remote}{hint}"),
+        &format!("{marker} {number} {badge} {title}  {remote}{hint}"),
         inner,
     )
 }
 
+/// Preserve the controller-owned PR order while adding one repository heading
+/// before each consecutive group visible in the viewport.
+fn grouped_pr_rows(prs: &[PrLink], start: usize, end: usize, selected: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut previous_repository = None;
+    for (index, pr) in prs[start..end].iter().enumerate() {
+        let repository = repository(&pr.url);
+        if previous_repository != Some(repository) {
+            rows.push(modal::caption(repository));
+            previous_repository = Some(repository);
+        }
+        let absolute_index = start + index;
+        rows.push(pr_row(pr, absolute_index == selected, INNER_WIDTH));
+    }
+    rows
+}
+
+/// Select a PR window whose repository headings and scroll indicators all fit
+/// in the fixed list region. PR rows retain priority and the cursor always stays
+/// visible; only the number of visible PRs shrinks when several repositories
+/// need headings at once.
+fn grouped_window(state: &PrModal) -> Vec<String> {
+    let len = state.prs.len();
+    let mut capacity = len.min(MAX_VISIBLE);
+    loop {
+        let (start, end) = modal::list_window(len, state.selected, capacity);
+        let rows = grouped_pr_rows(&state.prs, start, end, state.selected);
+        let indicators = usize::from(start > 0) + usize::from(end < len);
+        if rows.len() + indicators <= LIST_HEIGHT {
+            let mut visible = Vec::with_capacity(rows.len() + indicators);
+            if start > 0 {
+                visible.push(modal::scroll_above(start));
+            }
+            visible.extend(rows);
+            if end < len {
+                visible.push(modal::scroll_below(len - end));
+            }
+            return visible;
+        }
+        capacity -= 1;
+    }
+}
+
 /// PR ポップアップのボディ（枠の内側の行）: 一覧とフッタ。
 ///
-/// list shape の共通部品を使う: 選択追従の viewport は [`modal::list_window`]、
-/// `↑/↓ N more` を挟んだ scroll 描画は [`modal::scroll_window`] に委譲する。
+/// 選択追従の viewport は [`modal::list_window`] を使い、repository 見出しと
+/// `↑/↓ N more` を含めて固定高へ収める。
 fn body(state: &PrModal) -> Vec<String> {
     let mut lines = Vec::new();
     if state.selected_pr().is_some() {
-        let rows: Vec<String> = state
-            .prs
-            .iter()
-            .enumerate()
-            .map(|(index, pr)| pr_row(pr, index == state.selected, INNER_WIDTH))
-            .collect();
-        let (start, end) = modal::list_window(state.prs.len(), state.selected, MAX_VISIBLE);
-        lines.extend(modal::scroll_window(&rows, start, end));
+        lines.extend(grouped_window(state));
     } else {
         lines.push(modal::empty_notice("no pull requests"));
     }
@@ -251,6 +288,14 @@ fn body(state: &PrModal) -> Vec<String> {
         "c: copy  d: dismiss  Enter: open  Esc: close",
     ));
     lines
+}
+
+/// Whether a Home-relative terminal cell is inside the rendered PR modal box.
+/// This delegates the exact fixed-body and centring geometry to the shared
+/// modal widget used by [`render_over`].
+#[must_use]
+pub fn contains(raw_height: usize, raw_width: usize, column: u16, row: u16) -> bool {
+    modal::body_contains(raw_height, raw_width, INNER_WIDTH, BODY_HEIGHT, column, row)
 }
 
 /// 生の端末サイズに対する pull request modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
@@ -290,7 +335,7 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{PrModal, render, render_over};
+    use super::{PrModal, contains, render, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::pr_inventory::{
         PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
@@ -466,7 +511,7 @@ mod tests {
 
         let text = joined(&modal);
         assert!(text.contains("#9"));
-        assert!(text.contains("↑ 3 more"));
+        assert!(text.contains("↑ 4 more"));
         assert!(text.contains("↓ 1 more"));
         assert!(!text.contains("#1 "));
         assert!(text.contains("Esc: close"));
@@ -487,9 +532,38 @@ mod tests {
         assert!(text.contains("open"));
         assert!(text.contains("merged")); // #801 は merged
         assert!(text.contains("workspace 画面")); // タイトル
+        assert_eq!(text.matches("kkyosuke/usagi").count(), 1);
         assert!(!text.contains("github.com/kkyosuke/usagi/pull/812"));
         assert!(text.contains("Esc: close"));
         assert!(text.contains('›')); // 選択マーカー
+    }
+
+    #[test]
+    fn repository_headings_group_prs_without_changing_selection_order() {
+        let prs = vec![
+            PrLink::new(11, "https://github.com/acme/api/pull/11"),
+            PrLink::new(12, "https://github.com/acme/api/pull/12"),
+            PrLink::new(21, "https://github.com/acme/web/pull/21"),
+        ];
+        let text = joined(&PrModal::with_selection(prs, 2));
+
+        assert_eq!(text.matches("acme/api").count(), 1);
+        assert_eq!(text.matches("acme/web").count(), 1);
+        assert!(
+            text.lines()
+                .any(|line| line.contains('›') && line.contains("#21"))
+        );
+        assert_eq!(text.matches("#11").count(), 1);
+        assert_eq!(text.matches("#12").count(), 1);
+        assert_eq!(text.matches("#21").count(), 1);
+    }
+
+    #[test]
+    fn modal_hit_test_includes_the_border_but_not_its_background() {
+        assert!(contains(24, 80, 2, 4));
+        assert!(contains(24, 80, 77, 18));
+        assert!(!contains(24, 80, 1, 4));
+        assert!(!contains(24, 80, 2, 3));
     }
 
     #[test]

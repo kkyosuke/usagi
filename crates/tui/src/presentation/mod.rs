@@ -51,6 +51,7 @@ use crate::presentation::views::director_drawer::{
 };
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
+use crate::presentation::views::pr_modal;
 use crate::presentation::views::quit_modal;
 use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
@@ -831,6 +832,28 @@ enum WorkspaceInputRoute {
     Garden(Vec<Effect>),
     Forwarded,
     Unhandled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrModalClickRoute {
+    Inside,
+    Outside,
+}
+
+fn route_pr_modal_click(
+    overlay: Option<Overlay>,
+    height: usize,
+    width: usize,
+    column: u16,
+    row: u16,
+) -> Option<PrModalClickRoute> {
+    (overlay == Some(Overlay::Prs)).then(|| {
+        if pr_modal::contains(height, width, column, row) {
+            PrModalClickRoute::Inside
+        } else {
+            PrModalClickRoute::Outside
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6803,39 +6826,53 @@ fn drive_workspace_controller(
         } else if is_director_new_click(&key, &runtime, height, width) {
             runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew))
         } else if let Key::Click { column, row } = key {
-            // Header rendering and hit-testing share one layout projection, so
-            // Notice presence and narrow clipping cannot move an action away
-            // from its clickable cells.
-            let header_action = drawn_material.as_ref().and_then(|material| {
-                home_header_action_at(width, &material.projection, column, row)
-            });
-            let pane_tab = runtime
-                .wants_right_pane_tab_click()
-                .then(|| {
-                    drawn_material.as_ref().and_then(|material| {
-                        right_pane_tab_at(
-                            material.height,
-                            material.width,
-                            &material.projection,
-                            column,
-                            row,
-                        )
-                    })
-                })
-                .flatten();
-            match (header_action, pane_tab) {
-                (Some(HomeHeaderAction::Director), _) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
-                }
-                (Some(HomeHeaderAction::Decisions), _) => {
-                    runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
-                }
-                (None, Some(index)) => {
-                    select_right_pane_tab(&mut ui, &mut runtime, index);
+            if let Some(route) =
+                route_pr_modal_click(runtime.state().overlay(), height, width, column, row)
+            {
+                if route == PrModalClickRoute::Inside {
+                    // The modal owns its whole box; a click there must not
+                    // activate a header, pane tab, or sidebar row behind it.
                     Vec::new()
+                } else {
+                    runtime.apply_event(AppEvent::Key(AppKey::Escape))
                 }
-                (None, None) => {
-                    runtime.apply_event(sidebar_pointer_event(column, row, pointer_clock.elapsed()))
+            } else {
+                // Header rendering and hit-testing share one layout projection, so
+                // Notice presence and narrow clipping cannot move an action away
+                // from its clickable cells.
+                let header_action = drawn_material.as_ref().and_then(|material| {
+                    home_header_action_at(width, &material.projection, column, row)
+                });
+                let pane_tab = runtime
+                    .wants_right_pane_tab_click()
+                    .then(|| {
+                        drawn_material.as_ref().and_then(|material| {
+                            right_pane_tab_at(
+                                material.height,
+                                material.width,
+                                &material.projection,
+                                column,
+                                row,
+                            )
+                        })
+                    })
+                    .flatten();
+                match (header_action, pane_tab) {
+                    (Some(HomeHeaderAction::Director), _) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
+                    }
+                    (Some(HomeHeaderAction::Decisions), _) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
+                    }
+                    (None, Some(index)) => {
+                        select_right_pane_tab(&mut ui, &mut runtime, index);
+                        Vec::new()
+                    }
+                    (None, None) => runtime.apply_event(sidebar_pointer_event(
+                        column,
+                        row,
+                        pointer_clock.elapsed(),
+                    )),
                 }
             }
         } else {
@@ -8067,11 +8104,11 @@ mod tests {
         FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, Geometry, GitDiff,
         IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
         NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS,
-        PaneLaunch, PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort,
-        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
-        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
-        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
-        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+        SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
+        SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
+        SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
@@ -8090,8 +8127,8 @@ mod tests {
         projection_build_counts, recent_paths, registry_contains_path, remove_registry_paths,
         render_controller_frame, render_home_material, render_home_snapshot,
         reset_projection_build_counts, restore_open_panes, retarget_director_chords,
-        route_garden_input, route_workspace_input_before_reducer, run as run_from_start,
-        run_screen_graph_with_backend, run_with_settings,
+        route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -8462,6 +8499,23 @@ mod tests {
                 row: 4,
                 at,
             }
+        );
+    }
+
+    #[test]
+    fn pr_modal_click_route_claims_the_box_and_closes_on_its_background() {
+        assert_eq!(
+            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 2, 4),
+            Some(PrModalClickRoute::Inside)
+        );
+        assert_eq!(
+            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 1, 4),
+            Some(PrModalClickRoute::Outside)
+        );
+        assert_eq!(route_pr_modal_click(None, 24, 80, 1, 4), None);
+        assert_eq!(
+            route_pr_modal_click(Some(Overlay::Notes), 24, 80, 1, 4),
+            None
         );
     }
 
