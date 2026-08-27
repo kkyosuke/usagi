@@ -201,6 +201,7 @@ grep -q 'unsupported platform: linux-arm64' "$CASE_DIR/err"
 assert_old_preserved
 
 prepare_case interactive-selector
+make_binary "$HOME_DIR/.usagi/bin/usagi" 3.0.0 installed-newer
 FAKE_CURL_LOG="$CASE_DIR/curl.log"
 export FAKE_CURL_LOG
 python3 - "$INSTALLER" "$HOME_DIR" "$FIXTURE_DIR" "$FAKE_BIN" "$CWD_DIR" > "$CASE_DIR/selector.out" <<'PY'
@@ -225,7 +226,8 @@ if pid == 0:
 
 captured = bytearray()
 deadline = time.time() + 10
-sent = False
+selection_sent = False
+confirmation_sent = False
 status = None
 while time.time() < deadline:
     ready, _, _ = select.select([fd], [], [], 0.1)
@@ -238,9 +240,12 @@ while time.time() < deadline:
             pass
         else:
             captured.extend(chunk)
-            if not sent and b"usagi update" in captured and captured.count(b"\n") >= 10:
+            if not selection_sent and b"usagi update" in captured and captured.count(b"\n") >= 12:
                 os.write(fd, b"\x1b[A" + b"\x1b[B" * 5 + b"\r")
-                sent = True
+                selection_sent = True
+            if selection_sent and not confirmation_sent and b"Confirm downgrade" in captured:
+                os.write(fd, b"y")
+                confirmation_sent = True
     done, status = os.waitpid(pid, os.WNOHANG)
     if done:
         if os.waitstatus_to_exitcode(status) != 0:
@@ -263,18 +268,81 @@ grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
 python3 - "$CASE_DIR/selector.out" <<'PY'
 import re
 import sys
+import unicodedata
+
+
+def display_width(value):
+    return sum(2 if unicodedata.east_asian_width(char) in ("W", "F") else 1 for char in value)
 
 text = open(sys.argv[1], "rb").read().decode(errors="replace")
 plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
 assert "Choose a version" in plain
 assert "↑/↓ move  •  Enter install  •  q cancel" in plain
-assert text.count("\x1b[12A") == 6
+assert "Current: v3.0.0" in plain
+assert "Action: downgrade v2.0.0" in plain
+assert "Confirm downgrade from v3.0.0 to v2.0.0?" in plain
+assert text.count("\x1b[14A") == 6
 first_frame = plain.split("╰", 1)[0]
 rows = [line for line in first_frame.splitlines() if line.startswith("│")]
-release_rows = rows[2:7]
+release_rows = rows[4:9]
 assert len(release_rows) == 5, release_rows
 assert sum("v" in row for row in release_rows) == 5, release_rows
+assert all(display_width(row) == 45 for row in rows), [
+    (display_width(row), row) for row in rows
+]
 PY
+
+prepare_case downgrade-cancel
+make_binary "$HOME_DIR/.usagi/bin/usagi" 3.0.0 installed-newer
+python3 - "$INSTALLER" "$HOME_DIR" "$FIXTURE_DIR" "$FAKE_BIN" "$CWD_DIR" > "$CASE_DIR/cancel.out" <<'PY'
+import os
+import pty
+import select
+import sys
+import time
+
+installer, home, fixture, fake_bin, cwd = sys.argv[1:]
+env = os.environ.copy()
+env.update(HOME=home, FIXTURE_DIR=fixture, PATH=f"{fake_bin}:{env['PATH']}")
+env.pop("USAGI_HOME", None)
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(cwd)
+    os.execvpe("bash", ["bash", installer, "--select-version"], env)
+
+captured = bytearray()
+deadline = time.time() + 10
+selection_sent = False
+confirmation_sent = False
+status = None
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.1)
+    if ready:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            chunk = b""
+        captured.extend(chunk)
+        if not selection_sent and b"usagi update" in captured and captured.count(b"\n") >= 12:
+            os.write(fd, b"\x1b[B" * 5 + b"\r")
+            selection_sent = True
+        if selection_sent and not confirmation_sent and b"Confirm downgrade" in captured:
+            os.write(fd, b"n")
+            confirmation_sent = True
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        break
+else:
+    os.kill(pid, 9)
+    raise SystemExit("downgrade cancellation timed out")
+
+if status is None or os.waitstatus_to_exitcode(status) != 0:
+    sys.stderr.buffer.write(captured)
+    raise SystemExit("downgrade cancellation was not successful")
+sys.stdout.buffer.write(captured)
+PY
+grep -q 'downgrade cancelled' "$CASE_DIR/cancel.out"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 3.0.0" ]
 
 prepare_case bad-checksum
 printf '%064d  %s\n' 0 "$ASSET" > "$FIXTURE_DIR/$ASSET.sha256"
