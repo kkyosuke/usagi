@@ -478,6 +478,7 @@ struct RegistryGenerationControl {
     data_dir: PathBuf,
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup
 impl RegistryGenerationControl {
     fn retained(&self) -> std::io::Result<Vec<ProcessIdentity>> {
         Ok(read_registry_document(&self.data_dir)
