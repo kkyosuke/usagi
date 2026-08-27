@@ -68,7 +68,11 @@ select_release() {
             j)
                 if [ "$selected" -lt "$release_count" ]; then selected=$((selected + 1)); fi
                 ;;
-            q) printf '\033[?25h\n' > /dev/tty; SELECTOR_ACTIVE=0; fail "release selection cancelled" ;;
+            q)
+                printf '\033[?25h\nrelease selection cancelled\n' > /dev/tty
+                SELECTOR_ACTIVE=0
+                exit 0
+                ;;
             *) continue ;;
         esac
         if [ "$selected" -lt "$window_start" ]; then
