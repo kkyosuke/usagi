@@ -618,6 +618,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
+| live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
 | 画面をまたぐ再利用 UI 部品（widget） | `crates/tui/` の `presentation/widgets/` |
 | 色（意味的な役割→具体色）・色定数 | `crates/tui/` の `presentation/theme` |

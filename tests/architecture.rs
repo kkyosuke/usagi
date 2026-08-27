@@ -305,3 +305,32 @@ fn source_layers_follow_the_documented_dependency_matrix() {
         "source dependency matrix violations:\n{violations:#?}"
     );
 }
+
+#[test]
+fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition source is readable");
+    let tenant = fs::read_to_string(root.join("src/runtime/daemon/tenant_control.rs"))
+        .expect("tenant control source is readable");
+
+    assert!(composition.contains("mod tenant_control;"));
+    assert!(composition.contains("tenant_control::dispatch("));
+    assert!(!composition.contains("fn dispatch_tenant("));
+    for source in [&composition, &tenant] {
+        assert!(
+            !source
+                .lines()
+                .take(10)
+                .any(|line| line.trim_start().starts_with("#![coverage(off)]")),
+            "a module split must not remove production composition from coverage"
+        );
+    }
+    assert!(
+        tenant.lines().count() <= 250,
+        "tenant control composition grew beyond its reviewable boundary"
+    );
+    assert!(tenant.contains("pub(super) fn dispatch("));
+    assert!(tenant.contains("fn inventory("));
+    assert!(tenant.contains("fn retire("));
+}
