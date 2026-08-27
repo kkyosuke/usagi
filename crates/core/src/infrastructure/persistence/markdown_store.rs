@@ -257,7 +257,16 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
                 hasher.update(&buffer[..read]);
             }
         }
-        Ok(format!("{FINGERPRINT_ALGORITHM}:{:x}", hasher.finalize()))
+        let digest =
+            hasher
+                .finalize()
+                .iter()
+                .fold(String::with_capacity(64), |mut output, byte| {
+                    use std::fmt::Write as _;
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                });
+        Ok(format!("{FINGERPRINT_ALGORITHM}:{digest}"))
     }
 
     // Takes `&self` for call-site consistency with the store's other methods
