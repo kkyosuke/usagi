@@ -1596,6 +1596,12 @@ cursor の offset へ直接 seek し、最大100件の要求 page だけを read
 `cursor expired` を返す。journal は4,096件で最新2,048件へ atomic compact し、replay checkpoint を先に offset 0へ
 置くことで、compact 中の crash でも current snapshot への duplicate replayだけに収束する。
 
+supervisor run list は owner / state / 作成順 / revision の derived index を使い、cursor から選んだ page の snapshot
+だけを hydrate する。index は mutation と同時に更新し、restart 後の初回 query では authoritative snapshot / journal
+から再構築する。page 全体が 512 KiB に達した場合は count limit より前でも cursor を返す。list / get / events の
+read-only response はすべて 512 KiB 以下とし、1 run の安全な projection だけで上限を超える場合は
+`resource_exhausted` として effect zero で拒否する。
+
 ## supervisor policy and verification
 
 各 `SupervisorRun` は作成時の immutable `ExecutionPolicy` snapshot を durable state に保存する。現在の既定値は dispatch 16 回、同時実行 4、親子深さ 8、retry attempt 1（fail-closed）、retry backoff 30 秒である。request ごとの上限緩和は受け取らない。
