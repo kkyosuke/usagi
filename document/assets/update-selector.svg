@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500" role="img" aria-labelledby="title desc">
-  <title id="title">usagi update release selector</title>
-  <desc id="desc">A terminal window showing the current version, upgrade action, and five selectable releases.</desc>
+  <title id="title">usagi update リリース選択</title>
+  <desc id="desc">現在のバージョン、アップグレード操作、選択可能な5件のリリースを表示するターミナル。</desc>
   <rect width="900" height="500" fill="#f4eefe"/>
   <circle cx="86" cy="75" r="115" fill="#f7c8ff" opacity="0.42"/>
   <circle cx="827" cy="448" r="170" fill="#bdefff" opacity="0.45"/>
@@ -17,13 +17,13 @@
     <path d="M180 240H720 M180 405H720" fill="none" stroke="#ed73ff" stroke-width="2"/>
     <rect x="198" y="119" width="185" height="24" fill="#17131f"/>
     <text x="206" y="138" fill="#ed73ff">usagi update</text>
-    <text x="206" y="171" font-weight="700" fill="#ffffff">Choose a version</text>
-    <text x="206" y="196" fill="#82788f">↑/↓ move  •  Enter install  •  q cancel</text>
-    <text x="206" y="218" fill="#ffffff">Current: v0.8.1</text>
-    <text x="206" y="236" fill="#65d9ef">Action: upgrade v0.8.2</text>
+    <text x="206" y="171" font-weight="700" fill="#ffffff">バージョンを選択</text>
+    <text x="206" y="196" fill="#82788f">↑/↓ 移動 • Enter 決定 • q キャンセル</text>
+    <text x="206" y="218" fill="#ffffff">現在: v0.8.1</text>
+    <text x="206" y="236" fill="#65d9ef">操作: アップグレード v0.8.2</text>
     <text x="206" y="270" fill="#ed73ff">&gt;</text>
     <text x="232" y="270" font-weight="700" fill="#ffffff">v0.8.2</text>
-    <text x="626" y="270" text-anchor="end" fill="#65d9ef">latest</text>
+    <text x="626" y="270" text-anchor="end" fill="#65d9ef">最新</text>
     <text x="232" y="299" font-weight="700" fill="#ffffff">v0.8.1</text>
     <text x="232" y="328" font-weight="700" fill="#ffffff">v0.8.0</text>
     <text x="232" y="357" font-weight="700" fill="#ffffff">v0.7.4</text>

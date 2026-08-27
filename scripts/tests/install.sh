@@ -159,6 +159,8 @@ run_installer >"$CASE_DIR/out"
 unset FAKE_CURL_LOG
 grep -q '次回の起動から新しい CLI を使える' "$CASE_DIR/out"
 grep -q "daemon の build が古い場合は 'usagi doctor --fix'" "$CASE_DIR/out"
+grep -q "$ASSET をダウンロードして検証中" "$CASE_DIR/out"
+grep -q '次の行を shell の設定ファイル' "$CASE_DIR/out"
 grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
 if grep -Eq 'raw\.githubusercontent\.com|/releases/latest/download/' "$CASE_DIR/curl.log"; then
     echo "latest update crossed a mutable installer or release URL" >&2
@@ -243,7 +245,7 @@ while time.time() < deadline:
             if not selection_sent and b"usagi update" in captured and captured.count(b"\n") >= 12:
                 os.write(fd, b"\x1b[A" + b"\x1b[B" * 5 + b"\r")
                 selection_sent = True
-            if selection_sent and not confirmation_sent and b"Confirm downgrade" in captured:
+            if selection_sent and not confirmation_sent and b"[y/N]" in captured:
                 os.write(fd, b"y")
                 confirmation_sent = True
     done, status = os.waitpid(pid, os.WNOHANG)
@@ -276,11 +278,11 @@ def display_width(value):
 
 text = open(sys.argv[1], "rb").read().decode(errors="replace")
 plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
-assert "Choose a version" in plain
-assert "↑/↓ move  •  Enter install  •  q cancel" in plain
-assert "Current: v3.0.0" in plain
-assert "Action: downgrade v2.0.0" in plain
-assert "Confirm downgrade from v3.0.0 to v2.0.0?" in plain
+assert "バージョンを選択" in plain
+assert "↑/↓ 移動 • Enter 決定 • q キャンセル" in plain
+assert "現在: v3.0.0" in plain
+assert "操作: ダウングレード v2.0.0" in plain
+assert "v3.0.0 から v2.0.0 へダウングレードする？" in plain
 assert text.count("\x1b[14A") == 6
 first_frame = plain.split("╰", 1)[0]
 rows = [line for line in first_frame.splitlines() if line.startswith("│")]
@@ -326,7 +328,7 @@ while time.time() < deadline:
         if not selection_sent and b"usagi update" in captured and captured.count(b"\n") >= 12:
             os.write(fd, b"\x1b[B" * 5 + b"\r")
             selection_sent = True
-        if selection_sent and not confirmation_sent and b"Confirm downgrade" in captured:
+        if selection_sent and not confirmation_sent and b"[y/N]" in captured:
             os.write(fd, b"n")
             confirmation_sent = True
     done, status = os.waitpid(pid, os.WNOHANG)
@@ -341,7 +343,7 @@ if status is None or os.waitstatus_to_exitcode(status) != 0:
     raise SystemExit("downgrade cancellation was not successful")
 sys.stdout.buffer.write(captured)
 PY
-grep -q 'downgrade cancelled' "$CASE_DIR/cancel.out"
+grep -q 'ダウングレードをキャンセルしたよ' "$CASE_DIR/cancel.out"
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 3.0.0" ]
 
 prepare_case interactive-cancel
@@ -388,7 +390,7 @@ if status is None or os.waitstatus_to_exitcode(status) != 0:
     raise SystemExit("release selection cancellation was not successful")
 sys.stdout.buffer.write(captured)
 PY
-grep -q 'release selection cancelled' "$CASE_DIR/cancel.out"
+grep -q 'リリース選択をキャンセルしたよ' "$CASE_DIR/cancel.out"
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 1.0.0" ]
 
 prepare_case bad-checksum

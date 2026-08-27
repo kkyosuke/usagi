@@ -1012,7 +1012,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(outcome, RunOutcome::SelfUpdate { .. }));
-        assert!(String::from_utf8(out).unwrap().contains("select"));
+        assert!(String::from_utf8(out).unwrap().contains("リリースを選んで"));
         assert!(err.is_empty());
     }
 
