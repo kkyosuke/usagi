@@ -1,13 +1,13 @@
 ---
 number: 714
 title: feat(cli): daemon status の tenant 一覧と daemon retire を tenant 向け IPC で足す
-status: todo
+status: done
 priority: medium
 labels: [v2, cli, daemon, workspace]
 dependson: [710]
 related: []
 created_at: 2026-08-21T02:19:56.661282+00:00
-updated_at: 2026-08-23T22:43:41.686272+00:00
+updated_at: 2026-08-26T02:10:20.409235+00:00
 ---
 
 設計は [document/proposals/17-multi-workspace-daemon.md](../../document/proposals/17-multi-workspace-daemon.md) が正本。#710 / #712 の実装中に切り出した残件。

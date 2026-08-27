@@ -1101,19 +1101,37 @@ impl AgentRuntime {
         outcome
     }
 
-    /// Whether this workspace still has an Agent runtime that is running.
+    /// Whether this workspace has an Agent runtime that is live or whose
+    /// process ownership has not been proved safe to release.
     ///
     /// A retirement asks this before giving the workspace back: its PTY children
     /// belong to that workspace's scopes, and releasing the workspace while one
     /// is alive would hand its worktrees to a second owner.
     #[must_use]
     pub fn has_running_agent(&self, workspace: WorkspaceId) -> bool {
-        use crate::usecase::terminal::TerminalRuntimeState;
+        self.retirement_blocker_count(workspace) != 0
+    }
 
-        self.coordinator.snapshot().records.iter().any(|record| {
-            record.runtime.terminal.workspace_id == workspace
-                && matches!(record.state, TerminalRuntimeState::Running)
-        })
+    /// Number of Agent records which may still own a PTY process.
+    #[must_use]
+    pub fn retirement_blocker_count(&self, workspace: WorkspaceId) -> usize {
+        self.coordinator
+            .snapshot()
+            .records
+            .iter()
+            .filter(|record| {
+                record.runtime.terminal.workspace_id == workspace
+                    && matches!(
+                        record.state,
+                        super::runtime::RuntimeState::Running
+                            | super::runtime::RuntimeState::ReconcileRequired(
+                                super::runtime::ReconcileState::OrphanRunning
+                                    | super::runtime::ReconcileState::SpawnAmbiguous
+                                    | super::runtime::ReconcileState::PersistAfterSpawn
+                            )
+                    )
+            })
+            .count()
     }
 
     /// Diagnoses launch-time hook/MCP integration revisions without exposing
@@ -2773,6 +2791,43 @@ impl AgentRuntime {
         Ok(closed.len())
     }
 
+    /// Closes every Agent runtime belonging to one retiring workspace.
+    pub fn close_workspace(&mut self, workspace: WorkspaceId) -> Result<usize, ProtocolError> {
+        let owned_operations = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .map(|record| {
+                (
+                    record.runtime.agent_runtime_id,
+                    record.operation.operation_id.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let closed = self
+            .coordinator
+            .close_workspace(workspace, &mut *self.store, &mut *self.pty)
+            .map_err(map_runtime_error)?;
+        let runtime_ids = closed
+            .iter()
+            .map(|runtime| runtime.agent_runtime_id)
+            .collect::<Vec<_>>();
+        let operation_ids = owned_operations
+            .into_iter()
+            .filter(|(runtime, _)| runtime_ids.contains(runtime))
+            .map(|(_, operation)| operation)
+            .collect::<Vec<_>>();
+        self.operations
+            .retain(|operation, _| !operation_ids.contains(operation));
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(runtime));
+        Ok(closed.len())
+    }
+
     /// Managed-session identities currently retained by the Agent owner.
     #[must_use]
     pub fn managed_session_ids(&self) -> std::collections::BTreeSet<SessionId> {
@@ -3095,6 +3150,7 @@ fn holds_live_or_unknown_agent(state: super::runtime::RuntimeState) -> bool {
             | super::runtime::RuntimeState::ReconcileRequired(
                 super::runtime::ReconcileState::OrphanRunning
                     | super::runtime::ReconcileState::SpawnAmbiguous
+                    | super::runtime::ReconcileState::PersistAfterSpawn
                     | super::runtime::ReconcileState::PersistAfterExit
             )
     )
@@ -4729,6 +4785,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
+        let mut runtime = AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let launch_intent = intent(None);
+        let workspace = launch_intent.workspace;
+        let admission = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+
+        assert_eq!(runtime.retirement_blocker_count(workspace), 1);
+        let running_snapshot = runtime.coordinator.snapshot();
+        for (state, ownership_state, expected) in [
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::OrphanRunning,
+                ),
+                super::super::generation::TerminalState::OrphanRunning,
+                1,
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::SpawnAmbiguous,
+                ),
+                super::super::generation::TerminalState::IdentityUnknown,
+                1,
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::PersistAfterSpawn,
+                ),
+                super::super::generation::TerminalState::IdentityUnknown,
+                1,
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::IdentityUnknown,
+                ),
+                super::super::generation::TerminalState::IdentityUnknown,
+                0,
+            ),
+        ] {
+            let mut snapshot = running_snapshot.clone();
+            snapshot.records[0].state = state;
+            snapshot.generation.terminals[0].state = ownership_state;
+            runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+            assert_eq!(runtime.retirement_blocker_count(workspace), expected);
+        }
+        runtime.coordinator =
+            RuntimeCoordinator::hydrate(running_snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
+        assert_eq!(runtime.retirement_blocker_count(workspace), 0);
+        assert!(
+            !runtime
+                .retained_resources()
+                .contains(&admission.terminal.terminal_id.as_str())
+        );
+    }
+
     /// #522: every admission and every final — direct, replayed, or hydrated after
     /// a restart — states the operation it belongs to and the digest of the intent
     /// it was admitted for, so a client can refuse an answer that means something
@@ -5708,6 +5837,7 @@ mod tests {
             RuntimeState::Running,
             RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning),
             RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous),
+            RuntimeState::ReconcileRequired(ReconcileState::PersistAfterSpawn),
             RuntimeState::ReconcileRequired(ReconcileState::PersistAfterExit),
         ] {
             assert!(holds_live_or_unknown_agent(state));

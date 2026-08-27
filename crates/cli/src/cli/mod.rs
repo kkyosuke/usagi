@@ -295,7 +295,7 @@ impl From<SandboxModeArg> for SandboxMode {
 ///
 /// 引数なしの `usagi daemon` は `serve`（active role）と同じである。各 variant は
 /// 追加の positional を持たないため、clap が余分な argv を runtime 起動前に拒否する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum DaemonCommand {
     /// 前景で daemon を serve する（内部用）
     #[command(hide = true)]
@@ -314,6 +314,13 @@ pub enum DaemonCommand {
     Start,
     /// daemon の状態を表示する
     Status,
+    /// 稼働中 daemon が保持する 1 workspace を解放する
+    Retire {
+        path: PathBuf,
+        /// live な Agent / generic terminal を終了して解放することを明示する
+        #[arg(long)]
+        force: bool,
+    },
     /// daemon を停止する
     Stop {
         /// live な Agent / generic terminal を巻き添えに停止することを明示する
@@ -433,7 +440,7 @@ struct DaemonEntry {
 
 impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
-        Ok(match self.command {
+        Ok(match self.command.clone() {
             DaemonCommand::Replace { force } => RunOutcome::RequestDaemonReplacement { force },
             command => RunOutcome::LaunchDaemon(command),
         })
@@ -715,7 +722,32 @@ mod tests {
             assert!(out.is_empty());
             assert!(err.is_empty());
         }
+    }
 
+    /// tenant retire も typed な daemon 起動要求になる。
+    #[test]
+    fn retire_entry_returns_typed_launch_request() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run(
+            argv(&["usagi", "daemon", "retire", "/tmp/work", "--force"]),
+            "9.9.9",
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::LaunchDaemon(DaemonCommand::Retire {
+                path: std::path::PathBuf::from("/tmp/work"),
+                force: true,
+            })
+        );
+    }
+
+    /// daemon replacement と MCP もそれぞれの typed な起動要求になる。
+    #[test]
+    fn replacement_and_mcp_entries_return_typed_launch_requests() {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let outcome = run(

@@ -200,7 +200,7 @@ TUI の [workspace の離脱と終了](../03-tui.md#workspace-の離脱と終了
 | 3b | #710 | handshake admission の tenant 解決（`selected` は adopt、`bound` は最長一致、`unbound` は起動 workspace）、adopt 時の fence patience | 実装済み |
 | 4 | #711 | TUI: Open / Recent からの切り替えが refusal ではなく open になることを実 PTY E2E で固定し、正本（[05-daemon.md](../05-daemon.md) / [04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md)）へ畳み込む | 実装済み |
 | 5 | #712 | 遊休 tenant の retire | 実装済み（明示的な `usagi daemon retire <path>` は #714 の tenant 向け IPC と同じ経路になるため #714 へ移した） |
-| 6 | #714 | `usagi daemon status` に保持中 tenant の一覧を出す（read-only な IPC が要る） | 未実装 |
+| 6 | #714 | `usagi daemon status` に保持中 tenant の一覧を出し、`daemon retire <path>` で 1 tenant を返す | 実装済み |
 
 ## test 戦略
 
