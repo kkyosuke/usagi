@@ -414,9 +414,11 @@ impl Registry {
         if self.runs.iter().filter(|run| terminal(run)).count() <= replay_floor {
             return false;
         }
-        let Some(index) = self.runs.iter().position(terminal) else {
-            return false;
-        };
+        let index = self
+            .runs
+            .iter()
+            .position(terminal)
+            .expect("terminal count was computed from the same run list");
         self.remove_run_at(index);
         true
     }
@@ -1683,9 +1685,12 @@ impl DispatchStore {
             if bytes <= self.limits.registry_bytes {
                 return Ok(());
             }
-            if !registry.drop_oldest_terminal_run(self.limits.run_replay_floor) {
-                anyhow::bail!("dispatch registry capacity is exhausted by protected records");
-            }
+            registry
+                .drop_oldest_terminal_run(self.limits.run_replay_floor)
+                .then_some(())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("dispatch registry capacity is exhausted by protected records")
+                })?;
         }
     }
 
