@@ -58,6 +58,10 @@ runtime executable snapshot を束ねる `serve_with_client` を `composition` �
 #626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。
 残す registry entry は production の process・filesystem・環境を束ねる module または最終 composition だけである。
 
+2026-08-27 の再審査では、`src/runtime/daemon.rs` の bool / enum mapping、MCP environment allowlist、TOML
+basic string encoder、available worktree selection、required payload validation、runtime channel mapping の 6 件を pure
+decision と判定した。各 decision table を direct unit test で固定し、`composition` 例外から coverage 対象へ戻す。
+
 | path | coverage 対象へ戻した責務 | 残存例外 |
 |---|---|---|
 | `crates/cli/src/**` | #625 で parser・route selection・schema projection・caller policy・error mapping | MCP composition と test-build 単相化の 2 件 |

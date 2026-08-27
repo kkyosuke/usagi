@@ -581,7 +581,6 @@ fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
 
 /// Whether the operator explicitly gave up the live runtime a transition would
 /// destroy.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 const fn transition_mode(force: bool) -> TransitionMode {
     if force {
         TransitionMode::Cold
@@ -1470,7 +1469,6 @@ fn launch_environment(
     environment
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_fixture_is_injected_without_cli_credentials
 fn mcp_environment_allowlist(context: &ProvisionContext) -> BTreeSet<EnvironmentVariableName> {
     if context.inject_mcp {
         [
@@ -1577,7 +1575,6 @@ fn codex_developer_instructions_arguments(prompt: &str) -> Vec<String> {
 /// Renders a TOML basic string without involving a shell. The prompt contains
 /// newlines, and callers may supply quotes, backslashes, or control characters,
 /// so every character TOML forbids literally is escaped.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn toml_basic_string(text: &str) -> String {
     let mut rendered = String::with_capacity(text.len() + 2);
     rendered.push('"');
@@ -2208,7 +2205,6 @@ impl TerminalScopeResolver for SharedTerminalScopeResolver {
         })
     }
 }
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Option<WorktreeId> {
     let target = serde_json::to_value(session).ok()?;
     snapshot
@@ -7663,7 +7659,6 @@ fn authorize_delegation(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn required_payload_string<'a>(
     payload: &'a serde_json::Value,
     key: &str,
@@ -12773,9 +12768,12 @@ fn request_replacement(policy: ClientPolicy) -> Result<BuildRolloverTrigger, Cli
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_agent_children_reapply_the_runtime_mode_onto_the_daemon_data_home
 fn runtime_channel() -> &'static str {
-    match paths::runtime_mode() {
+    runtime_channel_for(paths::runtime_mode())
+}
+
+const fn runtime_channel_for(mode: paths::RuntimeMode) -> &'static str {
+    match mode {
         paths::RuntimeMode::Production => "production",
         paths::RuntimeMode::Development => "development",
         paths::RuntimeMode::Local => "local",
@@ -17941,6 +17939,55 @@ instructions = "{instructions}"
         assert!(codex[1].contains(r"C:\\work\nnext\tline\u0000\u007F"));
         let parsed: toml::Value = toml::from_str(&codex[1]).unwrap();
         assert_eq!(parsed["developer_instructions"].as_str(), Some(prompt));
+    }
+
+    #[test]
+    fn pure_daemon_helpers_keep_their_decisions_measured() {
+        assert!(matches!(transition_mode(false), TransitionMode::Planned));
+        assert!(matches!(transition_mode(true), TransitionMode::Cold));
+
+        let mut context = provision_context(None);
+        assert_eq!(mcp_environment_allowlist(&context).len(), 3);
+        context.inject_mcp = false;
+        assert!(mcp_environment_allowlist(&context).is_empty());
+
+        let text = "quote \" slash \\ backspace \u{0008} tab \t newline \n formfeed \u{000c} return \r null \u{0000}";
+        let assignment = format!("value={}", toml_basic_string(text));
+        let parsed: toml::Value = toml::from_str(&assignment).unwrap();
+        assert_eq!(parsed["value"].as_str(), Some(text));
+
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let snapshot = serde_json::json!({
+            "sessions": [{
+                "session_id": session,
+                "worktree_id": worktree,
+                "lifecycle": "available"
+            }]
+        });
+        assert_eq!(available_worktree(&snapshot, session), Some(worktree));
+        assert_eq!(available_worktree(&snapshot, SessionId::new()), None);
+
+        let payload = serde_json::json!({"value": "  present  ", "blank": " ", "number": 1});
+        assert_eq!(
+            required_payload_string(&payload, "value").unwrap(),
+            "present"
+        );
+        assert!(required_payload_string(&payload, "missing").is_err());
+        assert!(required_payload_string(&payload, "blank").is_err());
+        assert!(required_payload_string(&payload, "number").is_err());
+
+        for (mode, expected) in [
+            (paths::RuntimeMode::Production, "production"),
+            (paths::RuntimeMode::Development, "development"),
+            (paths::RuntimeMode::Local, "local"),
+        ] {
+            assert_eq!(runtime_channel_for(mode), expected);
+        }
+        assert_eq!(
+            runtime_channel(),
+            runtime_channel_for(paths::runtime_mode())
+        );
     }
 
     #[test]
