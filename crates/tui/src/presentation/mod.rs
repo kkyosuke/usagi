@@ -8624,7 +8624,7 @@ mod tests {
         let rows = render_home_material(&garden);
         let text = rows.join("\n");
         assert_eq!(rows.len(), 24);
-        assert!(text.contains("Garden · click a usagi to visit · any key to return"));
+        assert!(text.contains("Garden · click a usagi") && text.contains("any key · wake"));
         assert!(text.contains("alpha"));
 
         // Every cell of the frame resolves through the same layout that drew it,

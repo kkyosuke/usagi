@@ -22,9 +22,10 @@ const SIDE_PADDING: usize = 2;
 const HEADER_ROWS: usize = 3;
 const FOOTER_ROWS: usize = 2;
 const PLOT_WIDTH: usize = 28;
-const PLOT_HEIGHT: usize = 7;
-/// plot のうち、うさぎと label が占める行数（残り 1 行が地面）。
-const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - 1;
+const GROUND_ROWS: usize = 2;
+const PLOT_HEIGHT: usize = 8;
+/// plot のうち、うさぎと label が占める行数（残り 2 行が草地と土）。
+const PLOT_CONTENT_ROWS: usize = PLOT_HEIGHT - GROUND_ROWS;
 /// うさぎ 1 羽分の pose 行数（plot の label / status / 地面を除く）。
 const SPRITE_ROWS: usize = 4;
 const COMPACT_RABBIT_WIDTH: usize = 8;
@@ -63,12 +64,18 @@ impl RunningAction {
     }
 }
 
-/// 地面のタイル。庭の幅いっぱいに敷き詰めるため、隣り合うタイルで草の位置を変えて
+/// 草地のタイル。庭の幅いっぱいに敷き詰めるため、隣り合うタイルで草の位置を変えて
 /// 同じ絵が横に並ぶ tiling に見せない。
-const GROUND: [&str; 3] = [
+const GRASS: [&str; 3] = [
     "--v-------v-----------v-----",
     "------v---------v----v------",
     "---v----------v-------v-----",
+];
+/// 草地の下に薄く見せる土。ASCII だけで構成し、端末の表示幅に依存しない。
+const SOIL: [&str; 3] = [
+    "  .     .       .   .       ",
+    "     .      .          .    ",
+    " .         .    .           ",
 ];
 
 /// Garden に渡す、表示に必要な session 情報だけの projection。
@@ -292,7 +299,7 @@ pub fn render_scrolled(
 
     let mut rows = Vec::with_capacity(height);
     rows.push(header_line(width, workspace_name, sessions));
-    rows.push(Role::Feature.style().paint(&"·".repeat(width)));
+    rows.push(sky_line(width, workspace_name));
     rows.push(" ".repeat(width));
 
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
@@ -318,7 +325,7 @@ pub fn render_scrolled(
         }
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
-        rows.push(ground_row(width, layout.content_width));
+        rows.extend(ground_rows(width, layout.content_width));
         for column in 0..used_columns {
             let index = column * layout.plot_rows + plot_row;
             let Some((session, plot)) = visible_sessions.get(index).zip(plots.get(index)) else {
@@ -368,12 +375,7 @@ pub fn render_scrolled(
         sessions.len(),
     );
     rows.push(scroll_footer);
-    let help = if max_scroll > 0 {
-        "Garden · ←/→ scroll · click to visit · Esc to return"
-    } else {
-        "Garden · click a usagi to visit · any key to return"
-    };
-    rows.push(centered(width, &Style::new().dim().paint(help)));
+    rows.push(footer_line(width, max_scroll > 0));
 
     Some(GardenFrame {
         rows,
@@ -558,9 +560,49 @@ fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -
     pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
 }
 
+/// Header の下に置く静かな空。装飾位置は workspace 名だけから決まり、refresh で
+/// 星が飛び回らない。ASCII の `.` / `*` だけなので端末ごとの表示幅差もない。
+fn sky_line(width: usize, workspace_name: &str) -> String {
+    let content_width = width.saturating_sub(SIDE_PADDING * 2);
+    let mut sky = vec![' '; content_width];
+    let seed = stable_hash(workspace_name);
+    let ornaments = (content_width / 18).clamp(2, 6);
+    for index in 0..ornaments {
+        let mixed = seed.rotate_left(u32::try_from(index * 9).unwrap_or_default())
+            ^ u64::try_from(index)
+                .unwrap_or_default()
+                .wrapping_mul(0x9e37_79b9);
+        let column = usize::try_from(
+            mixed % u64::try_from(content_width).expect("Garden content width is non-zero"),
+        )
+        .expect("sky column fits usize");
+        sky[column] = if index.is_multiple_of(3) { '*' } else { '.' };
+    }
+    let sky = sky.into_iter().collect::<String>();
+    pad_to_width(
+        &format!(
+            "{}{}",
+            " ".repeat(SIDE_PADDING),
+            Style::new().dim().paint(&sky)
+        ),
+        width,
+    )
+}
+
+fn footer_line(width: usize, scrollable: bool) -> String {
+    let (left, right) = if scrollable {
+        (" Garden · ←/→ scroll · click", "Esc · return ")
+    } else {
+        (" Garden · click a usagi", "any key · wake ")
+    };
+    let left = Role::Feature.style().paint(left);
+    let right = Style::new().dim().paint(right);
+    let gap = width.saturating_sub(display_width(&left) + display_width(&right));
+    pad_to_width(&format!("{left}{}{right}", " ".repeat(gap)), width)
+}
+
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
-    let nameplate = clip_to_width(&session.label, PLOT_WIDTH);
-    let label = Style::new().dim().paint(&nameplate);
+    let label = signpost(&session.label);
     let ([status, ears, head, body, feet], rabbits) = if session.agents_observed {
         match session.lifecycle {
             SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
@@ -571,7 +613,7 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
         (inactive_plot(session), Vec::new())
     };
     Plot {
-        rows: [centered(PLOT_WIDTH, &label), status, ears, head, body, feet],
+        rows: [label, status, ears, head, body, feet],
         rabbits,
     }
 }
@@ -592,25 +634,40 @@ fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
     ]
 }
 
-/// 庭の幅いっぱいに敷いた地面の 1 行。
+/// session 名を庭の立札として描く。左右の線も含めて固定幅で切り詰める。
+fn signpost(label: &str) -> String {
+    let label = clip_to_width(label, PLOT_WIDTH.saturating_sub(6));
+    let sign = Style::new().dim().paint(&format!("-- {label} --"));
+    centered(PLOT_WIDTH, &sign)
+}
+
+/// 庭の幅いっぱいに敷いた草地と土の 2 行。
 ///
-/// [`GROUND`] のタイルを順に並べて `content_width` 桁ちょうどで切る。タイルは ASCII
-/// なので 1 文字 = 1 桁で、途中で切っても桁がずれない。
-fn ground_row(width: usize, content_width: usize) -> String {
-    let soil = GROUND
+/// タイルを順に並べて `content_width` 桁ちょうどで切る。どちらも ASCII なので
+/// 1 文字 = 1 桁で、途中で切っても桁がずれない。
+fn ground_rows(width: usize, content_width: usize) -> [String; GROUND_ROWS] {
+    let grass = GRASS
         .iter()
         .cycle()
         .flat_map(|tile| tile.chars())
         .take(content_width)
         .collect::<String>();
-    pad_to_width(
-        &format!(
-            "{}{}",
-            " ".repeat(SIDE_PADDING),
-            Style::new().dim().paint(&soil)
-        ),
-        width,
-    )
+    let soil = SOIL
+        .iter()
+        .cycle()
+        .flat_map(|tile| tile.chars())
+        .take(content_width)
+        .collect::<String>();
+    [grass, soil].map(|layer| {
+        pad_to_width(
+            &format!(
+                "{}{}",
+                " ".repeat(SIDE_PADDING),
+                Style::new().dim().paint(&layer)
+            ),
+            width,
+        )
+    })
 }
 
 /// pose を 1 つの絵として中央へ寄せる。
@@ -679,7 +736,7 @@ fn lifecycle_plot(
                 status,
                 Role::Danger.style().bold(),
                 Role::Danger.style(),
-                ["", " /)/)", "( x.x)", "c(\")(\")"],
+                ["", " /)/)", "( x.x)", "c(\")(\")/"],
             )
         }
         SessionLifecycle::Available => unreachable!("available sessions use agent projection"),
@@ -707,7 +764,7 @@ fn available_plot(
         let rabbit = if reduced_motion || tick.is_multiple_of(2) {
             ["  \\ /", "  /)/)", " \\(^.^)/", " c(\")(\")"]
         } else {
-            [" ✨  ✨", "  /)/)", " \\(^o^)/", " c(\")(\")"]
+            [" *  . *", "  /)/)", " \\(^o^)/", " c(\")(\")"]
         };
         let [ears, head, body, feet] = sprite(rabbit, Role::Feature.style().bold(), PLOT_WIDTH);
         // celebration は session の祝いの姿で、特定の agent ではない。
@@ -715,7 +772,7 @@ fn available_plot(
             [
                 centered(
                     PLOT_WIDTH,
-                    &Role::Success.style().bold().paint("PR merged! ✨"),
+                    &Role::Success.style().bold().paint("PR merged! *"),
                 ),
                 ears,
                 head,
@@ -839,7 +896,7 @@ fn agent_appearance(
             "done",
             Style::new().dim(),
             feature,
-            ["", " /)/)", "( -.-)", "c(\")(\")"],
+            [" z", " /)/)", "( -.-)", "c(\")(\")"],
         ),
         AgentPhase::Absent | AgentPhase::Ready => {
             let face = if phase == 4 { "( -.-)" } else { "( . .)" };
@@ -847,7 +904,7 @@ fn agent_appearance(
                 "available",
                 Style::new().dim(),
                 feature,
-                ["", " /)/)", face, "c(\")(\")"],
+                ["", " /)/)", face, "c(\")(\")v"],
             )
         }
     }
@@ -949,7 +1006,7 @@ fn centered(width: usize, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GROUND, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, render,
+        GRASS, GardenAgent, GardenSession, MIN_HEIGHT, MIN_WIDTH, PLOT_WIDTH, SOIL, render,
         render_scrolled,
     };
     use crate::presentation::widgets::display_width;
@@ -1087,15 +1144,18 @@ mod tests {
         assert_eq!(frame.rows.len(), 24);
         assert!(frame.rows.iter().all(|row| display_width(row) == 100));
         assert_eq!(plots(&frame).len(), 4);
-        for hitbox in frame.hitboxes {
+        for hitbox in &frame.hitboxes {
             assert!(hitbox.contains(hitbox.column, hitbox.row));
             assert!(!hitbox.contains(hitbox.column + hitbox.width, hitbox.row));
         }
-        let text = frame.rows.join("\n");
+        let text = plain(&frame).join("\n");
         assert!(text.contains("session-auth"));
         assert!(text.contains("日本語-session"));
         assert!(text.contains("running"));
         assert!(text.contains("failed"));
+        assert!(text.contains("-- session-auth --"));
+        assert!(text.contains("any key · wake"));
+        assert!(text.contains('*') || text.contains('.'));
     }
 
     #[test]
@@ -1938,7 +1998,7 @@ mod tests {
 
     #[test]
     fn the_ground_joins_across_neighbouring_plots() {
-        for pattern in GROUND {
+        for pattern in GRASS.into_iter().chain(SOIL) {
             assert_eq!(display_width(pattern), PLOT_WIDTH);
         }
         let sessions = (0..3)
@@ -1958,6 +2018,36 @@ mod tests {
             .expect("the garden draws ground");
         // 3 plot 分の地面が途切れずつながる（plot 間に空白が入らない）。
         assert!(!ground.trim().contains("  "), "ground broke: {ground:?}");
+    }
+
+    #[test]
+    fn the_garden_has_two_ground_layers_and_stable_sky() {
+        let sessions = fixtures();
+        let first = render(24, 100, "my-project", &sessions, 0, true).expect("fits");
+        let second = render(24, 100, "my-project", &sessions, 5, true).expect("fits");
+        let rows = plain(&first);
+        assert_eq!(
+            rows[1],
+            plain(&second)[1],
+            "the sky must not move on refresh"
+        );
+        assert!(rows[1].contains('*') || rows[1].contains('.'));
+
+        let grass = rows
+            .iter()
+            .position(|row| row.contains("--v"))
+            .expect("grass layer");
+        assert!(rows[grass + 1].contains('.'), "soil follows the grass");
+    }
+
+    #[test]
+    fn calm_agent_states_have_small_readable_environment_details() {
+        let ready = only(SessionLifecycle::Available, AgentPhase::Ready, 0).join("\n");
+        let done = only(SessionLifecycle::Available, AgentPhase::Ended, 0).join("\n");
+        let failed = only(SessionLifecycle::Failed, AgentPhase::Absent, 0).join("\n");
+        assert!(ready.contains("c(\")(\")v"));
+        assert!(done.contains(" z"));
+        assert!(failed.contains("c(\")(\")/"));
     }
 
     #[test]

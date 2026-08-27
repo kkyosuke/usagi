@@ -954,6 +954,11 @@ controller が runtime の `Ended` / `Exited` を観測した runtime（tab は�
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
 全 pose を静止姿勢に固定し、lifecycle と Agent phase の状態ラベルだけを更新する。
 
+Garden の背景は workspace 名から決定的に配置した `.` / `*` の空、session 名を挟んだ立札、庭の全幅へ続く草地と
+薄い土の 2 層で構成する。装飾は ASCII を基本とし、同じ workspace・session 順・端末幅では refresh ごとに移動しない。
+状態ラベルに加え、`Ready` は足元の草、`Done` は `z`、`Failed` は枯れ草を小さく添える。これらは雰囲気の補助であり、
+状態の意味は引き続き文字ラベルと顔で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
+
 ### 自動表示
 
 **最終操作から 5 分**で開く。キー、paste、pointer の press と wheel、端末 copy、live pane への passthrough、
