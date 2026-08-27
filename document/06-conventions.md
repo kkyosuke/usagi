@@ -383,7 +383,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 現行パッケージの実 PTY TUI E2E。PR / merge queue ではルート `Cargo.toml` の `[package].version` が base と異なる場合だけ実行する |
 | `.github/workflows/release-build-check.yml` | ルート `Cargo.toml` / `Cargo.lock`、またはリリース経路の workflow / `rust-toolchain.toml` を変更する PR | リリースと同じ 3 プラットフォーム・同じ `--features production` で `cargo build --release` し、リリースビルドが成功することをマージ前に検証する。host target では installer の version 出力契約も検証する。workflow 自身も trigger に含めるのは、リリース経路を変更する PR では version が動かず、version だけを trigger にすると経路の変更が無検証でマージされるためである |
-| `.github/workflows/coverage.yml` | PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR コメント + Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
+| `.github/workflows/coverage.yml` | `main` への push / PR | Rust gate 対象差分では `coverage(off)` registry lint、カバレッジ計測・未達レポート（PR ではコメント + Job Summary、push では Job Summary）・100% 未満で失敗し、全差分で `coverage` aggregate を報告 |
 | `.github/workflows/markdown-link-check.yml` | `main` への push / PR | Markdown 対象差分ではリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証し、全差分で `markdown-link-check` aggregate を報告 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
 | `.github/workflows/security-audit.yml` | 毎週 / 手動 | `Cargo.lock` を RustSec advisory database と照合する。PR / `main` push では `test.yml` の policy check として同じ audit を実行し、required `test` aggregate が結果を伝播する |
@@ -395,7 +395,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 - `test.yml` は `scripts/ci/root-readme.sh` でルート `README.md` の最低限の contract（`# usagi` 見出し・`document/` の正本へのリンク・truncation 検出のための本文行数）を検証する。リンクチェックはリンクが 0 本になった README を通してしまい、実際にルート README が 1 行へ破壊されたまま `main` に残った事故があるため、この checker が独立した gate として必要である。checker 自体は `scripts/tests/root-readme.sh` の fixture test で検証する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
-- required status check の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
+- required status check、review count、bypass actor の正本は `.github/required-contexts.json` である。ruleset `17627257` は `test`、
   `enforce-base-main`、`full-test`、`coverage`、`markdown-link-check` を GitHub Actions（integration ID
   `15368`）の required context として持つ。各 workflow は path filter をイベントに置かず、軽量な差分判定後に対象の重い job だけを
   実行する。aggregate job は `if: always()` で判定 job と実行 job の結果を検査するため、Rust、Markdown-only、既知の静的 asset の
@@ -406,8 +406,9 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   更新する。
 - ruleset 更新では、更新直前の GET response を保存し、`scripts/ci/required-contexts.sh prepare-ruleset` で update payload と
   rollback payload を生成する。PUT 後は GET response へ `verify-ruleset` を実行する。失敗時は保存した rollback payload を同じ ruleset へ
-  PUT する。bypass policy は RepositoryRole ID `5`（admin）の `always` だけを許可し、通常 merge は required context と 1 approval を
-  必須にする。bypass や admin merge は障害復旧など明示的に承認された操作に限り、通常の workflow rollout には使用しない。
+  PUT する。required context を迂回できる actor は置かない。単独 maintainer が自分の PR を merge できるよう approval count は 0 とし、
+  required context の全成功を merge の必須条件にする。緊急時に ruleset を変更する場合も、変更前 snapshot と rollback payload を保存し、
+  復旧後に contract と一致することを `verify-ruleset` で確認する。
 - `coverage.yml` は 100% 計測の前に `scripts/coverage-off-lint.rb` を実行する。lint 自体は `scripts/tests/coverage-off-lint.sh` の fixture（許可 IO、禁止 reducer、理由欠落、stale、追加、削除、期限切れ）で検証し、`test.yml` でも実行する。
 - カバレッジ未達（100% 未満）のとき、`coverage.yml` は `cargo llvm-cov report --json` から**未達ファイルと未達関数**（ファイル path・関数名・宣言行・関数率/行率・不足量・未達行レンジ）のレポートを生成し、PR コメント（同一リポジトリ PR。`marocchino/sticky-pull-request-comment` の header + recreate で再実行時も 1 件に更新）と Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも一覧が見え、コメント投稿は `continue-on-error` で **coverage gate の合否（exit code）から独立**させる。関数カバレッジは JSON summary（generic の単相化をマージした集計＝gate と一致。lcov の per-monomorphization な `FN/FNDA` を数えると gate と食い違う）を使い、関数名は `c++filt`（binutils。Rust v0 を demangle）で可読化する。出力はファイル/関数/行レンジの上限で切り詰め、超過分は明示する。レポート生成は `scripts/coverage-report-comment.rb`（Ruby, stdlib のみ）に抽出し、`scripts/tests/coverage-report-comment.sh` の fixture test（`test.yml` の script-tests job で実行）で固定する。閾値・対象パッケージ選択の SSoT は `scripts/coverage.sh`。
 - TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれからルート `[package].version` を読む。version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。

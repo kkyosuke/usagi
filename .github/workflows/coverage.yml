@@ -1,6 +1,8 @@
 name: Coverage
 
 on:
+  push:
+    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
 
@@ -28,8 +30,8 @@ jobs:
     - id: classify
       name: Classify changed paths
       env:
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       run: scripts/ci/required-contexts.sh changed "$BASE_SHA" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
   coverage-run:
@@ -91,7 +93,8 @@ jobs:
     # header + recreate で同一 PR の再実行でもコメントを重複させず 1 件に更新する。
     - name: Comment coverage on PR
       if: >-
-        always() && hashFiles('lcov.info') != '' &&
+        always() && github.event_name == 'pull_request' &&
+        hashFiles('lcov.info') != '' &&
         github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
       uses: marocchino/sticky-pull-request-comment@v2

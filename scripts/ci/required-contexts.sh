@@ -112,6 +112,9 @@ case "${1:-}" in
           .parameters.required_status_checks = (
             $contract[0].required_status_checks | map({context, integration_id})
           )
+        elif .type == "pull_request" then
+          .parameters.required_approving_review_count =
+            $contract[0].required_approving_review_count
         else . end
       )
       | .bypass_actors = $contract[0].bypass_actors
@@ -123,6 +126,9 @@ case "${1:-}" in
       .id == $contract[0].ruleset_id
       and .enforcement == "active"
       and .bypass_actors == $contract[0].bypass_actors
+      and ([.rules[] | select(.type == "pull_request")
+            | .parameters.required_approving_review_count] ==
+          [$contract[0].required_approving_review_count])
       and ([.rules[] | select(.type == "required_status_checks")
             | .parameters.required_status_checks[].context] | sort)
           == ([$contract[0].required_status_checks[].context] | sort)
