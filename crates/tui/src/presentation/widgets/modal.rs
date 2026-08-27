@@ -361,6 +361,67 @@ pub fn render_body_over(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModalGeometry {
+    inner_width: usize,
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+}
+
+impl ModalGeometry {
+    fn new(
+        height: usize,
+        width: usize,
+        desired_inner_width: usize,
+        body_height: usize,
+    ) -> Option<Self> {
+        if width < 4 {
+            return None;
+        }
+        let inner_width = modal_inner_width(width, desired_inner_width);
+        let box_width = inner_width + 4;
+        let box_height = body_height + 4;
+        Some(Self {
+            inner_width,
+            left: centered_padding(width, box_width),
+            top: height.saturating_sub(box_height) / 2,
+            width: box_width,
+            height: box_height,
+        })
+    }
+
+    fn contains(self, column: u16, row: u16) -> bool {
+        let column = usize::from(column);
+        let row = usize::from(row);
+        column >= self.left
+            && column < self.left.saturating_add(self.width)
+            && row >= self.top
+            && row < self.top.saturating_add(self.height)
+    }
+}
+
+/// Whether a terminal cell lies inside the box drawn by [`render_body_over`].
+///
+/// Views use this for modal pointer ownership instead of reproducing the
+/// centring, narrow-terminal clamping, or fixed-body height calculation in an
+/// input adapter. A box too narrow to render contains no cells.
+#[must_use]
+pub fn body_contains(
+    raw_height: usize,
+    raw_width: usize,
+    inner_width: usize,
+    body_height: usize,
+    column: u16,
+    row: u16,
+) -> bool {
+    let (height, width) = normalize_size(raw_height, raw_width);
+    let reserved = body_height.min(height.saturating_sub(6));
+    ModalGeometry::new(height, width, inner_width, reserved)
+        .is_some_and(|geometry| geometry.contains(column, row))
+}
+
 /// Shared state for a two-choice confirmation modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationModal {
@@ -755,24 +816,20 @@ pub fn render_over(
         .collect();
 
     // 左右の枠線と余白だけで 4 桁必要。それ未満では背景を守る。
-    if width < 4 {
+    let Some(geometry) = ModalGeometry::new(height, width, inner_width, body.len()) else {
         return frame;
-    }
+    };
 
-    let inner_width = modal_inner_width(width, inner_width);
-    let box_lines = boxed(title, inner_width, body);
-    let box_width = inner_width + 4;
-    let left = centered_padding(width, box_width);
-    let top = height.saturating_sub(box_lines.len()) / 2;
+    let box_lines = boxed(title, geometry.inner_width, body);
 
     for (offset, box_line) in box_lines.iter().enumerate() {
-        let row = top + offset;
+        let row = geometry.top + offset;
         if row >= height {
             break;
         }
         let background = &frame[row];
-        let prefix = columns(background, 0, left);
-        let suffix_start = left + box_width;
+        let prefix = columns(background, 0, geometry.left);
+        let suffix_start = geometry.left + geometry.width;
         let suffix = columns(background, suffix_start, width.saturating_sub(suffix_start));
         // A modal line may contain coloured title, copy, or button text. Close
         // every style before restoring the background suffix so no SGR state
@@ -787,9 +844,9 @@ pub fn render_over(
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        ConfirmationModal, ConfirmationView, bounded_list_rows, boxed, caption, columns,
-        compact_boxed, confirmation_buttons, content_line, empty_notice, filter_line, fixed_body,
-        footer, heading, list_window, modal_inner_width, prompt_line, render_body,
+        ConfirmationModal, ConfirmationView, body_contains, bounded_list_rows, boxed, caption,
+        columns, compact_boxed, confirmation_buttons, content_line, empty_notice, filter_line,
+        fixed_body, footer, heading, list_window, modal_inner_width, prompt_line, render_body,
         render_body_over, render_confirmation_over, render_modal, render_over, scroll_above,
         scroll_below, scroll_window, selection_marker, subcommand_row, viewport_window,
     };
@@ -928,6 +985,17 @@ mod tests {
         assert_eq!(modal_inner_width(80, 40), 40); // 収まる
         assert_eq!(modal_inner_width(10, 40), 6); // 10 - 4
         assert_eq!(modal_inner_width(2, 40), 0); // 飽和
+    }
+
+    #[test]
+    fn body_hit_test_matches_the_rendered_box_and_narrow_fallback() {
+        // 80 columns centre a 72-column body plus four border/padding cells at x=2.
+        // A 24-row frame centres the 11-row body plus four box rows at y=4.
+        assert!(body_contains(24, 80, 72, 11, 2, 4));
+        assert!(body_contains(24, 80, 72, 11, 77, 18));
+        assert!(!body_contains(24, 80, 72, 11, 1, 4));
+        assert!(!body_contains(24, 80, 72, 11, 2, 3));
+        assert!(!body_contains(24, 3, 72, 11, 0, 0));
     }
 
     #[test]
