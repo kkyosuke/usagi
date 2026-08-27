@@ -111,7 +111,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
     CommandDefinition {
         info: CommandInfo {
             name: "garden",
-            description: "Watch this workspace's sessions as usagi in a garden",
+            description: "Watch every registered workspace's sessions as usagi in a garden",
             usage: "garden",
             long_description: "Open the session garden screen saver. Any key returns to Home.",
         },

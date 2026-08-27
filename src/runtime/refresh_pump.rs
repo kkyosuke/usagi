@@ -125,6 +125,7 @@ pub struct RefreshMetrics {
 #[derive(Debug)]
 pub struct RefreshState<T> {
     cadence: RefreshCadence,
+    active: bool,
     /// Elapsed time the next fetch becomes allowed at, or `None` while the lane
     /// is dormant.
     due: Option<Duration>,
@@ -150,6 +151,7 @@ impl<T> RefreshState<T> {
     pub fn new(cadence: RefreshCadence) -> Self {
         Self {
             cadence,
+            active: false,
             due: None,
             failures: 0,
             latest: None,
@@ -162,12 +164,26 @@ impl<T> RefreshState<T> {
     /// from dormant to active. An already-active lane keeps its current
     /// schedule instead of becoming due again.
     pub fn activate(&mut self) -> bool {
-        if self.due.is_none() {
+        if !self.active {
+            self.active = true;
             self.due = Some(Duration::ZERO);
             self.woken = true;
             return true;
         }
         false
+    }
+
+    /// Stop observing until the next [`Self::activate`]. Any already published
+    /// result is discarded because it describes the surface that just closed.
+    pub fn deactivate(&mut self) -> bool {
+        if !self.active {
+            return false;
+        }
+        self.active = false;
+        self.due = None;
+        self.latest = None;
+        self.woken = true;
+        true
     }
 
     /// Whether a fetch may start at `now`, counting it when it may. A dormant
@@ -184,6 +200,9 @@ impl<T> RefreshState<T> {
     /// replaces an undrained one is coalesced: the render thread only ever sees
     /// the newest observation of a lane.
     pub fn complete(&mut self, now: Duration, result: Result<T, String>) {
+        if !self.active {
+            return;
+        }
         if result.is_err() {
             self.metrics.failures += 1;
             self.failures = self.failures.saturating_add(1);
@@ -202,6 +221,7 @@ impl<T> RefreshState<T> {
     /// the wait.
     pub fn wake(&mut self) {
         self.metrics.wakes += 1;
+        self.active = true;
         self.due = Some(Duration::ZERO);
         self.woken = true;
     }
@@ -344,6 +364,14 @@ impl<T: Send + 'static> RefreshPump<T> {
         self.shared.notify_all();
     }
 
+    /// Return the lane to its dormant state. A fetch already in progress may
+    /// finish, but its result is discarded by the next deactivation call.
+    pub fn deactivate(&self) {
+        if lock(&self.shared.state).deactivate() {
+            self.shared.notify_all();
+        }
+    }
+
     /// Non-blocking drain of the newest observation. This is the only call the
     /// render thread makes into the lane.
     pub fn take(&self) -> Option<Result<T, String>> {
@@ -431,6 +459,7 @@ mod tests {
     #[test]
     fn failures_back_off_and_success_restores_the_steady_cadence() {
         let mut state = RefreshState::<u32>::new(cadence());
+        state.activate();
         state.complete(Duration::ZERO, Err("daemon unavailable".to_owned()));
         assert_eq!(state.wait_for(Duration::ZERO), Duration::from_millis(500));
         state.complete(Duration::from_millis(500), Err("still down".to_owned()));
@@ -463,6 +492,7 @@ mod tests {
     #[test]
     fn results_coalesce_to_the_newest_observation() {
         let mut state = RefreshState::new(cadence());
+        state.activate();
         state.complete(Duration::ZERO, Ok(1));
         state.complete(Duration::from_millis(500), Ok(2));
         state.complete(Duration::from_millis(1_000), Ok(3));
@@ -769,6 +799,21 @@ mod tests {
         // Activating again is idempotent: it never re-arms an active lane.
         state.activate();
         assert!(!state.begin(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn deactivation_discards_results_and_a_late_completion_stays_dormant() {
+        let mut state = RefreshState::<u32>::new(cadence());
+        state.activate();
+        assert!(state.begin(Duration::ZERO));
+        assert!(state.deactivate());
+        state.complete(Duration::from_millis(10), Ok(1));
+        assert!(state.take().is_none());
+        assert!(!state.begin(Duration::from_secs(1)));
+        assert_eq!(state.wait_for(Duration::from_secs(1)), DORMANT_INTERVAL);
+
+        assert!(state.activate());
+        assert!(state.begin(Duration::from_secs(1)));
     }
 
     #[test]

@@ -11714,11 +11714,36 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
 /// reports the failure and backs off.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_tui_pty
 pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+    attached_client_for(policy, client_workspace())
+}
+
+/// Connect an observation lane to one explicitly selected workspace without
+/// changing the process-wide workspace selected by the foreground TUI.
+///
+/// Garden uses this to observe registered projects concurrently. Reusing
+/// `declare_opened_workspace` here would race every resident foreground lane's
+/// reconnect and could bind it to whichever project the Garden scanned last.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+pub(crate) fn attached_client_for_workspace(
+    policy: ClientPolicy,
+    workspace_root: &Path,
+) -> Result<impl DaemonClient, ClientError> {
+    let canonical = paths::canonical_workspace_root(workspace_root)
+        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let workspace = ClientWorkspace::Selected {
+        root: paths::wire_workspace_root(canonical),
+    };
+    attached_client_for(policy, workspace)
+}
+
+fn attached_client_for(
+    policy: ClientPolicy,
+    workspace: ClientWorkspace,
+) -> Result<impl DaemonClient, ClientError> {
     let clock = SystemClock::new();
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let build = current_build();
-    let workspace = client_workspace();
     let connect = move |clock: SystemClock, budget_ms: u64| {
         connect_deadline_client(
             &data_dir,

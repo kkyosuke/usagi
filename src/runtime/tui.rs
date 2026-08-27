@@ -61,14 +61,14 @@ use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::pr_modal::PrModal;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::views::workspace::GitDiff;
+use usagi_tui::presentation::views::workspace::{GitDiff, ProjectedSession};
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentPaneAdmission, BannerScreenRunner, ControllerBackendComposition,
     ControllerBackendFactory, ControllerHost, DecisionCommandPort, DesktopNotificationPort,
-    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, MetricsPort,
-    RestoreConnectionPort, SerializedPaneLaunchPort, SessionCommandPort, SessionCommandResult,
-    SessionRefreshPort, Start, WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceLoader,
-    WorkspaceSnapshot,
+    EnvironmentStorePort, ExactAgentResume, Exit, ExternalTerminalPort, GardenRefreshPort,
+    GardenWorkspaceProjection, MetricsPort, RestoreConnectionPort, SerializedPaneLaunchPort,
+    SessionCommandPort, SessionCommandResult, SessionRefreshPort, Start, WorkspaceCreateCompletion,
+    WorkspaceCreateEffect, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
@@ -926,7 +926,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let (restore_connection, restore_publisher) =
-            DaemonRestoreConnectionPort::channel(data_dir);
+            DaemonRestoreConnectionPort::channel(data_dir.clone());
         ControllerBackendComposition {
             backend,
             session_commands: Box::new(DaemonSessionCommandPort),
@@ -935,6 +935,9 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             // the background observation must not queue behind each other.
             session_refresh: Box::new(DaemonSessionRefreshPort {
                 pump: spawn_session_refresh_pump(snapshot.workspace.clone()),
+            }),
+            garden_refresh: Box::new(DaemonGardenRefreshPort {
+                pump: spawn_garden_refresh_pump(data_dir.clone()),
             }),
             agent_commands: Box::new(
                 DaemonAgentCommandPort::new(spawn_poll_pump())
@@ -977,6 +980,25 @@ impl ControllerBackendFactory for ProductionBackendFactory {
 /// wakes and drains.
 struct DaemonSessionRefreshPort {
     pump: RefreshPump<SessionCommandResult>,
+}
+
+struct DaemonGardenRefreshPort {
+    pump: RefreshPump<Vec<GardenWorkspaceProjection>>,
+}
+
+#[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
+impl GardenRefreshPort for DaemonGardenRefreshPort {
+    fn set_active(&mut self, active: bool) {
+        if active {
+            self.pump.activate();
+        } else {
+            self.pump.deactivate();
+        }
+    }
+
+    fn take(&mut self) -> Option<Result<Vec<GardenWorkspaceProjection>, String>> {
+        self.pump.take()
+    }
 }
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
@@ -2686,6 +2708,103 @@ fn spawn_session_refresh_pump(workspace: Workspace) -> RefreshPump<SessionComman
     })
 }
 
+/// Observe every registered workspace only while Garden is visible. Each
+/// request uses an explicitly selected handshake, so scanning another project
+/// never changes the foreground TUI's reconnect target.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+fn spawn_garden_refresh_pump(data_dir: PathBuf) -> RefreshPump<Vec<GardenWorkspaceProjection>> {
+    let mut cache = BTreeMap::<PathBuf, GardenWorkspaceProjection>::new();
+    let mut cursor = 0_usize;
+    RefreshPump::spawn(
+        RefreshCadence::new(
+            Duration::from_millis(250),
+            Duration::from_millis(500),
+            Duration::from_millis(2_000),
+        ),
+        move || {
+            let storage = Storage::new(data_dir.clone());
+            let workspaces = storage
+                .load_workspaces()
+                .map_err(|error| error.to_string())?;
+            cache.retain(|path, _| workspaces.iter().any(|workspace| &workspace.path == path));
+            if workspaces.is_empty() {
+                return Ok(Vec::new());
+            }
+            let workspace = &workspaces[cursor % workspaces.len()];
+            cursor = cursor.wrapping_add(1);
+            if let Ok(observation) = garden_workspace_observation(workspace) {
+                cache.insert(workspace.path.clone(), observation);
+            }
+            Ok(workspaces
+                .iter()
+                .filter_map(|workspace| cache.get(&workspace.path).cloned())
+                .collect())
+        },
+    )
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
+fn garden_workspace_observation(
+    workspace: &Workspace,
+) -> Result<GardenWorkspaceProjection, String> {
+    let mut client = crate::runtime::daemon::attached_client_for_workspace(
+        ClientPolicy {
+            timeout_ms: 500,
+            reconnect_attempts: 0,
+        },
+        &workspace.path,
+    )
+    .map_err(|error| error.to_string())?;
+    let lifecycle = match client.request(DaemonRequest::Session {
+        action: SessionAction::List,
+        operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+        payload: serde_json::json!({}),
+    }) {
+        Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => lifecycle_snapshot(&body),
+        Err(error) => Err(daemon_error_reason(error)),
+    }?;
+    let snapshot = session_snapshot_result("garden", &lifecycle, workspace)?;
+    let (Some(records), Some(ids)) = (snapshot.sessions, snapshot.session_ids) else {
+        return Err("Garden session snapshot is incomplete".to_owned());
+    };
+    let lifecycles = snapshot.session_lifecycles.unwrap_or_default();
+    let roles = snapshot.session_roles.unwrap_or_default();
+    let sessions = ids
+        .iter()
+        .zip(&records)
+        .map(|(id, record)| {
+            let mut session = ProjectedSession::from_record(*id, record);
+            if let Some(projection) = lifecycles.get(id) {
+                session.lifecycle = projection.lifecycle;
+                session.failure_stage.clone_from(&projection.failure_stage);
+                session
+                    .failure_summary
+                    .clone_from(&projection.failure_summary);
+            }
+            if let Some(role) = roles.get(id) {
+                session.role_id = role.role_id.as_ref().map(ToString::to_string);
+                session.parent_session_id = role.parent_session_id;
+            }
+            session
+        })
+        .collect();
+    let agent_inventory = match client.request(DaemonRequest::AgentInventory {
+        workspace: lifecycle.workspace_id,
+    }) {
+        Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => {
+            serde_json::from_value(body).ok()
+        }
+        Err(_) => None,
+    };
+    Ok(GardenWorkspaceProjection {
+        workspace_id: lifecycle.workspace_id,
+        name: workspace.name.clone(),
+        path: workspace.path.clone(),
+        sessions,
+        agent_inventory,
+    })
+}
+
 fn lock_pr_sessions(sessions: &Mutex<Vec<SessionId>>) -> std::sync::MutexGuard<'_, Vec<SessionId>> {
     sessions
         .lock()
@@ -4253,9 +4372,10 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             // The workspace's ports are already dropped by the time the
             // controller returns, so the switcher starts with no connection
             // to the workspace that was left.
-            match presentation::run_workspace_controller_with_backend_and_config(
+            match presentation::run_workspace_controller_with_backend_config_and_loader(
                 terminal,
                 snapshot,
+                &mut loader,
                 &mut backend_factory,
                 &mut settings,
                 available_models,

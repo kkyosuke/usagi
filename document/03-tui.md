@@ -840,8 +840,10 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 ## session garden
 
 session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
-Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新の coherent Agent inventory・controller が runtime
-ごとに保持する Agent phase だけを絵に写す。背面の route・active target・pane・terminal subscription は変えず、
+Home の一時的な全幅レイヤーで、**登録済みの全 workspace** を横断して表示する。現在の workspace は daemon 権威の
+lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase、ほかの workspace は
+それぞれの daemon 権威の lifecycle と coherent Agent inventory だけを絵に写す。Garden が閉じている間は他 workspace
+を観測しない。背面の route・active target・pane・terminal subscription は変えず、
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
@@ -850,7 +852,9 @@ Home の一時的な全幅レイヤーで、daemon 権威の lifecycle・最新�
 
 ### 区画とうさぎ
 
-1 区画は 1 session、1 うさぎは 1 Agent runtime である。nameplate は `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
+1 区画は 1 session、1 うさぎは 1 Agent runtime である。workspace が複数なら nameplate の先頭に workspace 名を加え、
+`workspace / role-icon Role · parent › session`（直下の session は `workspace / role-icon Role · session`）として同名
+session を区別する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
 描く。runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
@@ -915,7 +919,8 @@ frame loop が monotonic time と user input を観測して経過時間を cont
 |---|---|
 | 任意の key / paste | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
-| うさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
+| 現在の workspace のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
+| 別 workspace の区画・うさぎを single click | 現在の workspace の接続・pane を閉じ、通常の workspace loader で対象 workspace を開いて Home へ切り替える |
 | 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ session の Closeup へ入るところまでで、tab の選択は動かさない |
 | 区画の外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 

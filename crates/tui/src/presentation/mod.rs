@@ -981,6 +981,9 @@ pub struct ControllerBackendComposition {
     /// connection, so a slow user-initiated create/remove and the background
     /// observation cannot block each other.
     pub session_refresh: Box<dyn SessionRefreshPort>,
+    /// Cross-workspace Garden observation. It remains dormant while Garden is
+    /// closed, so an ordinary Home neither adopts nor polls other workspaces.
+    pub garden_refresh: Box<dyn GardenRefreshPort>,
     /// Resident terminal stream client. It stays with the live panes for the
     /// whole workspace and is never moved into a worker.
     pub agent_commands: Box<dyn AgentCommandPort>,
@@ -1003,6 +1006,29 @@ pub struct ControllerBackendComposition {
     /// stays out of the frame budget (#554).
     pub session_worktrees: Box<dyn SessionWorktreeScanPort>,
 }
+
+/// One registered workspace projected for the cross-workspace Garden.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GardenWorkspaceProjection {
+    pub workspace_id: WorkspaceId,
+    pub name: String,
+    pub path: PathBuf,
+    pub sessions: Vec<ProjectedSession>,
+    pub agent_inventory: Option<AgentInventory>,
+}
+
+/// Dormant-until-visible observation boundary for Garden's other workspaces.
+pub trait GardenRefreshPort: Send {
+    fn set_active(&mut self, _active: bool) {}
+
+    fn take(&mut self) -> Option<Result<Vec<GardenWorkspaceProjection>, String>> {
+        None
+    }
+}
+
+struct UnavailableGardenRefreshPort;
+
+impl GardenRefreshPort for UnavailableGardenRefreshPort {}
 
 /// Dedicated restore-client connection lifecycle observed by the composition
 /// root. Epochs are strictly monotonic; duplicate delivery is harmless.
@@ -1243,23 +1269,27 @@ enum OpenStep {
 }
 
 /// Workspace 画面のキー処理結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WorkspaceStep {
     /// TUI を終了する。
     Quit,
     /// workspace を離れて Welcome へ戻る。呼び出し側がこの workspace のために
     /// 確立した資源を落としたあと、entry 画面を描き直す（#556）。
     Back,
+    /// A foreign Garden plot was chosen. The screen graph tears down the
+    /// foreground composition, opens this workspace through the normal loader,
+    /// and enters it directly.
+    Switch(PathBuf),
 }
 
 impl WorkspaceStep {
     /// workspace ループの停止理由を TUI 全体の終了理由へ投影する。workspace を
     /// 直接開いた入口（`usagi <path>`）は Welcome を持たないため、合成ルートが
     /// [`Exit::Welcome`] を受けて screen graph へ入り直す。
-    const fn exit(self) -> Exit {
+    fn exit(self) -> Exit {
         match self {
             Self::Quit => Exit::Quit,
-            Self::Back => Exit::Welcome,
+            Self::Back | Self::Switch(_) => Exit::Welcome,
         }
     }
 }
@@ -4964,6 +4994,7 @@ struct FrameMaterialKey {
     width: usize,
     controller: (u64, u64),
     sessions: (u64, Option<SessionId>, u64),
+    garden: u64,
     shell: u64,
     metrics: u64,
     terminal: (u64, u64),
@@ -4981,6 +5012,7 @@ impl FrameMaterialKey {
             && self.height == other.height
             && self.width == other.width
             && self.sessions == other.sessions
+            && self.garden == other.garden
             && self.shell == other.shell
             && self.metrics == other.metrics
             && self.terminal == other.terminal
@@ -5001,6 +5033,11 @@ impl HomeFrameMaterial {
         self.now = self
             .projection
             .canonical_garden_now(self.height, self.width, self.now);
+        self
+    }
+
+    fn with_garden_workspaces(mut self, workspaces: &[GardenWorkspaceProjection]) -> Self {
+        self.projection = self.projection.with_garden_workspaces(workspaces);
         self
     }
 }
@@ -5691,6 +5728,9 @@ fn drive_workspace_controller(
     // Resident session-inventory lane. The frame loop only wakes and drains it;
     // the observation itself never runs here (#551).
     let mut session_refresh = composition.session_refresh;
+    let mut garden_refresh = composition.garden_refresh;
+    let mut garden_workspaces = Vec::<GardenWorkspaceProjection>::new();
+    let mut garden_revision = 0_u64;
     // The `Effect::RefreshSessions` completion parked until the resident lane
     // publishes its next snapshot. Requests inside one cadence period coalesce
     // onto that one snapshot instead of each issuing a request, and every
@@ -5922,6 +5962,15 @@ fn drive_workspace_controller(
             ui.removing_session,
             runtime.state().session_pr_revision(),
         );
+        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
+        garden_refresh.set_active(garden_open);
+        if garden_open
+            && let Some(Ok(observed)) = garden_refresh.take()
+            && garden_workspaces != observed
+        {
+            garden_workspaces = observed;
+            garden_revision = garden_revision.saturating_add(1);
+        }
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {
             sessions = Arc::from(project_controller_sessions(&ui, runtime.state()));
@@ -5957,6 +6006,7 @@ fn drive_workspace_controller(
             width,
             controller: runtime.material_key(),
             sessions: next_session_key,
+            garden: garden_revision,
             shell: ui.material_revision,
             metrics: metrics_projection.generation(),
             terminal: (terminal_generation, background_terminal_generation),
@@ -5991,6 +6041,7 @@ fn drive_workspace_controller(
                 now,
             )
             .with_agent_inventory(ui.agent_inventory())
+            .with_garden_workspaces(&garden_workspaces)
             .with_garden_reduced_motion(garden_reduced_motion);
             // Skip only the drawing. A skipped tick has already run every drain
             // above and still runs restore admission, pane launches, and input
@@ -6080,6 +6131,13 @@ fn drive_workspace_controller(
                     row,
                 )
             });
+            if let Some(GardenClick::Visit { session, .. }) = garden_click
+                && let Some((_, path)) = drawn_material
+                    .as_ref()
+                    .and_then(|material| material.projection.garden_workspace_target(session))
+            {
+                return Ok(WorkspaceStep::Switch(path.to_path_buf()));
+            }
             // Header rendering and hit-testing share one layout projection, so
             // CJK breadcrumbs, notice presence, and narrow clipping cannot move
             // an action away from its clickable cells.
@@ -6303,6 +6361,31 @@ pub fn run_workspace_controller_with_backend_and_config(
     .map(WorkspaceStep::exit)
 }
 
+/// Run a direct workspace entry with the screen graph's loader available for
+/// cross-workspace Garden visits.
+///
+/// # Errors
+///
+/// Returns workspace loading, settings binding, or terminal IO failures.
+pub fn run_workspace_controller_with_backend_config_and_loader(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    loader: &mut dyn WorkspaceLoader,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    settings: &mut dyn SettingsPort,
+    available_models: AvailableAgentModels,
+) -> io::Result<Exit> {
+    enter_workspace(
+        term,
+        snapshot,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+    )
+    .map(|exit| exit.unwrap_or(Exit::Welcome))
+}
+
 struct FixedBackendFactory {
     sessions: Option<Box<dyn SessionCommandPort>>,
     agent: Option<Box<dyn AgentCommandPort>>,
@@ -6313,6 +6396,7 @@ struct FixedBackendFactory {
     /// Resident session-inventory lane injected as a fake by the frame-loop
     /// tests; unset means the workspace observes nothing (#551).
     session_refresh: Option<Box<dyn SessionRefreshPort>>,
+    garden_refresh: Option<Box<dyn GardenRefreshPort>>,
     /// Decision lane injected as a fake by the frame-loop tests; unset keeps the
     /// unavailable port.
     decisions: Option<Box<dyn BackendDecisionPort>>,
@@ -6348,6 +6432,10 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .session_refresh
                 .take()
                 .unwrap_or_else(|| Box::new(UnavailableSessionRefreshPort)),
+            garden_refresh: self
+                .garden_refresh
+                .take()
+                .unwrap_or_else(|| Box::new(UnavailableGardenRefreshPort)),
             agent_commands: self.agent.take().expect("fixed agent port is created once"),
             pane_launch_commands: self
                 .launch
@@ -6410,6 +6498,7 @@ pub fn run_workspace_controller(
         session_refresh: None,
         decisions: None,
         session_worktrees: None,
+        garden_refresh: None,
     };
     run_workspace_controller_with_backend(term, snapshot, &mut factory)
 }
@@ -6610,17 +6699,26 @@ fn open_snapshot_via_controller(
 /// three entries (#556).
 fn enter_workspace(
     term: &mut dyn Terminal,
-    snapshot: WorkspaceSnapshot,
+    mut snapshot: WorkspaceSnapshot,
+    loader: &mut dyn WorkspaceLoader,
     settings: &mut dyn SettingsPort,
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Option<Exit>> {
-    let step =
-        open_snapshot_via_controller(term, snapshot, settings, backend_factory, available_models)?;
-    Ok(match step {
-        WorkspaceStep::Quit => Some(Exit::Quit),
-        WorkspaceStep::Back => None,
-    })
+    loop {
+        let step = open_snapshot_via_controller(
+            term,
+            snapshot,
+            settings,
+            backend_factory,
+            available_models,
+        )?;
+        match step {
+            WorkspaceStep::Quit => return Ok(Some(Exit::Quit)),
+            WorkspaceStep::Back => return Ok(None),
+            WorkspaceStep::Switch(path) => snapshot = loader.open(&path)?,
+        }
+    }
 }
 
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
@@ -6664,6 +6762,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             backend,
             session_commands: self.sessions.create(),
             session_refresh: Box::new(UnavailableSessionRefreshPort),
+            garden_refresh: Box::new(UnavailableGardenRefreshPort),
             agent_commands,
             pane_launch_commands,
             restore_commands: self.agents.as_deref_mut().map_or_else(
@@ -6834,9 +6933,14 @@ pub fn run_screen_graph_with_backend(
         if let Some(snapshot) = created_snapshot {
             welcome.record_opened(&snapshot.workspace);
             open.record_opened(&snapshot.workspace);
-            if let Some(exit) =
-                enter_workspace(term, snapshot, settings, backend_factory, available_models)?
-            {
+            if let Some(exit) = enter_workspace(
+                term,
+                snapshot,
+                loader,
+                settings,
+                backend_factory,
+                available_models,
+            )? {
                 return Ok(exit);
             }
             screen = Screen::Welcome;
@@ -6904,6 +7008,7 @@ pub fn run_screen_graph_with_backend(
                     if let Some(exit) = enter_workspace(
                         term,
                         snapshot,
+                        loader,
                         settings,
                         backend_factory,
                         available_models,
@@ -6939,6 +7044,7 @@ pub fn run_screen_graph_with_backend(
                     if let Some(exit) = enter_workspace(
                         term,
                         snapshot,
+                        loader,
                         settings,
                         backend_factory,
                         available_models,
@@ -7211,29 +7317,30 @@ mod tests {
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, FsSessionWorktreeScanPort, Geometry, GitDiff, IdleWatch,
-        MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PaneLaunch,
-        PaneLaunchCommandPort, ProjectedSession, SerializedPaneLaunchPort, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
-        SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint,
-        SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk, TerminalError,
-        TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+        FixedBackendFactory, FsSessionWorktreeScanPort, GardenRefreshPort,
+        GardenWorkspaceProjection, Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME,
+        MetricsPort, MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics,
+        NoMetricsFactory, OpenStep, PaneLaunch, PaneLaunchCommandPort, ProjectedSession,
+        SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
+        SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
+        SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
+        TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
         UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
         UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
         WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken,
-        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, app_event_from_key, close_exited_panes, controller_terminal_view,
-        copy_terminal_selection, director_organization, drain_session_completions,
-        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at,
-        handle_terminal_pointer, home_frame_material, intercept_live_terminal_control,
-        is_user_activity, key_to_terminal_bytes, new_project_notice, play_startup_splash,
-        poll_and_project_terminals, projection_build_counts, render_controller_frame,
-        render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
+        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceStep,
+        WorkspaceUi, WorkspaceView, app_event_from_key, close_exited_panes,
+        controller_terminal_view, copy_terminal_selection, director_organization,
+        drain_session_completions, drive_workspace_controller, foreground_terminal_geometry,
+        forward_live_terminal_input, garden_click_at, handle_terminal_pointer, home_frame_material,
+        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
+        new_project_notice, play_startup_splash, poll_and_project_terminals,
+        projection_build_counts, render_controller_frame, render_home_material,
+        render_home_snapshot, reset_projection_build_counts, restore_open_panes,
+        retarget_director_chords, route_workspace_input_before_reducer, run as run_from_start,
+        run_screen_graph_with_backend, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -7246,6 +7353,7 @@ mod tests {
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::open::Open;
     use crate::presentation::views::welcome::MenuAction;
+    use crate::presentation::widgets::garden;
     use crate::presentation::widgets::strip_ansi;
     use crate::presentation::workspace_runtime::PaneRestoreTarget;
     use crate::usecase::application::agent_tab_intent::{
@@ -7356,6 +7464,24 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .pop_front()
+        }
+    }
+
+    struct FixedGardenRefreshPort {
+        observation: Option<Vec<GardenWorkspaceProjection>>,
+        active: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl GardenRefreshPort for FixedGardenRefreshPort {
+        fn set_active(&mut self, active: bool) {
+            self.active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(active);
+        }
+
+        fn take(&mut self) -> Option<Result<Vec<GardenWorkspaceProjection>, String>> {
+            self.observation.take().map(Ok)
         }
     }
 
@@ -10771,6 +10897,7 @@ mod tests {
             session_refresh: None,
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
 
         let started = std::time::Instant::now();
@@ -10818,6 +10945,7 @@ mod tests {
             session_refresh: None,
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
         let settings = usagi_core::domain::settings::Settings {
             modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode::Prompt,
@@ -10885,6 +11013,7 @@ mod tests {
                 polls: Arc::clone(&decision_polls),
             })),
             session_worktrees: None,
+            garden_refresh: None,
         };
 
         assert_eq!(
@@ -11040,6 +11169,7 @@ mod tests {
             })),
             decisions: None,
             session_worktrees: Some(counting_scan(&scans)),
+            garden_refresh: None,
         };
 
         assert_eq!(
@@ -11200,6 +11330,7 @@ mod tests {
             })),
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
 
         assert_eq!(
@@ -11346,6 +11477,7 @@ mod tests {
             session_refresh: None,
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
 
         assert_eq!(
@@ -11597,6 +11729,7 @@ mod tests {
             session_refresh: None,
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
 
         assert_eq!(
@@ -12087,6 +12220,7 @@ mod tests {
             session_refresh: None,
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
         let mut settings = WorkspaceBindingSettingsPort::default();
 
@@ -20083,6 +20217,115 @@ mod tests {
         }
     }
 
+    fn garden_plot(id: SessionId, label: &str) -> garden::GardenSession {
+        garden::GardenSession {
+            id,
+            label: label.to_owned(),
+            lifecycle: SessionLifecycle::Available,
+            selected: false,
+            failure_summary: None,
+            agents: Vec::new(),
+            pr_merged: false,
+        }
+    }
+
+    #[test]
+    fn a_foreign_garden_plot_returns_the_workspace_switch_target() {
+        let snapshot = snapshot("alpha");
+        let current_session = snapshot.session_ids[0];
+        let foreign_workspace = WorkspaceId::new();
+        let foreign_session = SessionId::new();
+        let foreign_path = PathBuf::from("/tmp/beta");
+        let foreign_record = SessionRecord {
+            name: "review".to_owned(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: foreign_path.join(".usagi/sessions/review"),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        };
+        let frame = garden::render(
+            24,
+            80,
+            "all projects",
+            &[
+                garden_plot(current_session, "alpha / alpha-session"),
+                garden_plot(foreign_session, "beta / review"),
+            ],
+            0,
+            true,
+        )
+        .expect("garden fits");
+        let hitbox = frame
+            .hitboxes
+            .iter()
+            .find(|hitbox| hitbox.session_id == foreign_session && hitbox.agent.is_none())
+            .expect("foreign plot hitbox");
+        let mut keys = vec![Key::Char(':')];
+        keys.extend("garden".chars().map(Key::Char));
+        keys.extend([
+            Key::Enter,
+            Key::Click {
+                column: u16::try_from(hitbox.column + 1).unwrap(),
+                row: u16::try_from(hitbox.row + 1).unwrap(),
+            },
+        ]);
+        let active = Arc::new(Mutex::new(Vec::new()));
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut factory = FixedBackendFactory {
+            sessions: Some(Box::new(UnavailableSessionCommandPort)),
+            agent: Some(Box::new(UnavailableAgentCommandPort)),
+            launch: None,
+            restore: None,
+            metrics: Some(Box::new(NoMetrics)),
+            browser: Some(Box::new(UnavailableBrowserOpener)),
+            session_refresh: None,
+            decisions: None,
+            session_worktrees: None,
+            garden_refresh: Some(Box::new(FixedGardenRefreshPort {
+                observation: Some(vec![GardenWorkspaceProjection {
+                    workspace_id: foreign_workspace,
+                    name: "beta".to_owned(),
+                    path: foreign_path.clone(),
+                    sessions: vec![ProjectedSession::from_record(
+                        foreign_session,
+                        &foreign_record,
+                    )],
+                    agent_inventory: None,
+                }]),
+                active: Arc::clone(&active),
+            })),
+        };
+
+        assert_eq!(
+            drive_workspace_controller(
+                &mut term,
+                snapshot,
+                &mut factory,
+                usagi_core::domain::settings::ModalSelectionMode::Action,
+                usagi_core::domain::settings::PrAutoOpen::default(),
+                super::AgentModelPolicy::default(),
+                None,
+            )
+            .unwrap(),
+            WorkspaceStep::Switch(foreign_path)
+        );
+        assert!(
+            active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&true)
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("beta / review"))
+        );
+    }
+
     struct StaticMetrics;
 
     impl MetricsPort for StaticMetrics {
@@ -23178,6 +23421,8 @@ mod tests {
 
     impl SessionRefreshPort for CountedPort {}
 
+    impl super::GardenRefreshPort for CountedPort {}
+
     impl AgentCommandPort for CountedPort {
         fn launch(
             &mut self,
@@ -23304,7 +23549,7 @@ mod tests {
     /// `blocked_restore_inventory_never_blocks_render_or_quit`). Its drop
     /// therefore happens on that worker and is not ordered against the next
     /// workspace's composition.
-    const RESIDENT_PORTS_PER_COMPOSITION: usize = 11;
+    const RESIDENT_PORTS_PER_COMPOSITION: usize = 12;
 
     /// A production-shaped factory whose every port counts its own drop, and
     /// which records how many ports had been dropped when each workspace's
@@ -23346,6 +23591,7 @@ mod tests {
                 .with_overlay(Box::new(UnavailableBackendPort)),
                 session_commands: Box::new(self.port()),
                 session_refresh: Box::new(self.port()),
+                garden_refresh: Box::new(self.port()),
                 agent_commands: Box::new(self.port()),
                 pane_launch_commands: Box::new(self.port()),
                 // Uncounted on purpose: see `RESIDENT_PORTS_PER_COMPOSITION`.
@@ -23693,6 +23939,7 @@ mod tests {
                 session_refresh: None,
                 decisions: None,
                 session_worktrees: None,
+                garden_refresh: None,
             };
 
             assert_eq!(
@@ -23731,6 +23978,7 @@ mod tests {
             session_refresh: None,
             decisions: None,
             session_worktrees: None,
+            garden_refresh: None,
         };
         assert_eq!(
             run_workspace_controller_with_backend(

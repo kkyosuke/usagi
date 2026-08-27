@@ -49,7 +49,7 @@ use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::{AgentRuntimeId, SessionId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -260,6 +260,7 @@ impl GardenMotion {
 /// そのため表示名や入力 `Vec` の index を identity として扱わない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HomeProjection {
+    workspace_id: WorkspaceId,
     workspace_name: String,
     sessions: Arc<[ProjectedSession]>,
     selected: Selection,
@@ -330,6 +331,8 @@ pub struct HomeProjection {
     /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
     /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
+    garden_workspace_targets: BTreeMap<SessionId, (WorkspaceId, PathBuf)>,
+    garden_title: String,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
@@ -504,6 +507,7 @@ impl HomeProjection {
                 .collect::<Vec<_>>()
         });
         Self {
+            workspace_id: state.workspace(),
             workspace_name: workspace_name.to_owned(),
             sessions,
             selected: state.selected(),
@@ -549,6 +553,8 @@ impl HomeProjection {
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
             session_agents,
             garden_sessions,
+            garden_workspace_targets: BTreeMap::new(),
+            garden_title: workspace_name.to_owned(),
             garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
             closeup_modal: None,
@@ -562,6 +568,81 @@ impl HomeProjection {
                 .director_drawer_open()
                 .then(DirectorDrawerProjection::default),
         }
+    }
+
+    /// Merge registered workspaces into an open Garden. The foreground
+    /// workspace keeps its precise controller-owned phases; foreign workspaces
+    /// use their latest coherent daemon inventory.
+    #[must_use]
+    pub fn with_garden_workspaces(
+        mut self,
+        workspaces: &[crate::presentation::GardenWorkspaceProjection],
+    ) -> Self {
+        let Some(current) = self.garden_sessions.as_mut() else {
+            return self;
+        };
+        let foreign = workspaces
+            .iter()
+            .filter(|workspace| workspace.workspace_id != self.workspace_id)
+            .collect::<Vec<_>>();
+        if foreign.is_empty() {
+            return self;
+        }
+        for session in current.iter_mut() {
+            session.label = format!("{} / {}", self.workspace_name, session.label);
+        }
+        for workspace in foreign {
+            let names = workspace
+                .sessions
+                .iter()
+                .map(|session| (session.id, session.label.as_str()))
+                .collect::<BTreeMap<_, _>>();
+            let mut agents = BTreeMap::<SessionId, Vec<widgets::agent_status::AgentStatus>>::new();
+            if let Some(inventory) = workspace.agent_inventory.as_ref() {
+                for item in &inventory.runtimes {
+                    let Some(session_id) = item.runtime.session_id else {
+                        continue;
+                    };
+                    let Some(phase) = present_agent_phase(item.state) else {
+                        continue;
+                    };
+                    agents.entry(session_id).or_default().push(
+                        widgets::agent_status::AgentStatus {
+                            runtime_id: item.runtime.agent_runtime_id,
+                            phase,
+                        },
+                    );
+                }
+            }
+            for session in &workspace.sessions {
+                current.push(widgets::garden::GardenSession {
+                    id: session.id,
+                    label: format!(
+                        "{} / {}",
+                        workspace.name,
+                        garden_session_label(session, &names)
+                    ),
+                    lifecycle: session.lifecycle,
+                    selected: false,
+                    failure_summary: session.failure_summary.clone(),
+                    pr_merged: false,
+                    agents: agents.remove(&session.id).unwrap_or_default(),
+                });
+                self.garden_workspace_targets
+                    .insert(session.id, (workspace.workspace_id, workspace.path.clone()));
+            }
+        }
+        "all projects".clone_into(&mut self.garden_title);
+        self
+    }
+
+    pub(crate) fn garden_workspace_target(
+        &self,
+        session: SessionId,
+    ) -> Option<(WorkspaceId, &Path)> {
+        self.garden_workspace_targets
+            .get(&session)
+            .map(|(workspace, path)| (*workspace, path.as_path()))
     }
 
     /// Attach the composition-owned motion preference without teaching the
@@ -1856,7 +1937,7 @@ fn garden_frame(
     widgets::garden::render(
         height,
         width,
-        &home.workspace_name,
+        &home.garden_title,
         sessions,
         garden_tick(now),
         home.garden_motion.is_reduced(),
@@ -2842,6 +2923,7 @@ mod tests {
         right_pane_tab_at, role_identity, short_id, sidebar_agent_line, sidebar_metadata,
         sidecar_labels, terminal_point_at, with_footer_gap,
     };
+    use crate::presentation::GardenWorkspaceProjection;
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
         DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
@@ -3321,6 +3403,53 @@ mod tests {
         let garden = garden.garden_sessions.as_ref().expect("garden projection");
         assert_eq!(garden[0].label, "◆ Manager · planning");
         assert_eq!(garden[1].label, "● Worker · planning › api");
+    }
+
+    #[test]
+    fn garden_merges_registered_projects_and_keeps_foreign_switch_targets() {
+        let current_workspace = WorkspaceId::new();
+        let foreign_workspace = WorkspaceId::new();
+        let current_session = SessionId::new();
+        let foreign_session = SessionId::new();
+        let mut state = AppState::home(current_workspace, vec![current_session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+        let foreign_path = PathBuf::from("/work/beta");
+        let home = HomeProjection::from_state(
+            &state,
+            "alpha",
+            Path::new("/work/alpha"),
+            &[projected_session(
+                current_session,
+                "build",
+                "/work/alpha/build",
+            )],
+        )
+        .with_garden_workspaces(&[GardenWorkspaceProjection {
+            workspace_id: foreign_workspace,
+            name: "beta".to_owned(),
+            path: foreign_path.clone(),
+            sessions: vec![projected_session(
+                foreign_session,
+                "review",
+                "/work/beta/review",
+            )],
+            agent_inventory: None,
+        }]);
+
+        let garden = home.garden_sessions.as_ref().expect("garden projection");
+        assert_eq!(garden.len(), 2);
+        assert_eq!(garden[0].label, "alpha / build");
+        assert_eq!(garden[1].label, "beta / review");
+        assert_eq!(home.garden_title, "all projects");
+        assert_eq!(
+            home.garden_workspace_target(foreign_session),
+            Some((foreign_workspace, foreign_path.as_path()))
+        );
+        assert_eq!(home.garden_workspace_target(current_session), None);
     }
 
     /// sidebar の agent 行と Garden の plot は同じ束を読む。片方だけが inventory を
