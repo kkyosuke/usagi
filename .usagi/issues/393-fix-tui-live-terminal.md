@@ -5,14 +5,14 @@ status: done
 priority: medium
 labels: [tui, bug]
 dependson: []
-related: [390]
+related: [723]
 created_at: 2026-07-20T03:56:14.791768+00:00
-updated_at: 2026-07-20T04:04:58.566039+00:00
+updated_at: 2026-08-27T01:00:00+00:00
 ---
 
 ## 概要
 
-issue #390 により live terminal の drag 選択は release 後も保持される。保持済み選択を明示的に解除する通常左クリックが未実装で、右ペイン content の click は sidebar 用 event として扱われ inert になる。
+issue #723 により live terminal の drag 選択は release 後も保持される。保持済み選択を明示的に解除する通常左クリックが未実装で、右ペイン content の click は sidebar 用 event として扱われ inert になる。
 
 ## 方針
 

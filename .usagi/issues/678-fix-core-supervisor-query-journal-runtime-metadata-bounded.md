@@ -1,7 +1,7 @@
 ---
 number: 678
 title: fix(core): supervisor 履歴を query・journal・runtime metadata 全体で bounded にする
-status: doing
+status: in-progress
 priority: medium
 labels: [review, v2, core, daemon, supervisor, resource, retention, performance]
 dependson: []
