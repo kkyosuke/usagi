@@ -317,6 +317,8 @@ printf "   %s(\(\\%s\n" "$C_PINK" "$C_RST"
 printf "   %s%s%s  %s%s%s\n" "$C_PINK" "$FACE" "$C_RST" "$C_BOLD" "$MESSAGE" "$C_RST"
 printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$C_RST" "$C_CYAN" "$BIN_DIR" "$C_RST"
 printf "\n"
+printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
+printf "daemon の build が古い場合は 'usagi doctor --fix' で入れ替えてね。\n"
 
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
