@@ -116,8 +116,8 @@ use usagi_daemon::usecase::pr_projection::{
     PrProjection, PrProjectionQueue, pr_projection_counters,
 };
 use usagi_daemon::usecase::replacement::{
-    LiveResources, ResourceCensus, RolloverRequester, SeamlessRefusal, TransitionMode,
-    manual_operation_id, seamless_refusal,
+    LiveResources, ResourceCensus, RetainedGenerationControl, RolloverRequester, SeamlessRefusal,
+    TransitionMode, manual_operation_id, seamless_refusal,
 };
 use usagi_daemon::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator};
 use usagi_daemon::usecase::resources::durable::{
@@ -465,6 +465,94 @@ impl ResourceCensus for DurableResourceCensus {
             agents: live.agents,
             terminals: live.terminals,
         })
+    }
+}
+
+/// Exact process control for all non-retired generations in this data home.
+///
+/// `daemon.json` follows the active generation across a handoff, but a draining
+/// predecessor legitimately remains alive with its PTYs and the singleton lock.
+/// Cold lifecycle transitions therefore use the generation registry rather
+/// than assuming the lifecycle record names every process that must stop.
+struct RegistryGenerationControl {
+    data_dir: PathBuf,
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup
+impl RegistryGenerationControl {
+    fn retained(&self) -> std::io::Result<Vec<ProcessIdentity>> {
+        Ok(read_registry_document(&self.data_dir)
+            .map_err(std::io::Error::other)?
+            .into_iter()
+            .flat_map(|document| document.generations)
+            .filter(|entry| entry.role != GenerationRole::Retired)
+            .map(|entry| entry.process)
+            .collect())
+    }
+
+    fn exactly_alive(process: &ProcessIdentity) -> std::io::Result<bool> {
+        if process.start_identity.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "retained daemon generation has no process identity",
+            ));
+        }
+        match process_start_identity(process.pid) {
+            Ok(identity) => Ok(identity == process.start_identity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn record(process: &ProcessIdentity) -> DaemonRecord {
+        DaemonRecord {
+            pid: process.pid,
+            process_start_identity: Some(process.start_identity.clone()),
+            started_at: chrono::Utc::now(),
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup
+impl RetainedGenerationControl for RegistryGenerationControl {
+    fn has_live(&self) -> std::io::Result<bool> {
+        for process in self.retained()? {
+            if Self::exactly_alive(&process)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn shutdown_all(&self) -> std::io::Result<()> {
+        let mut signalled = BTreeSet::new();
+        for _ in 0..=100 {
+            let mut live = false;
+            // Re-read on every pass so a handoff that was already committing
+            // while shutdown began cannot leave its newly retained successor
+            // outside the fixed snapshot we signal.
+            for process in self.retained()? {
+                if !Self::exactly_alive(&process)? {
+                    continue;
+                }
+                live = true;
+                let identity = (process.pid, process.start_identity.clone());
+                if signalled.insert(identity)
+                    && let Err(error) = signal_exact_process(&Self::record(&process), libc::SIGTERM)
+                    && Self::exactly_alive(&process)?
+                {
+                    return Err(error);
+                }
+            }
+            if !live {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "retained daemon generations did not stop within the shutdown window",
+        ))
     }
 }
 
@@ -11675,6 +11763,9 @@ fn run_inner(
     let census = DurableResourceCensus {
         data_dir: data_dir.clone(),
     };
+    let generations = RegistryGenerationControl {
+        data_dir: data_dir.clone(),
+    };
     let authority = RegistryAuthority {
         data_dir: &data_dir,
         ready: &ready,
@@ -11706,6 +11797,7 @@ fn run_inner(
         workspace: &workspace,
         pid,
         census: &census,
+        generations: &generations,
         seamless: observed_seamless_refusal(&data_dir),
         rollover: &rollover,
     };
@@ -15031,6 +15123,66 @@ mod tests {
             observe_generation_process(&absent),
             ProcessObservation::Gone
         );
+    }
+
+    #[test]
+    fn forced_transition_stops_a_live_draining_generation_before_stale_cleanup() {
+        use usagi_daemon::usecase::authority::registry::{GenerationEntry, RegistryFile};
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let mut draining = Command::new("sleep").arg("30").spawn().unwrap();
+        let draining_process = ProcessIdentity {
+            pid: draining.id(),
+            start_identity: process_start_identity(draining.id()).unwrap(),
+            process_group: process_group(draining.id()).unwrap(),
+        };
+        let mut retired = Command::new("sleep").arg("30").spawn().unwrap();
+        let retired_process = ProcessIdentity {
+            pid: retired.id(),
+            start_identity: process_start_identity(retired.id()).unwrap(),
+            process_group: process_group(retired.id()).unwrap(),
+        };
+        let entry = |role, process: ProcessIdentity| GenerationEntry {
+            generation: DaemonGeneration::new(),
+            role,
+            endpoint: format!("generations/{}/daemon.sock", process.pid),
+            process,
+            expected_build: current_build(),
+            verified_build: Some(current_build()),
+            revision: 1,
+        };
+        let document = RegistryDocument {
+            revision: 1,
+            generations: vec![
+                entry(GenerationRole::Draining, draining_process),
+                entry(GenerationRole::Retired, retired_process),
+            ],
+            ..RegistryDocument::default()
+        };
+        assert!(
+            GenerationRegistryFile::new(data)
+                .unwrap()
+                .compare_and_write(None, &serde_json::to_string(&document).unwrap())
+                .unwrap()
+        );
+        let control = RegistryGenerationControl {
+            data_dir: data.to_path_buf(),
+        };
+        assert!(control.has_live().unwrap());
+
+        // Reap concurrently: an unreaped fixture child remains visible as a
+        // zombie, while a real daemon generation is reaped by its process owner.
+        let draining_waiter = std::thread::spawn(move || draining.wait().unwrap());
+        control.shutdown_all().unwrap();
+        assert!(!draining_waiter.join().unwrap().success());
+        assert!(!control.has_live().unwrap());
+        assert!(
+            retired.try_wait().unwrap().is_none(),
+            "retired generations must never be signalled"
+        );
+        retired.kill().unwrap();
+        retired.wait().unwrap();
     }
 
     #[test]

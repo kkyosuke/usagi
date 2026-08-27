@@ -4532,7 +4532,8 @@ mod tests {
             .join("\n");
         assert_eq!(frame.len(), 24);
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
-        assert!(text.contains("Garden · click a usagi to visit · any key to return"));
+        assert!(text.contains("Garden · click a usagi"));
+        assert!(text.contains("any key · wake"));
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 run · 1 done"));

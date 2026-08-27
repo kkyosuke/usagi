@@ -89,6 +89,8 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     pub pid: u32,
     /// `stop` / `replace` が壊しうる live runtime の実測。
     pub census: &'a dyn usecase::replacement::ResourceCensus,
+    /// retained generation の exact liveness と cold shutdown。
+    pub generations: &'a dyn usecase::replacement::RetainedGenerationControl,
     /// この build が live successor へ authority を渡せない理由。durable な
     /// generation registry の観測から導く。
     pub seamless: Option<usecase::replacement::SeamlessRefusal>,
@@ -174,6 +176,7 @@ pub fn run<
                 env.sleeper,
                 env.ready,
                 env.census,
+                env.generations,
                 mode,
                 info,
             )?;
@@ -188,6 +191,7 @@ pub fn run<
                 env.sleeper,
                 env.ready,
                 env.census,
+                env.generations,
                 env.seamless.as_ref(),
                 env.rollover,
                 mode,
@@ -208,7 +212,8 @@ mod tests {
         RecordingTerminator, TestLauncher,
     };
     use crate::usecase::replacement::{
-        LiveResources, ResourceCensus, RolloverRequester, SeamlessRefusal, TransitionMode,
+        LiveResources, ResourceCensus, RetainedGenerationControl, RolloverRequester,
+        SeamlessRefusal, TransitionMode,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -229,6 +234,16 @@ mod tests {
                 agents: self.0,
                 terminals: 0,
             })
+        }
+    }
+    struct NoGenerations;
+    impl RetainedGenerationControl for NoGenerations {
+        fn has_live(&self) -> std::io::Result<bool> {
+            Ok(false)
+        }
+
+        fn shutdown_all(&self) -> std::io::Result<()> {
+            Ok(())
         }
     }
     struct NoopRollover;
@@ -280,6 +295,7 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(0),
+            generations: &NoGenerations,
             seamless: Some(SeamlessRefusal::NoGenerationRegistry),
             rollover: &NoopRollover,
         };
@@ -332,6 +348,7 @@ mod tests {
             workspace: &FakeWorkspaceFence::Held(1111),
             pid: 4321,
             census: &Owning(0),
+            generations: &NoGenerations,
             seamless: Some(SeamlessRefusal::NoLiveRegisteredActive),
             rollover: &NoopRollover,
         };
@@ -385,6 +402,7 @@ mod tests {
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
                 census: &Owning(0),
+                generations: &NoGenerations,
                 seamless: Some(SeamlessRefusal::NoGenerationRegistry),
                 rollover: &NoopRollover,
             };
@@ -421,6 +439,7 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(1),
+            generations: &NoGenerations,
             seamless: None,
             rollover: &NoopRollover,
         };
@@ -484,6 +503,7 @@ mod tests {
             workspace: &FakeWorkspaceFence::Acquired,
             pid: 4321,
             census: &Owning(1),
+            generations: &NoGenerations,
             seamless: Some(SeamlessRefusal::NoGenerationRegistry),
             rollover: &NoopRollover,
         };
@@ -546,6 +566,7 @@ mod tests {
                 workspace: &FakeWorkspaceFence::Acquired,
                 pid: 4321,
                 census: &Owning(0),
+                generations: &NoGenerations,
                 seamless: Some(SeamlessRefusal::NoGenerationRegistry),
                 rollover: &NoopRollover,
             };
