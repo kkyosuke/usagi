@@ -432,7 +432,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 |---|---|
 | feature | `--features production` を付ける。この feature が無い artifact は `USAGI_RUNTIME_MODE` 未指定時に local を既定にするため、利用者のデータが `~/.usagi/local/` に入る（正本は [5. daemon#artifact の既定 mode](05-daemon.md#artifact-の既定-mode)） |
 | toolchain | `rust-toolchain.toml` が pin した nightly。cross target は `rustup target add` で pin した toolchain へ入れる（`dtolnay/rust-toolchain` の `targets:` は日付なし nightly に入るため使わない） |
-| 対象 platform | Linux amd64 / macOS amd64 / macOS arm64 の 3 つ。installer（`scripts/install.sh`）の `platform_asset` は darwin / linux だけを受け付け、それ以外は fail する。加えて v2 は Unix domain socket の IPC と Unix 専用の process / permission API に依存するため Windows ではコンパイルできない |
+| 対象 platform | Linux amd64 / macOS amd64 / macOS arm64 の 3 つ。installer（`scripts/install.sh`）の `platform_asset` はこの OS / architecture の組み合わせだけを受け付け、それ以外は artifact の取得前に fail する。加えて v2 は Unix domain socket の IPC と Unix 専用の process / permission API に依存するため Windows ではコンパイルできない |
 | archive | `usagi-<os>-<arch>.tar.gz`。中身は唯一の top-level entry `usagi`（installer の `verify_archive` が要求する） |
 | verification artifact | 各 archive と同名の `.sha256` と `.version`。installer は両方を必須とし、存在しない旧 release へ無検証 fallback しない |
 | version 出力 | `usagi <version>`（installer の `read_version` が要求する。`release-build-check.yml` が host target でこの契約を検証する） |

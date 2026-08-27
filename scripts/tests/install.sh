@@ -174,6 +174,32 @@ prepare_case selected-version
 run_installer_for_version >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 
+prepare_case unsupported-linux-arm64
+cat > "$FAKE_BIN/uname" <<'SH'
+#!/bin/sh
+case "$1" in
+    -s) printf 'Linux\n' ;;
+    -m) printf 'aarch64\n' ;;
+    *) exit 64 ;;
+esac
+SH
+chmod 755 "$FAKE_BIN/uname"
+cat > "$FAKE_BIN/curl" <<SH
+#!/bin/sh
+touch "$CASE_DIR/curl-called"
+exit 70
+SH
+chmod 755 "$FAKE_BIN/curl"
+if (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" \
+    FIXTURE_DIR="$FIXTURE_DIR" PATH="$FAKE_BIN:$PATH" \
+    bash "$INSTALLER" --select-version) >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+    echo "expected Linux arm64 to be rejected" >&2
+    exit 1
+fi
+grep -q 'unsupported platform: linux-arm64' "$CASE_DIR/err"
+[ ! -e "$CASE_DIR/curl-called" ]
+assert_old_preserved
+
 prepare_case interactive-selector
 FAKE_CURL_LOG="$CASE_DIR/curl.log"
 export FAKE_CURL_LOG

@@ -11,6 +11,7 @@ readonly LOCK_DIR="$USAGI_DIR/update.lock"
 STAGE_DIR=""
 LOCK_HELD=0
 SELECTOR_ACTIVE=0
+SELECT_VERSION=0
 
 cleanup() {
     local status=$?
@@ -138,7 +139,7 @@ render_release_selector() {
 
 case "${1:-}" in
     --select-version)
-        select_release
+        SELECT_VERSION=1
         ;;
     '')
         ;;
@@ -195,6 +196,10 @@ platform_asset() {
         aarch64|arm64) arch=arm64 ;;
         *) fail "unsupported architecture: $arch" ;;
     esac
+    case "$os-$arch" in
+        linux-amd64|macos-amd64|macos-arm64) ;;
+        *) fail "unsupported platform: $os-$arch" ;;
+    esac
     printf 'usagi-%s-%s.tar.gz\n' "$os" "$arch"
 }
 
@@ -249,9 +254,12 @@ verify_expected_version() {
     printf '%s\n' "$actual"
 }
 
+ASSET_NAME="$(platform_asset)"
+if [ "$SELECT_VERSION" -eq 1 ]; then
+    select_release
+fi
 acquire_lock
 
-ASSET_NAME="$(platform_asset)"
 if [ -z "${USAGI_VERSION:-}" ]; then resolve_latest_release; fi
 case "$USAGI_VERSION" in
     v[0-9]*.[0-9]*.[0-9]*) ;;
