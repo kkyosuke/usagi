@@ -6424,6 +6424,10 @@ fn dispatch_user_decision(
                     ErrorCode::IdempotencyConflict,
                     "decision idempotency key conflicts",
                 ),
+                UserDecisionDispatchError::Decision(UserDecisionError::IdempotencyExpired) => (
+                    ErrorCode::IdempotencyExpired,
+                    "decision idempotency result is no longer retained; use a new key for a new request",
+                ),
                 UserDecisionDispatchError::Decision(UserDecisionError::InvalidRequest) => (
                     ErrorCode::InvalidArgument,
                     "decision request must be bounded and offer at least one answer path",
@@ -6448,6 +6452,11 @@ fn dispatch_user_decision(
                     ErrorCode::ResourceExhausted,
                     "the unanswered decision backlog is full for this workspace or daemon; \
                      answer some before asking another",
+                ),
+                UserDecisionDispatchError::Decision(UserDecisionError::CapacityReached) => (
+                    ErrorCode::ResourceExhausted,
+                    "the user decision store is full of pending or undelivered records; \
+                     complete some before retrying",
                 ),
                 UserDecisionDispatchError::Cancelled => {
                     (ErrorCode::Cancelled, "decision wait was cancelled")
