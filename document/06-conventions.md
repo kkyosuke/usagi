@@ -200,6 +200,7 @@ CI で full test / coverage gate が必須となる条件は次のとおり（�
 - テストカバレッジ 100% を維持する（CI でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（ルートの `src/main.rs`）で束ねる。
   - 計測から外す必要がある item には、ファイル名の正規表現ではなく該当する module または function に `#[coverage(off)]` を付ける（外部 module ファイル全体を外す場合は inner attribute の `#![coverage(off)]`）。使用できるのは、テスト可能なロジックを抜いたあとの「実 IO そのもの」、または LLVM coverage が generic の単相化を重複計上する場合に限る。いずれも振る舞いを検証する fake / integration test を残し、除外理由を同じ変更に記録する。未テストの業務ロジック、到達しにくい error path、短期的な coverage 目標の回避には使わない。
+  - `#[coverage(off)]` はその item だけに適用され、内部の closure など別 item には継承されない。除外した合成関数は closure-free に保つか、入れ子の item をテスト可能な関数へ分離し、意図しない未計測 item を作らない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
   - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は日付なしの `nightly` なので、pin した toolchain が使う component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` の `components` が正本である。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
