@@ -1560,31 +1560,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_list_pages_hydrate_only_selected_aggregates_and_bound_serialized_bytes() {
+    fn indexed_run_fixture() -> (tempfile::TempDir, SupervisorStore, Vec<SupervisorRunId>) {
         let tmp = tempfile::tempdir().unwrap();
         let store = SupervisorStore::new(tmp.path());
-        assert!(
-            store
-                .runs_page("caller", None, 0, 0)
-                .unwrap_err()
-                .to_string()
-                .contains("limit must be positive")
-        );
-        assert!(
-            store
-                .runs_page("caller", None, 0, 1)
-                .unwrap()
-                .runs
-                .is_empty()
-        );
-        assert!(
-            store
-                .runs_page("caller", None, 1, 1)
-                .unwrap_err()
-                .to_string()
-                .contains("cursor is outside")
-        );
         let mut caller_runs = Vec::new();
         for index in 0..8 {
             let caller = if index % 3 == 0 { "other" } else { "caller" };
@@ -1605,18 +1583,42 @@ mod tests {
             }
             store.initialize(&run).unwrap();
         }
+        (tmp, store, caller_runs)
+    }
 
-        store.run_snapshots_read.set(0);
-        let first = store.runs_page("caller", None, 0, 2).unwrap();
-        assert_eq!(first.runs.len(), 2);
-        assert!(first.next_cursor.is_some());
-        assert_eq!(store.run_snapshots_read.get(), 2);
+    #[test]
+    fn run_list_validates_arguments_and_its_derived_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = SupervisorStore::new(tmp.path());
         assert!(
-            store
-                .runs_page("nobody", None, 0, 2)
+            empty
+                .runs_page("caller", None, 0, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("limit must be positive")
+        );
+        assert!(
+            empty
+                .runs_page("caller", None, 0, 1)
                 .unwrap()
                 .runs
                 .is_empty()
+        );
+        assert!(
+            empty
+                .runs_page("caller", None, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor is outside")
+        );
+
+        let (_tmp, store, caller_runs) = indexed_run_fixture();
+        let first = store.runs_page("caller", None, 0, 2).unwrap();
+        assert!(
+            first
+                .runs
+                .iter()
+                .all(|run| caller_runs.contains(&run.supervisor_run_id))
         );
 
         let valid_index = store.run_list_index().unwrap();
@@ -1629,11 +1631,22 @@ mod tests {
         let mut missing = valid_index;
         missing.entries.last_mut().unwrap().supervisor_run_id = SupervisorRunId::new();
         assert!(!store.run_list_index_is_valid(&missing).unwrap());
+    }
+
+    #[test]
+    fn run_list_pages_hydrate_only_selected_aggregates_and_bound_serialized_bytes() {
+        let (_tmp, store, caller_runs) = indexed_run_fixture();
+        store.run_snapshots_read.set(0);
+        let first = store.runs_page("caller", None, 0, 2).unwrap();
+        assert_eq!(first.runs.len(), 2);
+        assert!(first.next_cursor.is_some());
+        assert_eq!(store.run_snapshots_read.get(), 2);
         assert!(
-            first
+            store
+                .runs_page("nobody", None, 0, 2)
+                .unwrap()
                 .runs
-                .iter()
-                .all(|run| caller_runs.contains(&run.supervisor_run_id))
+                .is_empty()
         );
 
         store.run_snapshots_read.set(0);
@@ -1668,7 +1681,11 @@ mod tests {
                 .to_string()
                 .contains("capacity is exhausted")
         );
+    }
 
+    #[test]
+    fn run_list_rebuilds_once_and_falls_back_from_stale_or_unreadable_state() {
+        let (tmp, store, caller_runs) = indexed_run_fixture();
         let reopened = SupervisorStore::new(tmp.path());
         let snapshot_count = reopened.snapshot_count().unwrap();
         reopened.run_snapshots_read.set(0);
