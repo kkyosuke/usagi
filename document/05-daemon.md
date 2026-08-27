@@ -642,21 +642,13 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 |---|---|---|
 | `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
 | inbox | ACK 済み 256 件。総数の上限は 4096、query page は最大 100 件 | 未 ACK の報告。未 ACK だけで上限へ達した append は既存報告を落とさず capacity error で拒否する |
-| `user-decisions.json` | pretty JSON 全体 4 MiB、終了済みは最新 32 件を最低保持し最大 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
+| `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
 | `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
 未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
 pending が 1 つの共有文書を無制限に増やすことを防ぐ。拒否は `resource_exhausted` で、durable state を一切変更しない
 ため、人が backlog を消化したあとの retry が安全である。
-
-decision の件数上限とは別に、caller-controlled な prompt / option / answer を含む永続化後の正確な byte 数も
-4 MiB 以下に保つ。byte pressure では最新 32 件より古い terminal record だけを先に落とし、pending、未 ACK outbox、
-または最新 32 件の retry window が
-上限を占有していれば mutation を `resource_exhausted`・effect zero で拒否する。削除した terminal record の
-idempotency key は owner と組にした固定長 tombstone に残すため、古い retry は `idempotency_expired` となり、
-別の新規 decision として再作成されない。固定長集合の衝突は安全側（expired）へ倒れ、daemon の寿命に比例して
-metadata を増やさない。
 
 inbox の query は `sequence -> byte offset` index から `cursor` 位置へ seek し、`limit` 件だけを読む。query 自体は
 既読化せず、処理済み page の `next_cursor` を別の `agent_inbox_ack` effect で送る。ACK は atomic watermark の単調更新で、
