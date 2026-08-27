@@ -121,7 +121,11 @@ libc = "0.2"
 signal-hook = "0.3"
 # daemon-owned terminal runtime.  The daemon opens the pseudo-terminal; TUI
 # clients only attach through IPC and never acquire a local PTY.
-portable-pty = "0.9"
+# crates.io 0.9.0 pins nix 0.28, whose trailing-semicolon macro expansion is
+# rejected by a future Rust release. Upstream already moved the same 0.9 API to
+# nix 0.29; pin the minimal signed upstream dependency-update revision until
+# the next crates.io release, avoiding unrelated post-release changes.
+portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "f78f72f2f18bf459561e3681f016365273d3e281" }
 
 # clippy は CI / pre-push で `-D warnings` になるため、
 # 日常のビルドから pedantic まで warning として表面化させておく。

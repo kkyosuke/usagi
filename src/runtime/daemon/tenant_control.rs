@@ -166,6 +166,7 @@ fn retire(
     Ok(serde_json::json!({ "retired": paths::wire_workspace_root(&root) }))
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn map_retire_error(error: RetireError) -> ProtocolError {
     match error {
         RetireError::NotFound => {
@@ -182,6 +183,7 @@ fn map_retire_error(error: RetireError) -> ProtocolError {
     }
 }
 
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-08-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn unavailable(message: &'static str) -> ProtocolError {
     ProtocolError::new(ErrorCode::Unavailable, message)
 }

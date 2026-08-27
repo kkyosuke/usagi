@@ -112,6 +112,7 @@ jobs:
   policy-checks:
     name: Lightweight repository policy checks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - uses: actions/checkout@v5
       with:
@@ -136,10 +137,23 @@ jobs:
     - name: Enforce root README contract
       run: bash scripts/ci/root-readme.sh README.md
 
+    - id: security-exceptions
+      name: Validate RustSec exceptions
+      run: ruby scripts/ci/security-audit-exceptions.rb >> "$GITHUB_OUTPUT"
+
+    - name: Test RustSec exception checker
+      run: bash scripts/tests/security-audit-exceptions.sh
+
+    - name: Audit Cargo.lock against RustSec
+      uses: rustsec/audit-check@v2.0.0
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        ignore: ${{ steps.security-exceptions.outputs.ignore }}
+
   test:
     name: test
     if: always()
-    needs: [changes, rust-lint]
+    needs: [changes, rust-lint, policy-checks]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -150,6 +164,10 @@ jobs:
         RUN_RESULT: ${{ needs.rust-lint.result }}
       run: |
         scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT"
+    - name: Report repository policy result
+      env:
+        POLICY_RESULT: ${{ needs.policy-checks.result }}
+      run: test "$POLICY_RESULT" = success
 
   full-test:
     name: full-test

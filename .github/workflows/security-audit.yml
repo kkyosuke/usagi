@@ -1,0 +1,25 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: "17 18 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    name: security-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - id: security-exceptions
+        name: Validate RustSec exceptions
+        run: ruby scripts/ci/security-audit-exceptions.rb >> "$GITHUB_OUTPUT"
+      - name: Audit Cargo.lock against RustSec
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: ${{ steps.security-exceptions.outputs.ignore }}
