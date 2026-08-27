@@ -123,7 +123,7 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 
 | 入力 | 動作 |
 |---|---|
-| `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する |
+| `Ctrl-O` → `+` / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する。表示中の open workspace は `Ctrl-D` で閉じる |
 | `Ctrl-O` → `1` … `9` / tab click | 1〜9 番目またはクリックした project tab を active にする |
 | `Ctrl-O` → `0` | 全件 switcher。`↑↓` / 数字 / `Enter` で切替し、10 件目以降にも到達できる |
 | switcher の `x` | 選択 project tab を deck から detach する。workspace 登録、session、daemon terminal は削除・終了しない |
@@ -132,7 +132,8 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 live PTY と management surface の両方で解決できる 1 秒の `Ctrl-O` leader を使う。leader がない plain digit / `+` は従来どおり live PTY へ
 1 回だけ渡す。project shortcut は Switch、Closeup、Director、project overlay より先に process shell が消費する。
 
-Add は現在の Home composition を背面に保ち、既存 tab を checked + disabled で示す。選択した全 workspace の snapshot と settings を
+Add は現在の Home composition を背面に保ち、既存 tab を checked で示す。checked row の `Ctrl-D` は switcher の `x` と同じ
+project close を実行し、未追加 row では何もしない。filter 入力の plain `x` は従来どおり文字として扱う。選択した全 workspace の snapshot と settings を
 現在の composition を保ったまま準備し、1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
 旧 composition を drop してから新しい composition を作る。通常切替も同じ prepare → commit 境界を使うため、失敗時は current workspace と
 その接続を保つ。未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
