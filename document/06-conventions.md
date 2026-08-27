@@ -284,6 +284,11 @@ daemon の workspace root は**起動時 cwd** で決まるため（[5. daemon](
 | workspace root の回帰検出 | fixture の teardown で、起動した daemon が adopt した workspace（`daemon/w/<digest>/root.json`）がすべて fixture であることを assert する |
 | exact reap | teardown で graceful stop を試み、残った場合だけ `daemon.json` の pid + process-start identity が一致する incarnation へ SIGTERM → SIGKILL と段階的に落とす |
 
+daemon から分離して常駐する bootstrap broker も同じ teardown の対象である。broker は digest-scoped な
+`bootstrap-broker-<digest>.json` に pid + process-start identity を記録する。fixture はまず private socket へ stop を送り、
+残った exact incarnation だけを SIGTERM → SIGKILL で reap する。production の 1 時間 idle timeout は test cleanup の
+代用にしない。
+
 `daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
 `mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
 なる（自分自身を撃たない）。

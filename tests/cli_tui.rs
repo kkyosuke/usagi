@@ -547,6 +547,70 @@ fn daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused() {
 }
 
 #[test]
+fn fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let mut daemon = home.spawn_serve();
+    let mut broker_record = None;
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            broker_record = std::fs::read_dir(&daemon_dir).ok().and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name().is_some_and(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with("bootstrap-broker-")
+                            && path
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                    })
+                })
+            });
+            daemon_dir.join("daemon.json").is_file() && broker_record.is_some()
+        }),
+        "daemon and bootstrap broker did not publish exact process records"
+    );
+    let broker_record = broker_record.unwrap();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&broker_record).unwrap()).unwrap();
+    let broker_pid = u32::try_from(record["pid"].as_u64().unwrap()).unwrap();
+    assert_ne!(broker_pid, daemon.pid());
+    assert!(process_alive(broker_pid));
+
+    daemon.kill_and_reap();
+    assert!(
+        process_alive(broker_pid),
+        "broker must outlive a crashed daemon"
+    );
+
+    // Remove the graceful control pathname to exercise the exact-identity
+    // fallback rather than letting the ordinary broker STOP request succeed.
+    std::fs::remove_file(broker_record.with_extension("sock")).unwrap();
+    home.reap();
+    assert!(
+        wait_until(Duration::from_secs(5), || !process_alive(broker_pid)),
+        "fixture teardown left bootstrap broker {broker_pid} running"
+    );
+    let artifacts = std::fs::read_dir(&daemon_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.starts_with("bootstrap-broker-")
+                && !Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        artifacts.is_empty(),
+        "stale broker artifacts: {artifacts:?}"
+    );
+}
+
+#[test]
 fn daemon_restart_initializes_a_private_endpoint_from_an_empty_data_dir() {
     let _guard = DAEMON_LIFECYCLE_LOCK
         .lock()
