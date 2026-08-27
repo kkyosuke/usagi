@@ -14,7 +14,7 @@ updated_at: 2026-07-19T22:59:32.505461+00:00
 
 `user_decision_get` が「取得リクエストは正常に dispatch、回答待ち」「テスト用の判断リクエストも作成済み」と
 返すのに TUI に回答 modal が出ない。triage の結果、原因はこの機能が**本番の 3 層すべてで未接続**であること
-（設計と全体像は [document/proposals/09-user-decision-mcp.md](../../document/proposals/09-user-decision-mcp.md#実装状況と未接続点triage)）。
+（設計と全体像は [document/proposals/09-user-decision-mcp.md](../../document/proposals/09-user-decision-mcp.md#実装時の接続経緯)）。
 本 issue はそのうち **MCP → daemon → 配送** の層を担当する（TUI 側は #382）。
 
 ### 確認された根本原因（この層）

@@ -1,9 +1,10 @@
 # 15. session garden
 
-> [設計提案一覧](README.md) ｜ 関連仕様: [TUI](../03-tui.md) ｜ 実装 issue: #674
+> [設計提案一覧](README.md) ｜ 現在仕様: [TUI](../03-tui.md) ｜ 実装履歴: #674
 
-session を庭の区画、その agent を区画にいるうさぎとして表す、Home の screen saver UI を提案する。一定時間操作がなければ Garden が
-自動的に現れ、入力すると元の画面へ戻る。目的は session 数や実行状態を一覧表より速く把握できることと、
+session を庭の区画、その agent を区画にいるうさぎとして表す Home の screen saver UI を導入した際の
+設計記録である。現在の表示・入力契約は [3. TUI#session garden](../03-tui.md#session-garden) が正本であり、
+本書は採用理由と実装履歴を残す。Garden の目的は session 数や実行状態を一覧表より速く把握できることと、
 `usagi` らしさを操作の邪魔にならない範囲で強めることである。
 
 Garden は session の lifecycle や Agent phase を所有しない。daemon-authoritative な既存 projection を
@@ -225,7 +226,7 @@ phase と最新 coherent Agent inventory を結合して各 agent の phase を�
 tab が無いうさぎを押せてしまう。tab strip と同じ observation を権威にすることで、庭の羽数と開ける tab が
 一致する（正本は [3. TUI#区画とうさぎ](../03-tui.md#区画とうさぎ)）。
 
-## 実装順序と受け入れ条件
+## 実装履歴と受け入れ条件
 
 1. 固定 snapshot から ANSI-safe / width-safe な Garden frame と hitbox を返す widget / unit test を追加する。
 2. Garden overlay、idle event、wake / single-click transition を reducer に追加し、注入した経過時間で controller test を
