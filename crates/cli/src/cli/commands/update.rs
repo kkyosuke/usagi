@@ -7,8 +7,8 @@ use crate::cli::{InstallerRequest, Run, RunOutcome};
 /// この digest は `scripts/install.sh` と同じ build に固定する。変更時は unit test が
 /// 不一致を検出するため、review 可能な identity 更新として同時に変更する。
 const INSTALLER_SHA256: [u8; 32] = [
-    0x40, 0x37, 0xd7, 0x34, 0x88, 0xbc, 0x22, 0x42, 0x20, 0xed, 0x95, 0xa2, 0xdc, 0xb6, 0x82, 0x89,
-    0x22, 0xf0, 0x4c, 0x83, 0xb6, 0x63, 0xb5, 0x5e, 0x97, 0x02, 0x54, 0x03, 0x21, 0xc6, 0xb5, 0x26,
+    0x5e, 0x92, 0x9c, 0x94, 0xa2, 0x68, 0xdd, 0xeb, 0x43, 0x33, 0xa3, 0x7f, 0x35, 0x91, 0x64, 0x9b,
+    0x11, 0xa5, 0x14, 0x77, 0xaf, 0x8f, 0x82, 0x08, 0x78, 0x81, 0xc6, 0x0e, 0x3f, 0x62, 0x8e, 0x60,
 ];
 const INSTALLER: &[u8] = include_bytes!("../../../../../scripts/install.sh");
 
@@ -20,12 +20,9 @@ pub struct Update {
 impl Run for Update {
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
         if self.select_version {
-            writeln!(out, "select a usagi release to install...")?;
+            writeln!(out, "インストールする usagi のリリースを選んでね！ぴょん")?;
         } else {
-            writeln!(
-                out,
-                "downloading and installing the latest usagi release..."
-            )?;
+            writeln!(out, "最新の usagi リリースをインストール中だよ！ぴょん")?;
         }
         Ok(RunOutcome::SelfUpdate(InstallerRequest::new(
             INSTALLER,
@@ -64,7 +61,7 @@ mod tests {
         assert!(
             matches!(outcome, RunOutcome::SelfUpdate(request) if !request.select_version() && request.verified_script() == Some(INSTALLER))
         );
-        assert!(String::from_utf8(out).unwrap().contains("downloading"));
+        assert!(String::from_utf8(out).unwrap().contains("インストール中"));
     }
 
     #[test]

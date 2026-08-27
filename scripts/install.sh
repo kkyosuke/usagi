@@ -69,7 +69,7 @@ select_release() {
                 if [ "$selected" -lt "$release_count" ]; then selected=$((selected + 1)); fi
                 ;;
             q)
-                printf '\033[?25h\nrelease selection cancelled\n' > /dev/tty
+                printf '\033[?25h\nリリース選択をキャンセルしたよ\n' > /dev/tty
                 SELECTOR_ACTIVE=0
                 exit 0
                 ;;
@@ -89,12 +89,12 @@ select_release() {
     action="$(release_action "$current_version" "$version")"
     case "$action" in
         downgrade)
-            printf 'Confirm downgrade from v%s to v%s? [y/N] ' "$current_version" "$version" > /dev/tty
+            printf 'v%s から v%s へダウングレードする？ [y/N] ' "$current_version" "$version" > /dev/tty
             IFS= read -rsn1 key < /dev/tty || fail "could not read downgrade confirmation"
             printf '\n' > /dev/tty
             case "$key" in
                 y|Y) ;;
-                *) printf 'downgrade cancelled\n' > /dev/tty; exit 0 ;;
+                *) printf 'ダウングレードをキャンセルしたよ\n' > /dev/tty; exit 0 ;;
             esac
             ;;
     esac
@@ -131,7 +131,7 @@ resolve_latest_release() {
 
 render_release_selector() {
     local releases=$1 release_count=$2 selected=$3 window_start=$4 redraw=$5 current_version=$6
-    local row index version marker badge action action_text current_text c_reset c_bold c_pink c_cyan c_dim
+    local row index version marker badge action c_reset c_bold c_pink c_cyan c_dim
     c_reset=$'\033[0m'
     c_bold=$'\033[1m'
     c_pink=$'\033[95m'
@@ -140,15 +140,21 @@ render_release_selector() {
 
     version="$(printf '%s\n' "$releases" | sed -n "${selected}p")"
     action="$(release_action "$current_version" "$version")"
-    if [ -n "$current_version" ]; then current_text="v${current_version}"; else current_text="not installed"; fi
-    action_text="${action} v${version}"
-
     [ "$redraw" -eq 0 ] || printf '\033[14A' > /dev/tty
     printf '%s╭─ usagi update ────────────────────────────╮%s\n' "$c_pink" "$c_reset" > /dev/tty
-    printf '│ %sChoose a version%s                          │\n' "$c_bold" "$c_reset" > /dev/tty
-    printf '│ %s↑/↓ move  •  Enter install  •  q cancel%s   │\n' "$c_dim" "$c_reset" > /dev/tty
-    printf '│ Current: %-32.32s │\n' "$current_text" > /dev/tty
-    printf '│ Action: %-33.33s │\n' "$action_text" > /dev/tty
+    printf '│ %sバージョンを選択%s                          │\n' "$c_bold" "$c_reset" > /dev/tty
+    printf '│ %s↑/↓ 移動 • Enter 決定 • q キャンセル%s      │\n' "$c_dim" "$c_reset" > /dev/tty
+    if [ -n "$current_version" ]; then
+        printf '│ 現在: v%-34.34s │\n' "$current_version" > /dev/tty
+    else
+        printf '│ 現在: 未インストール%22s│\n' '' > /dev/tty
+    fi
+    case "$action" in
+        install) printf '│ 操作: インストール v%-21.21s │\n' "$version" > /dev/tty ;;
+        reinstall) printf '│ 操作: 再インストール v%-19.19s │\n' "$version" > /dev/tty ;;
+        upgrade) printf '│ 操作: アップグレード v%-19.19s │\n' "$version" > /dev/tty ;;
+        downgrade) printf '│ 操作: ダウングレード v%-19.19s │\n' "$version" > /dev/tty ;;
+    esac
     printf '%s├───────────────────────────────────────────┤%s\n' "$c_pink" "$c_reset" > /dev/tty
     row=0
     while [ "$row" -lt 5 ]; do
@@ -160,12 +166,12 @@ render_release_selector() {
             marker="${c_pink}>${c_reset} "
         fi
         if [ "$index" -eq 1 ] && [ -n "$version" ]; then
-            badge='latest'
+            badge='最新'
         fi
         if [ -n "$version" ]; then
             printf '│ %b%s%-20s%s ' "$marker" "$c_bold" "v${version}" "$c_reset" > /dev/tty
             if [ -n "$badge" ]; then
-                printf '%s%-6s%s%13s│\n' "$c_cyan" "$badge" "$c_reset" '' > /dev/tty
+                printf '%s%s%s%15s│\n' "$c_cyan" "$badge" "$c_reset" '' > /dev/tty
             else
                 printf '%19s│\n' '' > /dev/tty
             fi
@@ -318,7 +324,7 @@ ARCHIVE="$STAGE_DIR/$ASSET_NAME"
 CHECKSUM="$STAGE_DIR/$ASSET_NAME.sha256"
 VERSION_FILE="$STAGE_DIR/$ASSET_NAME.version"
 
-echo "Downloading and verifying $ASSET_NAME..."
+echo "$ASSET_NAME をダウンロードして検証中だよ！ぴょん"
 curl -fsSL "$BASE_URL/$ASSET_NAME" -o "$ARCHIVE"
 curl -fsSL "$BASE_URL/$ASSET_NAME.sha256" -o "$CHECKSUM"
 curl -fsSL "$BASE_URL/$ASSET_NAME.version" -o "$VERSION_FILE"
@@ -374,9 +380,9 @@ case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
         echo ""
-        echo "Please add the following line to your shell configuration file (e.g., ~/.bashrc, ~/.zshrc):"
+        echo "次の行を shell の設定ファイル（例: ~/.bashrc、~/.zshrc）へ追加してね："
         echo "  export PATH=\"\$PATH:$BIN_DIR\""
         echo ""
-        echo "After adding, restart your shell or run 'source <your-rc-file>' to apply the changes."
+        echo "追加後に shell を再起動するか、'source <設定ファイル>' を実行してね。"
         ;;
 esac
