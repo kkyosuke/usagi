@@ -15,7 +15,7 @@ use std::sync::{Arc, Condvar, LockResult, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
@@ -38,6 +38,7 @@ use usagi_core::infrastructure::ipc::{
     build_artifact_decision, build_rollover_trigger,
 };
 use usagi_core::infrastructure::paths;
+use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::{DispatchStore, INBOX_PAGE_MAX, InboxCursor};
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
@@ -145,7 +146,7 @@ use usagi_daemon::usecase::session_teardown::{
 use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
-    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
+    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime, bounded_supervisor_query,
 };
 use usagi_daemon::usecase::tenant::{
     DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
@@ -5839,7 +5840,7 @@ fn dispatch_supervisor_tool(
                             "invalid supervisor_get payload",
                         )
                     })?;
-                    serde_json::to_value(
+                    let value = serde_json::to_value(
                         runtime
                             .get(&caller, input.supervisor_run_id)
                             .map_err(supervisor_error)?
@@ -5855,7 +5856,8 @@ fn dispatch_supervisor_tool(
                             ErrorCode::Internal,
                             "supervisor response encoding failed",
                         )
-                    })
+                    })?;
+                    bounded_supervisor_query(value).map_err(supervisor_error)
                 }
                 SupervisorToolAction::List => {
                     let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
@@ -5885,13 +5887,18 @@ fn dispatch_supervisor_tool(
                                 "invalid supervisor_list cursor",
                             )
                         })?;
-                    let runs = runtime
-                        .list(&caller, input.state)
-                        .map_err(supervisor_error)?;
-                    let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
-                    let next_cursor = (offset + page.len() < runs.len())
-                        .then(|| (offset + page.len()).to_string());
-                    Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
+                    let value = serde_json::to_value(
+                        runtime
+                            .list_page(&caller, input.state, offset, input.limit)
+                            .map_err(supervisor_error)?,
+                    )
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })?;
+                    bounded_supervisor_query(value).map_err(supervisor_error)
                 }
                 SupervisorToolAction::Cancel => {
                     let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
@@ -5958,7 +5965,10 @@ fn dispatch_supervisor_tool(
                             input.limit,
                         )
                         .map_err(supervisor_error)?;
-                    Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+                    bounded_supervisor_query(
+                        serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}),
+                    )
+                    .map_err(supervisor_error)
                 }
             }
         });
@@ -6047,7 +6057,9 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let message = error.to_string();
     drop(error);
-    let code = if message.contains("reused") {
+    let code = if message.contains("capacity is exhausted") {
+        ErrorCode::ResourceExhausted
+    } else if message.contains("reused") {
         ErrorCode::IdempotencyConflict
     } else if message.contains("does not exist") {
         ErrorCode::OwnershipUnknown
@@ -6409,6 +6421,10 @@ fn dispatch_user_decision(
                     ErrorCode::IdempotencyConflict,
                     "decision idempotency key conflicts",
                 ),
+                UserDecisionDispatchError::Decision(UserDecisionError::IdempotencyExpired) => (
+                    ErrorCode::IdempotencyExpired,
+                    "decision idempotency result is no longer retained; use a new key for a new request",
+                ),
                 UserDecisionDispatchError::Decision(UserDecisionError::InvalidRequest) => (
                     ErrorCode::InvalidArgument,
                     "decision request must be bounded and offer at least one answer path",
@@ -6433,6 +6449,11 @@ fn dispatch_user_decision(
                     ErrorCode::ResourceExhausted,
                     "the unanswered decision backlog is full for this workspace or daemon; \
                      answer some before asking another",
+                ),
+                UserDecisionDispatchError::Decision(UserDecisionError::CapacityReached) => (
+                    ErrorCode::ResourceExhausted,
+                    "the user decision store is full of pending or undelivered records; \
+                     complete some before retrying",
                 ),
                 UserDecisionDispatchError::Cancelled => {
                     (ErrorCode::Cancelled, "decision wait was cancelled")
@@ -10753,10 +10774,20 @@ const BROKER_IDLE_TIMEOUT: Duration = Duration::from_hours(1);
 /// attempt against the daemon endpoint each time.
 const BROKER_IDLE_POLL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct BootstrapBrokerAddress {
     socket: PathBuf,
     lock: PathBuf,
+    record: PathBuf,
+}
+
+/// Exact process identity published by a bootstrap broker for fixture and
+/// operator cleanup. The identity fences PID reuse; the private, digest-scoped
+/// path fences the workspace and executable this broker serves.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct BootstrapBrokerRecord {
+    pid: u32,
+    process_start_identity: String,
 }
 
 fn bootstrap_broker_address(
@@ -10782,6 +10813,7 @@ fn bootstrap_broker_address(
     BootstrapBrokerAddress {
         socket: daemon_dir.join(format!("bootstrap-broker-{key}.sock")),
         lock: daemon_dir.join(format!("bootstrap-broker-{key}.lock")),
+        record: daemon_dir.join(format!("bootstrap-broker-{key}.json")),
     }
 }
 
@@ -11107,14 +11139,15 @@ fn serve_bootstrap_broker(
     ensure_private_dir_all(data_dir)?;
     let daemon_dir = data_dir.join("daemon");
     ensure_private_dir(&daemon_dir)?;
+    let address = bootstrap_broker_address(data_dir, &workspace, &exe);
     let lock = FileInstanceLock {
-        path: bootstrap_broker_address(data_dir, &workspace, &exe).lock,
+        path: address.lock.clone(),
         held: RefCell::new(None),
     };
     if !lock.acquire()? {
         return Ok(());
     }
-    let socket = bootstrap_broker_address(data_dir, &workspace, &exe).socket;
+    let socket = address.socket.clone();
     match std::fs::symlink_metadata(&socket) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(&socket)?,
         Ok(_) => {
@@ -11132,13 +11165,18 @@ fn serve_bootstrap_broker(
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     }
+    let pid = std::process::id();
+    let record = BootstrapBrokerRecord {
+        pid,
+        process_start_identity: process_start_identity(pid)?,
+    };
+    if let Err(error) = json_file::write_atomic(&daemon_dir, &address.record, &record) {
+        drop(listener);
+        let _ = std::fs::remove_file(&socket);
+        return Err(std::io::Error::other(error.to_string()));
+    }
     let activity = Arc::new(BrokerActivity::started());
-    let watch = spawn_broker_idle_watch(
-        &activity,
-        bootstrap_broker_address(data_dir, &workspace, &exe),
-        data_dir,
-        idle,
-    );
+    let watch = spawn_broker_idle_watch(&activity, address.clone(), data_dir, idle);
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
@@ -11177,7 +11215,8 @@ fn serve_bootstrap_broker(
     activity.stop();
     let _ = watch.join();
     drop(listener);
-    let _ = std::fs::remove_file(socket);
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&address.record);
     Ok(())
 }
 
@@ -18517,7 +18556,9 @@ instructions = "{instructions}"
             result
         });
         for _ in 0..500 {
-            if std::os::unix::net::UnixStream::connect(&address.socket).is_ok() {
+            if address.record.is_file()
+                && std::os::unix::net::UnixStream::connect(&address.socket).is_ok()
+            {
                 return BrokerFixture {
                     workspace_dir,
                     _data_parent: data_parent,
@@ -18541,6 +18582,13 @@ instructions = "{instructions}"
             timeout: Duration::from_secs(3600),
             poll: Duration::from_secs(3600),
         });
+        let record: BootstrapBrokerRecord =
+            json_file::read(&fixture.address.record).unwrap().unwrap();
+        assert_eq!(record.pid, std::process::id());
+        assert_eq!(
+            record.process_start_identity,
+            process_start_identity(record.pid).unwrap()
+        );
 
         // Retirement is acknowledged, so a caller learns the endpoint is going
         // rather than having to infer it from a closed connection.
@@ -18548,6 +18596,7 @@ instructions = "{instructions}"
 
         fixture.server.join().unwrap().unwrap();
         assert!(!fixture.address.socket.exists());
+        assert!(!fixture.address.record.exists());
         let replacement_lock = FileInstanceLock {
             path: fixture.address.lock.clone(),
             held: RefCell::new(None),
@@ -21441,6 +21490,17 @@ instructions = "{instructions}"
             ),
         );
         assert_eq!(cancelled, ResponseOutcome::Ok);
+    }
+
+    #[test]
+    fn supervisor_query_capacity_maps_to_typed_backpressure() {
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "supervisor query response capacity is exhausted"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::ResourceExhausted
+        );
     }
 
     fn fence_in(role: GenerationRole) -> GenerationFence {

@@ -15,7 +15,7 @@ run_case() {
   mkdir -p "$case_root/src"
   "$@" "$case_root"
   set +e
-  output=$(ruby "$lint" --root "$case_root" --manifest allowlist.json --today 2026-07-21 2>&1)
+  output=$(ruby "$lint" --root "$case_root" --manifest allowlist.json --budget none --today 2026-07-21 2>&1)
   status=$?
   set -e
   if [[ $status -ne $expected ]]; then
@@ -25,6 +25,28 @@ run_case() {
   fi
   if grep -Fq 'coverage-off-lint.rb:' <<<"$output"; then
     echo "FAIL: $name emitted a Ruby stack trace" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+  if [[ -n $pattern ]] && ! grep -Fq "$pattern" <<<"$output"; then
+    echo "FAIL: $name did not contain: $pattern" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+}
+
+run_budget_case() {
+  local name=$1 expected=$2 pattern=$3
+  local case_root="$tmp/$name"
+  shift 3
+  mkdir -p "$case_root/src"
+  "$@" "$case_root"
+  set +e
+  output=$(ruby "$lint" --root "$case_root" --manifest allowlist.json --budget budget.json --today 2026-07-21 2>&1)
+  status=$?
+  set -e
+  if [[ $status -ne $expected ]]; then
+    echo "FAIL: $name returned $status, expected $expected" >&2
     echo "$output" >&2
     exit 1
   fi
@@ -102,6 +124,18 @@ invalid_utf8_manifest() {
   printf '\xff}\n' >> "$dir/allowlist.json"
 }
 
+exact_budget() {
+  local dir=$1
+  allowed_io "$dir"
+  printf '%s\n' '{"version":1,"total":1,"owners":{"daemon":1},"paths":{"src/lib.rs":1}}' > "$dir/budget.json"
+}
+
+increased_budget() {
+  local dir=$1
+  allowed_io "$dir"
+  printf '%s\n' '{"version":1,"total":0,"owners":{},"paths":{}}' > "$dir/budget.json"
+}
+
 run_case allowed-io 0 'ok (1 exclusions)' allowed_io
 run_case allowed-test-instance 0 'ok (1 exclusions)' allowed_test_instance
 run_case forbidden-reducer 1 'forbidden reason "reducer"' forbidden_reducer
@@ -113,5 +147,7 @@ run_case expired 1 'expired on 2026-07-20' expired
 run_case utf8-source 0 'ok (1 exclusions)' utf8_source
 run_case invalid-utf8-source 1 'src/lib.rs:1: invalid UTF-8' invalid_utf8_source
 run_case invalid-utf8-manifest 1 'allowlist.json:1: invalid UTF-8' invalid_utf8_manifest
+run_budget_case exact-budget 0 'ok (1 exclusions)' exact_budget
+run_budget_case increased-budget 1 'coverage budget: total expected 0, scanned 1' increased_budget
 
 echo "coverage-off-lint: fixtures ok"

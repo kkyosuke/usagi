@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
 use syn::{Attribute, File, Item, Path as RustPath, UseTree};
+use usagi_core::infrastructure::store::issue::IssueStore;
 
 const FACES: [(&str, &[&str]); 4] = [
     ("core", &[]),
@@ -14,6 +15,13 @@ const FACES: [(&str, &[&str]); 4] = [
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+#[test]
+fn committed_issue_sources_are_parseable_and_unambiguous() {
+    IssueStore::new(workspace_root())
+        .validate_source_set()
+        .expect("committed .usagi/issues Markdown must have valid unique identities");
 }
 
 fn manifest_usagi_dependencies(path: &Path) -> BTreeSet<String> {

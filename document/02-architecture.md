@@ -385,7 +385,10 @@ parse 可能な exact-path source を同時に得て、query、ambiguity、done 
 snapshot を使う。snapshot 前には同じ lock のまま scheduled derived repair を試みるため、自己修復契約も保つ。
 全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
 error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
-決める。番号指定 delete は repair 手段に使わない。
+決める。番号指定 delete は repair 手段に使わない。`IssueStore::validate_source_set` は immutable な source
+snapshotをstrictにparseし、filename/frontmatter不一致・prefix欠落・重複番号をerrorにする。rootの
+`committed_issue_sources_are_parseable_and_unambiguous` testがcheckout済み `.usagi/issues/*.md` 全体へこの検査を適用し、
+壊れたsource setをCIで拒否する。
 
 ## Git subprocess の環境 confine
 
