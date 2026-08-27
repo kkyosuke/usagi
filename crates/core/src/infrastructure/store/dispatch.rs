@@ -286,6 +286,13 @@ pub enum CredentialProvenance {
 }
 
 impl Registry {
+    fn remove_run_at(&mut self, index: usize) {
+        let dropped = self.runs.remove(index).run_id;
+        self.bindings.retain(|binding| binding.run_id != dropped);
+        self.admissions
+            .retain(|admission| admission.operation_id != dropped);
+    }
+
     fn reserve_admission(
         &mut self,
         agent: Agent,
@@ -410,10 +417,7 @@ impl Registry {
         let Some(index) = self.runs.iter().position(terminal) else {
             return false;
         };
-        let dropped = self.runs.remove(index).run_id;
-        self.bindings.retain(|binding| binding.run_id != dropped);
-        self.admissions
-            .retain(|admission| admission.operation_id != dropped);
+        self.remove_run_at(index);
         true
     }
 
@@ -440,10 +444,7 @@ impl Registry {
             }) else {
                 return;
             };
-            let dropped = self.runs.remove(index).run_id;
-            self.bindings.retain(|binding| binding.run_id != dropped);
-            self.admissions
-                .retain(|admission| admission.operation_id != dropped);
+            self.remove_run_at(index);
         }
     }
 
@@ -1409,10 +1410,10 @@ impl DispatchStore {
 
         let sequence = next_inbox_sequence(&index.entries)?;
         message.read = false;
-        let mut record = InboxRecord { sequence, message };
+        let record = InboxRecord { sequence, message };
         let mut bytes = serde_json::to_vec(&record)?;
         bytes.push(b'\n');
-        let mut encoded_len = u64::try_from(bytes.len())?;
+        let encoded_len = u64::try_from(bytes.len())?;
         if encoded_len > self.limits.inbox_bytes {
             anyhow::bail!("dispatch inbox capacity is exhausted by one oversized message");
         }
@@ -1420,16 +1421,6 @@ impl DispatchStore {
             index = self.compact_inbox(caller, &index, ack, encoded_len)?;
             if index.valid_len.saturating_add(encoded_len) > self.limits.inbox_bytes {
                 anyhow::bail!("dispatch inbox capacity is exhausted by unacknowledged messages");
-            }
-            // Compaction preserves retained sequence identities, but it can
-            // remove every acknowledged predecessor in a small-budget fixture.
-            // The ACK watermark is then the next safe sequence floor.
-            record.sequence = next_inbox_sequence(&index.entries)?.max(ack.next_sequence);
-            bytes = serde_json::to_vec(&record)?;
-            bytes.push(b'\n');
-            encoded_len = u64::try_from(bytes.len())?;
-            if index.valid_len.saturating_add(encoded_len) > self.limits.inbox_bytes {
-                anyhow::bail!("dispatch inbox capacity is exhausted by protected messages");
             }
         }
         let parent = path.parent().context("dispatch inbox path has no parent")?;
@@ -4073,6 +4064,199 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("serialized byte limit")
+        );
+    }
+
+    #[test]
+    fn inbox_byte_pressure_compacts_only_read_history_before_append() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+        let first_run = OperationId::new();
+        let second_run = OperationId::new();
+        let third_run = OperationId::new();
+        let first = message(first_run, worker.clone());
+        let second = message(second_run, worker.clone());
+        let third = message(third_run, worker);
+        let line_len = |sequence, message: InboxMessage| {
+            let mut bytes = serde_json::to_vec(&InboxRecord { sequence, message }).unwrap();
+            bytes.push(b'\n');
+            u64::try_from(bytes.len()).unwrap()
+        };
+        let mut read_first = first.clone();
+        read_first.read = true;
+        let first_and_second = line_len(1, read_first) + line_len(2, second.clone());
+        let second_and_third = line_len(2, second.clone()) + line_len(3, third.clone());
+        let limits = DispatchStoreLimits {
+            inbox_bytes: first_and_second.max(second_and_third),
+            inbox_count: 64,
+            inbox_read_retention: 64,
+            inbox_read_replay_floor: 0,
+            ..DispatchStoreLimits::default()
+        };
+        let store = DispatchStore::with_limits(tmp.path(), limits);
+        store.append_inbox(&caller, first).unwrap();
+        assert!(store.mark_inbox_read(&caller, first_run).unwrap());
+        store.append_inbox(&caller, second).unwrap();
+        store.append_inbox(&caller, third).unwrap();
+
+        let index = store.inbox_index(&caller).unwrap();
+        assert_eq!(
+            index
+                .entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(index.valid_len <= limits.inbox_bytes);
+        let retained = store.inbox(&caller).unwrap();
+        assert!(!retained.iter().any(|message| message.run_id == first_run));
+        assert!(retained.iter().any(|message| message.run_id == second_run));
+        assert!(retained.iter().any(|message| message.run_id == third_run));
+    }
+
+    #[test]
+    fn each_serialized_capacity_boundary_has_typed_effect_zero_refusal() {
+        let (session, agent_id, caller) = ids();
+        let worker = WorkerRef {
+            session_id: Some(session),
+            agent_id,
+        };
+
+        let oversized_tmp = tempfile::tempdir().unwrap();
+        let oversized = DispatchStore::with_limits(
+            oversized_tmp.path(),
+            DispatchStoreLimits {
+                inbox_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            oversized
+                .append_inbox(&caller, message(OperationId::new(), worker.clone()))
+                .unwrap_err()
+                .to_string()
+                .contains("one oversized message")
+        );
+        assert!(!oversized.inbox_path(&caller).exists());
+
+        let workspace_tmp = tempfile::tempdir().unwrap();
+        let workspace_limited = DispatchStore::with_limits(
+            workspace_tmp.path(),
+            DispatchStoreLimits {
+                workspace_registry_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            workspace_limited
+                .upsert_agent(WorkspaceId::new(), agent(session, AgentId::new()))
+                .unwrap_err()
+                .to_string()
+                .contains("workspace registry capacity is exhausted")
+        );
+        assert!(!workspace_limited.registry_path().exists());
+        assert!(!workspace_limited.workspace_registry_path().exists());
+
+        let records = vec![
+            InboxRecord {
+                sequence: 1,
+                message: message(OperationId::new(), worker.clone()),
+            },
+            InboxRecord {
+                sequence: 2,
+                message: message(OperationId::new(), worker),
+            },
+        ];
+        let count_tmp = tempfile::tempdir().unwrap();
+        let count_limited = DispatchStore::with_limits(
+            count_tmp.path(),
+            DispatchStoreLimits {
+                inbox_count: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            count_limited
+                .write_inbox_records(&caller, &records)
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+        assert!(!count_limited.inbox_path(&caller).exists());
+
+        let bytes_tmp = tempfile::tempdir().unwrap();
+        let bytes_limited = DispatchStore::with_limits(
+            bytes_tmp.path(),
+            DispatchStoreLimits {
+                inbox_bytes: 1,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        assert!(
+            bytes_limited
+                .write_inbox_records(&caller, &records[..1])
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
+        assert!(!bytes_limited.inbox_path(&caller).exists());
+    }
+
+    #[test]
+    fn byte_pruning_removes_terminal_run_lineage_from_one_ssot_path() {
+        let (session, agent_id, caller) = ids();
+        let run_id = OperationId::new();
+        let mut registry = Registry {
+            runs: vec![DispatchRun {
+                run_id,
+                agent_id,
+                prompt: "done".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::Completed,
+            }],
+            bindings: vec![DispatchBinding {
+                run_id,
+                caller,
+                worker: WorkerRef {
+                    session_id: Some(session),
+                    agent_id,
+                },
+            }],
+            admissions: vec![AgentAdmissionReservation {
+                operation_id: run_id,
+                semantic_key: "key".into(),
+                credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+            }],
+            ..Registry::default()
+        };
+        assert!(registry.drop_oldest_terminal_run(0));
+        assert!(registry.runs.is_empty());
+        assert!(registry.bindings.is_empty());
+        assert!(registry.admissions.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serialized_limit_metadata_errors_keep_the_io_context() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("state.json");
+        fs::write(&path, "{}").unwrap();
+        let mode = fs::metadata(&blocked).unwrap().permissions().mode();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = DispatchStore::ensure_file_within(&path, 1024, "dispatch fixture");
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            format!("{:#}", result.unwrap_err()).contains("failed to inspect dispatch fixture")
         );
     }
 }
