@@ -544,6 +544,28 @@ impl PrFilter {
         }
     }
 
+    fn previous(self) -> Self {
+        match self {
+            Self::All => Self::Merged,
+            Self::Open => Self::All,
+            Self::Closed => Self::Open,
+            Self::Merged => Self::Closed,
+        }
+    }
+
+    /// Status tabs in their horizontal navigation order.
+    pub const TABS: [Self; 4] = [Self::All, Self::Open, Self::Closed, Self::Merged];
+
+    #[must_use]
+    pub const fn tab_index(self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Open => 1,
+            Self::Closed => 2,
+            Self::Merged => 3,
+        }
+    }
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -4419,15 +4441,19 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::LoadPreview { target }]
 }
 
-/// Pull Request overlay の入力を還元する。↑↓ で選択を回し、Enter で選択 PR を
-/// browser で開く effect を出す。Esc は overlay を閉じる。素材の再取得はしない。
+/// Pull Request overlay の入力を還元する。←→ で status tab、↑↓ で PR 選択を回し、
+/// Enter で選択 PR を browser で開く effect を出す。Esc は overlay を閉じる。
+/// 素材の再取得はしない。
 fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
-    if matches!(key, AppKey::Char('f')) {
-        let Some((target, filter)) = state
-            .pr_overlay
-            .as_ref()
-            .map(|overlay| (overlay.target, overlay.filter.next()))
-        else {
+    if matches!(key, AppKey::Left | AppKey::Right) {
+        let Some((target, filter)) = state.pr_overlay.as_ref().map(|overlay| {
+            let filter = if matches!(key, AppKey::Right) {
+                overlay.filter.next()
+            } else {
+                overlay.filter.previous()
+            };
+            (overlay.target, filter)
+        }) else {
             return Vec::new();
         };
         let all = target
@@ -9922,7 +9948,7 @@ mod tests {
     }
 
     #[test]
-    fn open_pr_overlay_tracks_new_detection_and_cycles_every_filter() {
+    fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
         let mut state = AppState::home(workspace, vec![session]);
@@ -9950,7 +9976,7 @@ mod tests {
             state.pr_overlay().unwrap().selected_pr(),
             Some(&newly_detected)
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
         assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
         assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
         for (filter, expected) in [
@@ -9958,17 +9984,35 @@ mod tests {
             (PrFilter::Merged, 1),
             (PrFilter::All, 3),
         ] {
-            let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+            let _ = update(&mut state, AppEvent::Key(AppKey::Right));
             assert_eq!(state.pr_overlay().unwrap().filter(), filter);
             assert_eq!(state.pr_overlay().unwrap().prs().len(), expected);
         }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Merged);
+        assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
+
+        // The old hidden `f` shortcut is inert now that the visible tabs own
+        // status navigation.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Merged);
         assert_eq!(PrFilter::All.label(), "all");
         assert_eq!(PrFilter::Open.label(), "open");
         assert_eq!(PrFilter::Closed.label(), "closed");
         assert_eq!(PrFilter::Merged.label(), "merged");
+        assert_eq!(PrFilter::TABS.map(PrFilter::tab_index), [0, 1, 2, 3]);
+        assert_eq!(
+            PrFilter::TABS.map(PrFilter::previous),
+            [
+                PrFilter::Merged,
+                PrFilter::All,
+                PrFilter::Open,
+                PrFilter::Closed,
+            ]
+        );
 
         state.pr_overlay = None;
-        assert!(update(&mut state, AppEvent::Key(AppKey::Char('f'))).is_empty());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
     }
 
     #[test]

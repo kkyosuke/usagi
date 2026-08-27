@@ -1,8 +1,8 @@
 //! Pull request modal（PR ポップアップ）。
 //!
 //! workspace のセッションで見つかった Pull Request を repository ごとに一覧し、番号・状態・
-//! title・remote status を見る中央モーダル。↑↓ で選ぶ。中央に浮かぶ枠付きダイアログとして描く（枠・配置は
-//! 共通の [`modal`] widget に委譲）。
+//! title・remote status を見る中央モーダル。←→ で status tab、↑↓ で PR を選ぶ。中央に浮かぶ
+//! 枠付きダイアログとして描く（枠・配置は共通の [`modal`] widget に委譲）。
 //!
 //! 一覧する PR は core domain の [`PrLink`] を持つ。状態 [`PrModal`] は端末 IO を持たない
 //! 純粋な値で、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。キー入力の
@@ -13,21 +13,23 @@ use usagi_core::domain::pullrequest::{PrLink, PrState};
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::modal;
+use crate::usecase::application::controller::PrFilter;
 
 /// モーダルの枠の内側（内容）幅。
-const INNER_WIDTH: usize = 72;
+const INNER_WIDTH: usize = 88;
 /// 一度に表示する Pull Request の最大数。
-const MAX_VISIBLE: usize = 6;
-const BODY_HEIGHT: usize = 11;
+const MAX_VISIBLE: usize = 8;
+const BODY_HEIGHT: usize = 15;
+const TAB_HEIGHT: usize = 2;
 const FOOTER_HEIGHT: usize = 3;
-const LIST_HEIGHT: usize = BODY_HEIGHT - FOOTER_HEIGHT;
+const LIST_HEIGHT: usize = BODY_HEIGHT - TAB_HEIGHT - FOOTER_HEIGHT;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
 pub struct PrModal {
     prs: Vec<PrLink>,
     selected: usize,
-    filter: &'static str,
+    filter: PrFilter,
 }
 
 /// ダミーの [`PrLink`] を 1 件組む。
@@ -70,7 +72,7 @@ impl PrModal {
         Self {
             prs,
             selected: 0,
-            filter: "all",
+            filter: PrFilter::All,
         }
     }
 
@@ -85,12 +87,12 @@ impl PrModal {
         Self {
             prs,
             selected,
-            filter: "all",
+            filter: PrFilter::All,
         }
     }
 
     #[must_use]
-    pub const fn with_filter(mut self, filter: &'static str) -> Self {
+    pub const fn with_filter(mut self, filter: PrFilter) -> Self {
         self.filter = filter;
         self
     }
@@ -268,22 +270,32 @@ fn grouped_window(state: &PrModal) -> Vec<String> {
     }
 }
 
+fn status_tabs(active: PrFilter) -> String {
+    let choices = PrFilter::TABS.map(|filter| {
+        let role = match filter {
+            PrFilter::All => Role::Accent,
+            PrFilter::Open => Role::Success,
+            PrFilter::Closed => Role::Warning,
+            PrFilter::Merged => Role::Feature,
+        };
+        (filter.label(), role)
+    });
+    modal::choice_buttons(active.tab_index(), &choices)
+}
+
 /// PR ポップアップのボディ（枠の内側の行）: 一覧とフッタ。
 ///
 /// 選択追従の viewport は [`modal::list_window`] を使い、repository 見出しと
 /// `↑/↓ N more` を含めて固定高へ収める。
 fn body(state: &PrModal) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut lines = vec![status_tabs(state.filter), String::new()];
     if state.selected_pr().is_some() {
         lines.extend(grouped_window(state));
     } else {
         lines.push(modal::empty_notice("no pull requests"));
     }
     lines.push(String::new());
-    lines.push(modal::footer(&format!(
-        "filter:{}  ↑↓ select  f: filter",
-        state.filter
-    )));
+    lines.push(modal::footer("←→: status  ↑↓: select"));
     lines.push(modal::footer(
         "c: copy  d: dismiss  Enter: open  Esc: close",
     ));
@@ -335,8 +347,9 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{PrModal, contains, render, render_over};
+    use super::{PrModal, contains, render, render_over, status_tabs};
     use crate::presentation::widgets::{display_width, strip_ansi};
+    use crate::usecase::application::controller::PrFilter;
     use usagi_core::domain::pr_inventory::{
         PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
     };
@@ -511,7 +524,7 @@ mod tests {
 
         let text = joined(&modal);
         assert!(text.contains("#9"));
-        assert!(text.contains("↑ 4 more"));
+        assert!(text.contains("↑ 2 more"));
         assert!(text.contains("↓ 1 more"));
         assert!(!text.contains("#1 "));
         assert!(text.contains("Esc: close"));
@@ -519,8 +532,25 @@ mod tests {
         modal.select_next();
         let last = joined(&modal);
         assert!(last.contains("#10"));
-        assert!(last.contains("↑ 4 more"));
+        assert!(last.contains("↑ 2 more"));
         assert!(!last.contains("↓ 1 more"));
+    }
+
+    #[test]
+    fn status_tabs_are_always_visible_and_move_the_active_style() {
+        let open = status_tabs(PrFilter::Open);
+        let closed = status_tabs(PrFilter::Closed);
+        let labels = strip_ansi(&open);
+
+        for label in ["all", "open", "closed", "merged"] {
+            assert!(labels.contains(label));
+        }
+        assert_eq!(labels.matches('[').count(), 4);
+        assert_ne!(open, closed);
+
+        let text = joined(&PrModal::dummy().with_filter(PrFilter::Merged));
+        assert!(text.contains("←→: status  ↑↓: select"));
+        assert!(!text.contains("f: filter"));
     }
 
     #[test]
@@ -560,10 +590,10 @@ mod tests {
 
     #[test]
     fn modal_hit_test_includes_the_border_but_not_its_background() {
-        assert!(contains(24, 80, 2, 4));
-        assert!(contains(24, 80, 77, 18));
-        assert!(!contains(24, 80, 1, 4));
-        assert!(!contains(24, 80, 2, 3));
+        assert!(contains(24, 80, 0, 2));
+        assert!(contains(24, 80, 79, 20));
+        assert!(!contains(24, 80, 0, 1));
+        assert!(!contains(24, 80, 80, 2));
     }
 
     #[test]
@@ -634,11 +664,12 @@ mod tests {
         assert_eq!(frame.len(), 24);
         assert!(frame.iter().all(|line| display_width(line) == 80));
         assert!(frame[0].starts_with("workspace-row-0-"));
+        assert!(frame[23].starts_with("workspace-row-23-"));
         assert!(text.contains("Pull Request"));
         assert!(text.contains("#812"));
         let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();
-        assert!(!modal_row.starts_with('┌'));
-        assert!(modal_row.trim_end().ends_with('.'));
+        assert!(modal_row.starts_with('┌'));
+        assert!(modal_row.ends_with("┐\u{1b}[0m"));
     }
 
     #[test]

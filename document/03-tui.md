@@ -1038,8 +1038,8 @@ window 内の成功、`backing_off` は last-known title/state を表示した�
 独自 timer、`gh` 呼び出し、失敗時の空 snapshot への置換を行わない。refresh の間隔、dedupe、backoff、restart、
 shutdown の正本は [daemon の PR refresh scheduler](05-daemon.md#pr-refresh-scheduler) とする。
 
-`f` は All / Open / Closed / Merged filter、`c` は canonical URL の clipboard copy、`d` は daemon に
-dismissed tombstone を保存する。Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
+modal 上部は All / Open / Closed / Merged の status tab を横に並べ、`←→` で tab、`↑↓` で表示中の PR を循環する。
+`c` は canonical URL の clipboard copy、`d` は daemon に dismissed tombstone を保存する。Enter は選択中の canonical HTTPS PR URL を browser effect に 1 回渡す。合成ルートは macOS では
 `open`、Linux では `xdg-open`、Windows では `cmd /C start "" <url>`（空文字は `start` が消費する
 window title 引数）を argv として実行する。URL を shell command に補間せず、検証失敗、
 未対応 platform、起動失敗は TUI を終了させず safe feedback にする。同じ browser effect は
