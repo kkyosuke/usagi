@@ -332,6 +332,11 @@ fn execute_self_update(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
+    // The installer inherits the process streams so progress and failures stay
+    // visible while network and verification work is running. Flush the CLI's
+    // preamble first so it cannot appear after the child output.
+    out.flush()?;
+    err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
         use std::process::{Command, Stdio};
 
@@ -341,8 +346,8 @@ fn execute_self_update(
             .arg("--")
             .current_dir("/")
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
         if select_version {
             command.arg("--select-version");
         }
@@ -356,7 +361,12 @@ fn execute_self_update(
             let _ = child.wait();
             return Err(error);
         }
-        child.wait_with_output()
+        let status = child.wait()?;
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     })
 }
 
@@ -379,7 +389,6 @@ fn execute_self_update_with(
     out.write_all(&result.stdout)?;
     err.write_all(&result.stderr)?;
     if result.status.success() {
-        writeln!(out, "usagi was updated; restart it to use the new binary.")?;
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(exit_code(result.status.code().unwrap_or(1)))
@@ -917,26 +926,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct FailOnSecondWrite {
-        writes: usize,
-    }
-
-    impl Write for FailOnSecondWrite {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.writes += 1;
-            if self.writes == 2 {
-                Err(io::Error::other("second write failed"))
-            } else {
-                Ok(buffer.len())
-            }
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn process_exit_codes_are_bounded_to_the_platform_representation() {
         assert_eq!(exit_code(0), std::process::ExitCode::SUCCESS);
@@ -1081,10 +1070,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, std::process::ExitCode::SUCCESS);
-        assert_eq!(
-            out,
-            b"installed\nusagi was updated; restart it to use the new binary.\n"
-        );
+        assert_eq!(out, b"installed\n");
         assert_eq!(err, b"warning\n");
 
         let status =
@@ -1114,17 +1100,6 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(stderr_error.kind(), io::ErrorKind::Other);
-
-        let mut completion_writer = FailOnSecondWrite::default();
-        completion_writer.flush().unwrap();
-        let completion_error = execute_self_update_with(
-            &request,
-            &mut completion_writer,
-            &mut Vec::new(),
-            &mut |_, _| Ok(process_output(0, b"output", b"")),
-        )
-        .unwrap_err();
-        assert_eq!(completion_error.to_string(), "second write failed");
 
         #[cfg(unix)]
         {
