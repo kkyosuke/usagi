@@ -52,6 +52,7 @@ for workflow in test.yml enforce-pr-base.yml coverage.yml markdown-link-check.ym
   cp "$repo_root/.github/workflows/$workflow" "$audit_root/.github/workflows/$workflow"
 done
 REQUIRED_CONTEXTS_REPO_ROOT="$audit_root" "$subject" audit-workflows
+grep -Fqx '  push:' "$audit_root/.github/workflows/coverage.yml"
 sed -i.bak 's/^    name: coverage$/    name: coverage-renamed/' \
   "$audit_root/.github/workflows/coverage.yml"
 if REQUIRED_CONTEXTS_REPO_ROOT="$audit_root" "$subject" audit-workflows 2>/dev/null; then
@@ -68,6 +69,9 @@ cat > "$tmp/snapshot.json" <<'JSON'
   "conditions": {"ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}},
   "rules": [
     {"type": "deletion"},
+    {"type": "pull_request", "parameters": {
+      "required_approving_review_count": 1
+    }},
     {"type": "required_status_checks", "parameters": {
       "strict_required_status_checks_policy": true,
       "do_not_enforce_on_create": false,
@@ -81,9 +85,13 @@ JSON
 $subject prepare-ruleset "$tmp/snapshot.json" "$tmp/update.json" "$tmp/rollback.json"
 jq -e '.rules[] | select(.type == "required_status_checks")
   | .parameters.required_status_checks | length == 5' "$tmp/update.json" >/dev/null
-jq -e '.bypass_actors == [{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]' "$tmp/update.json" >/dev/null
+jq -e '.rules[] | select(.type == "pull_request")
+  | .parameters.required_approving_review_count == 0' "$tmp/update.json" >/dev/null
+jq -e '.bypass_actors == []' "$tmp/update.json" >/dev/null
 jq -e '.rules[] | select(.type == "required_status_checks")
   | .parameters.required_status_checks | length == 1' "$tmp/rollback.json" >/dev/null
+jq -e '.rules[] | select(.type == "pull_request")
+  | .parameters.required_approving_review_count == 1' "$tmp/rollback.json" >/dev/null
 
 jq '. + {id: 17627257}' "$tmp/update.json" > "$tmp/readback.json"
 $subject verify-ruleset "$tmp/readback.json"
@@ -91,6 +99,13 @@ jq '.rules |= map(if .type == "required_status_checks" then .parameters.required
   "$tmp/readback.json" > "$tmp/bad-readback.json"
 if $subject verify-ruleset "$tmp/bad-readback.json"; then
   echo "verify-ruleset accepted missing contexts" >&2
+  exit 1
+fi
+jq '(.rules[] | select(.type == "pull_request")
+  | .parameters.required_approving_review_count) = 1' \
+  "$tmp/readback.json" > "$tmp/bad-review-readback.json"
+if $subject verify-ruleset "$tmp/bad-review-readback.json"; then
+  echo "verify-ruleset accepted an approval-count drift" >&2
   exit 1
 fi
 
