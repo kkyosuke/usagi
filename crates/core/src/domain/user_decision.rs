@@ -99,6 +99,12 @@ pub enum UserDecisionError {
     Terminal,
     Expired,
     IdempotencyConflict,
+    /// The same owner already used this key, but its retained decision expired.
+    ///
+    /// The old result is no longer available, so replaying it as a fresh human
+    /// question would violate idempotency. Callers must issue a new key for a
+    /// genuinely new request.
+    IdempotencyExpired,
     /// This daemon already holds as many unanswered decisions as it will.
     ///
     /// Pending decisions are the one class this store may never evict — each is
@@ -107,6 +113,11 @@ pub enum UserDecisionError {
     /// which makes it safe for the caller to retry once a person has worked
     /// through the backlog.
     PendingLimitReached,
+    /// Protected pending or undelivered records fill the serialized store.
+    ///
+    /// The attempted mutation has no durable effect. Once pending work or an
+    /// outbox delivery is completed, the exact request may be retried safely.
+    CapacityReached,
 }
 
 impl UserDecision {

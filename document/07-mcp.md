@@ -199,6 +199,14 @@ MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開
 上限超過は decision、outbox、waiter を作らず `InvalidArgument` になり、既存の durable document に違反があれば
 再起動後も巨大な値を再公開せず fail closed にする。
 
+件数上限とは別に、caller-controlled な prompt / option / answer を含む `user-decisions.json` の pretty JSON は
+4 MiB 以下に保つ。byte pressure では最新 32 件より古い terminal record だけを先に落とし、pending、未 ACK outbox、
+または最新 32 件の retry window が上限を占有していれば mutation を `ResourceExhausted`・effect zero で拒否する。
+削除した terminal record の idempotency key は owner と組にした固定長 tombstone に残すため、古い retry は
+`IdempotencyExpired` となり、別の新規 decision として再作成されない。固定長集合の衝突は安全側（expired）へ倒れ、
+daemon の寿命に比例して metadata を増やさない。既存ファイルが byte 上限を超えている場合も、全体を parse せず
+fail closed にする。
+
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。
 

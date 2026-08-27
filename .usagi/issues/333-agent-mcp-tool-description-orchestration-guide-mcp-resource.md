@@ -1,5 +1,5 @@
 ---
-number: 323
+number: 333
 title: agent 向け MCP 利用導線の改善（tool description 拡充 + orchestration guide を MCP Resource で公開）
 status: done
 priority: medium
@@ -7,7 +7,7 @@ labels: [mcp, docs]
 dependson: []
 related: []
 created_at: 2026-07-17T20:59:35.824372+00:00
-updated_at: 2026-07-17T21:59:12.628349+00:00
+updated_at: 2026-08-27T01:00:00+00:00
 ---
 
 ## 背景 / 目的

@@ -1,7 +1,7 @@
 ---
 number: 676
 title: fix(core): dispatch registry / inbox を retention と pagination で bounded にする
-status: doing
+status: in-progress
 priority: high
 labels: [review, v2, core, daemon, mcp, dispatch, resource, retention]
 dependson: []

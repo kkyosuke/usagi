@@ -5,9 +5,9 @@ status: done
 priority: medium
 labels: [review, v2, tui, clipboard, process, freeze, resource]
 dependson: []
-related: [307, 390, 662]
+related: [307, 662, 723]
 created_at: 2026-08-13T22:45:35.558571+00:00
-updated_at: 2026-08-25T23:44:15+00:00
+updated_at: 2026-08-27T01:00:00+00:00
 ---
 
 ## Finding（P2 UI freeze / process lifecycle）

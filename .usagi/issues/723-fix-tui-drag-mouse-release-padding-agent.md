@@ -1,5 +1,5 @@
 ---
-number: 390
+number: 723
 title: fix(tui): drag 選択が mouse release で消える／空白 padding・空行で反転しない（agent 画面で選択が見えない）
 status: done
 priority: medium
@@ -7,7 +7,7 @@ labels: [tui, bug]
 dependson: []
 related: []
 created_at: 2026-07-20T01:46:04.190605+00:00
-updated_at: 2026-07-20T02:28:02.722585+00:00
+updated_at: 2026-08-27T01:00:00+00:00
 ---
 
 ## 概要
