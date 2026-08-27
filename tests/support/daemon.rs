@@ -20,12 +20,14 @@
 #![allow(dead_code)]
 
 use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
+use serde::Deserialize;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::ipc::ClientWorkspace;
 use usagi_core::infrastructure::workspace_state;
@@ -34,6 +36,12 @@ use usagi_core::infrastructure::workspace_state;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM / SIGKILL 後に終了を待つ上限。
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Deserialize)]
+struct BootstrapBrokerRecord {
+    pid: u32,
+    process_start_identity: String,
+}
 
 /// 重い E2E がロックを取れるまで待つ上限。
 ///
@@ -507,27 +515,125 @@ fn reap_channel(home: &Path, channel: Channel) {
     // fake daemon を自プロセス上で立てるテストは、自分の pid と identity を record に書く。
     // その record を stop client や signal の対象にすると**テストプロセス自身**を殺すため、
     // 自分を名指す record の channel は reap しない（reap すべき別プロセスは存在しない）。
-    if record
+    let record_is_self = record
         .as_ref()
-        .is_some_and(|record| record.pid == std::process::id())
-    {
-        return;
+        .is_some_and(|record| record.pid == std::process::id());
+    if !record_is_self {
+        if let Ok(mut child) = stop_command(home, channel).spawn() {
+            wait_with_timeout(&mut child, STOP_TIMEOUT);
+        }
+        if let Some(record) = record
+            && exact_process_alive(&record)
+        {
+            signal_exact(&record, libc::SIGTERM);
+            if !wait_for_exit(&record, SIGNAL_TIMEOUT) {
+                signal_exact(&record, libc::SIGKILL);
+                wait_for_exit(&record, SIGNAL_TIMEOUT);
+            }
+        }
     }
-    if let Ok(mut child) = stop_command(home, channel).spawn() {
-        wait_with_timeout(&mut child, STOP_TIMEOUT);
-    }
-    let Some(record) = record else {
+    reap_bootstrap_brokers(&data_dir);
+}
+
+/// Stop every digest-scoped bootstrap broker in this fixture, then fall back to
+/// its exact PID + process-start identity if the endpoint does not retire.
+fn reap_bootstrap_brokers(data_dir: &Path) {
+    let daemon_dir = data_dir.join("daemon");
+    let Ok(entries) = std::fs::read_dir(&daemon_dir) else {
         return;
     };
-    if !exact_process_alive(&record) {
+    let mut records = Vec::new();
+    let mut sockets = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let extension = path.extension().and_then(OsStr::to_str);
+        if name.starts_with("bootstrap-broker-")
+            && extension.is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            records.push(path);
+        } else if name.starts_with("bootstrap-broker-")
+            && extension.is_some_and(|extension| extension.eq_ignore_ascii_case("sock"))
+        {
+            sockets.push(path);
+        }
+    }
+
+    // The normal path owns no PID signal: ask each private endpoint to retire.
+    for socket in sockets {
+        request_broker_stop(&socket);
+    }
+
+    for path in records {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<BootstrapBrokerRecord>(&bytes) else {
+            continue;
+        };
+        if record.pid == std::process::id()
+            || !usagi_core::domain::daemon::is_record_pid(record.pid)
+            || record.process_start_identity.is_empty()
+        {
+            continue;
+        }
+        if wait_for_broker_exit(&record, SIGNAL_TIMEOUT) {
+            continue;
+        }
+        signal_exact_broker(&record, libc::SIGTERM);
+        if !wait_for_broker_exit(&record, SIGNAL_TIMEOUT) {
+            signal_exact_broker(&record, libc::SIGKILL);
+            wait_for_broker_exit(&record, SIGNAL_TIMEOUT);
+        }
+        if !exact_broker_alive(&record) {
+            let _ = std::fs::remove_file(path.with_extension("sock"));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn request_broker_stop(socket: &Path) {
+    use std::os::unix::net::UnixStream;
+
+    let Ok(mut broker) = UnixStream::connect(socket) else {
+        return;
+    };
+    let _ = broker.set_read_timeout(Some(SIGNAL_TIMEOUT));
+    let _ = broker.set_write_timeout(Some(SIGNAL_TIMEOUT));
+    if broker.write_all(b"X").is_err() {
         return;
     }
-    signal_exact(&record, libc::SIGTERM);
-    if wait_for_exit(&record, SIGNAL_TIMEOUT) {
+    let mut reply = [0_u8; 1];
+    let _ = broker.read_exact(&mut reply);
+}
+
+fn exact_broker_alive(record: &BootstrapBrokerRecord) -> bool {
+    observed_process_start_identity(record.pid)
+        .is_some_and(|observed| observed == record.process_start_identity)
+}
+
+fn signal_exact_broker(record: &BootstrapBrokerRecord, signal: libc::c_int) {
+    if !exact_broker_alive(record) {
         return;
     }
-    signal_exact(&record, libc::SIGKILL);
-    wait_for_exit(&record, SIGNAL_TIMEOUT);
+    if let Ok(pid) = libc::pid_t::try_from(record.pid) {
+        // SAFETY: the fixture-private record's process-start identity was
+        // re-observed immediately above, fencing stale records and PID reuse.
+        unsafe { libc::kill(pid, signal) };
+    }
+}
+
+fn wait_for_broker_exit(record: &BootstrapBrokerRecord, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while exact_broker_alive(record) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 fn stop_command(home: &Path, channel: Channel) -> Command {

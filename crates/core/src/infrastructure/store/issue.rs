@@ -243,6 +243,41 @@ impl IssueStore {
         self.inner.scan()
     }
 
+    /// Validate every Markdown source as one unambiguous issue identity.
+    ///
+    /// This is stricter than lenient listing: every source must parse, its
+    /// filename number must match its frontmatter number, and no number may be
+    /// claimed by more than one file. It is intended for repository policy
+    /// checks and other immutable source snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unreadable or unparseable source, a filename /
+    /// frontmatter mismatch, a prefixless source, or a duplicate number.
+    pub fn validate_source_set(&self) -> Result<()> {
+        let mut claims = BTreeMap::<u32, Vec<PathBuf>>::new();
+        for path in self.issue_files()? {
+            let issue = self
+                .inner
+                .read_existing_path(&path)
+                .with_context(|| format!("failed to validate issue source {}", path.display()))?;
+            let filename_number = number_from_filename(&path);
+            if filename_number != Some(issue.number) {
+                return Err(MismatchedIssueNumber {
+                    filename_number,
+                    declared_number: issue.number,
+                    file: path,
+                }
+                .into());
+            }
+            claims.entry(issue.number).or_default().push(path);
+        }
+        if let Some((number, files)) = claims.into_iter().find(|(_, files)| files.len() > 1) {
+            return Err(AmbiguousIssueNumber { number, files }.into());
+        }
+        Ok(())
+    }
+
     /// Like [`scan`](Self::scan), but logs unreadable/unparseable issue files and
     /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
     ///
@@ -888,6 +923,42 @@ mod tests {
         let store = IssueStore::new(tmp.path());
         assert!(store.scan().unwrap().is_empty());
         assert_eq!(store.max_number().unwrap(), 0);
+    }
+
+    #[test]
+    fn source_set_validation_rejects_corrupt_and_ambiguous_identities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.validate_source_set().unwrap();
+
+        store.write(&issue(7, "Canonical")).unwrap();
+        store.validate_source_set().unwrap();
+
+        let sibling = store.dir().join("007-sibling.md");
+        fs::write(&sibling, issue(7, "Sibling").to_markdown()).unwrap();
+        let error = store.validate_source_set().unwrap_err();
+        let ambiguity = error.downcast_ref::<AmbiguousIssueNumber>().unwrap();
+        assert_eq!(ambiguity.number, 7);
+        assert_eq!(ambiguity.files.len(), 2);
+        fs::remove_file(&sibling).unwrap();
+
+        let prefixless = store.dir().join("manual.md");
+        fs::write(&prefixless, issue(8, "Moved").to_markdown()).unwrap();
+        let error = store.validate_source_set().unwrap_err();
+        let mismatch = error.downcast_ref::<MismatchedIssueNumber>().unwrap();
+        assert_eq!(mismatch.filename_number, None);
+        assert_eq!(mismatch.declared_number, 8);
+        fs::remove_file(&prefixless).unwrap();
+
+        let corrupt = store.dir().join("008-corrupt.md");
+        fs::write(&corrupt, "not issue frontmatter\n").unwrap();
+        let error = store.validate_source_set().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to validate issue source")
+        );
+        assert!(error.to_string().contains("008-corrupt.md"));
     }
 
     #[test]

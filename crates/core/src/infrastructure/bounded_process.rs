@@ -563,7 +563,7 @@ mod tests {
         assert_eq!(
             write_stdin_bounded(
                 "sh",
-                &["-c", "(trap '' TERM; sleep 30) & exit 0"],
+                &["-c", "cat >/dev/null; (trap '' TERM; sleep 30) & exit 0",],
                 b"payload",
                 16,
                 policy(),
