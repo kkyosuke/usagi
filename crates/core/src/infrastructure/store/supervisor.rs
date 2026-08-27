@@ -435,7 +435,7 @@ impl SupervisorStore {
             }
             let run = self
                 .load(entry.supervisor_run_id)?
-                .ok_or_else(|| anyhow::anyhow!("supervisor indexed snapshot disappeared"))?;
+                .context("supervisor indexed snapshot disappeared")?;
             if RunListIndexEntry::from(&run) != *entry {
                 // Another store instance may have advanced a snapshot. Rebuild
                 // the disposable index once from authoritative aggregates.
@@ -519,8 +519,8 @@ impl SupervisorStore {
             #[cfg(test)]
             self.run_snapshots_read
                 .set(self.run_snapshots_read.get() + 1);
-            let snapshot: SupervisorRun = json_file::read(&path)?
-                .ok_or_else(|| anyhow::anyhow!("supervisor snapshot disappeared"))?;
+            let snapshot: SupervisorRun =
+                json_file::read(&path)?.context("supervisor snapshot disappeared")?;
             Self::validate_snapshot(&snapshot)?;
             index
                 .entries
