@@ -412,10 +412,12 @@ record の `pid` は 1 つの process を名指せる値でなければならな
 へ raw PID signal を送らない。
 
 running `stop` は SIGTERM を送っても先行消去せず、
-owner が retire 成功後に exact record を変更・消去するまで有界に poll する。PID が消えても同じ record が残る場合や
-shutdown window を超えた場合は cleanup failure として record を保持するため、stale locator のまま replacement を
-起動しない。locator が先に `NotFound` となる短い区間でも live record と `daemon.lock` が replacement 起動を抑止し、
-`stop` は最後の record clear まで成功を返さない。
+owner が retire 成功後に exact record を変更・消去するまで有界に poll する。PID が先に消えて同じ record が残る場合は、
+その同じ `stop` が signal-free の stale cleanup へ移り、`daemon.lock` の取得と exact record の再照合に成功した場合だけ
+endpoint と record を回収する。これにより owner の process exit と最後の record clear の間で `restart` が失敗したまま
+残らない。lock が busy、record が変化、cleanup が失敗、または shutdown window を超えた場合は record を保持するため、
+stale locator のまま replacement を起動しない。locator が先に `NotFound` となる短い区間でも live record と
+`daemon.lock` が replacement 起動を抑止し、`stop` は最後の record clear まで成功を返さない。
 
 stale `stop` は scoped `daemon.lock` を取得し、lock 下で最初の lifecycle record 全体がまだ exact current record であることを
 再確認する。その後 `current.lock` 下で current が指す socket と安全に検証できる orphan socket を先に回収し、exact locator、
