@@ -16,7 +16,7 @@ v2 の `#[coverage(off)]` の移行 inventory。許可条件と更新手順の�
 ## 基準値
 
 2026-07-21 の inventory 開始時点では v2 に 892 件あり、#485–#487 と後続の root・CLI 返済で一度は
-129 件まで減った。その後の実装で例外が再び増え、2026-08-27 の source scan は 484 件である。inline metadata や
+129 件まで減った。その後の実装で例外が再び増え、2026-08-27 の source scan は 486 件である。inline metadata や
 allowlist 登録は item の責務が許可理由に適合する証明ではないため、増加分を返済済みとは扱わない。
 
 [`coverage-off-budget.json`](../coverage-off-budget.json) が owner / path ごとの現在件数を列挙する機械可読な
@@ -27,10 +27,10 @@ inventory が更新されていない変更を拒否する。budget の更新は
 | owner | 件数 | 返済先 |
 |---|---:|---|
 | core | 9 | parser / validation / persistence 判断を優先して再審査 |
-| daemon | 335 | `src/runtime/daemon.rs` の composition 集中を最優先で分離・再審査 |
+| daemon | 337 | `src/runtime/daemon.rs` の composition 集中を最優先で分離・再審査 |
 | root・CLI | 21 | process / stdio 合成と pure helper を分離して再審査 |
 | TUI | 119 | presentation / production adapter と reducer の境界を再審査 |
-| **合計** | **484** | 詳細は machine-readable inventory に全 path と件数を列挙 |
+| **合計** | **486** | 詳細は machine-readable inventory に全 path と件数を列挙 |
 
 ## 領域別返済順序
 
