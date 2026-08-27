@@ -6,30 +6,52 @@
 
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::Read as _,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     domain::{
         agent::CallerRef,
         id::{UserDecisionId, WorkspaceId},
-        user_decision::{UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionStatus},
+        user_decision::{
+            UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionOwner,
+            UserDecisionStatus,
+        },
     },
     infrastructure::persistence::{json_file, store_lock::StoreLock},
 };
 
 const FILE: &str = "user-decisions.json";
 
+/// Exact upper bound of the pretty JSON document written by this store.
+///
+/// Count limits alone do not bound caller-controlled prompt and answer bytes.
+/// Four MiB keeps every read/parse/rewrite finite while leaving room for the
+/// maximum ordinary pending backlog when requests are much smaller than their
+/// individual field ceilings.
+const MAX_SERIALIZED_BYTES: usize = 4 * 1024 * 1024;
+
 /// How many resolved / cancelled / expired decisions are kept.
 ///
 /// Every mutation rewrites this whole document, so an unbounded history makes
 /// each decision cost more than the last, and a long-lived daemon pays that
-/// forever. Terminal records are kept only to answer a retry of the request that
-/// produced them: an idempotency key that arrives after eviction creates a fresh
-/// decision, which is the same outcome as if the retry had never been sent.
+/// forever. Terminal records are kept to answer recent retries; an idempotency
+/// key that arrives after eviction is refused from a fixed-size tombstone rather
+/// than silently creating a second human question.
 const TERMINAL_RETENTION: usize = 256;
+
+/// Newest terminal decisions protected even during byte-pressure compaction.
+///
+/// This is the minimum duplicate-recovery window. Older terminal records may
+/// be replaced by idempotency tombstones to meet the aggregate byte budget.
+const MIN_TERMINAL_RETENTION: usize = 32;
 
 /// How many unanswered decisions one workspace may hold at once.
 ///
@@ -44,6 +66,12 @@ const PENDING_LIMIT: usize = 128;
 /// lifetime, so a per-workspace ceiling alone does not bound this shared file.
 const GLOBAL_PENDING_LIMIT: usize = PENDING_LIMIT * 2;
 
+/// A fixed-size probabilistic set remembers evicted idempotency keys forever.
+/// False positives fail closed with `IdempotencyExpired`; there are no false
+/// negatives, and the durable metadata never grows with daemon lifetime.
+const TOMBSTONE_WORDS: usize = 512;
+const TOMBSTONE_HASHES: u64 = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionResolvedEvent {
     pub decision_id: UserDecisionId,
@@ -55,13 +83,94 @@ pub struct UserDecisionResolvedEvent {
 pub enum UserDecisionDeliveryError {
     Inconsistent,
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct State {
     decisions: Vec<UserDecision>,
     events: Vec<UserDecisionResolvedEvent>,
+    #[serde(default)]
+    expired_idempotency: KeyTombstones,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct KeyTombstones {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    words: Vec<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct StoreLimits {
+    max_serialized_bytes: usize,
+    terminal_retention: usize,
+    minimum_terminal_retention: usize,
+    pending_per_workspace: usize,
+    pending_global: usize,
+}
+
+impl Default for StoreLimits {
+    fn default() -> Self {
+        Self {
+            max_serialized_bytes: MAX_SERIALIZED_BYTES,
+            terminal_retention: TERMINAL_RETENTION,
+            minimum_terminal_retention: MIN_TERMINAL_RETENTION,
+            pending_per_workspace: PENDING_LIMIT,
+            pending_global: GLOBAL_PENDING_LIMIT,
+        }
+    }
 }
 pub struct UserDecisionStore {
     dir: PathBuf,
+    limits: StoreLimits,
+}
+
+impl KeyTombstones {
+    fn bit(owner: &UserDecisionOwner, key: &str, seed: u64) -> usize {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let owner_session = owner
+            .session_id
+            .map_or_else(|| "-".into(), |id| id.as_str());
+        let caller_session = owner
+            .caller
+            .session_id
+            .map_or_else(|| "-".into(), |id| id.as_str());
+        let parts = [
+            owner.workspace_id.as_str(),
+            owner_session,
+            caller_session,
+            owner.caller.agent_id.as_str(),
+            owner.run_id.as_str(),
+            key.into(),
+        ];
+        for part in parts {
+            for byte in part.bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash ^= 0xff;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        usize::try_from(hash % (TOMBSTONE_WORDS as u64 * 64)).expect("bit index fits")
+    }
+
+    fn contains(&self, owner: &UserDecisionOwner, key: &str) -> bool {
+        self.words.len() == TOMBSTONE_WORDS
+            && (0..TOMBSTONE_HASHES).all(|seed| {
+                let bit = Self::bit(owner, key, seed);
+                self.words[bit / 64] & (1_u64 << (bit % 64)) != 0
+            })
+    }
+
+    fn insert(&mut self, owner: &UserDecisionOwner, key: &str) {
+        self.words.resize(TOMBSTONE_WORDS, 0);
+        self.words.truncate(TOMBSTONE_WORDS);
+        for seed in 0..TOMBSTONE_HASHES {
+            let bit = Self::bit(owner, key, seed);
+            self.words[bit / 64] |= 1_u64 << (bit % 64);
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.words.is_empty() || self.words.len() == TOMBSTONE_WORDS
+    }
 }
 
 impl UserDecisionStore {
@@ -69,6 +178,14 @@ impl UserDecisionStore {
     pub fn new(dir: impl AsRef<Path>) -> Self {
         Self {
             dir: dir.as_ref().into(),
+            limits: StoreLimits::default(),
+        }
+    }
+    #[cfg(test)]
+    fn with_limits(dir: impl AsRef<Path>, limits: StoreLimits) -> Self {
+        Self {
+            dir: dir.as_ref().into(),
+            limits,
         }
     }
     #[must_use]
@@ -175,7 +292,7 @@ impl UserDecisionStore {
         if let Err(error) = decision.validate_request() {
             return Ok(Err(error));
         }
-        self.mutate(|state| {
+        self.mutate_decision(|state| {
             if let Some(key) = &decision.idempotency_key
                 && let Some(existing) = state.decisions.iter().find(|item| {
                     item.owner == decision.owner && item.idempotency_key.as_ref() == Some(key)
@@ -187,6 +304,11 @@ impl UserDecisionStore {
                     Err(UserDecisionError::IdempotencyConflict)
                 };
             }
+            if let Some(key) = &decision.idempotency_key
+                && state.expired_idempotency.contains(&decision.owner, key)
+            {
+                return Err(UserDecisionError::IdempotencyExpired);
+            }
             // Admission is charged before the record exists, so a refusal
             // leaves the store byte-for-byte as it was.
             let all_pending = state
@@ -194,7 +316,7 @@ impl UserDecisionStore {
                 .iter()
                 .filter(|item| item.status == UserDecisionStatus::Pending)
                 .count();
-            if all_pending >= GLOBAL_PENDING_LIMIT {
+            if all_pending >= self.limits.pending_global {
                 return Err(UserDecisionError::PendingLimitReached);
             }
             let pending = state
@@ -205,7 +327,7 @@ impl UserDecisionStore {
                         && item.status == UserDecisionStatus::Pending
                 })
                 .count();
-            if pending >= PENDING_LIMIT {
+            if pending >= self.limits.pending_per_workspace {
                 return Err(UserDecisionError::PendingLimitReached);
             }
             state.decisions.push(decision.clone());
@@ -222,7 +344,7 @@ impl UserDecisionStore {
         if let Err(error) = answer.validate_resource_policy() {
             return Ok(Err(error));
         }
-        self.mutate(|state| {
+        self.mutate_decision(|state| {
             let Some(item) = state
                 .decisions
                 .iter_mut()
@@ -250,7 +372,7 @@ impl UserDecisionStore {
         status: UserDecisionStatus,
         now: DateTime<Utc>,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
-        self.mutate(|state| {
+        self.mutate_decision(|state| {
             let Some(item) = state
                 .decisions
                 .iter_mut()
@@ -271,7 +393,32 @@ impl UserDecisionStore {
             && decision.expires_at.is_some_and(|deadline| deadline <= now)
     }
     fn load(&self) -> Result<State> {
-        let state: State = json_file::read(&self.path())?.unwrap_or_default();
+        let path = self.path();
+        let file = match File::open(&path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).context(format!("failed to read {}", path.display()));
+            }
+        };
+        let Some(mut file) = file else {
+            return Ok(State::default());
+        };
+        let max_bytes = u64::try_from(self.limits.max_serialized_bytes)
+            .expect("serialized byte limit fits u64");
+        let mut text = String::new();
+        file.by_ref()
+            .take(max_bytes.saturating_add(1))
+            .read_to_string(&mut text)
+            .context(format!("failed to read {}", path.display()))?;
+        if text.len() > self.limits.max_serialized_bytes {
+            anyhow::bail!(
+                "user decision document exceeds its {} byte hard limit",
+                self.limits.max_serialized_bytes
+            );
+        }
+        let state: State =
+            serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
         if state
             .decisions
             .iter()
@@ -280,8 +427,26 @@ impl UserDecisionStore {
                 .events
                 .iter()
                 .any(|event| event.answer.validate_resource_policy().is_err())
+            || !state.expired_idempotency.valid()
         {
             anyhow::bail!("user decision document violates the resource policy");
+        }
+        let mut pending_by_workspace = BTreeMap::new();
+        for decision in state
+            .decisions
+            .iter()
+            .filter(|decision| decision.status == UserDecisionStatus::Pending)
+        {
+            *pending_by_workspace
+                .entry(decision.owner.workspace_id)
+                .or_insert(0_usize) += 1;
+        }
+        if pending_by_workspace.values().sum::<usize>() > self.limits.pending_global
+            || pending_by_workspace
+                .values()
+                .any(|pending| *pending > self.limits.pending_per_workspace)
+        {
+            anyhow::bail!("user decision document exceeds its pending hard limit");
         }
         Ok(state)
     }
@@ -289,7 +454,26 @@ impl UserDecisionStore {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut state = self.load()?;
         let result = f(&mut state);
-        retain_bounded(&mut state);
+        if !compact_bounded(&mut state, self.limits)? {
+            anyhow::bail!("user decision store capacity is exhausted by protected records");
+        }
+        json_file::write_atomic(&self.dir, &self.path(), &state)?;
+        Ok(result)
+    }
+
+    fn mutate_decision<T>(
+        &self,
+        f: impl FnOnce(&mut State) -> Result<T, UserDecisionError>,
+    ) -> Result<Result<T, UserDecisionError>> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut state = self.load()?;
+        let result = f(&mut state);
+        if result.is_err() {
+            return Ok(result);
+        }
+        if !compact_bounded(&mut state, self.limits)? {
+            return Ok(Err(UserDecisionError::CapacityReached));
+        }
         json_file::write_atomic(&self.dir, &self.path(), &state)?;
         Ok(result)
     }
@@ -309,29 +493,54 @@ impl UserDecisionStore {
 ///
 /// Running on every mutation keeps the bound a property of the document rather
 /// than of a maintenance tick that may never run.
-fn retain_bounded(state: &mut State) {
+fn compact_bounded(state: &mut State, limits: StoreLimits) -> Result<bool> {
     let referenced: Vec<UserDecisionId> =
         state.events.iter().map(|event| event.decision_id).collect();
     let evictable = |decision: &UserDecision| {
         decision.status != UserDecisionStatus::Pending
             && !referenced.contains(&decision.decision_id)
     };
-    let evictable_count = state.decisions.iter().filter(|d| evictable(d)).count();
-    let Some(mut over) = evictable_count.checked_sub(TERMINAL_RETENTION) else {
-        return;
-    };
-    if over == 0 {
-        return;
+    let mut evictable_count = state.decisions.iter().filter(|d| evictable(d)).count();
+    let over = evictable_count.saturating_sub(limits.terminal_retention);
+    if over > 0 {
+        drop_oldest_evictable(state, &referenced, over);
+        evictable_count -= over;
     }
-    // `decisions` is append-ordered, so removing from the front removes the
-    // oldest — the ones least likely to be retried.
-    state.decisions.retain(|decision| {
-        if over > 0 && evictable(decision) {
-            over -= 1;
-            return false;
+
+    while serialized_len(state)? > limits.max_serialized_bytes {
+        if evictable_count <= limits.minimum_terminal_retention {
+            return Ok(false);
         }
-        true
+        drop_oldest_evictable(state, &referenced, 1);
+        evictable_count -= 1;
+    }
+    Ok(true)
+}
+
+/// Removes up to `count` append-ordered terminal records and remembers any
+/// idempotency keys before the records disappear.
+fn drop_oldest_evictable(state: &mut State, referenced: &[UserDecisionId], mut count: usize) {
+    let mut expired_keys = Vec::new();
+    state.decisions.retain(|decision| {
+        let evictable = decision.status != UserDecisionStatus::Pending
+            && !referenced.contains(&decision.decision_id);
+        if count == 0 || !evictable {
+            return true;
+        }
+        count -= 1;
+        if let Some(key) = &decision.idempotency_key {
+            expired_keys.push((decision.owner.clone(), key.clone()));
+        }
+        false
     });
+    for (owner, key) in expired_keys {
+        state.expired_idempotency.insert(&owner, &key);
+    }
+    debug_assert_eq!(count, 0, "evictable count was computed from the same state");
+}
+
+fn serialized_len(state: &State) -> Result<usize> {
+    Ok(serde_json::to_string_pretty(state)?.len() + 1)
 }
 fn same_request(a: &UserDecision, b: &UserDecision) -> bool {
     a.title == b.title
@@ -348,6 +557,7 @@ mod tests {
         id::{AgentId, OperationId, SessionId},
         user_decision::{UserDecisionOption, UserDecisionOwner, UserDecisionPolicy},
     };
+    use chrono::TimeZone as _;
     fn item() -> UserDecision {
         UserDecision {
             decision_id: UserDecisionId::new(),
@@ -374,6 +584,20 @@ mod tests {
             answer: None,
             created_at: Utc::now(),
             resolved_at: None,
+        }
+    }
+    fn fixed_now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 27, 12, 0, 0)
+            .single()
+            .unwrap()
+    }
+    fn small_limits(max_serialized_bytes: usize, terminal_retention: usize) -> StoreLimits {
+        StoreLimits {
+            max_serialized_bytes,
+            terminal_retention,
+            minimum_terminal_retention: 0,
+            pending_per_workspace: 8,
+            pending_global: 16,
         }
     }
     #[test]
@@ -843,5 +1067,364 @@ mod tests {
             Err(UserDecisionError::PendingLimitReached)
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn exact_serialized_budget_refuses_each_growing_mutation_with_zero_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut decision = item();
+        decision.created_at = fixed_now();
+        let exact = serialized_len(&State {
+            decisions: vec![decision.clone()],
+            ..State::default()
+        })
+        .unwrap();
+        let store = UserDecisionStore::with_limits(temp.path(), small_limits(exact, 8));
+        store.create(decision.clone()).unwrap().unwrap();
+        assert_eq!(std::fs::metadata(store.path()).unwrap().len(), exact as u64);
+        let before = std::fs::read(store.path()).unwrap();
+
+        assert_eq!(
+            store
+                .resolve(
+                    decision.owner.workspace_id,
+                    decision.decision_id,
+                    UserDecisionAnswer::Option {
+                        option_id: "a".into(),
+                    },
+                    fixed_now(),
+                )
+                .unwrap(),
+            Err(UserDecisionError::CapacityReached)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+
+        let mut second = decision.clone();
+        second.decision_id = UserDecisionId::new();
+        second.idempotency_key = None;
+        assert_eq!(
+            store.create(second).unwrap(),
+            Err(UserDecisionError::CapacityReached)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+
+        let oversized = tempfile::tempdir().unwrap();
+        let tiny = UserDecisionStore::with_limits(oversized.path(), small_limits(64, 8));
+        std::fs::write(tiny.path(), vec![b' '; 65]).unwrap();
+        assert!(
+            tiny.events()
+                .unwrap_err()
+                .to_string()
+                .contains("hard limit")
+        );
+    }
+
+    #[test]
+    fn expiry_capacity_failure_uses_the_generic_effect_zero_transaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut decision = item();
+        decision.created_at = fixed_now();
+        decision.expires_at = Some(fixed_now() + chrono::Duration::seconds(1));
+        let exact = serialized_len(&State {
+            decisions: vec![decision.clone()],
+            ..State::default()
+        })
+        .unwrap();
+        let limits = StoreLimits {
+            minimum_terminal_retention: 1,
+            ..small_limits(exact, 8)
+        };
+        let store = UserDecisionStore::with_limits(temp.path(), limits);
+        store.create(decision.clone()).unwrap().unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        assert!(
+            store
+                .expire_due(fixed_now() + chrono::Duration::seconds(1))
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert_eq!(
+            store
+                .get(decision.owner.workspace_id, decision.decision_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            UserDecisionStatus::Pending
+        );
+    }
+
+    #[test]
+    fn byte_eviction_tombstones_old_keys_across_restart_and_keeps_recent_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut first = item();
+        first.created_at = fixed_now();
+        first.prompt = "p".repeat(UserDecisionPolicy::PROMPT_MAX_BYTES);
+        first.idempotency_key = Some("first-key".into());
+        let mut second = first.clone();
+        second.decision_id = UserDecisionId::new();
+        second.idempotency_key = Some("second-key".into());
+
+        let mut tombstones = KeyTombstones::default();
+        tombstones.insert(&first.owner, "first-key");
+        let compacted = State {
+            decisions: vec![second.clone()],
+            events: Vec::new(),
+            expired_idempotency: tombstones,
+        };
+        let budget = serialized_len(&compacted).unwrap();
+        let limits = small_limits(budget, 8);
+        let store = UserDecisionStore::with_limits(temp.path(), limits);
+        store.create(first.clone()).unwrap().unwrap();
+        store
+            .terminal(
+                first.owner.workspace_id,
+                first.decision_id,
+                UserDecisionStatus::Cancelled,
+                fixed_now(),
+            )
+            .unwrap()
+            .unwrap();
+
+        let mut recent_retry = first.clone();
+        recent_retry.decision_id = UserDecisionId::new();
+        assert_eq!(
+            store.create(recent_retry).unwrap().unwrap().decision_id,
+            first.decision_id
+        );
+        store.create(second.clone()).unwrap().unwrap();
+        assert!(std::fs::metadata(store.path()).unwrap().len() <= budget as u64);
+
+        let reopened = UserDecisionStore::with_limits(temp.path(), limits);
+        let before = std::fs::read(reopened.path()).unwrap();
+        let mut expired_retry = first;
+        expired_retry.decision_id = UserDecisionId::new();
+        assert_eq!(
+            reopened.create(expired_retry).unwrap(),
+            Err(UserDecisionError::IdempotencyExpired)
+        );
+        assert_eq!(std::fs::read(reopened.path()).unwrap(), before);
+
+        let expected = second.decision_id;
+        second.decision_id = UserDecisionId::new();
+        assert_eq!(
+            reopened.create(second).unwrap().unwrap().decision_id,
+            expected
+        );
+    }
+
+    #[test]
+    fn byte_pressure_preserves_the_minimum_recent_retry_window() {
+        let mut oldest = item();
+        oldest.idempotency_key = None;
+        oldest.status = UserDecisionStatus::Cancelled;
+        oldest.resolved_at = Some(fixed_now());
+        let mut newest = oldest.clone();
+        newest.decision_id = UserDecisionId::new();
+        newest.created_at += chrono::Duration::seconds(1);
+        newest.resolved_at = Some(newest.created_at);
+        let one_record_budget = serialized_len(&State {
+            decisions: vec![newest.clone()],
+            ..State::default()
+        })
+        .unwrap();
+        let limits = StoreLimits {
+            minimum_terminal_retention: 1,
+            ..small_limits(one_record_budget, 8)
+        };
+        let mut state = State {
+            decisions: vec![oldest, newest.clone()],
+            ..State::default()
+        };
+        assert!(compact_bounded(&mut state, limits).unwrap());
+        assert_eq!(state.decisions, vec![newest]);
+
+        let before = state.decisions.clone();
+        let impossible = StoreLimits {
+            max_serialized_bytes: one_record_budget - 1,
+            ..limits
+        };
+        assert!(!compact_bounded(&mut state, impossible).unwrap());
+        assert_eq!(state.decisions, before);
+    }
+
+    #[test]
+    fn small_budget_fake_clock_bounds_all_terminal_kinds_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let limits = small_limits(12 * 1024, 4);
+        let store = UserDecisionStore::with_limits(temp.path(), limits);
+        let workspace = WorkspaceId::new();
+        let epoch = fixed_now();
+
+        for index in 0..60 {
+            let mut decision = distinct(workspace);
+            let now = epoch + chrono::Duration::seconds(index * 2);
+            decision.created_at = now;
+            let id = decision.decision_id;
+            match index % 3 {
+                0 => {
+                    store.create(decision).unwrap().unwrap();
+                    store
+                        .resolve(
+                            workspace,
+                            id,
+                            UserDecisionAnswer::Option {
+                                option_id: "a".into(),
+                            },
+                            now,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    assert!(store.ack_event(id).unwrap());
+                }
+                1 => {
+                    store.create(decision).unwrap().unwrap();
+                    store
+                        .terminal(workspace, id, UserDecisionStatus::Cancelled, now)
+                        .unwrap()
+                        .unwrap();
+                }
+                _ => {
+                    decision.expires_at = Some(now + chrono::Duration::seconds(1));
+                    store.create(decision).unwrap().unwrap();
+                    assert_eq!(
+                        store
+                            .expire_due(now + chrono::Duration::seconds(1))
+                            .unwrap(),
+                        vec![id]
+                    );
+                }
+            }
+            assert!(std::fs::metadata(store.path()).unwrap().len() <= 12 * 1024);
+        }
+
+        let reopened = UserDecisionStore::with_limits(temp.path(), limits);
+        let state = reopened.load().unwrap();
+        assert!(state.events.is_empty());
+        assert!(state.decisions.len() <= 4);
+    }
+
+    #[test]
+    fn byte_pressure_never_discards_pending_or_unacknowledged_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut awaited = item();
+        awaited.created_at = fixed_now();
+        awaited.idempotency_key = None;
+        awaited.allow_freeform = true;
+        let answer = UserDecisionAnswer::Freeform {
+            text: "a".repeat(4 * 1024),
+        };
+        let mut resolved = awaited.clone();
+        resolved.status = UserDecisionStatus::Resolved;
+        resolved.answer = Some(answer.clone());
+        resolved.resolved_at = Some(fixed_now());
+        let expected = State {
+            decisions: vec![resolved],
+            events: vec![UserDecisionResolvedEvent {
+                decision_id: awaited.decision_id,
+                recipient: awaited.owner.caller.clone(),
+                answer: answer.clone(),
+                created_at: fixed_now(),
+            }],
+            expired_idempotency: KeyTombstones::default(),
+        };
+        let budget = serialized_len(&expected).unwrap();
+        let store = UserDecisionStore::with_limits(temp.path(), small_limits(budget, 8));
+        store.create(awaited.clone()).unwrap().unwrap();
+        store
+            .resolve(
+                awaited.owner.workspace_id,
+                awaited.decision_id,
+                answer,
+                fixed_now(),
+            )
+            .unwrap()
+            .unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+
+        let mut blocked = distinct(awaited.owner.workspace_id);
+        blocked.created_at = fixed_now();
+        assert_eq!(
+            store.create(blocked.clone()).unwrap(),
+            Err(UserDecisionError::CapacityReached)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert!(
+            store
+                .get(awaited.owner.workspace_id, awaited.decision_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(store.events().unwrap().len(), 1);
+
+        assert!(store.ack_event(awaited.decision_id).unwrap());
+        store.create(blocked.clone()).unwrap().unwrap();
+        assert_eq!(
+            store.pending(blocked.owner.workspace_id).unwrap(),
+            vec![blocked]
+        );
+    }
+
+    #[test]
+    fn malformed_tombstones_and_forged_pending_overflow_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::with_limits(temp.path(), small_limits(64 * 1024, 8));
+        let malformed = State {
+            expired_idempotency: KeyTombstones { words: vec![1] },
+            ..State::default()
+        };
+        std::fs::write(store.path(), serde_json::to_vec(&malformed).unwrap()).unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("resource policy")
+        );
+
+        let workspace = WorkspaceId::new();
+        let overflow = State {
+            decisions: vec![distinct(workspace), distinct(workspace)],
+            ..State::default()
+        };
+        let strict = StoreLimits {
+            pending_per_workspace: 1,
+            ..small_limits(64 * 1024, 8)
+        };
+        let store = UserDecisionStore::with_limits(temp.path(), strict);
+        std::fs::write(store.path(), serde_json::to_vec(&overflow).unwrap()).unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap_err()
+                .to_string()
+                .contains("pending hard limit")
+        );
+
+        let mut root_owner = item().owner;
+        root_owner.session_id = None;
+        root_owner.caller.session_id = None;
+        let mut root_tombstones = KeyTombstones::default();
+        root_tombstones.insert(&root_owner, "root-key");
+        assert!(root_tombstones.contains(&root_owner, "root-key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_document_keeps_its_io_context() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        std::fs::write(store.path(), b"{}").unwrap();
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let error = store.events().unwrap_err();
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(format!("{error:#}").contains("failed to read"));
     }
 }
