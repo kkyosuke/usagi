@@ -6,7 +6,6 @@
 //! On restart, a torn final JSONL record is ignored because it was never a
 //! durable, complete event.
 
-#[cfg(test)]
 use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -16,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
 use crate::domain::supervisor::{
-    SupervisorEvent, SupervisorRun, SupervisorRunId, SupervisorRunQuery, reduce,
+    SupervisorEvent, SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, reduce,
 };
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
@@ -24,6 +23,7 @@ const SNAPSHOT_SUFFIX: &str = ".snapshot.json";
 const JOURNAL_SUFFIX: &str = ".events.jsonl";
 const JOURNAL_INDEX_SUFFIX: &str = ".events.index.json";
 const CHECKPOINT_SUFFIX: &str = ".replay.json";
+const RUN_LIST_INDEX_FILE: &str = "runs.index.json";
 
 /// Compact at the high watermark and keep this many newest events. The gap
 /// avoids rewriting the journal for every subsequent append.
@@ -44,6 +44,9 @@ const JOURNAL_RETAIN_EVENTS: usize = 32;
 /// started and the state directory grows without limit. A finished run is
 /// history: this keeps the recent ones for inspection and drops the rest.
 const RUN_RETENTION: usize = 128;
+/// Keep list results comfortably below the 1 MiB daemon IPC frame after the
+/// response envelope and protocol metadata are added.
+pub const RUN_LIST_RESPONSE_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 struct ReplayCheckpoint {
@@ -66,6 +69,40 @@ struct JournalIndex {
     entries: Vec<JournalIndexEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct RunListIndexEntry {
+    supervisor_run_id: SupervisorRunId,
+    root_caller_ref: String,
+    created_at: DateTime<Utc>,
+    state: SupervisorRunState,
+    state_revision: u64,
+}
+
+impl From<&SupervisorRun> for RunListIndexEntry {
+    fn from(run: &SupervisorRun) -> Self {
+        Self {
+            supervisor_run_id: run.supervisor_run_id,
+            root_caller_ref: run.root_caller_ref.clone(),
+            created_at: run.created_at,
+            state: run.state,
+            state_revision: run.state_revision,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+struct RunListIndex {
+    entries: Vec<RunListIndexEntry>,
+}
+
+/// Bounded `supervisor_list` result. The cursor is an opaque position in the
+/// durable run index rather than an offset into a fully hydrated result set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SupervisorRunPage {
+    pub runs: Vec<SupervisorRunQuery>,
+    pub next_cursor: Option<String>,
+}
+
 /// Cursor used to page a run's event history without exposing payload bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct EventCursor {
@@ -83,16 +120,22 @@ pub struct EventQuery {
 /// A daemon-owned durable supervisor store rooted at its state directory.
 pub struct SupervisorStore {
     dir: PathBuf,
+    run_list_index_trusted: Cell<bool>,
     #[cfg(test)]
     journal_bytes_read: Cell<u64>,
+    #[cfg(test)]
+    run_snapshots_read: Cell<u64>,
 }
 impl SupervisorStore {
     #[must_use]
     pub fn new(daemon_state_dir: &Path) -> Self {
         Self {
             dir: daemon_state_dir.join("supervisor-runs"),
+            run_list_index_trusted: Cell::new(false),
             #[cfg(test)]
             journal_bytes_read: Cell::new(0),
+            #[cfg(test)]
+            run_snapshots_read: Cell::new(0),
         }
     }
     #[must_use]
@@ -109,6 +152,9 @@ impl SupervisorStore {
     fn checkpoint_path(&self, id: SupervisorRunId) -> PathBuf {
         self.dir.join(format!("{id}{CHECKPOINT_SUFFIX}"))
     }
+    fn run_list_index_path(&self) -> PathBuf {
+        self.dir.join(RUN_LIST_INDEX_FILE)
+    }
     /// Creates the initial atomically-written snapshot.
     ///
     /// # Errors
@@ -117,6 +163,7 @@ impl SupervisorStore {
     pub fn initialize(&self, run: &SupervisorRun) -> Result<()> {
         json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)?;
         self.write_checkpoint(run.supervisor_run_id, run.state_revision, 0)?;
+        self.refresh_run_list_index(run);
         // Starting a run is the moment the directory grows, so it is also where
         // the bound is charged. Pruning is best effort: a run that failed to be
         // removed is retried at the next start, and refusing to start a new run
@@ -165,6 +212,7 @@ impl SupervisorStore {
         }
         finished.sort_by_key(|(finished_at, id)| (*finished_at, *id));
         let mut removed = 0;
+        let mut removed_ids = Vec::new();
         for (_, id) in finished.into_iter().take(over) {
             for path in [
                 self.journal_path(id),
@@ -181,7 +229,9 @@ impl SupervisorStore {
                 }
             }
             removed += 1;
+            removed_ids.push(id);
         }
+        self.remove_from_run_list_index(&removed_ids);
         Ok(removed)
     }
     /// How many run snapshots the state directory holds, without reading any of
@@ -212,6 +262,9 @@ impl SupervisorStore {
     ///
     /// Returns an error when a snapshot or a non-final journal record is corrupt.
     pub fn load(&self, id: SupervisorRunId) -> Result<Option<SupervisorRun>> {
+        #[cfg(test)]
+        self.run_snapshots_read
+            .set(self.run_snapshots_read.get() + 1);
         let Some(run) = json_file::read(&self.snapshot_path(id))? else {
             return Ok(None);
         };
@@ -294,6 +347,7 @@ impl SupervisorStore {
             json_file::write_atomic(&self.dir, &self.snapshot_path(id), &run)?;
         }
         self.checkpoint_current_journal(id, run.state_revision)?;
+        self.refresh_run_list_index(&run);
         Ok(run)
     }
     /// Returns the redaction-safe aggregate projection.
@@ -333,6 +387,207 @@ impl SupervisorStore {
         }
         runs.sort_by_key(|run| (run.created_at, run.supervisor_run_id));
         Ok(runs)
+    }
+
+    /// Lists one owner/state-filtered page without hydrating aggregates outside
+    /// that page, and refuses a single response above the serialized budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid cursor, unreadable durable state, or a
+    /// run whose safe projection alone exceeds the response byte budget.
+    pub fn runs_page(
+        &self,
+        caller: &str,
+        state: Option<SupervisorRunState>,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<SupervisorRunPage> {
+        self.runs_page_with_budget(caller, state, cursor, limit, RUN_LIST_RESPONSE_MAX_BYTES)
+    }
+
+    fn runs_page_with_budget(
+        &self,
+        caller: &str,
+        state: Option<SupervisorRunState>,
+        cursor: usize,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<SupervisorRunPage> {
+        if limit == 0 {
+            bail!("supervisor list page limit must be positive");
+        }
+        let index = self.run_list_index()?;
+        if cursor > index.entries.len() {
+            bail!("supervisor list cursor is outside the retained run range");
+        }
+        let matches = |entry: &RunListIndexEntry| {
+            entry.root_caller_ref == caller && state.is_none_or(|value| entry.state == value)
+        };
+        let mut page = SupervisorRunPage {
+            runs: Vec::new(),
+            next_cursor: None,
+        };
+        let mut positions = Vec::new();
+        for (position, entry) in index.entries.iter().enumerate().skip(cursor) {
+            if !matches(entry) {
+                continue;
+            }
+            let run = self
+                .load(entry.supervisor_run_id)?
+                .ok_or_else(|| anyhow::anyhow!("supervisor indexed snapshot disappeared"))?;
+            if RunListIndexEntry::from(&run) != *entry {
+                // Another store instance may have advanced a snapshot. Rebuild
+                // the disposable index once from authoritative aggregates.
+                self.run_list_index_trusted.set(false);
+                return self.runs_page_with_budget(caller, state, cursor, limit, maximum_bytes);
+            }
+            page.runs.push(run.query());
+            positions.push(position);
+            let more = index.entries[position + 1..].iter().any(&matches);
+            page.next_cursor = more.then(|| (position + 1).to_string());
+            if serde_json::to_vec(&page)?.len() > maximum_bytes {
+                page.runs.pop();
+                positions.pop();
+                let mut resume_at = position;
+                loop {
+                    if page.runs.is_empty() {
+                        bail!("supervisor list response capacity is exhausted by one run");
+                    }
+                    page.next_cursor = Some(resume_at.to_string());
+                    if serde_json::to_vec(&page)?.len() <= maximum_bytes {
+                        return Ok(page);
+                    }
+                    page.runs.pop();
+                    resume_at = positions
+                        .pop()
+                        .context("supervisor list page position is missing")?;
+                }
+            }
+            if page.runs.len() == limit || !more {
+                return Ok(page);
+            }
+        }
+        Ok(page)
+    }
+
+    fn run_list_index(&self) -> Result<RunListIndex> {
+        if self.run_list_index_trusted.get()
+            && let Ok(Some(index)) = json_file::read::<RunListIndex>(&self.run_list_index_path())
+            && self.run_list_index_is_valid(&index)?
+        {
+            return Ok(index);
+        }
+        self.rebuild_run_list_index()
+    }
+
+    fn run_list_index_is_valid(&self, index: &RunListIndex) -> Result<bool> {
+        if index.entries.len() != self.snapshot_count()? {
+            return Ok(false);
+        }
+        let mut previous = None;
+        for entry in &index.entries {
+            let key = (entry.created_at, entry.supervisor_run_id);
+            if previous.is_some_and(|value| value >= key)
+                || !self.snapshot_path(entry.supervisor_run_id).is_file()
+            {
+                return Ok(false);
+            }
+            previous = Some(key);
+        }
+        Ok(true)
+    }
+
+    fn rebuild_run_list_index(&self) -> Result<RunListIndex> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RunListIndex::default());
+            }
+            Err(error) => return Err(error).context("failed to list supervisor runs"),
+        };
+        let mut index = RunListIndex::default();
+        for entry in entries {
+            let path = entry?.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(SNAPSHOT_SUFFIX))
+            {
+                continue;
+            }
+            #[cfg(test)]
+            self.run_snapshots_read
+                .set(self.run_snapshots_read.get() + 1);
+            let snapshot: SupervisorRun = json_file::read(&path)?
+                .ok_or_else(|| anyhow::anyhow!("supervisor snapshot disappeared"))?;
+            Self::validate_snapshot(&snapshot)?;
+            index
+                .entries
+                .push(RunListIndexEntry::from(&self.replay_snapshot(snapshot)?));
+        }
+        index
+            .entries
+            .sort_by_key(|entry| (entry.created_at, entry.supervisor_run_id));
+        if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_ok() {
+            self.run_list_index_trusted.set(true);
+        } else {
+            self.run_list_index_trusted.set(false);
+        }
+        Ok(index)
+    }
+
+    fn refresh_run_list_index(&self, run: &SupervisorRun) {
+        if !self.run_list_index_trusted.get() {
+            if self.snapshot_count().ok() != Some(1) {
+                return;
+            }
+            let index = RunListIndex {
+                entries: vec![RunListIndexEntry::from(run)],
+            };
+            if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_ok() {
+                self.run_list_index_trusted.set(true);
+            }
+            return;
+        }
+        let Ok(Some(mut index)) = json_file::read::<RunListIndex>(&self.run_list_index_path())
+        else {
+            self.run_list_index_trusted.set(false);
+            return;
+        };
+        let replacement = RunListIndexEntry::from(run);
+        if let Some(entry) = index
+            .entries
+            .iter_mut()
+            .find(|entry| entry.supervisor_run_id == run.supervisor_run_id)
+        {
+            *entry = replacement;
+        } else {
+            index.entries.push(replacement);
+        }
+        index
+            .entries
+            .sort_by_key(|entry| (entry.created_at, entry.supervisor_run_id));
+        if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_err() {
+            self.run_list_index_trusted.set(false);
+        }
+    }
+
+    fn remove_from_run_list_index(&self, removed: &[SupervisorRunId]) {
+        if removed.is_empty() || !self.run_list_index_trusted.get() {
+            return;
+        }
+        let Ok(Some(mut index)) = json_file::read::<RunListIndex>(&self.run_list_index_path())
+        else {
+            self.run_list_index_trusted.set(false);
+            return;
+        };
+        index
+            .entries
+            .retain(|entry| !removed.contains(&entry.supervisor_run_id));
+        if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_err() {
+            self.run_list_index_trusted.set(false);
+        }
     }
     /// Lists event metadata from `cursor`, and the next cursor if more history
     /// was returned. Event kinds and instruction bodies are intentionally absent.
@@ -1303,5 +1558,258 @@ mod tests {
             format!("{error:#}").contains("failed to list supervisor runs"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn run_list_pages_hydrate_only_selected_aggregates_and_bound_serialized_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        assert!(
+            store
+                .runs_page("caller", None, 0, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("limit must be positive")
+        );
+        assert!(
+            store
+                .runs_page("caller", None, 0, 1)
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+        assert!(
+            store
+                .runs_page("caller", None, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor is outside")
+        );
+        let mut caller_runs = Vec::new();
+        for index in 0..8 {
+            let caller = if index % 3 == 0 { "other" } else { "caller" };
+            let mut run = SupervisorRun::new(
+                caller.into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(index),
+            );
+            run.state = if index % 2 == 0 {
+                SupervisorRunState::Running
+            } else {
+                SupervisorRunState::WaitingForDecision
+            };
+            if caller == "caller" {
+                caller_runs.push(run.supervisor_run_id);
+            }
+            store.initialize(&run).unwrap();
+        }
+
+        store.run_snapshots_read.set(0);
+        let first = store.runs_page("caller", None, 0, 2).unwrap();
+        assert_eq!(first.runs.len(), 2);
+        assert!(first.next_cursor.is_some());
+        assert_eq!(store.run_snapshots_read.get(), 2);
+        assert!(
+            store
+                .runs_page("nobody", None, 0, 2)
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+
+        let valid_index = store.run_list_index().unwrap();
+        let mut wrong_count = valid_index.clone();
+        wrong_count.entries.pop();
+        assert!(!store.run_list_index_is_valid(&wrong_count).unwrap());
+        let mut duplicate = valid_index.clone();
+        duplicate.entries[1] = duplicate.entries[0].clone();
+        assert!(!store.run_list_index_is_valid(&duplicate).unwrap());
+        let mut missing = valid_index;
+        missing.entries.last_mut().unwrap().supervisor_run_id = SupervisorRunId::new();
+        assert!(!store.run_list_index_is_valid(&missing).unwrap());
+        assert!(
+            first
+                .runs
+                .iter()
+                .all(|run| caller_runs.contains(&run.supervisor_run_id))
+        );
+
+        store.run_snapshots_read.set(0);
+        let waiting = store
+            .runs_page("caller", Some(SupervisorRunState::WaitingForDecision), 0, 2)
+            .unwrap();
+        assert_eq!(waiting.runs.len(), 2);
+        assert!(
+            waiting
+                .runs
+                .iter()
+                .all(|run| run.state == SupervisorRunState::WaitingForDecision)
+        );
+        assert_eq!(store.run_snapshots_read.get(), 2);
+
+        let first_query = store.load(caller_runs[0]).unwrap().unwrap().query();
+        let one_run_budget = serde_json::to_vec(&SupervisorRunPage {
+            runs: vec![first_query],
+            next_cursor: Some("2".into()),
+        })
+        .unwrap()
+        .len();
+        let byte_page = store
+            .runs_page_with_budget("caller", None, 0, 100, one_run_budget)
+            .unwrap();
+        assert_eq!(byte_page.runs.len(), 1);
+        assert!(byte_page.next_cursor.is_some());
+        assert!(
+            store
+                .runs_page_with_budget("caller", None, 0, 100, one_run_budget - 1)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+
+        let reopened = SupervisorStore::new(tmp.path());
+        let snapshot_count = reopened.snapshot_count().unwrap();
+        reopened.run_snapshots_read.set(0);
+        assert_eq!(
+            reopened.runs_page("caller", None, 0, 1).unwrap().runs.len(),
+            1
+        );
+        assert_eq!(
+            reopened.run_snapshots_read.get(),
+            u64::try_from(snapshot_count + 1).unwrap()
+        );
+        reopened.run_snapshots_read.set(0);
+        assert_eq!(
+            reopened.runs_page("caller", None, 0, 1).unwrap().runs.len(),
+            1
+        );
+        assert_eq!(reopened.run_snapshots_read.get(), 1);
+
+        let mut advanced = store.load(caller_runs[0]).unwrap().unwrap();
+        advanced.state = SupervisorRunState::Failed;
+        advanced.state_revision += 1;
+        json_file::write_atomic(
+            &store.dir,
+            &store.snapshot_path(advanced.supervisor_run_id),
+            &advanced,
+        )
+        .unwrap();
+        assert_eq!(
+            store.runs_page("caller", None, 0, 1).unwrap().runs[0].state,
+            SupervisorRunState::Failed
+        );
+
+        let blocked = tempfile::tempdir().unwrap();
+        fs::write(blocked.path().join("supervisor-runs"), "not a directory").unwrap();
+        assert!(
+            SupervisorStore::new(blocked.path())
+                .runs_page("caller", None, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("failed to list supervisor runs")
+        );
+    }
+
+    #[test]
+    fn list_byte_budget_rechecks_a_cursor_that_grows_during_page_trim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let mut first_query = None;
+        for index in 0..=100 {
+            let caller = if matches!(index, 98 | 100) {
+                "caller"
+            } else {
+                "other"
+            };
+            let run = SupervisorRun::new(
+                caller.into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(index),
+            );
+            if index == 98 {
+                first_query = Some(run.query());
+            }
+            store.initialize(&run).unwrap();
+        }
+        let budget = serde_json::to_vec(&SupervisorRunPage {
+            runs: vec![first_query.unwrap()],
+            next_cursor: Some("99".into()),
+        })
+        .unwrap()
+        .len();
+        assert!(
+            store
+                .runs_page_with_budget("caller", None, 0, 100, budget)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_run_index_failures_fall_back_without_hiding_authoritative_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        owner.initialize(&run).unwrap();
+        let second = SupervisorRun::new(
+            "caller".into(),
+            "task-2".into(),
+            "input".into(),
+            "policy".into(),
+            now() + chrono::Duration::seconds(1),
+        );
+        owner.initialize(&second).unwrap();
+
+        let cold = SupervisorStore::new(tmp.path());
+        cold.refresh_run_list_index(&run);
+        assert!(!cold.run_list_index_trusted.get());
+        cold.remove_from_run_list_index(&[]);
+        cold.remove_from_run_list_index(&[run.supervisor_run_id]);
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        fs::remove_file(cold.run_list_index_path()).unwrap();
+        cold.refresh_run_list_index(&run);
+        assert!(!cold.run_list_index_trusted.get());
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        fs::remove_file(cold.run_list_index_path()).unwrap();
+        cold.remove_from_run_list_index(&[run.supervisor_run_id]);
+        assert!(!cold.run_list_index_trusted.get());
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        let mode = fs::metadata(&cold.dir).unwrap().permissions().mode();
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        cold.refresh_run_list_index(&run);
+        assert!(!cold.run_list_index_trusted.get());
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(mode)).unwrap();
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        cold.remove_from_run_list_index(&[run.supervisor_run_id]);
+        assert!(!cold.run_list_index_trusted.get());
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(mode)).unwrap();
+
+        let rebuild = SupervisorStore::new(tmp.path());
+        fs::set_permissions(&rebuild.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(
+            rebuild.runs_page("caller", None, 0, 1).unwrap().runs.len(),
+            1
+        );
+        assert!(!rebuild.run_list_index_trusted.get());
+        fs::set_permissions(&rebuild.dir, fs::Permissions::from_mode(mode)).unwrap();
     }
 }

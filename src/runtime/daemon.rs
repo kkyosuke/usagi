@@ -145,7 +145,7 @@ use usagi_daemon::usecase::session_teardown::{
 use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 use usagi_daemon::usecase::supervisor_runtime::{
-    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
+    DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime, bounded_supervisor_query,
 };
 use usagi_daemon::usecase::tenant::{
     DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
@@ -5843,7 +5843,7 @@ fn dispatch_supervisor_tool(
                             "invalid supervisor_get payload",
                         )
                     })?;
-                    serde_json::to_value(
+                    let value = serde_json::to_value(
                         runtime
                             .get(&caller, input.supervisor_run_id)
                             .map_err(supervisor_error)?
@@ -5859,7 +5859,8 @@ fn dispatch_supervisor_tool(
                             ErrorCode::Internal,
                             "supervisor response encoding failed",
                         )
-                    })
+                    })?;
+                    bounded_supervisor_query(value).map_err(supervisor_error)
                 }
                 SupervisorToolAction::List => {
                     let input: ListPayload = serde_json::from_value(payload).map_err(|_| {
@@ -5889,13 +5890,18 @@ fn dispatch_supervisor_tool(
                                 "invalid supervisor_list cursor",
                             )
                         })?;
-                    let runs = runtime
-                        .list(&caller, input.state)
-                        .map_err(supervisor_error)?;
-                    let page: Vec<_> = runs.iter().skip(offset).take(input.limit).collect();
-                    let next_cursor = (offset + page.len() < runs.len())
-                        .then(|| (offset + page.len()).to_string());
-                    Ok(serde_json::json!({"runs": page, "next_cursor": next_cursor}))
+                    let value = serde_json::to_value(
+                        runtime
+                            .list_page(&caller, input.state, offset, input.limit)
+                            .map_err(supervisor_error)?,
+                    )
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Internal,
+                            "supervisor response encoding failed",
+                        )
+                    })?;
+                    bounded_supervisor_query(value).map_err(supervisor_error)
                 }
                 SupervisorToolAction::Cancel => {
                     let input: CancelPayload = serde_json::from_value(payload).map_err(|_| {
@@ -5962,7 +5968,10 @@ fn dispatch_supervisor_tool(
                             input.limit,
                         )
                         .map_err(supervisor_error)?;
-                    Ok(serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}))
+                    bounded_supervisor_query(
+                        serde_json::json!({"events": events, "next_sequence": cursor.next_sequence}),
+                    )
+                    .map_err(supervisor_error)
                 }
             }
         });
@@ -6051,7 +6060,9 @@ fn supervisor_error(error: anyhow::Error) -> usagi_core::infrastructure::ipc::Pr
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let message = error.to_string();
     drop(error);
-    let code = if message.contains("reused") {
+    let code = if message.contains("capacity is exhausted") {
+        ErrorCode::ResourceExhausted
+    } else if message.contains("reused") {
         ErrorCode::IdempotencyConflict
     } else if message.contains("does not exist") {
         ErrorCode::OwnershipUnknown
@@ -21394,6 +21405,17 @@ instructions = "{instructions}"
             ),
         );
         assert_eq!(cancelled, ResponseOutcome::Ok);
+    }
+
+    #[test]
+    fn supervisor_query_capacity_maps_to_typed_backpressure() {
+        assert_eq!(
+            supervisor_error(anyhow::anyhow!(
+                "supervisor query response capacity is exhausted"
+            ))
+            .code,
+            usagi_core::infrastructure::ipc::ErrorCode::ResourceExhausted
+        );
     }
 
     fn fence_in(role: GenerationRole) -> GenerationFence {

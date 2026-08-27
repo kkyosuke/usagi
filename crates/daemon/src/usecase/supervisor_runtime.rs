@@ -30,7 +30,10 @@ use usagi_core::{
         persistence::json_file,
         store::{
             dispatch::DispatchStore,
-            supervisor::{EventCursor, EventQuery, SupervisorStore},
+            supervisor::{
+                EventCursor, EventQuery, RUN_LIST_RESPONSE_MAX_BYTES, SupervisorRunPage,
+                SupervisorStore,
+            },
         },
     },
 };
@@ -105,6 +108,18 @@ const MAX_WAKE_RESERVATIONS: usize = 8;
 const RETAIN_DELIVERED_WAKES: usize = 128;
 #[cfg(test)]
 const RETAIN_DELIVERED_WAKES: usize = 4;
+
+/// Applies the same serialized budget to every read-only supervisor query, not
+/// only list pages. The caller maps this capacity refusal to `resource_exhausted`.
+///
+/// # Errors
+/// Returns an error when serialization fails or the response exceeds the budget.
+pub fn bounded_supervisor_query(value: serde_json::Value) -> Result<serde_json::Value> {
+    if serde_json::to_vec(&value)?.len() > RUN_LIST_RESPONSE_MAX_BYTES {
+        anyhow::bail!("supervisor query response capacity is exhausted");
+    }
+    Ok(value)
+}
 
 impl KeyTombstones {
     fn bit(key: &str, seed: u64) -> usize {
@@ -462,6 +477,20 @@ impl SupervisorRuntime {
             })
             .map(|run| run.query())
             .collect())
+    }
+
+    /// Lists one bounded caller-owned page using the durable run index.
+    ///
+    /// # Errors
+    /// Returns an error when the cursor, durable state, or response budget is invalid.
+    pub fn list_page(
+        &self,
+        caller: &str,
+        state: Option<SupervisorRunState>,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<SupervisorRunPage> {
+        self.supervisor.runs_page(caller, state, cursor, limit)
     }
 
     /// Commits a fenced cancellation.
@@ -965,6 +994,22 @@ mod tests {
             SupervisorEventSource::DispatchFailure
         );
         assert_eq!(source(InboxKind::NoReport), SupervisorEventSource::NoReport);
+    }
+
+    #[test]
+    fn read_only_query_responses_have_an_aggregate_serialized_budget() {
+        assert_eq!(
+            bounded_supervisor_query(serde_json::json!({"runs": []})).unwrap(),
+            serde_json::json!({"runs": []})
+        );
+        assert!(
+            bounded_supervisor_query(serde_json::json!({
+                "value": "x".repeat(RUN_LIST_RESPONSE_MAX_BYTES)
+            }))
+            .unwrap_err()
+            .to_string()
+            .contains("capacity is exhausted")
+        );
     }
 
     #[test]
@@ -1796,6 +1841,18 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+        let page = runtime
+            .list_page("caller-a", Some(SupervisorRunState::Running), 0, 1)
+            .unwrap();
+        assert_eq!(page.runs.len(), 1);
+        assert!(page.next_cursor.is_none());
+        assert!(
+            runtime
+                .list_page("caller-b", None, 0, 1)
+                .unwrap()
+                .runs
+                .is_empty()
         );
         let (events, cursor) = runtime
             .events("caller-a", started.supervisor_run_id, 0, 10)

@@ -643,7 +643,7 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 | `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
 | inbox | ACK 済み 256 件。総数の上限は 4096、query page は最大 100 件 | 未 ACK の報告。未 ACK だけで上限へ達した append は既存報告を落とさず capacity error で拒否する |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
-| `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
+| `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持する。run list は最大 100 件 / 512 KiB（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
 未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
@@ -654,6 +654,12 @@ inbox の query は `sequence -> byte offset` index から `cursor` 位置へ se
 既読化せず、処理済み page の `next_cursor` を別の `agent_inbox_ack` effect で送る。ACK は atomic watermark の単調更新で、
 応答 loss 時に同じ page を再読しても未読を失わず、duplicate ACK と restart 後の retry は同じ状態へ収束する。retentionで
 消えた位置を明示 cursor が指す場合は expired として拒否し、先頭へ暗黙に読み替えない。
+
+supervisor run list は owner / state / 作成順 / revision の derived index を使い、cursor から選んだ page の snapshot
+だけを hydrate する。index は mutation と同時に更新し、restart 後の初回 query では authoritative snapshot / journal
+から再構築する。page 全体が 512 KiB に達した場合は count limit より前でも cursor を返す。list / get / events の
+read-only response はすべて 512 KiB 以下とし、1 run の安全な projection だけで上限を超える場合は
+`resource_exhausted` として effect zero で拒否する。
 
 ### tenant registry
 
