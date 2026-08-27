@@ -332,6 +332,11 @@ fn execute_self_update(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> std::io::Result<ExitCode> {
+    // The installer inherits the process streams so progress and failures stay
+    // visible while network and verification work is running. Flush the CLI's
+    // preamble first so it cannot appear after the child output.
+    out.flush()?;
+    err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
         use std::process::{Command, Stdio};
 
@@ -341,8 +346,8 @@ fn execute_self_update(
             .arg("--")
             .current_dir("/")
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
         if select_version {
             command.arg("--select-version");
         }
@@ -356,7 +361,12 @@ fn execute_self_update(
             let _ = child.wait();
             return Err(error);
         }
-        child.wait_with_output()
+        let status = child.wait()?;
+        Ok(std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     })
 }
 
