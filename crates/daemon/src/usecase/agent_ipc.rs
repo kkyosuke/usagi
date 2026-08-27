@@ -4849,8 +4849,15 @@ mod tests {
         }
         runtime.coordinator =
             RuntimeCoordinator::hydrate(running_snapshot, 16, 64 * 1024, 64).unwrap();
+        runtime.reported_phases.insert(
+            runtime.coordinator.snapshot().records[0]
+                .runtime
+                .agent_runtime_id,
+            AgentPhase::Running,
+        );
         assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
         assert_eq!(runtime.retirement_blocker_count(workspace), 0);
+        assert!(runtime.reported_phases.is_empty());
         assert!(
             !runtime
                 .retained_resources()

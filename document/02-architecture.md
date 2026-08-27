@@ -126,8 +126,8 @@
 |---|---|---|
 | `usagi-core` | `crates/core` | 各面が共有する domain / usecase / infrastructure（IPC プロトコル型・永続化・git） |
 | `usagi-daemon` | `crates/daemon` | 常駐プロセス（`usagi daemon`）のサーバ側。daemon lifecycle verb、IPC server protocol、daemon-owned terminal / runtime の usecase と Unix transport を持つ |
-| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを実装していく |
-| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を実装していく（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)） |
+| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを持つ |
+| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を持つ。配置の採用理由は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) に残す |
 | `usagi`（bin） | ルート | 合成ルート。実 IO（標準入出力・引数・端末）を束ね、各面へ dispatch する |
 
 ### usagi-tui の内部構成
@@ -618,6 +618,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
+| live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
 | 画面をまたぐ再利用 UI 部品（widget） | `crates/tui/` の `presentation/widgets/` |
 | 色（意味的な役割→具体色）・色定数 | `crates/tui/` の `presentation/theme` |

@@ -1,13 +1,13 @@
 ---
 number: 716
 title: docs(cli): daemon install-service のヘルプに Linux systemd を書く
-status: todo
+status: done
 priority: low
 labels: [v2, cli, docs, daemon]
 dependson: []
 related: []
 created_at: 2026-08-23T23:21:39.680915+00:00
-updated_at: 2026-08-25T22:25:22.537811+00:00
+updated_at: 2026-08-26T02:47:39.616275+00:00
 ---
 
 ## Finding

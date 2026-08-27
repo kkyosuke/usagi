@@ -1,13 +1,13 @@
 ---
 number: 717
 title: fix(daemon): retire sweep の lock 順序を直し、閉じた workspace の記録を守る
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, correctness, workspace]
 dependson: []
 related: [710, 712, 713]
 created_at: 2026-08-24T00:00:58.167704+00:00
-updated_at: 2026-08-24T00:00:58.167704+00:00
+updated_at: 2026-08-26T02:19:33.596536+00:00
 ---
 
 #708–#713 の実装レビューで見つけた欠陥 3 件。いずれもマージ済みコードの不具合。

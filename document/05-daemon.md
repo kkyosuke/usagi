@@ -459,9 +459,9 @@ hard crash では unique temporary が残り得るが、後続 save は別名を
 停止しない。shipping `serve` の active generation は [admission fence](#admission-fence) を通して全 connection を
 serve し、request ごとに role 付きの lease を発行し、client worker を shutdown 半分とともに保持する
 （[client worker の保持](#client-worker-の保持)）。したがって role が `draining` へ移れば control と spawn は
-次の request から拒否されるが、**この停止順序を駆動する collection そのもの**（internal producer の停止と
-retirement）はまだ無い。それを起動する rollover は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の残りである。
+次の request から拒否される。rollover は internal producer を止め、lease を drain してから authority を渡し、
+draining generation の resource claim が 0 になった時点で endpoint と process を回収する。この順序の設計経緯は
+完了済みの [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) に残す。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
