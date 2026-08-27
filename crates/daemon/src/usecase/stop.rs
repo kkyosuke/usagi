@@ -774,6 +774,7 @@ mod tests {
             .unwrap(),
             "usagi v0.1.0: daemon stopped (pid 4321)"
         );
+        assert_eq!(terminator.terminated(), vec![record.pid]);
         assert_eq!(store.load().unwrap(), None);
     }
 

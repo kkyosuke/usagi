@@ -134,6 +134,29 @@ pub trait ResourceCensus {
     fn live(&self) -> io::Result<LiveResources>;
 }
 
+/// Exact process control for every non-retired generation in the durable registry.
+///
+/// The lifecycle record names the current active generation, while an older
+/// draining generation can legitimately keep its process and PTYs after a
+/// handoff. Lifecycle commands therefore cannot infer generation liveness from
+/// `daemon.json` alone.
+pub trait RetainedGenerationControl {
+    /// Whether at least one non-retired generation process is exactly alive.
+    ///
+    /// # Errors
+    /// Returns an error when the registry or a retained process identity cannot
+    /// be observed safely.
+    fn has_live(&self) -> io::Result<bool>;
+
+    /// Gracefully terminate every exactly-live non-retired generation and wait
+    /// until none remains.
+    ///
+    /// # Errors
+    /// Returns an error when the registry is unreadable, identity is unknown,
+    /// signalling fails, or a generation does not exit within the bounded wait.
+    fn shutdown_all(&self) -> io::Result<()>;
+}
+
 /// Why this build cannot hand authority to a live successor.
 ///
 /// Every variant is a statement about the durable generation registry, so the
@@ -323,12 +346,13 @@ fn refuse_live(action: &str, live: LiveResources, why: Option<&SeamlessRefusal>)
     )
 }
 
-/// What the recorded daemon owns right now, or nothing when no daemon owns it.
+/// What every exactly-live retained generation owns right now.
 ///
-/// Only a daemon whose exact owner identity is alive can still hold a PTY
-/// master. Records a crashed daemon left behind name no owner a transition
-/// could take anything from, so a census is not even taken for them — otherwise
-/// `daemon stop` would refuse to stop a daemon that is not running.
+/// `daemon.json` proves the ordinary single-generation owner, while the durable
+/// generation registry proves a draining predecessor that remains alive after
+/// handoff. A census is skipped only when neither source names an exact live
+/// process, so crashed-owner snapshots do not make `daemon stop` refuse to stop
+/// nothing and a live draining owner is never mistaken for stale residue.
 ///
 /// # Errors
 /// Returns the store's load error or the census error. Neither is treated as
@@ -337,13 +361,16 @@ fn owned_runtime<F: RecordFile, P: LivenessProbe>(
     store: &DaemonRecordStore<F>,
     probe: &P,
     census: &dyn ResourceCensus,
+    generations: &dyn RetainedGenerationControl,
 ) -> io::Result<LiveResources> {
     let record = store.load()?;
     let observation = record.as_ref().map_or(
         usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
         |record| probe.observe(record),
     );
-    if usagi_core::domain::daemon::classify(record.as_ref(), observation) == DaemonState::Alive {
+    if usagi_core::domain::daemon::classify(record.as_ref(), observation) == DaemonState::Alive
+        || generations.has_live()?
+    {
         census.live()
     } else {
         Ok(LiveResources::default())
@@ -366,11 +393,15 @@ pub fn stop_daemon<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
     sleeper: &K,
     stale_cleanup: &dyn StaleDaemonCleanup,
     census: &dyn ResourceCensus,
+    generations: &dyn RetainedGenerationControl,
     mode: TransitionMode,
     info: &AppInfo,
 ) -> io::Result<String> {
-    match plan_stop(mode, owned_runtime(store, probe, census)?) {
-        StopPlan::Terminate => stop::stop(store, probe, terminator, sleeper, stale_cleanup, info),
+    match plan_stop(mode, owned_runtime(store, probe, census, generations)?) {
+        StopPlan::Terminate => {
+            generations.shutdown_all()?;
+            stop::stop(store, probe, terminator, sleeper, stale_cleanup, info)
+        }
         StopPlan::Refused(live) => Err(refuse_live("stop the daemon", live, None)),
     }
 }
@@ -401,15 +432,17 @@ pub fn replace_daemon<
     sleeper: &K,
     stale_cleanup: &dyn StaleDaemonCleanup,
     census: &dyn ResourceCensus,
+    generations: &dyn RetainedGenerationControl,
     seamless: Option<&SeamlessRefusal>,
     rollover: &dyn RolloverRequester,
     mode: TransitionMode,
     operation: Option<&OperationId>,
     info: &AppInfo,
 ) -> io::Result<String> {
-    let live = owned_runtime(store, probe, census)?;
+    let live = owned_runtime(store, probe, census, generations)?;
     match plan_replacement(mode, seamless, live) {
         ReplacementPlan::ColdTransition => {
+            generations.shutdown_all()?;
             let report = restart::restart(
                 store,
                 probe,

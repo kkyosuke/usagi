@@ -419,6 +419,14 @@ endpoint と record を回収する。これにより owner の process exit と
 stale locator のまま replacement を起動しない。locator が先に `NotFound` となる短い区間でも live record と
 `daemon.lock` が replacement 起動を抑止し、`stop` は最後の record clear まで成功を返さない。
 
+seamless handoff 後は `daemon.json` が active successor を指す一方、predecessor は draining generation として
+自分の PTY と singleton lock を保持できる。したがって `stop` / `restart` は lifecycle record だけで live runtime の
+有無を決めず、generation registry で exact に生存する全 non-retired generation を観測する。通常の `stop` は draining
+generation に live runtime があれば従来どおり拒否する。live runtime が無い cold transition または明示 `--force` は、
+registry に記録された exact process identity を再検証して全 non-retired generation へ shutdown を要求し、その消滅を
+有界に待ってから stale endpoint / lifecycle record cleanup と replacement 起動へ進む。PID だけ、retired entry、identity
+不明な process は signal 対象にしない。
+
 stale `stop` は scoped `daemon.lock` を取得し、lock 下で最初の lifecycle record 全体がまだ exact current record であることを
 再確認する。その後 `current.lock` 下で current が指す socket と安全に検証できる orphan socket を先に回収し、exact locator、
 exact record の順に消去する。socket removal failure では locator を、locator cleanup failure では record を残すため、各 crash
