@@ -126,8 +126,8 @@
 |---|---|---|
 | `usagi-core` | `crates/core` | 各面が共有する domain / usecase / infrastructure（IPC プロトコル型・永続化・git） |
 | `usagi-daemon` | `crates/daemon` | 常駐プロセス（`usagi daemon`）のサーバ側。daemon lifecycle verb、IPC server protocol、daemon-owned terminal / runtime の usecase と Unix transport を持つ |
-| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを実装していく |
-| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を実装していく（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)） |
+| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを持つ |
+| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を持つ。配置の採用理由は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) に残す |
 | `usagi`（bin） | ルート | 合成ルート。実 IO（標準入出力・引数・端末）を束ね、各面へ dispatch する |
 
 ### usagi-tui の内部構成

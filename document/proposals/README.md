@@ -5,16 +5,17 @@
 `document/` 直下の番号付きドキュメント（`01-` …）は**現在のビルドで動作する仕様の正本**であり、
 [06-conventions.md#記載実装済み](../06-conventions.md#記載実装済み) に従って未実装の内容を含めない。
 
-一方、まだ実装されていない**構成・機構の設計判断**を記録したいことがある。これを spec に混ぜると
-「どこまで本当か」が読者に判断できなくなるため、**設計提案はこの `proposals/` に分離**する。実装が進んで
-挙動が確定したら、その内容を正本（`02-architecture.md` など）へ畳み込み、提案は撤去またはリンクだけ残す。
+一方、実装前の**構成・機構の設計判断**や、実装後も採用理由を残す必要がある。これを spec に混ぜると
+「どこまで現在の挙動か」が読者に判断できなくなるため、**設計提案と設計履歴はこの `proposals/` に分離**する。
+挙動が確定したら、その内容を正本（`02-architecture.md` など）へ畳み込み、提案は撤去するか設計履歴へのリンクだけを
+残す。実装済みと記した proposal も現在仕様の正本にはならない。
 ロードマップ（実装タスク）は issue ストア（`.usagi/issues/`）で追跡する。
 
 ## 一覧
 
 | # | ドキュメント | 内容 | 状態 |
 |---|---|---|---|
-| 1 | [01-entry-surfaces.md](01-entry-surfaces.md) | 入口面（CLI / MCP）の配置と、daemon を実行の権威とする反映フロー | 提案（クレート構成・dispatch は [02-architecture.md](../02-architecture.md) へ畳み込み済み） |
+| 1 | [01-entry-surfaces.md](01-entry-surfaces.md) | 入口面（CLI / MCP）の配置と、daemon を実行の権威とする反映フロー | [02-architecture.md](../02-architecture.md) / [07-mcp.md](../07-mcp.md) へ畳み込み済み（採用理由の履歴） |
 | 2 | [02-ipc-id.md](02-ipc-id.md) | v2 daemon IPC の目標・権威・typed ID・fencing invariant | [04-ipc.md](../04-ipc.md) へ畳み込み済み |
 | 3 | [03-ipc-protocol.md](03-ipc-protocol.md) | envelope、handshake、stream、idempotency、bounded transport、error | [04-ipc.md](../04-ipc.md) へ畳み込み済み |
 | 4 | [04-daemon-api.md](04-daemon-api.md) | terminal/session command・event と socket/workspace/launch security | [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み済み |
@@ -29,4 +30,4 @@
 | 14 | [14-session-roles.md](14-session-roles.md) | director / manager / coder / reviewer などの workspace 定義と session への安定した割り当て、scope prompt との安全な合成 | [10-session-roles.md](../10-session-roles.md) へ畳み込み済み |
 | 15 | [15-session-garden.md](15-session-garden.md) | 無操作時に session を庭のうさぎとして映す screen saver、状態別 animation、click-to-Closeup と安全な wake-up | 提案（実装 issue #674） |
 | 16 | [16-restart-state-restoration.md](16-restart-state-restoration.md) | daemon の cold restart / crash 後に作業面を取り戻す設計（generic terminal の lineage と `ResumeTerminal`、durable screen checkpoint、workspace restore plan） | 提案（PTY 継続は [07](07-pty-crash-continuation.md) と分離） |
-| 17 | [17-multi-workspace-daemon.md](17-multi-workspace-daemon.md) | 1 つの daemon が複数 workspace を tenant として adopt し、daemon を止めずに workspace を切り替えられるようにする設計 | [05-daemon.md](../05-daemon.md) / [04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) へ畳み込み済み（実装 issue #708–#713。残るのは #714 の tenant 向け read-only IPC） |
+| 17 | [17-multi-workspace-daemon.md](17-multi-workspace-daemon.md) | 1 つの daemon が複数 workspace を tenant として adopt し、daemon を止めずに workspace を切り替えられるようにする設計 | [05-daemon.md](../05-daemon.md) / [04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) へ畳み込み済み（実装 issue #708–#714） |
