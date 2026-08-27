@@ -125,12 +125,12 @@ prepare_case() {
 }
 
 run_installer() {
-    (cd "$CWD_DIR" && HOME="$HOME_DIR" FIXTURE_DIR="$FIXTURE_DIR" \
+    (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
         PATH="$FAKE_BIN:$PATH" bash "$INSTALLER")
 }
 
 run_installer_for_version() {
-    (cd "$CWD_DIR" && HOME="$HOME_DIR" FIXTURE_DIR="$FIXTURE_DIR" \
+    (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
         PATH="$FAKE_BIN:$PATH" USAGI_VERSION=v2.0.0 bash "$INSTALLER")
 }
 
@@ -146,6 +146,9 @@ expect_failure() {
     fi
     assert_old_preserved
 }
+
+USAGI_HOME="$TEST_ROOT/ambient-usagi"
+export USAGI_HOME
 
 prepare_case success
 make_binary "$CWD_DIR/usagi" 99.0.0 malicious-cwd-sentinel
@@ -181,7 +184,12 @@ import time
 
 installer, home, fixture, fake_bin, cwd = sys.argv[1:]
 env = os.environ.copy()
-env.update(HOME=home, FIXTURE_DIR=fixture, PATH=f"{fake_bin}:{env['PATH']}")
+env.update(
+    HOME=home,
+    USAGI_HOME=os.path.join(home, ".usagi"),
+    FIXTURE_DIR=fixture,
+    PATH=f"{fake_bin}:{env['PATH']}",
+)
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(cwd)
@@ -223,6 +231,7 @@ PY
 unset FAKE_CURL_LOG
 grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+[ ! -e "$USAGI_HOME" ]
 python3 - "$CASE_DIR/selector.out" <<'PY'
 import re
 import sys
