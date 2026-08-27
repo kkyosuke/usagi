@@ -856,6 +856,18 @@ fn route_pr_modal_click(
     })
 }
 
+/// Give the PR modal ownership of a project-bar click before the process-level
+/// bar can activate the surface behind it. Project-bar coordinates are outside
+/// Home, so they cannot flow through [`route_pr_modal_click`]'s modal geometry.
+fn dismiss_pr_modal_on_project_bar_click(runtime: &mut WorkspaceRuntime, key: &Key) -> bool {
+    if runtime.state().overlay() != Some(Overlay::Prs) || !matches!(key, Key::Click { row: 0, .. })
+    {
+        return false;
+    }
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GardenProjectVisit {
     workspace: WorkspaceId,
@@ -6507,6 +6519,9 @@ fn drive_workspace_controller(
         // Director mode owns `Ctrl-O Ctrl-N` as New; the swap happens once here
         // so PTY forwarding, pane controls, and the reducer all see one key.
         let raw_key = retarget_director_chords(&runtime, term.read_key()?);
+        if dismiss_pr_modal_on_project_bar_click(&mut runtime, &raw_key) {
+            continue;
+        }
         let bar_click = matches!(raw_key, Key::Click { row: 0, .. });
         let bar_target = match &raw_key {
             Key::Click { column, row: 0 } => project_bar(deck, width)
@@ -6516,8 +6531,9 @@ fn drive_workspace_controller(
         };
         let key = adjust_project_bar_pointer(raw_key);
 
-        // Leader shortcuts and project-bar clicks are process-level and win over
-        // every workspace surface, including a focused live PTY and Director.
+        // Leader shortcuts and the remaining project-bar clicks are process-level
+        // and win over every workspace surface, including a focused live PTY and
+        // Director. A PR modal claimed its outside click immediately above.
         // Plain arrows are deliberately local to unobscured Switch mode.
         let switch_arrow_target = switch_arrow_target(deck, runtime.state(), &key);
         let direct_target = match (&key, &bar_target) {
@@ -8118,17 +8134,18 @@ mod tests {
         WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
         adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
         controller_terminal_view, copy_terminal_selection, director_organization,
-        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
-        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
-        home_frame_material, intercept_live_terminal_control, is_user_activity,
-        key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
-        play_startup_splash, poll_and_project_terminals, prepare_activation_settings,
-        prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck,
-        projection_build_counts, recent_paths, registry_contains_path, remove_registry_paths,
-        render_controller_frame, render_home_material, render_home_snapshot,
-        reset_projection_build_counts, restore_open_panes, retarget_director_chords,
-        route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
-        run as run_from_start, run_screen_graph_with_backend, run_with_settings,
+        dismiss_pr_modal_on_project_bar_click, drain_session_completions,
+        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
+        garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
+        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
+        key_to_terminal_bytes_for_mode, new_project_notice, play_startup_splash,
+        poll_and_project_terminals, prepare_activation_settings, prepare_batch_settings,
+        prepare_deck_workspace, prepare_workspace_deck, projection_build_counts, recent_paths,
+        registry_contains_path, remove_registry_paths, render_controller_frame,
+        render_home_material, render_home_snapshot, reset_projection_build_counts,
+        restore_open_panes, retarget_director_chords, route_garden_input, route_pr_modal_click,
+        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -8517,6 +8534,37 @@ mod tests {
             route_pr_modal_click(Some(Overlay::Notes), 24, 80, 1, 4),
             None
         );
+    }
+
+    #[test]
+    fn project_bar_click_closes_the_pr_modal_without_reaching_the_bar() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target: Target::Session(session),
+            revision: 1,
+            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                1625,
+                "https://github.com/kkyosuke/usagi/pull/1625",
+            )],
+        }));
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+
+        assert!(dismiss_pr_modal_on_project_bar_click(
+            &mut runtime,
+            &Key::Click { column: 2, row: 0 }
+        ));
+        assert_eq!(runtime.state().overlay(), None);
+
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
+        assert!(!dismiss_pr_modal_on_project_bar_click(
+            &mut runtime,
+            &Key::Click { column: 2, row: 1 }
+        ));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
     }
 
     fn user_interactions() -> Vec<Key> {
