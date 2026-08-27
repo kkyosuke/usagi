@@ -3237,14 +3237,13 @@ fn stale_terminal() -> ProtocolError {
 }
 
 fn map_dispatch_storage_error(error: anyhow::Error) -> ProtocolError {
-    let capacity = error
-        .to_string()
-        .starts_with("dispatch inbox capacity is exhausted");
+    let detail = error.to_string();
+    let capacity = detail.starts_with("dispatch ") && detail.contains("capacity is exhausted");
     drop(error);
     if capacity {
         ProtocolError::new(
             ErrorCode::ResourceExhausted,
-            "dispatch inbox capacity is exhausted by unacknowledged messages",
+            "daemon dispatch storage capacity is exhausted",
         )
     } else {
         ProtocolError::new(
@@ -8842,6 +8841,13 @@ mod tests {
         assert_eq!(
             map_dispatch_storage_error(anyhow::anyhow!(
                 "dispatch inbox capacity is exhausted by unacknowledged messages"
+            ))
+            .code,
+            ErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            map_dispatch_storage_error(anyhow::anyhow!(
+                "dispatch registry capacity is exhausted by protected records"
             ))
             .code,
             ErrorCode::ResourceExhausted
