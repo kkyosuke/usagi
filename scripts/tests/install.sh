@@ -155,8 +155,10 @@ make_binary "$CWD_DIR/usagi" 99.0.0 malicious-cwd-sentinel
 cp "$CWD_DIR/usagi" "$CASE_DIR/sentinel"
 FAKE_CURL_LOG="$CASE_DIR/curl.log"
 export FAKE_CURL_LOG
-run_installer >/dev/null
+run_installer >"$CASE_DIR/out"
 unset FAKE_CURL_LOG
+grep -q '次回の起動から新しい CLI を使える' "$CASE_DIR/out"
+grep -q "daemon の build が古い場合は 'usagi doctor --fix'" "$CASE_DIR/out"
 grep -q 'releases/download/v2.0.0/' "$CASE_DIR/curl.log"
 if grep -Eq 'raw\.githubusercontent\.com|/releases/latest/download/' "$CASE_DIR/curl.log"; then
     echo "latest update crossed a mutable installer or release URL" >&2

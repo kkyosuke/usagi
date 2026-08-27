@@ -102,7 +102,8 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 ```
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
-最新版へ、`usagi update -v` で選んだ release へ更新できる（反映には再起動が必要）。
+最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。
+起動中の TUI は終了して開き直し、稼働中 daemon の build が古い場合は `usagi doctor --fix` で入れ替える。
 
 対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
 使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
