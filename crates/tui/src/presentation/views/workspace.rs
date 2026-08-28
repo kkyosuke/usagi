@@ -2110,7 +2110,7 @@ fn render_pr_overlay(
         width,
         base,
         &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected())
-            .with_filter(overlay.filter().label()),
+            .with_filter(overlay.filter()),
     )
 }
 

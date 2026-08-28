@@ -8527,16 +8527,16 @@ mod tests {
     #[test]
     fn pr_modal_click_route_claims_the_box_and_closes_on_its_background() {
         assert_eq!(
-            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 2, 4),
+            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 0, 2),
             Some(PrModalClickRoute::Inside)
         );
         assert_eq!(
-            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 1, 4),
+            route_pr_modal_click(Some(Overlay::Prs), 24, 80, 0, 1),
             Some(PrModalClickRoute::Outside)
         );
-        assert_eq!(route_pr_modal_click(None, 24, 80, 1, 4), None);
+        assert_eq!(route_pr_modal_click(None, 24, 80, 0, 1), None);
         assert_eq!(
-            route_pr_modal_click(Some(Overlay::Notes), 24, 80, 1, 4),
+            route_pr_modal_click(Some(Overlay::Notes), 24, 80, 0, 1),
             None
         );
     }
