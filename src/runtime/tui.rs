@@ -3925,9 +3925,9 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                 })?;
             Self::runtime_snapshot(workspace, lifecycle)
         })();
-        if result.is_err()
-            && let Some(previous) = previous
-        {
+        // Refresh is observational: selecting an inactive Garden cache must not
+        // change which workspace subsequent production ports belong to.
+        if let Some(previous) = previous {
             let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
         }
         result
