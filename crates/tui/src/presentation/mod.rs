@@ -3661,6 +3661,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
+        LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
@@ -8393,6 +8394,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::OpenPullRequests)),
             Some(AppEvent::Key(AppKey::OpenPrs))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenGarden)),
+            Some(AppEvent::Key(AppKey::OpenGarden))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::Agent)),

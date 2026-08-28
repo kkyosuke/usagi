@@ -183,6 +183,8 @@ pub enum LiveTerminalAction {
     PreviousTab,
     /// Open the active Closeup target's Pull Request modal.
     OpenPullRequests,
+    /// Open the workspace Garden (`Ctrl-O ,`).
+    OpenGarden,
     /// Move the selected tab one slot toward the next tab.
     MoveTabNext,
     /// Move the selected tab one slot toward the previous tab.
@@ -451,6 +453,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         KeyCode::Char(digit @ '1'..='9') => Some(LiveTerminalAction::ActivateWorkspace(
             u8::try_from(digit.to_digit(10).unwrap_or(1)).unwrap_or(1),
         )),
+        KeyCode::Char(',') => Some(LiveTerminalAction::OpenGarden),
         KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
         KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
@@ -932,6 +935,24 @@ mod tests {
     }
 
     #[test]
+    fn garden_is_reserved_only_after_the_leader() {
+        let comma = || key(KeyCode::Char(','));
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), comma()),
+            LiveInputOutput::Action(LiveTerminalAction::OpenGarden)
+        );
+        assert_eq!(
+            LiveInputClassifier::default().classify(T0, comma()),
+            LiveInputOutput::Passthrough(b",".to_vec())
+        );
+    }
+
+    #[test]
     fn director_chord_distinguishes_ctrl_g_from_plain_g() {
         for follow_up in [
             ctrl('g'),
@@ -964,7 +985,7 @@ mod tests {
     fn plain_view_control_keys_reach_the_pty_without_a_leader() {
         // The restored follow-ups are reserved only after a Ctrl-O leader; a bare
         // press still types into the terminal.
-        for character in ['c', 'x', 'u', 'd'] {
+        for character in [',', 'c', 'x', 'u', 'd'] {
             assert_eq!(
                 LiveInputClassifier::default().classify(T0, key(KeyCode::Char(character))),
                 LiveInputOutput::Passthrough(character.to_string().into_bytes())
