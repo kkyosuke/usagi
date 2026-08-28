@@ -470,6 +470,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ（[指示モード](#指示モードdirector-mode)が開いている間は New） |
 | `Ctrl-O` `p` | PreviousTab | 前の tab を選ぶ |
 | `Ctrl-O` `Ctrl-P` | OpenPullRequests | focused session の Pull Request modal を開く |
+| `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する（[指示モード](#指示モードdirector-mode)が開いている間は NextTab） |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
@@ -481,7 +482,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `n` / `p` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `,` / `n` / `p` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
 **指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
 NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は

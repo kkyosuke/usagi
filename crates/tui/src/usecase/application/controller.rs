@@ -1706,6 +1706,8 @@ pub enum AppKey {
     OpenDirectorNew,
     /// workspace scope overlay を開く。
     OpenOverview,
+    /// workspace Garden を直接開く。
+    OpenGarden,
     /// target scope overlay を開く。
     OpenCloseupOverlay,
     /// Open the active target's scratchpad. No keyboard chord is assigned here.
@@ -3700,6 +3702,13 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     if let Some(effects) = update_overlay_control_chord(state, overlay, &key) {
         return effects;
     }
+    // Garden replaces the whole Home frame, so opening it here would discard a
+    // command draft or confirmation instead of restoring that front surface on
+    // wake. Keep the explicit shortcut subject to the same foreground guard as
+    // idle auto-open.
+    if matches!(key, AppKey::OpenGarden) {
+        return Vec::new();
+    }
     if matches!(overlay, Overlay::Closeup) && matches!(key, AppKey::Escape) {
         dismiss_closeup_action_modal(state);
         return Vec::new();
@@ -4057,6 +4066,11 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         AppKey::OpenOverview | AppKey::Char(':') => {
             state.overlay = Some(Overlay::Overview);
+            Vec::new()
+        }
+        AppKey::OpenGarden => {
+            state.overlay = Some(Overlay::Garden);
+            state.notice = None;
             Vec::new()
         }
         AppKey::OpenCloseupOverlay => {
@@ -8630,6 +8644,38 @@ mod tests {
                 .notice()
                 .is_some_and(|notice| notice.message.as_str().contains("takes no arguments"))
         );
+    }
+
+    #[test]
+    fn garden_shortcut_opens_without_replacing_a_front_surface() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        state.notice = Some(Notice::new("stale feedback"));
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenGarden)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert!(state.notice().is_none());
+
+        state.overlay = None;
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
+        assert_eq!(state.overlay(), None);
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenGarden)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Garden));
+        assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
+
+        for overlay in [Overlay::Overview, Overlay::Closeup] {
+            state.overlay = Some(overlay);
+            assert!(update(&mut state, AppEvent::Key(AppKey::OpenGarden)).is_empty());
+            assert_eq!(state.overlay(), Some(overlay));
+        }
     }
 
     #[test]
