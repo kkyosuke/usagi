@@ -1700,20 +1700,53 @@ fn hydrated_records(
     }
     for record in records.values() {
         if let Some(replacement_id) = record.superseded_by {
+            let Some(source_id) = record.resume_source else {
+                return Err(RuntimeSnapshotError::ResumeRelation);
+            };
             let Some(replacement) = records
                 .values()
                 .find(|candidate| candidate.runtime.agent_runtime_id == replacement_id)
             else {
                 return Err(RuntimeSnapshotError::ResumeRelation);
             };
-            if replacement.resumed_from != record.resume_source
+            if replacement.resumed_from != Some(source_id)
                 || replacement.continuation != record.continuation
             {
                 return Err(RuntimeSnapshotError::ResumeRelation);
             }
         }
     }
+    validate_acyclic_resume_lineage(&records)?;
     Ok(records)
+}
+
+fn validate_acyclic_resume_lineage(
+    records: &BTreeMap<String, DurableRuntimeRecord>,
+) -> Result<(), RuntimeSnapshotError> {
+    let mut acyclic = std::collections::BTreeSet::new();
+    for record in records.values() {
+        if acyclic.contains(&record.runtime.agent_runtime_id) {
+            continue;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cursor = record;
+        loop {
+            if acyclic.contains(&cursor.runtime.agent_runtime_id) {
+                break;
+            }
+            if !seen.insert(cursor.runtime.agent_runtime_id) {
+                return Err(RuntimeSnapshotError::ResumeRelation);
+            }
+            let Some(replacement_id) = cursor.superseded_by else {
+                break;
+            };
+            cursor = records
+                .get(&replacement_id.as_str())
+                .expect("validated replacement remains present");
+        }
+        acyclic.extend(seen);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2311,6 +2344,54 @@ mod tests {
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: vec![lineage_source.clone(), missing_replacement_backref],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
+        let (unfenced_runtime, unfenced_operation) = refs(&request);
+        let mut unfenced_source = record.clone();
+        unfenced_source.superseded_by = Some(unfenced_runtime.agent_runtime_id);
+        let unfenced_replacement = DurableRuntimeRecord {
+            runtime: unfenced_runtime,
+            operation: unfenced_operation,
+            ..record.clone()
+        };
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![unfenced_source, unfenced_replacement],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ResumeRelation
+        );
+        let first_source_id = usagi_core::domain::id::AgentResumeSourceId::new();
+        let second_source_id = usagi_core::domain::id::AgentResumeSourceId::new();
+        let (first_runtime, first_operation) = refs(&request);
+        let (second_runtime, second_operation) = refs(&request);
+        let mut first_cycle = DurableRuntimeRecord {
+            runtime: first_runtime,
+            operation: first_operation,
+            continuation: Some(continuation),
+            resume_source: Some(first_source_id),
+            resumed_from: Some(second_source_id),
+            ..record.clone()
+        };
+        let second_cycle = DurableRuntimeRecord {
+            runtime: second_runtime,
+            operation: second_operation,
+            continuation: Some(continuation),
+            resume_source: Some(second_source_id),
+            resumed_from: Some(first_source_id),
+            superseded_by: Some(first_cycle.runtime.agent_runtime_id),
+            ..record.clone()
+        };
+        first_cycle.superseded_by = Some(second_cycle.runtime.agent_runtime_id);
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![first_cycle, second_cycle],
                 generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),

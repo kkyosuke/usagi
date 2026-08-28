@@ -1229,8 +1229,8 @@ resume source を exact に fence する。いずれも daemon restart を越え
 resume では active owner が foreign shard を書き換えないため、replacement 側の `resumed_from` を durable な正本とし、
 全 retained shard の hydrate 時に同じ continuation・scope を持つ foreign source の `superseded_by` だけを derived state
 として復元する。各 record の launch scope は runtime terminal の workspace・session・worktree と完全一致しなければならない。
-同一 generation 内の片側 relation、競合する replacement、未知の source、重複 source ID、continuation・scope の不一致は
-startup validation error である。
+同一 generation 内の片側 relation、resume source ID を欠く relation、循環 lineage、競合する replacement、未知の source、
+重複 source ID、continuation・scope の不一致は startup validation error である。
 
 各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Codex では [private structured capture request](04-ipc.md#codex-structured-capture-request) の入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は spawn 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
