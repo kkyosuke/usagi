@@ -12,7 +12,9 @@ use usagi_core::domain::{
     },
 };
 
-use super::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner};
+use super::{
+    CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner, PROFILE_REVISION,
+};
 use crate::usecase::{
     generation::ProcessIdentity,
     runtime::{
@@ -272,7 +274,7 @@ fn renders_resume_only_without_an_initial_prompt() {
     request.provider_resume = Some(ProviderResumeRef {
         provider: ProviderKind::Codex,
         native_session_id: ProviderSessionId::new("structured-codex-session").unwrap(),
-        adapter_revision: 1,
+        adapter_revision: PROFILE_REVISION,
         scope: request.scope.clone(),
         provenance: ProviderCaptureProvenance::ProviderStructured,
         last_known_status: ProviderResumeStatus::Interrupted,
@@ -443,12 +445,12 @@ fn durable_snapshot_contains_no_provisioned_values_and_fails_closed_on_revision_
     assert!(!serialized.contains("ephemeral system prompt"));
     assert!(adapter.validate_snapshot(&resolved.snapshot).is_ok());
 
-    let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), 2);
+    let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), PROFILE_REVISION + 1);
     assert_eq!(
         newer.validate_snapshot(&resolved.snapshot),
         Err(LaunchValidationError::ProfileRevisionMismatch {
-            expected: 1,
-            actual: 2
+            expected: PROFILE_REVISION,
+            actual: PROFILE_REVISION + 1
         })
     );
 }

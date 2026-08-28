@@ -5,8 +5,7 @@ status: done
 priority: high
 labels: [review, v2, tui, terminal, resilience]
 dependson: []
-related: [216, 265, 303, 365, 385, 388]
-parent: 453
+related: [216, 303, 365, 385, 388]
 created_at: 2026-07-20T12:06:20.675238+00:00
 updated_at: 2026-07-20T22:11:04.307414+00:00
 ---

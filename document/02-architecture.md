@@ -2,8 +2,9 @@
 
 > [ドキュメント目次](README.md) ｜ ← 前へ [1. プロジェクト概要](01-overview.md) ｜ 次へ → [3. TUI](03-tui.md)
 
-v2 の実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
-面（TUI / daemon / 入口）の境界をクレート境界に一致させ、依存方向を rustc で強制する。
+実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
+面（TUI / daemon / 入口）の境界をクレート境界に一致させ、面どうしの依存禁止を rustc で強制する。
+クレート内は古典的な4層をそのまま重ねたものではなく、後述する実装依存行列を検査で固定する。
 本書がディレクトリ構成・クレート責務・依存ルールの正本である。
 
 ## 目次
@@ -26,8 +27,7 @@ v2 の実装は **Cargo workspace 上の 4 クレート＋合成ルート（ル�
 
 ## なぜ 4 クレートか
 
-v2 は「PTY 所有を daemon に移し、TUI は attach クライアントになる」設計
-（[v1/document/proposals/02-daemon.md](../v1/document/04-orchestration.md)）と、
+「PTY 所有を daemon に移し、TUI は attach クライアントになる」設計と、
 「常駐しない入口（CLI / MCP）は daemon を権威とするクライアントにする」設計
 （[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）を前提にする。
 この設計ではコードが自然に次の 4 つに分かれる。
@@ -37,8 +37,7 @@ v2 は「PTY 所有を daemon に移し、TUI は attach クライアントに�
 - **入口面（cli）**: 常駐しない入口。人間向け CLI サブコマンドとエージェント向け MCP サーバ。
 - **共通（common）**: 各面が共有する domain エンティティ・usecase・IPC プロトコル型・永続化。
 
-v1 は単一クレート内のモジュール分割だったため、層・面の依存方向はレビューでしか守れなかった。
-v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon の内部実装へうっかり依存する」類の
+この4分割をクレートとして表現し、「TUI が daemon の内部実装へうっかり依存する」類の
 逆流をコンパイルエラーにする。
 
 ## ディレクトリ構成
@@ -96,6 +95,7 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │           ├── infrastructure/  # attach クライアント（daemon への IPC クライアント側）・端末バックエンド
 │           └── presentation/    # 画面描画・キー入力マッピング・起動バナー runner
 │               ├── frame            # ANSI/Unicode 幅をセル grid にする pure frame diff（端末 write は adapter 側）
+│               ├── workspace_deck   # process-level project tab membership / overlay reducer / bar projection
 │               ├── theme            # 色テーマ（意味的な役割→具体色の単一情報源。ANSI SGR を吐く）
 │               ├── views/            # 各画面の view（splash / welcome / open / new / config / home）
 │               │   ├── welcome            # トップメニュー（Open/New/Config/Quit ＋ recent 2 カラム。単体 workspace と unite を描き分け）の状態と描画
@@ -115,7 +115,6 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 │               └── layouts/          # 領域配置（ペイン分割・chrome＝枠/ヘッダ/フッタ/ステータス行）
 │                   ├── mascot_screen      # マスコット＋タイトル＋中央寄せボディ＋固定フッタの共通全画面 chrome（welcome / config 等が共有）
 │                   └── panes              # 左右 2 ペインの幅割り当てと結合（workspace 画面が使う）
-└── v1/                   # 退避された旧実装（独立 Cargo プロジェクト。workspace exclude）
 ```
 
 ディレクトリ名は `crates/<短い名前>`、パッケージ名は衝突回避のため `usagi-<名前>` とする
@@ -127,20 +126,21 @@ v2 ではこの 4 分割をクレートとして表現し、「TUI が daemon �
 |---|---|---|
 | `usagi-core` | `crates/core` | 各面が共有する domain / usecase / infrastructure（IPC プロトコル型・永続化・git） |
 | `usagi-daemon` | `crates/daemon` | 常駐プロセス（`usagi daemon`）のサーバ側。daemon lifecycle verb、IPC server protocol、daemon-owned terminal / runtime の usecase と Unix transport を持つ |
-| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを実装していく |
-| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を実装していく（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)） |
+| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを持つ |
+| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を持つ。配置の採用理由は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) に残す |
 | `usagi`（bin） | ルート | 合成ルート。実 IO（標準入出力・引数・端末）を束ね、各面へ dispatch する |
 
 ### usagi-tui の内部構成
 
-TUI 面はクレート内でクリーンアーキテクチャの層を切る（依存方向は
-`presentation → usecase → domain ← infrastructure`）。複数 surface が共有する domain 語彙は
+TUI 面はクレート内を presentation / usecase / infrastructure に分ける。presentation と
+infrastructure adapter は usecase が公開する port / state へ依存し、usecase は同じクレートの
+presentation / infrastructure へ依存しない。複数 surface が共有する domain 語彙と technical boundary は
 [usagi-core](#各クレートの責務) が持つ。一方、TUI の表示 intent のように一つの face だけが使う domain / port は
 その face の usecase 境界に閉じる。`AgentTabIntent` は TUI-local domain であり、core domain へ置かない。
 
 | 層（`crates/tui/src/`） | 置くもの |
 |---|---|
-| `presentation/` | 画面描画・キー入力マッピング。描画は v1 と同じく自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分け、view が layout で領域を割りそこへ widget を配置する。色は `theme`（意味的な役割 accent / success / danger … を具体色へ写す単一情報源。ANSI SGR を直接吐き外部クレートに依存しない）で一元管理する。対話ループもここに置く（`run_with_settings` は `Terminal`、`WorkspaceLoader`、`SettingsPort` を注入し、Welcome ⇄ Open / New / Config、Open ⇄ Workspace の画面グラフを回す。Config は scope ごとの draft を持ち、保存失敗時も保持する。Workspace 内では Switch / Closeup の mode と Overview / PR の最前面 modal を状態機械で dispatch し、modal widget が組み立て済み workspace frame に枠を合成する。Recent は Welcome から Workspace へ直接進み、Esc で Welcome へ戻る） |
+| `presentation/` | 画面描画・キー入力マッピング。描画は自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分ける。process-level `workspace_deck` は ordered canonical path / active identity / Add・Switcher と project bar の identity-bearing hit geometry だけを所有し、workspace ごとの session / pane / modal state は共有しない。対話ループは active snapshot を先に prepare し、旧 composition を drop した後に次の factory を呼ぶため resident composition は常に 1 件である。 |
 | `usecase/` | TUI に閉じた application ロジック。起動画面の `EntryScreen`、それを具体的な描画・入力実装へ委譲する `ScreenRunner` 境界、管理画面用の端末ポート `Terminal` と入力語彙 `Key`、live pane 専用の端末非依存入力語彙・bytes encoder・`Ctrl-O` classifier、Welcome / Open / Recent の typed attach と Home の純粋 controller（state / event / effect reducer、TUI-local backend port と fake backend）。controller が返した全 `Effect` を daemon 所有のポート群（session command / agent / notes・environment store / workspace command / decision / PR・preview・browser）へ振り分ける本番 executor `daemon_backend`。実 IO ポートは合成ルートが 1 つの backend factory から注入し、`effect → 実行 → event → update()` の単方向ループを閉じる。Home は runtime ごとの phase を保持し、target ごとに `done > waiting > running > ready > absent` で集約する。progress・operation / terminal error・disconnect / reconnect / resync は safe message と error ID だけを TUI-local feedback として保持する。stable `TerminalRef` で tab / pending placeholder / attach policy を扱う Closeup pane reducer と、その reducer を daemon inventory / stream / resume / geometry dedupe へ結合する `pane_runtime`、Agent tab の order / selection を還元し legacy dismissal を移行する TUI-local `AgentTabIntent` domain と persistence port、Overview / Closeup コマンドの解釈・dispatch、画面グラフの遷移、イベント処理の状態機械 |
 | `infrastructure/` | daemon 端末へ attach する IPC クライアント側と端末バックエンド（raw mode・端末制御・キー/ホイール読み取り・クリップボード）。daemon push adapter は phase、safe error、connection feedback を TUI-local projection に変換し、wire の detail を越境させない |
 
@@ -257,16 +257,14 @@ create の再送は、初期 status と request fields が一致する committed
 重複していれば既存番号を任意に返さず ambiguity error になる。したがって derived failure や応答
 消失の後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
 
-issue number の採番 authority も本節を正本とする。Git repository では v1 / v2 が共有する
+issue number の採番 authority も本節を正本とする。Git repository では
 `<git-common-dir>/usagi/issue-numbers/`、非 Git workspace では
 `<workspace>/.usagi/issue-numbers/` にだけ authoritative state を置く。
 
 ```text
 <git-common-dir>/usagi/issue-numbers/
 ├── .lock
-├── sequence.json                         # normal: { "version": 1, "last_reserved": N }
-│                                         # blocker: last_reserved = u32::MAX,
-│                                         #          migration_floor = F
+├── sequence.json                         # { "version": 1, "last_reserved": N }
 ├── legacy-v2-migrated                    # Git migration commit: canonical body "N\n"
 └── reservations/
     └── 0000000516.reserved               # body: "516\n"
@@ -278,11 +276,11 @@ issue number の採番 authority も本節を正本とする。Git repository �
 
 <observed-issue-store>/usagi-issue-sequence/
 ├── .lock                                 # nested/non-Git の pre-fix store-local lock
-└── next                                  # common legacy と同じ active / fenced format
+└── next                                  # shared old-v2 と同じ active / fenced format
 ```
 
 raw cwd が repository 内の深い path でも、最寄り ancestor の `.git` まで遡って worktree boundary を決める。
-authority は v1 と同じく、[Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
+authority は [Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
 `git -C <worktree-root> rev-parse --path-format=absolute --git-common-dir` の成功結果だけを canonical existing
 directory として採用する。valid separate-git-dir / submodule で `commondir` が無い場合は Git が返す git dir
 自体を使う。empty / non-repository `.git`、stale / dangling gitfile・`commondir`、non-UTF-8 / empty output、
@@ -295,7 +293,7 @@ atomicに切り替えられないため、cached non-Git allocatorを停止し�
 offlineでGit authorityへreconcileしてから旧fallbackを取り除く。absence checkだけはcached processをfenceしないので、
 quiescenceは必須の外部gateである。Git→non-Gitへのclassification変更も同じoffline reconciliationなしで行わない。
 
-lock 順序は new authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
+lock 順序は current authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
 `sequence.json`、`legacy-v2-migrated`、全 reservation marker、旧 `next`、workspace root と
 登録済み全Git worktree root、それぞれの`.usagi/sessions/<name>/`、および登録済み全Git worktreeでtracked / untracked / ignoredとしてmaterialize済みの
 arbitrary nested issue storeにある全sourceのfilename prefix / parse可能なfrontmatter宣言の最大値を最初に検証する。activeな旧`next`は
@@ -303,82 +301,47 @@ plain `u32` として high-water へ fold する。observed path のうち senti
 相互に独立した旧 writer を atomic に止められないため、authoritative file を書く前に停止する。
 
 ```text
-fresh Normal sequence + sole unfenced legacy:
-  v1-visible floor A == durable floor F:
-    legacy next = sentinel(F)（atomic; 旧 v2 を最初に停止）
-  sole live legacy floor B == durable floor F:
-    sequence blocker(F)（atomic; 旧 v1 を一時停止）
-  A < F and B < F:
-    fail-closed（1 writeで安全にbridgeできない）
-no unfenced legacy:
-  sequence blocker(F)
-pre-existing blocker + unfenced legacy:
-  legacy next = sentinel(F)（旧 v1 は既に停止済み）
+F = max(sequence, reservation journal, source claims,
+        optional migration marker, every old-v2 next/sentinel)
 
-  → sequence blocker(F) を保証
-  → all observed legacy next = "migrated-to-usagi-issue-numbers:N\n"
+migration required:
+  → all observed old-v2 next = "migrated-to-usagi-issue-numbers:N\n"
   → reservation marker
   → legacy-v2-migrated = "N\n"（Git のみ）
-  → normal sequence.json
+  → sequence.json
+  → source Markdown
+
+migration complete:
+  → reservation marker
+  → sequence.json
   → source Markdown
 ```
 
-ここで `A` は全旧v1 callerが共有して見えるNormal sequence / reservation journalの最大、`B` はsole unfenced legacy
-floor、`F` はこれらに全worktree source / blocker recovery floor / optional migration watermark / 全fenced legacy floorも加えたdurable最大、
-`N = F + 1` である。異なる2 authority を1回でatomic updateできないため、fresh migrationの最初の成功writeは、もう片側に
-全durable floorが見える場合にだけlive allocatorを1つへ減らす。sentinelは旧v2を恒久的にfenceし、blockerはnormal sequenceを
-最後に戻すまで旧v1を一時停止する。両live sideがfenced watermarkより低ければ、どちらを先に止めても他方が番号を再利用するため、
-write前にoffline reconciliationを要求する。source visibilityはcallerのworkspace rootによって異なるため、first-write判定で
-`A`へ加えない。
+ここで `N = F + 1` である。sentinel は旧 v2 writer を恒久的に fence する。現行 allocator は旧 v2 の lock を保持して sentinel を先に公開するため、待機していた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。複数の独立した active / missing 旧 authority がある場合は、安全な停止順を証明できないため write 前に offline reconciliation を要求する。
 
-blocker は `{ "version": 1, "last_reserved": 4294967295, "migration_floor": F }` を1回の atomic write で公開する。
-旧 v1 は追加 field を無視するが `u32::MAX` の checked increment で停止し、fixed v2 は `F` から本来の high-water を
-回復する。`migration_floor` が無い `last_reserved = u32::MAX` は最終番号を正常予約した exhausted state である。
-blocker 以外で `migration_floor` が存在する、または floor 自体が `u32::MAX` の JSON は破損として拒否する。
-
-旧 writer が先に列挙済み旧 lock を保持していれば、その writer が更新した最新 `u32` を fixed allocator が fold する。
-fixed allocator を待っていた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。non-exhaustedなnormal sequence
-は全 sentinel / reservation / Git marker より後、かつ最後に公開するため、正常終了後は旧 v1も同じ authority の次番号へ
-進める。Git の sentinel と `legacy-v2-migrated` は migration watermark であり通常採番の live high-water ではない。
-通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発 legacy path を
-再移行するときだけ全 observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。interrupted
-development buildが残した既存markerだけをcanonical検証してrecovery floorへfoldし、legacy列挙を抑止する用途には使わない。
+Git の sentinel と `legacy-v2-migrated` は migration watermark であり、通常採番の live high-water ではない。通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発の旧 v2 path を再移行するときだけ observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。
 
 crash recovery は次の境界で固定する。atomic write の Write / Rename failure は old / new の完全な片方だけを露出する。
 
-| 最後に durable になった境界 | crash 後に進める旧 allocator | retry |
-| --- | --- | --- |
-| first sentinel / blocker が未commit | 変更前の旧state（fixed予約なし） | 元のfloorからfirst writeを再試行 |
-| sentinel-first(F), blockerなし | v1 のみ | v1のsequence / journal進捗をfold |
-| blockerのみ | 高水位を持つsole unfenced legacy v2（存在時）のみ | その`next`の進捗をfold |
-| blocker after sentinel-first, sentinel(N)なし | なし | blocker floorからF+1を予約 |
-| first / partial / all sentinel(N) | なし | Nを消費し、retryはN+1へ進む |
-| reservation marker | なし | journal を fold して次番号へ進む |
-| Git migration marker | なし | blocker / journal / marker を fold |
-| normal sequence, source 未作成 | v1 のみ（旧 v2 は fenced） | 予約済み gap を再利用しない |
-| exhausted safe-first sentinel(MAX) | v1のみ（MAXで停止） | normal sequence(MAX)をrecovery tagとして公開 |
-| exhausted safe-first sequence(MAX) | legacyはMAXで既に停止 | 全sentinel(MAX)へ収束 |
-| exhausted normal(MAX) + partial sentinel / old Git marker | なし | 残りsentinel → marker(MAX) → final normal(MAX) |
-| exhausted Git marker(MAX), final sequence failure | なし | blocker / journal / marker MAXをfoldしnormal(MAX)へ収束 |
+| 最後に durable になった境界 | retry |
+| --- | --- |
+| sentinel が未commit | 元の floor から migration を再試行 |
+| first / partial / all sentinel(N) | N を fold し、N+1 から再試行 |
+| reservation marker | journal を fold して次番号へ進む |
+| Git migration marker | journal / marker / sentinel を fold |
+| sequence、source 未作成 | 予約済み gap を再利用しない |
+| exhausted partial sentinel(MAX) | 残り sentinel → marker(MAX) → sequence(MAX) へ収束 |
 
-sequence は strict な schema / version / blocker semantics、sentinel、migration marker、reservation marker は canonical な
-filename/body を検証する。active legacy numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid state、read
-failure、および non-exhausted normal sequence 下の Git marker / shared sentinel mismatch は新しい write より前に fail-closed になる。
-marker 未作成の sentinel-first 境界、または blocker 下で crash が残した valid sentinel / reservation / marker floor の差だけは
-最大値を fold して回復する。`Normal(u32::MAX)`は旧v1の停止をdurableに証明するterminal recovery tagなので、
-その下でのshared sentinel(MAX) / 旧Git markerの差だけもpartial exhausted migrationとして回復する。
+sequence は strict な schema / version、sentinel、migration marker、reservation marker は canonical な filename/body を検証する。active old-v2 numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid stateとread failureは新しいwriteより前にfail-closedになる。Git migration markerがある場合、shared sentinelはmarker以上のfenced floorでなければならない。markerより新しいsentinelはpartial migrationとして最大値へfoldする。
 
 source high-waterはfilename prefixだけでなく、parse可能なfrontmatterの`number`も含む。
 `007-*.md`が`number: 800`を宣言する場合も、prefixの無いsourceが`number: 900`を宣言する場合も、
 宣言側を再採番しない。allocation時のsource read / parse failureは宣言high-waterを証明できないため
 lenient listingのようにskipせずfail-closedにする。
 
-durable floorが`u32::MAX`の場合も、safe first-write条件を満たすならallocation errorを即時返してnumericな旧`next`を残さない。
-旧v1がMAXのsequence / journal / blockerを見る場合はsentinel(MAX)を先に公開し、sole legacyがMAXを持つ場合は
-normal sequence(MAX)を先に公開する。旧v2が既にsentinelで停止している場合もsequence(MAX)を先に公開できる。
-どちらのlive側もMAXを見ないsource-only exhaustionはwrite前に停止する。safeなfirst write後は
-normal sequence(MAX)をrecovery tagとして直ちに公開し、全sentinel(MAX) → Git marker(MAX) →
-final normal sequence(MAX)と収束する。reservationやsourceを追加せずexhaustion errorを返す。
+durable floorが`u32::MAX`の場合は、全old-v2 pathをsentinel(MAX)へfenceし、Git marker(MAX)と
+sequence(MAX)へ収束させる。途中のatomic writeが失敗しても、既存sequence、active `next`、または先に
+公開済みのsentinel(MAX)からfloorを回復する。reservationやsourceを追加せずexhaustion errorを返す。
 
 Git は common legacy を常時、normalized worktree より深い caller の current store-local path を `next` 未作成でも列挙する。
 normalized workspace と登録済み全 Git worktree の各 `.usagi/sessions/` を毎回走査し、通常の direct-session child は
@@ -392,24 +355,19 @@ fail-closed になる。child 側から起動した場合も、conventional work
 対象へ加える。source high-water も normalized workspace と登録済み全 worktree の root / direct-session child、および
 materialize 済み nested source という同じ親集合から走査する。registered worktree root自身は旧v2も`.git`経由でcommon legacyを使うためstore-local pathを追加しない。
 非 Git は workspace root / current と存在する全 direct-session root を `next` 未作成でも列挙する。`Active` と `Missing` は
-ともに未封鎖で、列挙済み authority のうち2件以上なら blocker 前に停止する。dangling sessions / issue store / authority pathも
+ともに未封鎖で、列挙済み authority のうち2件以上なら authoritative write 前に停止する。dangling sessions / issue store / authority pathも
 「missing」と推測せず、session symlinkも暗黙に追わずfail-closedになる。非 Git は global completion marker を公開しないため、後発 direct session を
 既存 marker で隠さない。
 
 ただし、Gitでまだ legacy fileを作っていない arbitrary nested cwd、非Gitのroot/current/direct-session外の
 arbitrary nested cwd、および列挙snapshot後に初めてmaterializeするpathは有限に封鎖できない。sentinel markerだけで
-その未知 process の将来 write を防げるとは主張しない。最初の fixed reservation 前に全
+その未知 process の将来 write を防げるとは主張しない。最初の current reservation 前に全
 pre-fix process の cwd / legacy path を inventory し、列挙対象へ materializeして fenceするか停止して再起動を禁止することが
 safe rollout の外部 compatibility gate である。複数の未封鎖 file が見つかった場合は、全 pre-fix writer を停止し、最大
 floor を失わず1つの authorityへオフラインで整理するまで allocationを再開しない。
 並行回帰では、HEAD直前のraw-cwd resolver / filename floor / plain-u32 increment / StoreLockと同じロジックを
-別processで実行するold-v2 compatibility emulatorを用いる。これはhistorical binaryそのものとは呼ばず、
-旧側先行予約のfoldとfixed側先行sentinel parse failureを実OS process / file lockで固定する互換fixtureである。
-release acceptanceではこれと分けて、pre-fix commit `677405d31267e9205b76a26fe8b31098b6086852`からbuildした
-実`usagi 2.6.0` MCPを同一processのまま維持するrollout試験も行う。旧MCP create、fixed MCP createによるfold / fence、
-同じ旧MCP processの再createという順で、最後がsentinelのplain-`u32` parse errorになり、source / derived / authority
-artifactがbyte-for-byte不変であることを確認する。この実binary試験はrelease時の証拠であり、CIで常時動かす
-deterministicなlock / crash境界の保証は上記emulator回帰が担う。
+別processで実行するold-v2 compatibility emulatorを用いる。旧側先行予約のfoldとcurrent側先行sentinel parse failureを
+実OS process / file lockで固定する。
 
 issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
 point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed
@@ -427,7 +385,10 @@ parse 可能な exact-path source を同時に得て、query、ambiguity、done 
 snapshot を使う。snapshot 前には同じ lock のまま scheduled derived repair を試みるため、自己修復契約も保つ。
 全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
 error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
-決める。番号指定 delete は repair 手段に使わない。
+決める。番号指定 delete は repair 手段に使わない。`IssueStore::validate_source_set` は immutable な source
+snapshotをstrictにparseし、filename/frontmatter不一致・prefix欠落・重複番号をerrorにする。rootの
+`committed_issue_sources_are_parseable_and_unambiguous` testがcheckout済み `.usagi/issues/*.md` 全体へこの検査を適用し、
+壊れたsource setをCIで拒否する。
 
 ## Git subprocess の環境 confine
 
@@ -472,8 +433,12 @@ system / global config は**意図的に残す**。private repository の clone 
 必要とし、それは「repository が指定する任意コマンド」とは別物である。root Agent に渡す read-only git はこれに加えて
 system / global config も落とす（remote に到達する理由がないため）。
 
-`filter.<driver>.smudge` は driver 名を tracked `.gitattributes` が任意に選べるため、固定 key の上書きでは
-無効化できない。filter process を起動しない materialization は未実装で、issue #675 に残る。
+`filter.<driver>.smudge` / `filter.<driver>.process` は attribute が任意の driver 名を選べるため、固定 key の
+上書きでは無効化できない。session worktree 作成は base ref を先に commit object ID へ固定し、その tree 内の全
+`.gitattributes` を blob として検査する。tracked tree に filter attribute があれば checkout 前に拒否する。次に
+branch と `git worktree add --no-checkout` の metadata だけを作り、新worktreeの実効設定にある全 filter driverを
+command scope で無効化した `git read-tree -u` だけでmaterializeする。これによりGit local/global attributeも
+filter processを起動できず、途中失敗時はこの呼び出しが所有するworktreeとbranchだけを補償削除する。
 
 session の Git effect（create、mirror した tree の nested worktree、remove）は全て daemon の
 `GitRunner` 実装 1 か所を通るため、confine もそこで 1 回だけ適用する。
@@ -501,35 +466,57 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   TUI の attach 状態機械は socket 実装を参照せず、実 socket を束ねるのは合成ルートだけである。
 - managed session の lifecycle state は `usagi-core::domain::session_lifecycle` の pure reducer と
   `infrastructure::store::lifecycle::DaemonLifecycleStore` に分ける。後者を保持して reducer 結果を永続化するのは daemon の command handler
-  だけであり、TUI / CLI / MCP は IPC command を通じて要求する。legacy `state.json` は incarnation を持たないため、通常運用では
-  managed state として解釈しない。ただし shared lifecycle state の初期化時だけ、daemon が worktree と repository binding を検証した全 record を
-  stable ID 付き available session として一回だけ採用する。既存 shared state に対する adoption は daemon IPC の明示 recovery action だけが実行し、restart や UI refresh は実行しない。UI-only metadata は legacy store に残し、TUI が同名 record へ読み取り結合する。
+  だけであり、TUI / CLI / MCP は IPC command を通じて要求する。repository-local な `state.json` の session record は
+  managed state として解釈・採用せず、daemon lifecycle store だけを権威にする。notes 等の UI metadata は lifecycle とは独立して扱う。
 - supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
-  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と append-only event journal を保持し、
-  lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
+  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と compacting event journal、
+  offset index、replay checkpoint を保持し、lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
   event producer であり、domain/store はそれらを解釈しない。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない
   （それらは `infrastructure/` の責務）。
 - 外部クレートの version はルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、
-  必要になった時点で追加する（v1 の依存を先回りで持ち込まない）。
+  必要になった時点で追加する。
 - lint 設定は `[workspace.lints]` に置き、各クレートは `[lints] workspace = true` で継承する。
 
 ## クリーンアーキテクチャとの対応
 
-4 層（`presentation → usecase → domain ← infrastructure`）はクレート分割後も維持する。
+この構成が守る Clean Architecture の境界は、**domain の外部非依存**、**面クレートの相互非依存**、
+**面ローカル usecase の presentation / adapter 非依存**である。ディレクトリ名だけから
+`presentation → usecase → domain ← infrastructure` という古典的な4層を全クレートへ一律には適用しない。
 層とクレートの対応は次のとおり。
 
 | 層 | 置き場所 |
 |---|---|
 | domain | `usagi-core` の `domain/` |
 | usecase | 面をまたぐ共有は `usagi-core` の `usecase/`。片面専用のロジックは各面クレート内 |
-| infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末描画は tui）は各面クレート内 |
+| technical boundary / infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末 adapter は tui）は各面クレート内 |
 | presentation | 各面クレート（TUI の画面 / daemon のサーバ端点 / cli のサブコマンド・MCP tool アダプタ）と、ルート `main.rs` の dispatch |
 
-依存方向は「クレート間」（tui / cli / daemon → core）と「core 内モジュール」（usecase → domain ← infrastructure）
-の両方のレベルで守る。実 IO は合成ルートで注入し、各クレートは依存注入によりユニットテスト可能に保つ。
+`usagi-core/infrastructure` は外部 IO adapter だけの置き場ではない。面をまたぐ wire contract、
+cross-process lock を含む transactional store、Git effect の共有実装をまとめた technical boundary である。
+core usecase は `IssueStore` / `WorkspaceStateStore` / `Storage` / `GitRunner` 等を引数として受け、
+その transaction / compensation contract を直接合成する。逆に core infrastructure の adapter は
+usecase が定義する port を実装できる。これらを実体のない同型 port で包み直さず common crate に閉じることを、
+本プロジェクトの明示的な設計判断とする。時計・process 実行等は引き続き注入し、ユニットテスト可能性を保つ。
+
+実装依存行列は次のとおり（`○` は参照可、`—` は同一領域、空欄は禁止）。`core` の technical boundary と
+usecase の相互参照は上記の共有 contract に限り、domain は常に内側に留まる。
+
+| 参照元 | core domain | core usecase | core technical boundary | 同じ面の usecase | 同じ面の infrastructure | 同じ面の presentation |
+|---|---:|---:|---:|---:|---:|---:|
+| core domain | — |  |  | - | - | - |
+| core usecase | ○ | — | ○ | - | - | - |
+| core technical boundary | ○ | ○ | — | - | - | - |
+| face usecase | ○ | ○ | ○ | — |  |  |
+| face infrastructure | ○ | ○ | ○ | ○ | — |  |
+| face presentation | ○ | ○ | ○ | ○ | ○ | — |
+
+クレート間は `tui / cli / daemon → core` だけを許し、面クレートどうしは依存しない。ルート package だけが
+全クレートへ依存して実 IO を合成する。この行列は [`tests/architecture.rs`](../tests/architecture.rs) が、
+全 manifest の usagi dependency と `domain` / `usecase` / `infrastructure` の production Rust AST を走査して強制する。
+コメントや `#[cfg(test)]` の fake は production 依存として数えない。
 
 ## 単一バイナリと合成ルート
 
@@ -613,11 +600,10 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | test / clippy | ルートで実行するとルートパッケージしか対象にならないため、`--workspace` を付ける（test.yml / lefthook / recommend-tests の fail-safe も同様） |
 | auto-release | ルート `Cargo.toml` の `version` 変更を監視する。workspace 継承にせずリテラルで置くのは、この監視が `version = "..."` 行を grep するためである |
 | release-build-check / release.yml | ルートの v2 パッケージを `--features production` で release ビルドする |
-| `v1/` | `[workspace] exclude` で計測・ビルド対象外。`v1/**` を変更する push / PR は v1-test.yml が v1 のマニフェストで検証する |
 
 ## 実装の置き場所ガイド
 
-v1 から機能を再実装するときの置き場所の指針。
+機能を実装するときの置き場所の指針。
 
 | 実装 | 置き場所 |
 |---|---|
@@ -635,6 +621,7 @@ v1 から機能を再実装するときの置き場所の指針。
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
+| live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
 | 画面をまたぐ再利用 UI 部品（widget） | `crates/tui/` の `presentation/widgets/` |
 | 色（意味的な役割→具体色）・色定数 | `crates/tui/` の `presentation/theme` |
@@ -671,7 +658,7 @@ effective 設定から決まり、MCP server の registry と launch prompt の�
 [10. session role#prompt 合成](10-session-roles.md#prompt-合成) が正本で、ここでは重複させない。
 `SystemPrompt` は `McpWiring` と同じ必須 agent capability として fail-closed に検証する一方、選択・合成した
 system prompt 本文は ephemeral な adapter materialization であり、`LaunchRequest`、`LaunchPlan`、
-`DurableLaunchSnapshot` には保存しない（設計判断は issue #592）。
+`DurableLaunchSnapshot` には保存しない。
 
 daemon が snapshot を再生するときは schema と profile revision を検証する。不一致、unknown profile、
 request capability 不足、plan provenance 不一致は typed error で fail-closed とし、最新 catalog から
@@ -911,10 +898,13 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   呼び出しを担う薄い adapter で、実 stdin は合成ルートが束ねる。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
-  `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。報告は
-  daemon が発行して process environment に閉じ込めた credential で報告元 runtime に束縛され、caller は runtime /
-  session / path を名指しできない。未知 phase・malformed payload・配線外 event・credential 欠落は
-  fail-closed で拒否し、request は送らない（非 0 終了）。`transcript_path` は deserialize せず file も開かない。
+  `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。command hook は
+  `command` と `args` を分けた exec form で注入し、shell の quote / tokenization と中間 process に依存しない。報告は
+  kernel から得た hook PID・parent PID・process group を exact live runtime と照合して束縛し、caller は runtime /
+  session / path を名指しできない。provider の direct child は inherited / self-led process group の双方を受理し、
+  shell form との互換用に provider と同じ process group も受理する。未知 phase・malformed payload・配線外 event は
+  request 前に、runtime に束縛できない process は daemon 境界で fail-closed に拒否する（いずれも非 0 終了）。
+  `transcript_path` は deserialize せず file も開かない。
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
   この報告は**すでに動いている daemon へ attach するだけ**で、bootstrap lock も daemon の cold start も
   一切行わない。報告元は当の daemon が起動した agent であり daemon は定義上生きている一方、その agent が
@@ -924,7 +914,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   遅延を払わないという意味でも、attach だけが正しい。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。session の repository 書き込みは own worktree だけに閉じ込め、両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  起動する。session の repository content 書き込みは own worktree に閉じ込め、Git workspace では linked worktree が
+  checkout 外に持つ Git common directory も administrative state として許可する。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
@@ -969,9 +960,12 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
-- **起動固有 writable root**: session は own worktree だけであり、workspace の `.usagi`、Git common dir、
-  data home を追加しない。したがって sibling session、root の tracked issue source、daemon durable state は
-  path の表記や symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
+- **起動固有 writable root**: session は own worktree と、その repository の Git common directory を受け取る。
+  linked worktree の index・refs・logs・object database は checkout 外の common directory にあるため、後者が無いと
+  checkout 内の編集が可能でも `git add` / `git commit` は失敗する。workspace の `.usagi` と data home は追加しないため、
+  sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や symlink alias に
+  かかわらず read-only である。Git common directory は worktree 間で共有される administrative authority なので、
+  session 名・branch・worktree の対応と teardown は引き続き daemon lifecycle state が権威を持つ。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)と
@@ -985,7 +979,9 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   permission mode・onboarding・folder trust・MCP 承認が毎起動リセットされ、Keychain / MDS が無いと
   認証が 401 で失敗する。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
-  （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
+  （host path をディスクへ materialize しない）。各 command hook は `command: <usagi path>` と
+  `args: [...]` を分けた exec form であり、Claude は shell を介さず hook process を直接 spawn する。
+  `PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
   も checkout と Git common dir の書き込みを拒否する。
@@ -1034,11 +1030,15 @@ MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き�
   `~/.claude.json.tmp.<pid>.<random>` を書いて rename で本体に被せる。file 単位で許可すると temp と lock が
   `$HOME` 直下で拒否され、保存が丸ごと失敗する。設定は**読めるのに書けない**状態になるため、症状は
   「起動のたびに folder trust と初回フローを聞かれる」という形で出る（`~/.claude` の grant だけでは直らない）。
-- **`$HOME` 全体は writable にしない**。macOS の profile は prefix を regex（`(allow file-write* (regex
-  #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・temp・backup が
-  すべて覆われる。Linux の `bwrap` は mount 単位でしか許可できず prefix を表現できないため、
-  `--bind-try <prefix>` で config 本体だけを read-write に再 bind する（`$HOME` directory 自体は
-  read-only のままなので、Linux では lock / temp を要する保存経路は通らない）。
+- **既存の `$HOME` entry 全体は writable にしない**。macOS の profile は prefix を regex（`(allow
+  file-write* (regex #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・
+  temp・backup がすべて覆われる。Linux の `bwrap` は mount 単位でしか prefix を表現できないため、launcher が
+  起動直前の `$HOME` 直下 entry を列挙し、`$HOME` を read-write bind してから config prefix family 以外の
+  各 entry を read-only bind に戻す。最後に agent state と起動固有 root を read-write で重ねる。このため lock / temp の
+  新規作成と rename は通る一方、起動時に存在した `.ssh` や repository の ancestor などは read-only のままになる。
+  entry 列挙に失敗した場合や直下 path でない結果は無保護に続行せず fail closed にする。mount policy は起動後に
+  作られる別名の直下 entry を config temp と区別できないため、Linux では新規 `$HOME` 直下 entry の作成も許可されるが、
+  起動時点に存在する entry の内容と subtree は上記の再 bind で保護する。
 - 判定は state root と同じく launcher が exec する program の basename だけを根拠にし、値の正本は
   `usagi-core` の `domain::settings::DefaultModel::global_config_prefix` である。daemon 側の policy gate も
   同じ program から prefix を決め、保護対象 workspace・Git common dir と重なる構成を拒否する。
@@ -1092,7 +1092,7 @@ terminal environment が guard の前提を差し替えない。
 ## 入口面 MCP の tool dispatch
 
 dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
-`agent_complete`、`agent_fail`、`agent_inbox` は tool schema と daemon IPC request 型を公開する。
+`agent_complete`、`agent_fail`、`agent_inbox`、`agent_inbox_ack` は tool schema と daemon IPC request 型を公開する。
 daemon は private caller credential を live runtime と照合し、session lifecycle、Agent runtime、dispatch
 store と caller inbox を一つの durable 経路として compose する。credential の無い呼び出しや current run と
 一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。
@@ -1148,6 +1148,6 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
 
 | 代替案 | 不採用の理由 |
 |---|---|
-| 単一クレート内のモジュール分割（v1 方式） | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
+| 単一クレート内のモジュール分割 | 面・層の依存方向をコンパイラで強制できない。ビルド・テストのクレート単位並列性も得られない |
 | 層ごとのクレート分割（domain / usecase / infrastructure / presentation を各クレート化） | 実行面（TUI / daemon）の境界を表現できず、daemon 専用と TUI 専用の infrastructure が同じクレートに同居する |
 | TUI / daemon を別バイナリとして配布 | リリース CI（4 プラットフォーム）と配布手順の変更が大きい。単一バイナリ＋サブコマンドなら現行リリース機構が無変更で使える |

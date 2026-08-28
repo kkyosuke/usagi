@@ -1,13 +1,13 @@
 ---
 number: 719
 title: fix(daemon): cold start が cwd を無条件に adopt し、稼働中の判定と食い違う
-status: todo
+status: done
 priority: medium
 labels: [v2, daemon, workspace, consistency]
 dependson: []
 related: [712, 714]
 created_at: 2026-08-24T00:44:18.857349+00:00
-updated_at: 2026-08-24T00:44:18.857349+00:00
+updated_at: 2026-08-25T23:59:11+00:00
 ---
 
 ## Finding
@@ -59,7 +59,7 @@ A が本命である。判定の正本は [4. IPC#workspace fence](../../documen
 
 ## 受入条件
 
-- [ ] 同じ directory・同じ command が、daemon の生死によらず同じ結果になる。
-- [ ] `usagi open <path>` と TUI の Open / New は repository でない directory も従来どおり開ける。
-- [ ] cold start が repository でない directory に fence と `.usagi/` を作らない。
-- [ ] 既に adopt 済みの workspace の配下からの実行は、どちらの経路でも従来どおり解決される。
+- [x] 同じ directory・同じ command が、daemon の生死によらず同じ結果になる。
+- [x] `usagi open <path>` と TUI の Open / New は repository でない directory も従来どおり開ける。
+- [x] cold start が repository でない directory に fence と `.usagi/` を作らない。
+- [x] 既に adopt 済みの workspace の配下からの実行は、どちらの経路でも従来どおり解決される。

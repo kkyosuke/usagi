@@ -81,7 +81,6 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "session_remove" => (SessionRoute(Session::Remove), Public),
         "session_resume" => (AgentResume, Public),
         "agent_resume_inventory" => (AgentInventory, Public),
-        "session_recover_legacy" => (SessionRoute(Session::RecoverLegacy), Public),
         "session_prompt" => (SessionRoute(Session::Prompt), Public),
         "session_note_get" => (SessionRoute(Session::NoteGet), SessionCredential),
         "session_note_update" => (SessionRoute(Session::NoteUpdate), SessionCredential),
@@ -100,6 +99,7 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
         "agent_complete" => (DispatchRoute(Dispatch::AgentComplete), AgentCredential),
         "agent_fail" => (DispatchRoute(Dispatch::AgentFail), AgentCredential),
         "agent_inbox" => (DispatchRoute(Dispatch::AgentInbox), AgentCredential),
+        "agent_inbox_ack" => (DispatchRoute(Dispatch::AgentInboxAck), AgentCredential),
         "user_decision_request" => (
             DispatchRoute(Dispatch::UserDecisionRequest),
             AgentCredential,
@@ -212,6 +212,8 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
 mod tests {
     use super::{McpToolFamilies, descriptor, registry, registry_with_families, validate_registry};
     use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use std::path::Path;
+    use usagi_core::domain::user_decision::UserDecisionPolicy;
     use usagi_core::usecase::client::SessionAction;
 
     struct FixtureTool(&'static str);
@@ -318,10 +320,81 @@ mod tests {
 
             if !name.starts_with("issue_") && !name.starts_with("memory_") {
                 assert!(
-                    matches!(tool.call_store(&serde_json::json!({})), Err(ToolError::Unimplemented(n)) if n == name)
+                    matches!(tool.call_store(&serde_json::json!({}), Path::new(".")), Err(ToolError::Unimplemented(n)) if n == name)
                 );
             }
         }
+    }
+
+    #[test]
+    fn user_decision_schemas_publish_and_enforce_the_domain_policy_ceilings() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["title"]["maxLength"],
+            UserDecisionPolicy::TITLE_MAX_BYTES
+        );
+        assert_eq!(
+            properties["title"]["x-maxUtf8Bytes"],
+            UserDecisionPolicy::TITLE_MAX_BYTES
+        );
+        assert_eq!(
+            properties["prompt"]["maxLength"],
+            UserDecisionPolicy::PROMPT_MAX_BYTES
+        );
+        assert_eq!(
+            properties["options"]["maxItems"],
+            UserDecisionPolicy::OPTION_COUNT_MAX
+        );
+        let option = &properties["options"]["items"]["properties"];
+        assert_eq!(
+            option["id"]["maxLength"],
+            UserDecisionPolicy::OPTION_ID_MAX_BYTES
+        );
+        assert_eq!(
+            option["label"]["maxLength"],
+            UserDecisionPolicy::OPTION_LABEL_MAX_BYTES
+        );
+        assert_eq!(
+            option["description"]["maxLength"],
+            UserDecisionPolicy::OPTION_DESCRIPTION_MAX_BYTES
+        );
+        assert_eq!(
+            properties["idempotency_key"]["maxLength"],
+            UserDecisionPolicy::IDEMPOTENCY_KEY_MAX_BYTES
+        );
+
+        let overlong = serde_json::json!({
+            "title": "t".repeat(UserDecisionPolicy::TITLE_MAX_BYTES + 1),
+            "prompt": "prompt",
+            "options": [],
+        });
+        assert!(request.validate(&overlong, &schema).is_err());
+        let multibyte = serde_json::json!({
+            "title": "界".repeat(UserDecisionPolicy::TITLE_MAX_BYTES / 3 + 1),
+            "prompt": "prompt",
+            "options": [],
+        });
+        assert!(request.validate(&multibyte, &schema).is_err());
+
+        let resolve = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_resolve")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let overlong = serde_json::json!({
+            "decision_id": "00000000-0000-0000-0000-000000000000",
+            "answer": {
+                "kind": "freeform",
+                "text": "a".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES + 1),
+            },
+        });
+        assert!(resolve.validate(&overlong, &schema).is_err());
     }
 
     /// 系統ごとの tool 数を固定する（IF の増減に気づけるように）。
@@ -418,7 +491,7 @@ mod tests {
     fn registry_rejects_duplicate_name_duplicate_route_and_unadvertised_route() {
         assert_eq!(FixtureTool("description").description(), "fixture");
         assert!(matches!(
-            FixtureTool("call").call("{}"),
+            FixtureTool("call").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         assert!(
@@ -496,11 +569,11 @@ mod tests {
         assert_eq!(UnsupportedSchema.description(), "fixture");
         assert_eq!(SchemaFixture("fixture", "{}").description(), "fixture");
         assert!(matches!(
-            UnsupportedSchema.call("{}"),
+            UnsupportedSchema.call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         assert!(matches!(
-            SchemaFixture("call", "{}").call("{}"),
+            SchemaFixture("call", "{}").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         let unsupported_schema = [ToolDescriptor::new(
@@ -543,13 +616,13 @@ mod tests {
         }
 
         assert!(matches!(
-            super::memory::MemoryGet.call("{}"),
+            super::memory::MemoryGet.call("{}", Path::new(".")),
             Err(ToolError::InvalidParams(_))
         ));
     }
 
     fn assert_invalid_issue_json(tool: &dyn Tool) {
-        let error = tool.call("{").unwrap_err();
+        let error = tool.call("{", Path::new(".")).unwrap_err();
         let actual = std::mem::discriminant(&error);
         let expected = std::mem::discriminant(&ToolError::InvalidParams(String::new()));
         assert_eq!(actual, expected);

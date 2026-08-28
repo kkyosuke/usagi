@@ -4,12 +4,14 @@
 
 mod support;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use serde_json::json;
 use support::mcp::{FixtureArgv, McpHarness};
 use usagi_core::domain::{
@@ -26,6 +28,79 @@ use usagi_core::usecase::client::{
     DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
     TuiUserDecisionAction,
 };
+
+#[test]
+fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
+    let mcp = McpHarness::start();
+    let bootstrap_path = mcp.data_dir().join("daemon/bootstrap.lock");
+    let bootstrap = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bootstrap_path)
+        .expect("the running daemon has a bootstrap lock node");
+    FileExt::lock_exclusive(&bootstrap).expect("the fixture holds bootstrap authority");
+
+    // `USAGI_WORKSPACE_ROOT` is the non-secret provision marker the daemon
+    // injects into its Agent and forwards to the MCP child. The child must
+    // attach to that already-running daemon: taking this held lock would spend
+    // the five-second bootstrap ceiling and then exit before stdio serve.
+    let started = Instant::now();
+    let mut child = support::daemon::usagi_command(
+        mcp.home(),
+        support::daemon::Channel::Local,
+        mcp.cwd(),
+        &["mcp".as_ref()],
+    )
+    .env(
+        usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
+        mcp.workspace(),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("daemon-provisioned MCP child starts");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "clientInfo": {"name": "attached-regression", "version": "1"}
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut response)
+        .unwrap();
+
+    if response.is_empty() {
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        panic!("MCP child closed before initialize: {stderr}");
+    }
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "usagi");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "attached MCP waited on bootstrap.lock"
+    );
+
+    let _ = child.kill();
+    child.wait().unwrap();
+}
 
 #[test]
 fn production_tools_list_fixes_the_49_tool_schema_contract() {
@@ -556,6 +631,22 @@ fn production_issue_writes_are_refused_at_the_workspace_root() {
 }
 
 #[test]
+fn claimed_child_store_tools_stay_bound_to_the_authenticated_session() {
+    let mut mcp = McpHarness::start();
+    drop(mcp.launch_caller());
+
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Claimed child scope"})));
+
+    assert_eq!(created["number"], 1);
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/mcp-caller/.usagi/issues/001-claimed-child-scope.md")
+            .is_file()
+    );
+    assert!(!mcp.workspace().join(".usagi/issues").exists());
+}
+
+#[test]
 fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     let mut mcp = McpHarness::start_in_session("store-e2e");
     let created = tool_text(&mcp.tool(
@@ -661,8 +752,8 @@ fn production_issue_create_commits_source_when_derived_refresh_fails() {
 }
 
 #[test]
-fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
-    let mut mcp = McpHarness::start_in_session("v1-sequence-compat");
+fn production_issue_create_uses_the_git_common_sequence_authority() {
+    let mut mcp = McpHarness::start_in_session("shared-sequence");
     let authority = mcp.workspace().join(".git/usagi/issue-numbers");
     let reservations = authority.join("reservations");
     fs::create_dir_all(&reservations).unwrap();
@@ -673,10 +764,14 @@ fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
     .unwrap();
     fs::write(reservations.join("0000000515.reserved"), "515\n").unwrap();
 
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After v1"})));
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After reservation"})));
 
     assert_eq!(created["number"], 516);
-    assert!(mcp.cwd().join(".usagi/issues/516-after-v1.md").is_file());
+    assert!(
+        mcp.cwd()
+            .join(".usagi/issues/516-after-reservation.md")
+            .is_file()
+    );
     assert_eq!(
         fs::read_to_string(reservations.join("0000000516.reserved")).unwrap(),
         "516\n"
@@ -690,7 +785,7 @@ fn production_issue_create_uses_the_v1_git_common_sequence_authority() {
 
 #[test]
 fn production_issue_create_from_nested_linked_worktree_uses_git_common_authority() {
-    let mut mcp = McpHarness::start_in_nested_session("nested-v1-sequence-compat");
+    let mut mcp = McpHarness::start_in_nested_session("nested-shared-sequence");
     let authority = mcp.workspace().join(".git/usagi/issue-numbers");
     fs::create_dir_all(&authority).unwrap();
     fs::write(
@@ -1600,6 +1695,17 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
     assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
+    let next_cursor = page["next_cursor"].as_u64().unwrap();
+    let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));
+    assert!(ack.get("error").is_none(), "{ack}");
+    assert_eq!(tool_text(&ack)["acked_cursor"], next_cursor);
+    assert!(
+        tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     for (tool, arguments) in [
         ("session_get", json!({"name":"mcp-worker"})),

@@ -4,6 +4,8 @@
 //! 呼ぶ合成 tool。note / todo / decision はセッション内限定。
 
 use crate::mcp::tool::Tool;
+use std::sync::OnceLock;
+use usagi_core::domain::user_decision::UserDecisionPolicy;
 
 /// session 系 tool の一覧（オーケストレーションの delegate_* を含む）。
 #[must_use]
@@ -18,7 +20,6 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionRemove),
         Box::new(SessionResume),
         Box::new(AgentResumeInventory),
-        Box::new(SessionRecoverLegacy),
         Box::new(SessionNoteGet),
         Box::new(SessionNoteUpdate),
         Box::new(SessionTodoList),
@@ -36,6 +37,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(AgentComplete),
         Box::new(AgentFail),
         Box::new(AgentInbox),
+        Box::new(AgentInboxAck),
         Box::new(UserDecisionRequest),
         Box::new(UserDecisionGet),
         Box::new(UserDecisionList),
@@ -53,7 +55,42 @@ impl Tool for UserDecisionRequest {
         "現在の agent run に人間の判断を durable に要求し、回答を同期的に返す"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"title":{"type":"string"},"prompt":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"description":{"type":"string"}},"required":["id","label"],"additionalProperties":false}},"allow_freeform":{"type":"boolean"},"expires_at":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["title","prompt","options"],"additionalProperties":false}"#
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": bounded_string_schema(UserDecisionPolicy::TITLE_MAX_BYTES, true),
+                    "prompt": bounded_string_schema(UserDecisionPolicy::PROMPT_MAX_BYTES, true),
+                    "options": {
+                        "type": "array",
+                        "maxItems": UserDecisionPolicy::OPTION_COUNT_MAX,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true),
+                                "label": bounded_string_schema(UserDecisionPolicy::OPTION_LABEL_MAX_BYTES, true),
+                                "description": bounded_string_schema(
+                                    UserDecisionPolicy::OPTION_DESCRIPTION_MAX_BYTES,
+                                    false,
+                                ),
+                            },
+                            "required": ["id", "label"],
+                            "additionalProperties": false,
+                        },
+                    },
+                    "allow_freeform": {"type": "boolean"},
+                    "expires_at": {"type": "string"},
+                    "idempotency_key": bounded_string_schema(
+                        UserDecisionPolicy::IDEMPOTENCY_KEY_MAX_BYTES,
+                        true,
+                    ),
+                },
+                "required": ["title", "prompt", "options"],
+                "additionalProperties": false,
+            })
+            .to_string()
+        })
     }
 }
 pub struct UserDecisionGet;
@@ -89,8 +126,59 @@ impl Tool for UserDecisionResolve {
         "pending decision に option または許可された freeform を一度だけ記録する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"decision_id":{"type":"string"},"answer":{"oneOf":[{"type":"object","properties":{"kind":{"const":"option"},"option_id":{"type":"string"}},"required":["kind","option_id"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"freeform"},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}]}},"required":["decision_id","answer"],"additionalProperties":false}"#
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "decision_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "answer": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "option"},
+                                    "option_id": bounded_string_schema(
+                                        UserDecisionPolicy::OPTION_ID_MAX_BYTES,
+                                        true,
+                                    ),
+                                },
+                                "required": ["kind", "option_id"],
+                                "additionalProperties": false,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "freeform"},
+                                    "text": bounded_string_schema(
+                                        UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES,
+                                        true,
+                                    ),
+                                },
+                                "required": ["kind", "text"],
+                                "additionalProperties": false,
+                            },
+                        ],
+                    },
+                },
+                "required": ["decision_id", "answer"],
+                "additionalProperties": false,
+            })
+            .to_string()
+        })
     }
+}
+
+fn bounded_string_schema(maximum: usize, nonempty: bool) -> serde_json::Value {
+    let mut schema = serde_json::json!({
+        "type": "string",
+        "maxLength": maximum,
+        "x-maxUtf8Bytes": maximum,
+    });
+    if nonempty {
+        schema["minLength"] = serde_json::json!(1);
+    }
+    schema
 }
 pub struct UserDecisionCancel;
 impl Tool for UserDecisionCancel {
@@ -196,10 +284,22 @@ impl Tool for AgentInbox {
         "agent_inbox"
     }
     fn description(&self) -> &'static str {
-        "caller 自身の durable inbox を返す"
+        "caller 自身の durable inbox をACKせずbounded pageで返す"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"since":{"type":"string"},"unread_only":{"type":"boolean"}},"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"cursor":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":100},"since":{"type":"string"},"unread_only":{"type":"boolean"}},"additionalProperties":false}"#
+    }
+}
+pub struct AgentInboxAck;
+impl Tool for AgentInboxAck {
+    fn name(&self) -> &'static str {
+        "agent_inbox_ack"
+    }
+    fn description(&self) -> &'static str {
+        "agent_inboxで処理済みのnext_cursorまでをdurableにACKする"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"cursor":{"type":"integer","minimum":1}},"required":["cursor"],"additionalProperties":false}"#
     }
 }
 
@@ -218,21 +318,6 @@ impl Tool for SessionCreate {
     }
 }
 
-/// `session_recover_legacy` — explicitly validates legacy sessions and, only
-/// with `apply: true`, adopts the complete set into daemon lifecycle state.
-pub struct SessionRecoverLegacy;
-impl Tool for SessionRecoverLegacy {
-    fn name(&self) -> &'static str {
-        "session_recover_legacy"
-    }
-    fn description(&self) -> &'static str {
-        "legacy state.json session を検証する。既定は dry-run であり、永続化には apply: true を明示する。通常の daemon restart や sidebar refresh はこの操作を実行しない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"apply":{"type":"boolean","default":false}},"additionalProperties":false}"#
-    }
-}
-
 /// `session_resume` — explicitly starts a new daemon-owned Agent runtime for
 /// retained provider-native conversation metadata.
 pub struct SessionResume;
@@ -241,10 +326,10 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。互換用 name は eligible target が厳密に 1 件のときだけ daemon が解決する。"
+        "agent_resume_inventory が返した exact target を指定して中断 runtime を再開する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"oneOf":[{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}"#
     }
 }
 

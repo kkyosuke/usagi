@@ -555,6 +555,43 @@ fn a_foreign_record_is_never_written_and_is_released_only_when_terminated() {
 }
 
 #[test]
+fn a_reclaimed_foreign_agent_releases_capacity_before_its_record_is_forgotten() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let active = DaemonGeneration::new();
+    let resource = terminal(old);
+    let operation = OperationId::new();
+    let mut old_store =
+        ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(4, "start-4")));
+    old_store
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            operation,
+            RuntimeState::Running,
+            Some(process(4, "start-4")),
+        )]))
+        .unwrap();
+
+    let mut active_store = ShardedAgentStore::new(world.state(active, ObservedChildren::new()));
+    active_store
+        .save(agent_snapshot(vec![agent_record(
+            &resource,
+            operation,
+            RuntimeState::Reclaimed,
+            None,
+        )]))
+        .unwrap();
+    active_store.save(agent_snapshot(Vec::new())).unwrap();
+
+    let allocator = world.allocator();
+    assert_eq!(
+        allocator.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    assert_eq!(allocator.pool_used(ResourceKind::Agent), 0);
+}
+
+#[test]
 fn a_record_the_owner_stopped_retaining_leaves_the_shard() {
     let world = World::new();
     let owner = DaemonGeneration::new();

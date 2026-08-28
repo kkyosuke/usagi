@@ -12,7 +12,7 @@ updated_at: 2026-07-21T11:23:56.950206+00:00
 
 ## 背景・調査結果
 
-#350 は provider-native resume metadata と `SessionAction::ResumeAgent` を設計したが、現実装には未反映である。
+#350 は provider-native resume metadata と明示的な Agent resume を設計したが、現実装には未反映である。
 `DurableRuntimeRecord` は `runtime`、公開 launch snapshot、state、process、operation outcome 等を持つだけで、
 provider-native session ID を保持しない。`SessionAction` にも `ResumeAgent` は無い。
 
@@ -79,7 +79,7 @@ scope と adapter の検証を通過した新規 runtime だけを spawn する�
 
 ```text
 利用者の CLI / TUI / MCP 明示操作
-  -> daemon IPC SessionAction::ResumeAgent(operation ID, session incarnation)
+  -> daemon IPC DaemonRequest::ResumeAgent(operation ID, exact target)
   -> ProviderResumeRef + scope fences + adapter revision を検証
   -> live runtime の有無と operation fence を検証
   -> 新しい daemon-owned PTY / Agent runtime を予約・durable 化・spawn
@@ -111,7 +111,7 @@ scope と adapter の検証を通過した新規 runtime だけを spawn する�
    migration/atomic persistence、redaction 型、restart interrupted projection を追加する。
 2. **provider adapters**: Claude UUID の生成・`--session-id`/`--resume <id>` rendering、Codex の正式 structured capture
    boundary・`codex resume <id>` rendering・capture 不可時の typed rejectionを実装する。
-3. **daemon IPC**: `SessionAction::ResumeAgent`、scope/adapter/live-runtime/operation fence、new PTY spawn、typed final
+3. **daemon IPC**: exact-target `DaemonRequest::ResumeAgent`、scope/adapter/live-runtime/operation fence、new PTY spawn、typed final
    result を実装する。
 4. **clients**: CLI、TUI の interrupted/pending/live pane state machine、MCP explicit entry を daemon IPC の薄い client
    として追加する。client が provider argv/ID/cwd を指定できないようにする。

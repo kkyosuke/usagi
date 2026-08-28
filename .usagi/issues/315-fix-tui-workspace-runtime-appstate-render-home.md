@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, controller, runtime]
 dependson: [313, 314]
-related: [258, 287, 295, 305]
+related: [258, 295, 305]
 parent: 258
 created_at: 2026-07-17T14:22:12.472188+00:00
 updated_at: 2026-07-18T04:11:47.130791+00:00
@@ -41,7 +41,6 @@ updated_at: 2026-07-18T04:11:47.130791+00:00
 
 - 実端末の Home 描画・入力が controller projection を経由する ✓（両 entry point。CI green）。
 - #295 / #305 の live pane / terminal 挙動は legacy machinery を無改変で再利用し退行なし ✓。
-- #287（create entry）: `+ new session` 活性化・`Overlay::CreateSession`・`Effect::CreateSession`
   実行の seam が実端末（新ループ）で機能する ✓（integration test で固定）。
 
 ## 後続（#316）

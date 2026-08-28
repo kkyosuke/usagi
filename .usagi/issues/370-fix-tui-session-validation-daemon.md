@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, session, bug, validation, ux]
 dependson: []
-related: [357, 287, 257]
+related: [357]
 created_at: 2026-07-19T21:18:26.078166+00:00
 updated_at: 2026-07-19T21:30:24.859163+00:00
 ---

@@ -16,7 +16,7 @@ jobs:
     outputs:
       markdown: ${{ steps.classify.outputs.markdown }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: classify
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # リポジトリ内の全 Markdown の相対リンク・アンカー・外部 URL を検証する。
       # 設定（リトライ・除外・フラグメント検証）は lychee.toml に集約する。
@@ -45,8 +45,6 @@ jobs:
             --no-progress
             '*.md'
             'document/**/*.md'
-            'v1/README.md'
-            'v1/document/**/*.md'
             '.agents/**/*.md'
             '.github/**/*.md'
           fail: true
@@ -60,7 +58,7 @@ jobs:
     needs: [changes, link-check-run]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Report Markdown link result
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}

@@ -231,7 +231,9 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
 pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
     InputKeyEvent::new(
         match key.code {
-            CrosstermKeyCode::Char(character) => KeyCode::Char(character),
+            CrosstermKeyCode::Char(character) => {
+                KeyCode::Char(adapt_character(character, key.modifiers))
+            }
             CrosstermKeyCode::Enter => KeyCode::Enter,
             CrosstermKeyCode::Backspace => KeyCode::Backspace,
             CrosstermKeyCode::Tab => KeyCode::Tab,
@@ -264,6 +266,20 @@ pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
             KeyEventKind::Release => InputKeyEventKind::Release,
         },
     )
+}
+
+/// Canonicalize printable ASCII letters across terminal keyboard protocols.
+///
+/// Legacy input commonly reports Shift+x as `Char('X')`, while enhanced
+/// keyboard protocols may report the base key `Char('x')` plus the Shift bit.
+/// The TUI's character vocabulary represents the resulting text scalar, so both
+/// forms must become `Char('X')` before shortcut and text-input classification.
+fn adapt_character(character: char, modifiers: KeyModifiers) -> char {
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        character.to_ascii_uppercase()
+    } else {
+        character
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +670,20 @@ mod tests {
             ))
             .kind,
             InputKeyEventKind::Release
+        );
+    }
+
+    #[test]
+    fn adapter_canonicalizes_both_shifted_letter_encodings() {
+        for character in ['x', 'X'] {
+            assert_eq!(
+                adapt_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::SHIFT,)).code,
+                usagi_tui::usecase::terminal_input::KeyCode::Char('X')
+            );
+        }
+        assert_eq!(
+            adapt_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).code,
+            usagi_tui::usecase::terminal_input::KeyCode::Char('x')
         );
     }
 }

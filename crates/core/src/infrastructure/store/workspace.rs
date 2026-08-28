@@ -12,6 +12,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::recent::Unite;
 use crate::domain::settings::Settings;
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::paths::data_dir;
@@ -20,6 +21,7 @@ use crate::infrastructure::persistence::store_lock::StoreLock;
 
 const WORKSPACES_FILE: &str = "workspaces.json";
 const SETTINGS_FILE: &str = "settings.json";
+const UNITES_FILE: &str = "unites.json";
 
 /// The `workspaces.json` payload, borrowed for writes so the list need not be
 /// cloned into an owned wrapper just to stamp the version envelope.
@@ -33,6 +35,16 @@ struct WorkspacesRef<'a> {
 #[derive(Deserialize)]
 struct WorkspacesOwned {
     workspaces: Vec<Workspace>,
+}
+
+#[derive(Serialize)]
+struct UnitesRef<'a> {
+    unites: &'a [Unite],
+}
+
+#[derive(Deserialize)]
+struct UnitesOwned {
+    unites: Vec<Unite>,
 }
 
 /// File-based persistence for the workspace registry, rooted at the data
@@ -103,6 +115,30 @@ impl Storage {
             &self.dir,
             &self.dir.join(WORKSPACES_FILE),
             &WorkspacesRef { workspaces },
+        )
+    }
+
+    /// Load ordered project-tab sets. Missing storage means no Unite recents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `unites.json` exists but cannot be parsed.
+    pub fn load_unites(&self) -> Result<Vec<Unite>> {
+        let file: Option<UnitesOwned> =
+            json_file::read_supported_version(&self.dir.join(UNITES_FILE))?;
+        Ok(file.map(|file| file.unites).unwrap_or_default())
+    }
+
+    /// Atomically persist the complete Unite recent list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the user-data directory cannot be written.
+    pub fn save_unites(&self, unites: &[Unite]) -> Result<()> {
+        json_file::write_versioned(
+            &self.dir,
+            &self.dir.join(UNITES_FILE),
+            &UnitesRef { unites },
         )
     }
 
@@ -179,6 +215,20 @@ mod tests {
         let loaded = storage.load_workspaces().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "alpha");
+    }
+
+    #[test]
+    fn unites_round_trip_through_disk_in_tab_order() {
+        let (_dir, storage) = temp_storage();
+        assert!(storage.load_unites().unwrap().is_empty());
+        let now = Utc::now();
+        let unites = vec![Unite::new(
+            vec![PathBuf::from("/beta"), PathBuf::from("/alpha")],
+            now,
+        )];
+        storage.save_unites(&unites).unwrap();
+        assert_eq!(storage.load_unites().unwrap(), unites);
+        assert!(storage.dir().join(UNITES_FILE).is_file());
     }
 
     #[test]

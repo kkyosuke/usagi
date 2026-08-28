@@ -6,14 +6,13 @@ priority: high
 labels: [core, session, lifecycle]
 dependson: [214]
 related: []
-parent: 213
 created_at: 2026-07-12T11:38:56.295403+00:00
 updated_at: 2026-07-12T13:16:25.643862+00:00
 ---
 
 ## 目的
 
-[v1 lifecycle proposal](../../v1/document/proposals/05-session-lifecycle.md) の状態機械を v2 の daemon 単一書き手モデルへ移し、session incarnation、長時間操作、late worker を永続状態で fence する。v2 の統合契約は [daemon API proposal](../../document/proposals/04-daemon-api.md#sessioncontrol-api) を正本とする。
+旧 lifecycle の状態機械を daemon 単一書き手モデルへ移し、session incarnation、長時間操作、late worker を永続状態で fence する。統合契約は [daemon API proposal](../../document/proposals/04-daemon-api.md#sessioncontrol-api) を正本とする。
 
 ## 対象
 

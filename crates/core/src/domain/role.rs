@@ -89,7 +89,7 @@ pub struct RoleDefinition {
     pub scopes: BTreeSet<RoleScope>,
     pub instructions: String,
     /// Optional daemon-enforced delegation authority. Absence preserves the
-    /// version-1 catalog's legacy behavior; once present every limit is
+    /// catalog's established permissive behavior; once present every limit is
     /// enforced before a session or worker is created.
     #[serde(default)]
     pub delegation: Option<DelegationPolicy>,

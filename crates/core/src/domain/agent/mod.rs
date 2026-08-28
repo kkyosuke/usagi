@@ -425,6 +425,40 @@ pub struct AgentInventory {
     pub resumable: Vec<AgentResumableInventoryItem>,
 }
 
+/// Integration revision expected by the invoking `usagi` binary for one
+/// code-defined Agent profile. This is public, non-sensitive repair vocabulary;
+/// it never contains rendered hooks, MCP configuration, argv, or environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentIntegrationRevision {
+    pub profile_id: AgentProfileId,
+    pub revision: u32,
+}
+
+/// One Agent whose launch-time hook/MCP integration differs from the invoking
+/// binary. The daemon projects only safe identities and lifecycle state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutdatedAgentRuntime {
+    pub runtime: AgentRuntimeRef,
+    pub continuation: Option<AgentContinuationRef>,
+    pub profile_id: AgentProfileId,
+    pub actual_revision: u32,
+    pub expected_revision: u32,
+    pub state: AgentRuntimeInventoryState,
+    pub phase: crate::domain::session_lifecycle::AgentPhase,
+    /// Whether this exact source already has sufficient provider metadata to
+    /// survive a stop and revision-migrating resume.
+    pub resume_available: bool,
+}
+
+/// Deterministic diagnosis of launch-time Agent integrations in one workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentIntegrationDiagnosis {
+    pub workspace_id: WorkspaceId,
+    pub outdated: Vec<OutdatedAgentRuntime>,
+    /// Claimed daemon-provisioned MCP child slots belonging to `outdated`.
+    pub outdated_mcp_children: usize,
+}
+
 /// Explicit source-to-replacement relation returned by a successful resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentResumeRelation {

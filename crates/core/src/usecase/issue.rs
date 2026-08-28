@@ -850,7 +850,7 @@ mod tests {
         };
         IssueStore::new(&first_root).write(&seeded).unwrap();
 
-        // Production v1 has already reserved the unmerged source number in the
+        // Production legacy has already reserved the unmerged source number in the
         // Git-common authority. That shared floor is the safe side of the
         // first old-v2 sentinel handshake.
         let authority = root.join(".git/usagi/issue-numbers");

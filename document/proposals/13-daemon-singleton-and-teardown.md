@@ -9,11 +9,7 @@
 [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker)、
 [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約) に移った。
 本書に残るのは、その採用理由と却下した代替案である。
-実地調査で 3 つの独立した欠陥を確認し、実装 issue
-[#540](../../.usagi/issues/540-fix-daemon-daemon-serve-self-shutdown-test-fixture-workspace.md) /
-[#542](../../.usagi/issues/542-fix-daemon-fence-workspace-mode-home.md) /
-[#543](../../.usagi/issues/543-fix-daemon-session-remove-worktree-teardown-worker-ipc.md)
-に分割した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
+実地調査で 3 つの独立した欠陥を確認した。本書が採用機構・却下した代替案・fence の単位・crash 時の再開契約の設計判断の正本であり、実装が確定した
 部分は [5. daemon](../05-daemon.md) と [7. MCP サーバ](../07-mcp.md) へ畳み込む（[docs 畳み込み先](#docs-畳み込み先)）。
 
 ## 目次
@@ -48,13 +44,11 @@ PID 25529  PPID 1  ELAPSED 01:48:04
 | # | 欠陥 | 実装上の所在 | 状態 |
 |---|---|---|---|
 | 1 | daemon に「権威を失ったら終了する」自衛が無い | `SignalShutdown::wait` の shutdown 条件は signal と IPC flag だけ | 実測で確認（残留 20 プロセス）。#540 で修正済み |
-| 2 | fence の単位が mode 別 data directory であり、daemon が所有する workspace と一致しない | `FileInstanceLock` は `<data_dir>/daemon/daemon.lock`、権威は `current_dir()` 由来の repo root | コード調査で確定（潜在）。#542 で修正済み |
-| 3 | session teardown が IPC request handler 内で同期実行される | `perform_remove` の 3 段が `usagi-ipc-client` thread 上で直列 | 修正済み（#543。即時受理 + teardown worker） |
+| 2 | fence の単位が mode 別 data directory であり、daemon が所有する workspace と一致しない | `FileInstanceLock` は `<data_dir>/daemon/daemon.lock`、権威は `current_dir()` 由来の repo root | 修正済み |
+| 3 | session teardown が IPC request handler 内で同期実行される | `perform_remove` の 3 段が `usagi-ipc-client` thread 上で直列 | 修正済み（即時受理 + teardown worker） |
 
-欠陥 1 は、同じクラスの不具合として
-[#171](../../.usagi/issues/171-fix-daemon-usagi-daemon-serve-teardown-data-dir-self-shutdown.md)（`done`）が
-過去に修正している。当時も ppid=1 の孤児が 30 プロセス残留し、恒久対策として「自分の data dir が消えたら
-終了する」自衛を要求していた。v2 daemon にはその自衛が無く、同じ原因で再発している。
+欠陥 1 は、ppid=1 の孤児プロセスが残留する同じクラスの不具合を再発させる。恒久対策として、
+daemon 自身が data directory の消失を検知して終了する自衛を必要とする。
 
 ## 3 つの欠陥の関係
 
@@ -68,13 +62,12 @@ PID 25529  PPID 1  ELAPSED 01:48:04
                   呼び出した client の接続が deadline を超えて timeout した。現在は即時受理し、
                   停滞するのは daemon 所有の teardown worker だけである（client は応答を受け取る）
 
-[欠陥 2・修正済み] は日常運用では未発火だった（出荷バイナリは daemon を持たない v1 コード）。
-   v2 出荷時に mode 切り替え運用（task run / dev / prd）で確実に踏むため、発火前に workspace fence を入れた。
+[欠陥 2・修正済み] は日常運用では未発火だったが、mode 切り替え運用（task run / dev / prd）で
+確実に踏むため、発火前に workspace fence を入れた。
 ```
 
-実装順序は **#540 → #542** だった。#542 の test は #540 が入れた fixture workspace helper
-（`tests/support/daemon.rs`）を前提にする。#543 は独立に実装したが、その受入条件のうち「巨大 `target/` の
-削除が完了する」は、残留 daemon が worktree を握らないこと、すなわち #540 に実質的に依存する（削除は再開され
+実装は fixture workspace helper（`tests/support/daemon.rs`）を前提に段階的に進めた。teardown worker の
+受入条件のうち「巨大 `target/` の削除が完了する」は、残留 daemon が worktree を握らないことに依存する（削除は再開され
 続けるが、握られている間は完了しない）。
 
 ## 設計 1: custody 喪失による self-shutdown
@@ -97,7 +90,7 @@ daemon-owned PTY を失わせないための設計であり、正しい。連動
 
 ## 設計 2: fence の単位を workspace へ広げる
 
-**実装済み（#542）。契約の正本は [5. daemon の単一 daemon の 2 段 fence](../05-daemon.md#単一-daemon-の-2-段-fence)
+**実装済み。契約の正本は [5. daemon の単一 daemon の 2 段 fence](../05-daemon.md#単一-daemon-の-2-段-fence)
 である。** 本節に残すのは採用理由だけである。
 
 修正前の fence と権威は単位が食い違っていた。
@@ -147,7 +140,7 @@ client が workspace A に束縛された daemon へ接続すると、A の sess
 
 ## 設計 3: teardown worker と resume 契約
 
-**実装済み（#543）。契約の正本は [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker) と
+**実装済み。契約の正本は [5. daemon の session teardown worker](../05-daemon.md#session-teardown-worker) と
 [7. MCP サーバの session lifecycle の受理契約](../07-mcp.md#session-lifecycle-の受理契約)である。**
 本節に残すのは採用理由だけである。
 
@@ -156,8 +149,7 @@ IPC request handler の中で直列に走っていた。重い削除の間 sessi
 接続が削除完了まで応答を受け取れない**。client の deadline budget は TUI 2,000ms / CLI 10,000ms / MCP 30,000ms で、
 coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除は分オーダーになり必ず timeout していた。
 さらに daemon 起動時の `reconcile()` が `Deleting` を `Failed` へ落としていたため、`DeletePlan` が durable に
-残っているのに削除は再開されず、半分消えた worktree tree と session 名を所有し続ける record が残った。v1 で
-`git_teardown` 中断が次の手動 remove まで詰まった病理と同型である。
+残っているのに削除は再開されず、半分消えた worktree tree と session 名を所有し続ける record が残った。
 
 **採用した機構は「即時 accept + daemon 所有の teardown worker」である。** その選択理由は次のとおり。
 
@@ -183,7 +175,7 @@ coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除�
 |---|---|
 | daemon の idle timeout（client 0 で一定時間後に終了） | 正当な daemon は client が 0 でも live PTY と supervisor scheduler を所有する。idle は終了根拠にならない。custody 喪失は「この process はもう誰の権威でもない」を意味する精密な signal であり、policy tuning も不要である |
 | 親プロセス死亡検知（`getppid` 監視 / `PR_SET_PDEATHSIG`） | detached 起動（`process_group(0)`）は前景 hangup で PTY を失わせないための正しい設計であり、親の生死に daemon の生死を結び直すのは退行である。macOS には `PDEATHSIG` 相当も無い |
-| 起動経路（launchd plist / MCP 注入 / shell）の env 解決を統一して fence の分裂を防ぐ（#542 の代替） | plist と MCP 注入は統一できるが、利用者自身の shell（`USAGI_RUNTIME_MODE=production usagi ...`、`task prd`）は強制できない。env の合意は運用規約でしか守れず invariant にならない。lock は表記に依らない invariant なので、fence の正しい実装は lock 側である |
+| 起動経路（launchd plist / MCP 注入 / shell）の env 解決を統一して fence の分裂を防ぐ | plist と MCP 注入は統一できるが、利用者自身の shell（`USAGI_RUNTIME_MODE=production usagi ...`、`task prd`）は強制できない。env の合意は運用規約でしか守れず invariant にならない。lock は表記に依らない invariant なので、fence の正しい実装は lock 側である |
 | workspace fence だけにして data dir lock を撤去する | data directory 単位の record / locator / socket / durable state は依然その単位で排他が必要である。2 段とも残すのが正しい |
 | teardown を request ごとに thread へ投げる（worker を持たない） | 削除の同時実行が I/O を飽和させ、crash 後の再開も表現できない。durable state から導出する単一 worker が、有界性と resume の両方を同時に満たす |
 | teardown 用の永続 queue file を新設する | `Deleting` + `DeletePlan` が既に durable な未完了集合であり、二重管理は乖離の原因になる |

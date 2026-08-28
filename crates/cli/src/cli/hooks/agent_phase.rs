@@ -80,7 +80,14 @@ pub fn request_from_hook(
         .ok_or(PhaseInputError::UnknownPhase)?;
     let input = serde_json::from_reader::<_, PhaseHookInput>(reader)
         .map_err(|_| PhaseInputError::InvalidPayload)?;
-    if ReportedPhase::for_hook_event(&input.hook_event_name) != Some(phase) {
+    let canonical = ReportedPhase::for_hook_event(&input.hook_event_name);
+    // v2.9-era launch material wired `PostToolUse` to `running`. Accept that
+    // one historical pairing so an already-running Agent does not fail its
+    // hook after the `usagi` executable is updated in place. New launch
+    // material reports `waiting`, which is the canonical mapping above.
+    let legacy_post_tool =
+        input.hook_event_name == "PostToolUse" && phase == ReportedPhase::Running;
+    if canonical != Some(phase) && !legacy_post_tool {
         return Err(PhaseInputError::WrongEvent);
     }
     Ok(DaemonRequest::AgentPhaseReport {
@@ -118,6 +125,7 @@ mod tests {
             ("SessionStart", "ready"),
             ("UserPromptSubmit", "running"),
             ("PreToolUse", "running"),
+            ("PostToolUse", "waiting"),
             ("Notification", "waiting"),
             ("Stop", "ended"),
             ("SessionEnd", "exited"),
@@ -145,6 +153,17 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn legacy_post_tool_use_running_hook_remains_compatible() {
+        let request = request_from_hook(
+            &mut Cursor::new(br#"{"hook_event_name":"PostToolUse"}"#),
+            "running",
+            Some("runtime-secret".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap()["phase"], "running");
     }
 
     #[test]
@@ -178,12 +197,6 @@ mod tests {
                 // `Stop` は `ended` にだけ配線されており、別 phase を名乗れない。
                 br#"{"hook_event_name":"Stop"}"#.as_slice(),
                 "waiting",
-                Some("runtime-secret".to_owned()),
-                PhaseInputError::WrongEvent,
-            ),
-            (
-                br#"{"hook_event_name":"PostToolUse"}"#.as_slice(),
-                "running",
                 Some("runtime-secret".to_owned()),
                 PhaseInputError::WrongEvent,
             ),

@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, epic, tui, daemon, agent, recovery]
 dependson: [504]
-related: [209, 350, 388, 492, 503]
+related: [209, 350, 388, 503]
 created_at: 2026-07-21T21:20:29.599700+00:00
 updated_at: 2026-07-29T10:49:51.109315+00:00
 ---
@@ -19,8 +19,6 @@ v2 の Claude / Codex Agent tab について、現在の production path は要�
 | TUI（usagi）だけを閉じ、同じ daemon のまま開き直す | daemon inventory から `live` runtime を tab へ再投影でき、Agent process は継続する | 部分達成。`PaneRegistry` 自体は memory-only で、tab 順序・選択・閉じた intent は失われる。restore は一度だけの同期処理で、選択外 tab も attach する |
 | `usagi daemon restart` を実行する | [restart usecase](../../crates/daemon/src/usecase/restart.rs) は旧 daemon を stop してから新 daemon を start する。unfinished runtime は起動時 reconcile で `identity_unknown` になり、live inventory から外れる | 未達。#209 の active/draining rollover 契約と production command が接続されていない |
 | daemon crash / cold restart 後に provider 会話へ戻る | provider-native resume 基盤はあるが、公開操作は managed session 単位で root を扱えず、複数の履歴を exact target で選べない | 未達。Claude は exact-target UI/API が不足し、Codex は加えて [#504](./504-feat-daemon-codex-structured-capture-wiring.md) の production capture が未実装 |
-
-完了済み #388 は同一 daemon の live inventory 投影、#503 は provider-native identity の durable model、#492 は daemon 内の generation authority を扱う。本 finding は、それらを shipping lifecycle と product-level tab UX に接続する回帰修正であり、既存 issue を再起票しない。
 
 なお、同番号の別 issue が存在するため、live pane restore の既存 epic は番号だけでなく [workspace restore epic のファイル](./390-feat-workspace-open-daemon-scope-live-agent-terminal-stable-identity-pane-tab.md) を正本として参照する。
 

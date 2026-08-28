@@ -121,7 +121,15 @@ fn the_non_terminal_surface_names_spawns_reads_and_inventories() {
             (RequestClass::Spawn, ResourceOwner::Unscoped),
         ),
         (
+            "resume_agent_with_current_integration",
+            (RequestClass::Spawn, ResourceOwner::Unscoped),
+        ),
+        (
             "agent_inventory",
+            (RequestClass::Inventory, ResourceOwner::Unscoped),
+        ),
+        (
+            "diagnose_agents",
             (RequestClass::Inventory, ResourceOwner::Unscoped),
         ),
         ("metrics", (RequestClass::Read, ResourceOwner::Unscoped)),
@@ -190,6 +198,24 @@ fn an_unnameable_request_is_control_so_every_non_active_role_refuses_it() {
             );
         }
     }
+}
+
+#[test]
+fn tenant_inventory_is_read_only_but_retirement_is_control() {
+    assert_eq!(
+        classify_request(
+            &json!({"kind": "tenant", "action": "inventory"}),
+            OwnedRuntime::Own
+        ),
+        (RequestClass::Inventory, ResourceOwner::Unscoped)
+    );
+    assert_eq!(
+        classify_request(
+            &json!({"kind": "tenant", "action": "retire"}),
+            OwnedRuntime::Own
+        ),
+        (RequestClass::Control, ResourceOwner::Unscoped)
+    );
 }
 
 /// A terminal body whose `action` this build cannot name is IO on a named

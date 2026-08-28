@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, daemon, metrics]
 dependson: []
 related: [297, 319]
-parent: 453
 created_at: 2026-07-20T12:06:51.474490+00:00
 updated_at: 2026-07-21T00:12:59.972330+00:00
 ---

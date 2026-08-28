@@ -5,8 +5,7 @@ status: done
 priority: high
 labels: [mcp, orchestration]
 dependson: [402]
-related: [109, 323]
-parent: 400
+related: [323]
 created_at: 2026-07-21T00:00:00+00:00
 updated_at: 2026-07-21T01:00:00+00:00
 ---

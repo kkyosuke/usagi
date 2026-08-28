@@ -38,8 +38,6 @@ main 取り込み後の `document/proposals/`（`08-agent-dispatch-mcp.md`・`09
 | 08:245,258 | #323 | mcp: session_dispatch / *_get / *_list / agent_complete\|fail / inbox | feat(mcp): session_dispatch / session_get / agent_list / agent_get / agent_complete / agent_fail / agent_inbox を実装する | ✅（session_dispatch。背景通り正しい） |
 | 08:248,259 | #331 | mcp: runtime/model allowlist schema snapshot | feat(mcp): workspace allowlist から runtime/model schema snapshot を生成する | ✅ |
 | 08:251,260 | #332 | daemon: launch 前再検証 | feat(daemon): MCP agent dispatch で runtime/model allowlist を再検証する | ✅ |
-| 08:95,300 | #146 | agent capability / model allowlist 語彙 | refactor(orchestration): session agent override 検証を Agent capability に接続する | ✅ |
-| 08:223 | #110 | session_delegate_issue 基点コミット検証 | fix(mcp): session_delegate_issue は issue が委譲先の基点ブランチにコミット済みか検証する | ✅ |
 | 08:129 | #1234 | `pr?` フィールドの例文字列（`例 "#1234" or URL`） | — | 対象外（issue 参照でない） |
 | 09:6 / README.md:31 | #329–#330 | user decision 実装 task | #329 feat(daemon): user decision request を durable state と inbox 配送へ接続 / #330 feat(tui): user decision modal と pending 一覧 | ✅ |
 | 07-pty-crash-continuation.md:102 | #209 / #220 | MVP cutover 前提 | #209 feat(daemon): live terminal generation rollover と orphan safety / #220 feat(clients): TUI／CLI／MCP を v2 daemon IPC へ cutover | ✅ |

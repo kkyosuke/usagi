@@ -239,8 +239,8 @@ impl WorkspaceRuntime {
     }
 
     /// The selected managed-session terminal drawn behind an open Director
-    /// drawer. It remains detached and read-only while the root conversation
-    /// owns the sole foreground subscription.
+    /// drawer. It remains attached for live output but read-only while the root
+    /// conversation owns foreground input.
     #[must_use]
     pub fn director_background_terminal(&self) -> Option<TerminalRef> {
         if !self.state.director_drawer_open() {
@@ -785,8 +785,9 @@ impl WorkspaceRuntime {
 
     /// The focused live terminal when its tab hosts an Agent conversation.
     ///
-    /// Agent tabs remain inventory-owned and cannot be closed from the tab UI,
-    /// so the shell must tell them apart from closable generic terminal tabs.
+    /// Agent tabs remain inventory-owned: the tab close chord exits their CLI
+    /// instead of detaching the client subscription like a generic terminal, so
+    /// the shell must distinguish the two kinds before handling that chord.
     #[must_use]
     pub fn focused_agent_terminal(&self) -> Option<TerminalRef> {
         let terminal = self.focused_terminal()?;
@@ -950,6 +951,23 @@ impl WorkspaceRuntime {
             modal.set_error(self.panes.active_pane().error().map(str::to_owned));
         }
         effects
+    }
+
+    /// Surface display-safe feedback for the active pane without changing its
+    /// tab membership or selection.
+    pub fn surface_focused_pane_feedback(&mut self, message: impl Into<String>) {
+        if let Some(target) = self.panes.active() {
+            let _ = reduce_registry(
+                &mut self.panes,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Feedback {
+                        message: message.into(),
+                    },
+                },
+            );
+            self.sync_live_pane();
+        }
     }
 
     /// Focus the live tab attached to `terminal` for `target`. The shell calls
@@ -2048,11 +2066,11 @@ mod tests {
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
     }
 
-    /// #355: the real-loop key translation exits the Closeup action modal to
-    /// Switch on both Escape and Ctrl-C (`Key::Quit`), dropping the persisted
-    /// modal so its caret never leaks into the next open.
+    /// The real-loop key translation closes only the Closeup action modal on
+    /// Escape and Ctrl-C (`Key::Quit`), dropping the persisted modal so its caret
+    /// never leaks into the next open.
     #[test]
-    fn closeup_modal_escape_and_ctrl_c_exit_to_switch() {
+    fn closeup_modal_escape_and_ctrl_c_return_to_closeup() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         for exit_key in [Key::Escape, Key::Quit] {
@@ -2062,12 +2080,57 @@ mod tests {
             let effects = runtime.handle_key(exit_key.clone());
             assert!(effects.is_empty(), "{exit_key:?}");
             assert!(
-                matches!(runtime.state().route(), Route::Home(HomeMode::Switch)),
+                matches!(runtime.state().route(), Route::Home(HomeMode::Closeup)),
                 "{exit_key:?}"
             );
             assert_eq!(runtime.state().overlay(), None, "{exit_key:?}");
             assert!(runtime.closeup_modal().is_none(), "{exit_key:?}");
         }
+    }
+
+    #[test]
+    fn terminal_new_closes_only_the_action_modal_and_returns_to_closeup() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        type_str(&mut runtime, "terminal new");
+
+        assert_eq!(
+            runtime.handle_key(Key::Enter),
+            vec![Effect::OpenExternalTerminal {
+                target: Target::Session(session),
+            }]
+        );
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert!(runtime.active_pane().tabs().is_empty());
+    }
+
+    #[test]
+    fn terminal_new_from_a_live_pane_modal_returns_input_to_the_pane() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut runtime = closeup_on(workspace, session);
+        let operation = OperationId::new();
+        let terminal = terminal_ref(workspace, session);
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(target, operation, terminal.clone());
+        let _ = runtime.focus_terminal(target, terminal);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert!(!runtime.wants_live_input());
+        type_str(&mut runtime, "terminal new");
+
+        assert_eq!(
+            runtime.handle_key(Key::Enter),
+            vec![Effect::OpenExternalTerminal { target }]
+        );
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert!(runtime.wants_live_input());
     }
 
     #[test]
@@ -2091,19 +2154,18 @@ mod tests {
         assert!(!runtime.wants_live_input());
         assert!(!runtime.wants_pane_control_input());
         assert!(!runtime.wants_right_pane_tab_click());
-        // #355: Escape dismisses the forced modal and leaves Closeup for Switch
-        // (rather than handing input back to the live pane), so live passthrough
-        // stays disarmed until the session is re-activated.
+        // Escape dismisses only the forced modal and hands input back to the
+        // underlying live Closeup pane.
         let _ = runtime.handle_key(Key::Escape);
         assert!(matches!(
             runtime.state().route(),
-            Route::Home(HomeMode::Switch)
+            Route::Home(HomeMode::Closeup)
         ));
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
-        assert!(!runtime.wants_live_input());
-        assert!(!runtime.wants_pane_control_input());
-        assert!(!runtime.wants_right_pane_tab_click());
+        assert!(runtime.wants_live_input());
+        assert!(runtime.wants_pane_control_input());
+        assert!(runtime.wants_right_pane_tab_click());
     }
 
     #[test]
@@ -3346,7 +3408,7 @@ mod tests {
             None,
         );
         let text = frame.join("\n");
-        assert!(text.contains("atlas"));
+        assert!(!text.contains("atlas"));
         assert!(text.contains("alpha"));
         assert!(text.contains("+ new session"));
     }
@@ -3427,8 +3489,18 @@ mod tests {
         let mut runtime = closeup_on(workspace, session);
         assert!(!runtime.state().has_live_pane());
 
-        // The PR overlay opens and stays open across a resampling tick.
+        // An empty PR request stays hidden. A returned PR opens the overlay,
+        // which then stays open across a resampling tick.
         let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(runtime.state().overlay(), None);
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target: Target::Session(session),
+            revision: 1,
+            prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                41,
+                "https://github.com/o/r/pull/41",
+            )],
+        }));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));
         let _ = runtime.apply_event(AppEvent::Tick);
         assert_eq!(runtime.state().overlay(), Some(Overlay::Prs));

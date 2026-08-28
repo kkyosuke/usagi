@@ -1,13 +1,13 @@
 ---
 number: 706
 title: fix(sandbox): Linux で agent global config の prefix 相当を writable にする
-status: todo
+status: done
 priority: medium
 labels: []
 dependson: []
 related: [705]
 created_at: 2026-08-19T22:52:52.155223+00:00
-updated_at: 2026-08-19T22:52:52.155223+00:00
+updated_at: 2026-08-26T00:00:00+00:00
 ---
 
 ## 背景
@@ -34,3 +34,13 @@ read-only のままなので、**lock / temp を `$HOME` 直下に作って rena
   ことを実機または CI で確認する。
 - macOS 側の grant（regex prefix）と挙動が揃い、`document/02-architecture.md` の
   「agent global config の writable prefix」節から Linux の制限記述を落とせる。
+
+## 2026-08-26 対応
+
+- [x] Linux launcher が起動直前の `$HOME` 直下 entry を列挙し、純粋な sandbox plan へ渡す。
+- [x] `bwrap` は `$HOME` を read-write bind した後、config prefix family 以外の既存 entry を
+      read-only に戻し、agent state / launch root だけを最後に writable で重ねる。
+- [x] entry inventory の欠落・列挙失敗・直下でない path は fail closed にする。
+- [x] `.claude.json` の lock / temp / backup / rename 保存と、他の既存 HOME entry の拒否を
+      shipping launcher E2E と Linux argv unit test で固定した。
+- [x] macOS の regex grant は維持し、architecture の Linux 制限記述を実装済み契約へ更新した。

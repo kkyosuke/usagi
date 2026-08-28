@@ -6,7 +6,6 @@ priority: medium
 labels: [review, v2, tui, session, concurrency]
 dependson: [462]
 related: [314, 315]
-parent: 453
 created_at: 2026-07-20T12:06:50.826920+00:00
 updated_at: 2026-07-21T13:04:46.860740+00:00
 ---

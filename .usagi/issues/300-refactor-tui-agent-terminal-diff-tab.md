@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, pane, ux]
 dependson: []
-related: [141, 148, 232, 295]
+related: [232, 295]
 created_at: 2026-07-14T22:33:19.505265+00:00
 updated_at: 2026-07-14T22:41:29.084963+00:00
 ---

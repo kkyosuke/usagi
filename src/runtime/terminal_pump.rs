@@ -1,7 +1,7 @@
 //! Foreground terminal output pump.
 //!
 //! The interactive TUI renders on a single thread that, every frame, asks the
-//! daemon for the selected foreground terminal's new output. Doing that fetch
+//! daemon for each terminal visible in the current frame. Doing that fetch
 //! inline means a momentarily busy daemon stalls the whole render/input loop.
 //! This pump moves the `Resume` fetch onto a background thread: it reads the
 //! registered terminals into per-terminal read-ahead buffers at a bounded
@@ -46,7 +46,7 @@ use usagi_core::domain::id::TerminalRef;
 use usagi_tui::usecase::application::terminal_session::{TerminalChunk, TerminalError};
 
 /// Interactive cadence: how long the fetch thread sleeps between rounds while
-/// the foreground terminal is producing output or the user just interacted.
+/// a visible terminal is producing output or the user just interacted.
 /// Kept below the render frame tick so a drained buffer refills before the next
 /// frame.
 const ACTIVE_INTERVAL: Duration = Duration::from_millis(8);
@@ -219,7 +219,7 @@ impl PumpState {
     }
 
     /// Restores the interactive cadence because the user just acted on the
-    /// foreground terminal (input, resize) and output is expected right away.
+    /// visible terminal (input, resize) and output is expected right away.
     fn wake(&mut self) {
         self.woken = true;
         self.idle_rounds = 0;
@@ -949,9 +949,10 @@ mod tests {
     }
 
     #[test]
-    fn the_request_rate_does_not_grow_with_the_number_of_panes() {
-        // Only the selected foreground terminal is ever registered (#506), so the
-        // per-round request count stays at one however many panes exist.
+    fn the_request_rate_does_not_grow_with_hidden_panes() {
+        // Registration follows visible surfaces, not pane inventory. Ordinary
+        // Home therefore polls one terminal however many hidden panes exist;
+        // Director may deliberately add its one visible dimmed background.
         for panes in [1_usize, 10, 100] {
             let mut state = PumpState::default();
             let terminals = (0..panes).map(|_| terminal()).collect::<Vec<_>>();

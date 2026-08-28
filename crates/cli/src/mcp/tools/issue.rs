@@ -4,20 +4,18 @@
 //! issue 系 MCP tool（`.usagi/issues/` のタスク issue 操作）。CLI の `usagi` には
 //! 出さないエージェント向けの IF で、CLI コマンドと同じ core usecase を呼ぶ兄弟。
 use chrono::Utc;
+use std::path::Path;
 use usagi_core::infrastructure::store::issue::IssueStore;
 use usagi_core::usecase::issue::{self, NewIssue};
 
 use crate::mcp::tool::{Tool, ToolError};
 
-fn store() -> IssueStore {
-    IssueStore::new(
-        std::env::current_dir().expect("MCP server already resolved its cwd at startup"),
-    )
+fn store(root: &Path) -> IssueStore {
+    IssueStore::new(root)
 }
 
-fn writable_store() -> anyhow::Result<IssueStore> {
-    let root = std::env::current_dir().expect("MCP server already resolved its cwd at startup");
-    issue::ensure_write_allowed(&root)?;
+fn writable_store(root: &Path) -> anyhow::Result<IssueStore> {
+    issue::ensure_write_allowed(root)?;
     Ok(IssueStore::new(root))
 }
 
@@ -59,10 +57,10 @@ impl Tool for IssueCreate {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"title":{"type":"string"},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":"integer"},"milestone":{"type":"string"},"body":{"type":"string"}},"required":["title"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let spec: NewIssue =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let store = writable_store().map_err(|error| execution_error(&error))?;
+        let store = writable_store(store_root).map_err(|error| execution_error(&error))?;
         let created =
             issue::create(&store, spec, Utc::now()).map_err(|error| execution_error(&error))?;
         Ok(serde_json::to_string_pretty(&IssueView::from(&created))
@@ -103,8 +101,8 @@ impl Tool for IssueGet {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
-        Self::call_with_store(params, &store())
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
+        Self::call_with_store(params, &store(store_root))
     }
 }
 
@@ -121,11 +119,11 @@ impl Tool for IssueToPrompt {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NumberArgs =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
         let Some(issue) =
-            issue::get(&store(), args.number).map_err(|error| execution_error(&error))?
+            issue::get(&store(store_root), args.number).map_err(|error| execution_error(&error))?
         else {
             return Err(ToolError::Execution(format!("no issue #{}", args.number)));
         };
@@ -151,11 +149,15 @@ impl Tool for IssueSearch {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"label":{"type":"string"},"parent":{"type":"integer"},"milestone":{"type":"string"},"ready":{"type":"boolean"}}}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: SearchArgs =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let issues = issue::search(&store(), args.query.as_deref().unwrap_or(""), &args.filter)
-            .map_err(|error| execution_error(&error))?;
+        let issues = issue::search(
+            &store(store_root),
+            args.query.as_deref().unwrap_or(""),
+            &args.filter,
+        )
+        .map_err(|error| execution_error(&error))?;
         Ok(serde_json::to_string_pretty(
             &issues.iter().map(ListedIssueView::from).collect::<Vec<_>>(),
         )
@@ -176,10 +178,10 @@ impl Tool for IssueUpdate {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":["integer","null"]},"milestone":{"type":["string","null"]},"body":{"type":"string"}},"required":["number"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: UpdateArgs =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let store = writable_store().map_err(|error| execution_error(&error))?;
+        let store = writable_store(store_root).map_err(|error| execution_error(&error))?;
         let Some(updated) = issue::update(&store, args.number, args.patch, Utc::now())
             .map_err(|error| execution_error(&error))?
         else {
@@ -203,10 +205,10 @@ impl Tool for IssueDelete {
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
-    fn call(&self, params: &str) -> Result<String, ToolError> {
+    fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NumberArgs =
             serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let store = writable_store().map_err(|error| execution_error(&error))?;
+        let store = writable_store(store_root).map_err(|error| execution_error(&error))?;
         let deleted =
             issue::delete(&store, args.number).map_err(|error| execution_error(&error))?;
         Ok(serde_json::to_string_pretty(

@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, tui, daemon, ipc, terminal, recovery]
 dependson: [518]
-related: [386, 388, 463, 492, 506, 507, 516]
+related: [386, 388, 463, 506, 507, 516]
 parent: 505
 created_at: 2026-07-21T21:20:50.849656+00:00
 updated_at: 2026-07-26T09:25:39.166737+00:00

@@ -636,7 +636,7 @@ struct Entry {
     /// input after every reconnect as a stale sequence. Cross-connection identity
     /// lives in the separate operation ledger, keyed by client incarnation.
     inputs: BTreeMap<(ConnectionId, ClientId), InputLedger>,
-    /// The authoritative decoded screen for this terminal (#199). Every byte
+    /// The authoritative decoded screen for this terminal. Every byte
     /// this registry accepts is fed to it, so a checkpoint never depends on
     /// where the bounded journal happens to start.
     screen: VtScreen,
@@ -1660,7 +1660,7 @@ mod tests {
     fn revision_2_snapshot_reconstructs_a_screen_a_trimmed_raw_tail_cannot() {
         let r = reference();
         // A four byte journal keeps almost nothing, so the raw tail starts in the
-        // middle of an escape sequence — the #199 regression this replaces.
+        // middle of an escape sequence — the regression this replaces.
         let mut registry = TerminalRegistry::new(4, 2);
         registry
             .register(r.clone(), Geometry { cols: 12, rows: 3 })

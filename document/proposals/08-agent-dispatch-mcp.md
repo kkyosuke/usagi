@@ -3,34 +3,33 @@
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [PTY crash continuation](07-pty-crash-continuation.md)
 
 `usagi` の agent 向け MCP に、**特定の agent へ指示を出して即時実行させ、完了時は機械的に記録した
-呼び出し元 agent へ確実に報告する** dispatch 契約を追加する提案。まだ実装していないため
-[06-conventions.md#記載実装済み](../06-conventions.md#記載実装済み) に従い spec 本編（`01-` …）には
-書かず、この提案に分離する。実装が確定した部分は [02-architecture.md](../02-architecture.md) /
-[04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み、この提案はリンクだけ残す。
+呼び出し元 agent へ確実に報告する** dispatch 契約を導入した際の設計記録である。現在の実行契約は
+[02-architecture.md](../02-architecture.md) / [05-daemon.md](../05-daemon.md) /
+[07-mcp.md](../07-mcp.md) が正本であり、本書は採用理由と実装時の分割だけを残す。
 
-実装タスクは issue ストア（`.usagi/issues/`）の #321–#323、#331–#332 で追跡する（[§8](#8-実装-issue-分割)）。
+実装は issue ストア（`.usagi/issues/`）の #321–#323、#331–#332 で行った（[§8](#8-実装時の-issue-分割)）。
 
 ## 目次
 
 - [1. 目的と背景](#1-目的と背景)
-- [2. 現状の棚卸し（再利用する既存プリミティブ）](#2-現状の棚卸し再利用する既存プリミティブ)
+- [2. 導入時の棚卸し（再利用した既存プリミティブ）](#2-導入時の棚卸し再利用した既存プリミティブ)
 - [3. MCP 契約](#3-mcp-契約)
 - [4. durable データモデルと置き場所](#4-durable-データモデルと置き場所)
 - [5. caller↔worker binding と caller 推論](#5-callerworker-binding-と-caller-推論)
 - [6. 完了報告と「報告なし」検知](#6-完了報告と報告なし検知)
 - [7. 既存 tool との互換性・移行方針](#7-既存-tool-との互換性移行方針)
-- [8. 実装 issue 分割](#8-実装-issue-分割)
+- [8. 実装時の issue 分割](#8-実装時の-issue-分割)
 - [9. runtime/model allowlist、schema snapshot と再検証](#9-runtimemodel-allowlistschema-snapshot-と再検証)
 - [10. 非目標](#10-非目標)
 
 ## 1. 目的と背景
 
-現在の orchestration は「起源フロー（root が brief/issue を渡して新 session を起こす）」と
-「遂行フロー（session が worktree で作業して PR する）」を [session_delegate_brief](../../.usagi/issues/109-feat-mcp-session-delegate-brief-issue-session.md) /
+導入前の orchestration は「起源フロー（root が brief/issue を渡して新 session を起こす）」と
+「遂行フロー（session が worktree で作業して PR する）」を `session_delegate_brief` /
 `session_delegate_issue` で回す（[01-entry-surfaces.md](01-entry-surfaces.md)）。これらは
 **session 単位**の粗い委譲で、配送も `queue`（起動時キュー）が前提であり、次の要求を満たさない。
 
-| 要求 | 現状の不足 |
+| 要求 | 導入前の不足 |
 |---|---|
 | 他 session の**特定 agent**へ指示する | 委譲先は session 単位。session 内の複数 agent を個別に指名できない |
 | **即時実行**させる（queue/live を意識しない） | `session_prompt` は `mode`（auto/queue/live）を公開し、呼び出し側が配送を選ばされる |
@@ -41,11 +40,11 @@
 本提案はこれを、既存の durable な daemon runtime（reservation → snapshot → spawn → journal → exit）と
 typed ID / fence の上に、**agent 単位の dispatch と durable inbox** として設計する。
 
-## 2. 現状の棚卸し（再利用する既存プリミティブ）
+## 2. 導入時の棚卸し（再利用した既存プリミティブ）
 
-新規に作り直さず、既にある durable 機構へ接続する。
+新規に作り直さず、既にあった durable 機構へ接続した。
 
-| 概念 | 既存プリミティブ | 所在 |
+| 概念 | 再利用したプリミティブ | 所在 |
 |---|---|---|
 | run の同一性 | `OperationId`（UUIDv7・durable operation identity） | `crates/core/src/domain/id/` |
 | agent runtime の参照 | `AgentRuntimeRef { agent_runtime_id, terminal, session_id }` | 同上 |
@@ -57,8 +56,8 @@ typed ID / fence の上に、**agent 単位の dispatch と durable inbox** と�
 | run 実行と永続化 | `RuntimeCoordinator` / `RuntimeStore` / `RuntimeStoreSnapshot` | `crates/daemon/src/usecase/runtime.rs` |
 | durable な store 基盤 | `json_file`（atomic write+fsync）/ `store_lock`（cross-process） | `crates/core/src/infrastructure/persistence/` |
 
-**存在しないもの（本提案で新設）**: durable な **inbox**（grep で 0 件）、**agent 単位の永続エンティティ**、
-`run_id` を返し caller↔worker を結ぶ **dispatch 契約**。
+**導入前に存在しなかったもの**は、durable な **inbox**、**agent 単位の永続エンティティ**、
+`run_id` を返し caller↔worker を結ぶ **dispatch 契約**である。
 
 > daemon が単一書き手である原則（[01-entry-surfaces.md](01-entry-surfaces.md)）を保つため、新設 store は
 > daemon state dir 側（`sessions.json` の隣）に置き、typed ID で鍵付けし `CompletionFence` で照合する。
@@ -92,7 +91,7 @@ session_dispatch {
 - `agent` は **id 指定**（既存 agent の再利用）**か** `runtime`+`model` 指定（新規作成）の**排他**。
   `id` と `runtime`/`model` の併用は typed error（`ErrorCode::InvalidArgument`）にする。
 - `runtime` は `AgentProfileId`（`claude` / `codex` …）、`model` は `ModelSelector`。可否は
-  agent capability（#146）で検証する。
+agent capability で検証する。
 - prompt は `LaunchRequest.initial_prompt` に載せ、daemon が**即時 launch**する。queue/live は選ばせない。
 - dispatch 成立時に **caller↔worker を durable に binding**（[§5](#5-callerworker-binding-と-caller-推論)）し、
   `run_id`（＝ launch operation の `OperationId`）を返す。
@@ -220,7 +219,7 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 | 既存 tool | 関係 | 移行方針 |
 |---|---|---|
 | `session_delegate_brief` | 起源フロー（事前 issue 不要でトリアージ session を起こす） | 維持。`agent` selector を受け、同じ dispatch 経路で直ちに worker を起動する |
-| `session_delegate_issue` | 遂行フロー（committed issue を新 session へ委譲） | 維持。基点コミット検証（#110）もそのまま |
+| `session_delegate_issue` | 遂行フロー（committed issue を新 session へ委譲） | 維持。基点コミット検証もそのまま |
 | `issue_to_prompt` | issue → prompt 整形 | 維持。dispatch の prompt 生成に組み合わせて使える |
 | `session_prompt` | session の agent へ prompt 送信（`mode` 公開） | 維持。dispatch は `mode` を隠蔽した即時実行の上位入口 |
 | `session_complete` | session→親 session/`:root` へ自由文報告 | 維持。`agent_complete` は agent 単位＋構造化 result＋durable inbox で粒度が細かい |
@@ -228,12 +227,12 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 - `session_dispatch` は `session_create` + agent 解決 + `initial_prompt` launch + binding を束ねる
   **合成 tool**（`session_delegate_*` と同じ合成パターン）で、新しい実行ロジックを二重に持たない。
 - 配送モードの公開は `session_prompt` に閉じる。dispatch は常に即時実行なので queue/live を出さない。
-- 実装が確定したら、この互換表を [02-architecture.md#入口面-mcp-の-tool-dispatch](../02-architecture.md) と
-  [04-ipc.md](../04-ipc.md) の正本へ畳み込み、本提案はリンクに縮める。
+- 現在の互換契約は [02-architecture.md#入口面-mcp-の-tool-dispatch](../02-architecture.md) と
+  [07-mcp.md](../07-mcp.md) に畳み込み済みである。
 
-## 8. 実装 issue 分割
+## 8. 実装時の issue 分割
 
-層境界と store 境界に沿って 3 段の DAG に分割する。
+層境界と store 境界に沿って次の DAG に分割して実装した。
 
 ```
 #321 core: dispatch の durable ドメイン + store（基盤）
@@ -299,6 +298,6 @@ MCP は runtime/model 以外の path、argv、environment、credential、CLI raw
 ## 10. 非目標
 
 - queue/live 配送モードの再設計（`session_prompt` の既存挙動は変えない）。
-- `claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化（#146 の語彙に従う）。
+- `claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化（定義済みの語彙に従う）。
 - daemon crash 後の PTY FD 継続（[07-pty-crash-continuation.md](07-pty-crash-continuation.md) の範疇）。
 - TUI からの dispatch 表示／操作 UX（別 issue）。

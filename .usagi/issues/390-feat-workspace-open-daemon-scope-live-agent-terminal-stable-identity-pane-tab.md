@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, daemon, terminal, agent, orchestration, restore, design]
 dependson: []
-related: [193, 195, 256, 282, 350, 209, 254, 363, 367]
+related: [256, 282, 350, 209, 254, 363, 367]
 created_at: 2026-07-20T01:41:38.171645+00:00
 updated_at: 2026-07-20T03:32:06.373440+00:00
 ---

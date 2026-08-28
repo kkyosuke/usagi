@@ -28,11 +28,10 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | daemon が worktree を破棄し、lifecycle store を更新する |
-| legacy state の検査・採用 | `session_recover_legacy` | 既定は検査だけを行い、`apply: true` のときだけ daemon lifecycle state へ採用する |
 | worker dispatch | `session_dispatch` | session を作成または再利用し、worker PTY と run/binding を durable に記録する |
 | worker の観測 | `session_get` / `agent_list` / `agent_get` | dispatch store の agent と run を返す |
 | worker の報告 | `agent_complete` / `agent_fail` | authenticated current run の報告を保存済み caller inbox へ配送する |
-| caller の受信 | `agent_inbox` | authenticated caller 自身の durable inbox を返す |
+| caller の受信 | `agent_inbox` / `agent_inbox_ack` | authenticated caller 自身の durable inbox をbounded pageで読み、処理後に明示ACKする |
 
 ## observe と prompt
 
@@ -123,8 +122,10 @@ current run と dispatch 時の binding を照合し、元 caller の inbox へ�
 
 ## caller inbox を読む
 
-caller は `agent_inbox {"unread_only":true}` で自分宛ての報告を読む。`since` には RFC 3339 timestamp を
-指定できる。worker が報告せず終了した場合も daemon が `no_report` を配送する。
+caller は `agent_inbox {"unread_only":true,"limit":100}` で自分宛ての報告を読む。応答の`next_cursor`を次の
+pageの`cursor`に使い、messageを処理し終えた後だけ`agent_inbox_ack {"cursor":<next_cursor>}`へ渡す。queryだけでは
+既読にならないため、応答を失った場合は同じcursorで安全に再読できる。`since`にはRFC 3339 timestampを指定できる。
+workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 
 ## session を作成する
 
@@ -153,12 +154,6 @@ store の更新は daemon 内で同期的に完了してから応答する。同
 
 `force` は変更を失う可能性があるため、dirty であることを別の信頼できる経路で確認し、破棄が意図された
 場合だけ指定する。
-
-## legacy state を扱う
-
-`session_recover_legacy` は引数無し、または `apply: false` なら検査結果だけを返す。検査結果を確認した
-うえで `apply: true` を呼ぶと、検証に通った legacy session 一式を daemon lifecycle state へ採用する。
-通常の daemon restart や MCP 起動はこの採用を暗黙には行わない。
 
 ## 制約
 

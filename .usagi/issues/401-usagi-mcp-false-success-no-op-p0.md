@@ -6,12 +6,9 @@ priority: high
 labels: [mcp]
 dependson: []
 related: []
-parent: 400
 created_at: 2026-07-20T04:53:15.305558+00:00
 updated_at: 2026-07-20T07:17:47.427195+00:00
 ---
-
-親: #400。**最優先の安全弁**。実 durable 効果が無いのに成功を返す 13 tool を、実装が入るまで**明示エラー**に変える（agent の誤成功を止める）。以後の系別実装 PR は、自系 tool についてこのエラーを実処理へ置換する。
 
 ## 対象（false-success no-op = 13）
 
@@ -35,6 +32,6 @@ no-op の間は、これらの action に対して daemon が `ResponseOutcome::
 ## 完了条件
 
 - [ ] 上記 13 tool を新規ビルド `usagi mcp` stdio の `tools/call` に投げると **明示的な JSON-RPC エラー**（成功・エコーでない）を返す。
-- [ ] `session_create`/`session_remove`/`session_recover_legacy`（実装済み）と、`session`/`agent`/`dispatch` kind の Accepted 契約が回帰しない（既存 daemon test green）。
+- [ ] `session_create`/`session_remove` と、`session`/`agent`/`dispatch` kind の Accepted 契約が回帰しない（既存 daemon test green）。
 - [ ] 変更を固定する daemon/serve のユニットテスト（no-op action → Error）を追加。
 - [ ] 影響する docs（あれば）を同 PR で更新。coverage 100% 維持。

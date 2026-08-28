@@ -6,7 +6,6 @@ priority: high
 labels: [tui, runtime, input]
 dependson: [224]
 related: []
-parent: 227
 created_at: 2026-07-12T21:11:18.138830+00:00
 updated_at: 2026-07-12T22:33:09.385020+00:00
 ---

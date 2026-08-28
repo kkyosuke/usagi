@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, lifecycle, durability]
 dependson: [568]
-related: [515, 516, 542, 550, 559]
+related: [515, 516, 550, 559]
 parent: 559
 created_at: 2026-07-26T13:58:19.336697+00:00
 updated_at: 2026-07-26T22:29:27.685301+00:00
@@ -33,8 +33,6 @@ durable state 移行と混ぜず、単独でレビュー・検証できる形に
 - [#516](516-refactor-daemon-cross-process-generation-registry-standby-handoff-authority.md)（done）— registry の
   role / readiness / handoff / admission fence の**判定は正本がそちら**。本 issue は production lifecycle の配線だけを行い、
   判定を再実装しない。
-- [#542](542-fix-daemon-fence-workspace-mode-home.md)（done）— workspace fence。単一インスタンス性を registry へ
-  移した後も、**fence の契約は変えない**。
 - [#515](515-fix-daemon-current-locator-crash-safe-atomic-publish.md)（done）— locator の crash-safe publish。
   standby は locator を publish しない（`bind_private`）ことをここで守る。
 - [#550](550-fix-daemon-pid-record-lifecycle-command-stale.md)（done）— PID record の lifecycle。

@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [review, v2, daemon, ipc, lifecycle, build, release, recovery]
 dependson: []
-related: [215, 275, 341, 461, 507, 508, 516, 518]
+related: [215, 275, 341, 507, 508, 516, 518]
 parent: 507
 created_at: 2026-07-22T12:04:10.797067+00:00
 updated_at: 2026-07-23T10:16:18.568559+00:00
@@ -54,7 +54,6 @@ version/protocol compatibility と artifact incarnation は別概念である。
 - #516はtriggerが指すexpected artifactをprivate standbyで検証し、cross-process active/current authorityをhandoffする。
 - #508はactive / draining inventoryとexact `TerminalRef.daemon_generation` routingをshipping enable前に完成させる。
 - #507はmanual/build/update triggerを同じshipping rollover operationへ接続し、#508 capabilityをgateしたうえでold PTY継続と最終product E2Eを所有する。
-- wire protocol compatibilityは#215、verified self-update/stagingは#461の責務を維持する。
 - done #275のchannel分離は維持するが、development毎bootstrap restartは本issueのexact-artifact reuse + explicit force policyで置き換える。
 
 ## 非対象
@@ -62,7 +61,6 @@ version/protocol compatibility と artifact incarnation は別概念である。
 - generation registry、standby endpoint、locator handoff、request admission fence（#516）
 - owner-generation runtime shard / allocator / event handoff（#518）
 - shipping rollover orchestration、stop contract、live PTY継続の最終E2E（#507）
-- update artifactのdownload/signature/atomic install（#461）
 
 ## 受入条件
 

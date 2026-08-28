@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [orchestration, supervisor, policy, verification, daemon]
 dependson: [323, 326]
-related: [183, 187, 219, 283, 329, 330]
+related: [219, 283, 329, 330]
 parent: 324
 created_at: 2026-07-17T21:12:25.962916+00:00
 updated_at: 2026-07-18T00:25:33.721530+00:00

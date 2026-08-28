@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [tui, rust]
 dependson: []
-related: [222]
+related: []
 created_at: 2026-07-12T12:53:26.111794+00:00
 updated_at: 2026-07-12T13:00:23.751386+00:00
 ---

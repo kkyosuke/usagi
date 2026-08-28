@@ -4,15 +4,13 @@ title: feat(daemon): Codex adapter を daemon launch に接続する
 status: done
 priority: high
 labels: [daemon, agent, codex]
-dependson: [250, 251]
-related: [142, 145, 146]
+dependson: [251]
+related: []
 created_at: 2026-07-12T22:33:12.392377+00:00
 updated_at: 2026-07-12T23:07:15.451865+00:00
 ---
 
 ## 目的
-
-#250 の共通 contract と #251 の daemon runtime port を使い、Codex 固有の launch plan renderer と provisioner を adapter 境界に閉じて daemon launch へ接続する。Codex の CLI 文法、hook/config 形式、model の解釈、secret materialization は core と共通 daemon orchestration に漏らさない。
 
 ## Architecture ownership
 
@@ -22,8 +20,6 @@ updated_at: 2026-07-12T23:07:15.451865+00:00
 | Codex adapter module/crate | Codex profile の support 宣言、request → argv plan renderer、設定/MCP/hook materialization、secret を含まない provision result |
 | `crates/daemon/src/usecase` | adapter port を profile ID で解決し、validated plan/provision result を #251 の reservation/PTY lifecycle に渡す |
 | `crates/daemon/src/infrastructure` | provisioner が要求する scoped file/env と process/PTY を注入して実行し、secret を durable record/log に残さない |
-
-Codex adapter の write-set は Codex 専用 module・fixture・test に限定する。Claude adapter (#253) の renderer/provisioner を参照せず、両 issue は #250/#251 後に並行できる。
 
 ## 受け入れ条件
 

@@ -8,9 +8,9 @@ use usagi_core::infrastructure::daemon::DaemonRecordStore;
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_identity};
 
 use super::{
-    LiveResources, ReplacementPlan, ResourceCensus, RolloverRequester, SeamlessRefusal, StopPlan,
-    TransitionMode, manual_operation_id, plan_replacement, plan_stop, replace_daemon,
-    seamless_refusal, stop_daemon,
+    LiveResources, ReplacementPlan, ResourceCensus, RetainedGenerationControl, RolloverRequester,
+    SeamlessRefusal, StopPlan, TransitionMode, manual_operation_id, plan_replacement, plan_stop,
+    replace_daemon, seamless_refusal, stop_daemon,
 };
 use crate::test_support::{
     FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
@@ -85,6 +85,46 @@ struct FailingCensus;
 impl ResourceCensus for FailingCensus {
     fn live(&self) -> io::Result<LiveResources> {
         Err(io::Error::other("runtime store unreadable"))
+    }
+}
+
+struct NoGenerations;
+
+impl RetainedGenerationControl for NoGenerations {
+    fn has_live(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    fn shutdown_all(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct RecordingGenerations {
+    live: bool,
+    shutdowns: Cell<usize>,
+}
+
+struct FailingGenerationShutdown;
+
+impl RetainedGenerationControl for FailingGenerationShutdown {
+    fn has_live(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+
+    fn shutdown_all(&self) -> io::Result<()> {
+        Err(io::Error::other("retained generation did not stop"))
+    }
+}
+
+impl RetainedGenerationControl for RecordingGenerations {
+    fn has_live(&self) -> io::Result<bool> {
+        Ok(self.live)
+    }
+
+    fn shutdown_all(&self) -> io::Result<()> {
+        self.shutdowns.set(self.shutdowns.get() + 1);
+        Ok(())
     }
 }
 
@@ -354,6 +394,7 @@ fn no_live_owner_is_never_censused_and_never_blocks_a_transition() {
             &NoopSleeper,
             &NoopReady,
             &census,
+            &NoGenerations,
             TransitionMode::Planned,
             &info(),
         )
@@ -374,6 +415,7 @@ fn no_live_owner_is_never_censused_and_never_blocks_a_transition() {
             &NoopSleeper,
             &NoopReady,
             &census,
+            &NoGenerations,
             Some(&SeamlessRefusal::NoGenerationRegistry),
             &NeverRollover,
             TransitionMode::Planned,
@@ -383,6 +425,126 @@ fn no_live_owner_is_never_censused_and_never_blocks_a_transition() {
         .is_ok()
     );
     assert_eq!(census.calls.get(), 0);
+}
+
+#[test]
+fn a_live_draining_generation_is_censused_even_with_a_stale_lifecycle_record() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    store.save(&DaemonRecord::new(1111)).unwrap();
+    let census = FixedCensus::of(1, 0);
+    let generations = RecordingGenerations {
+        live: true,
+        shutdowns: Cell::new(0),
+    };
+
+    let error = stop_daemon(
+        &store,
+        &ReusedPidProbe(1111),
+        &RecordingTerminator::default(),
+        &NoopSleeper,
+        &NoopReady,
+        &census,
+        &generations,
+        TransitionMode::Planned,
+        &info(),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("1 Agent runtime(s)"));
+    assert!(error.to_string().contains("--force"));
+    assert_eq!(census.calls.get(), 1);
+    assert_eq!(generations.shutdowns.get(), 0);
+}
+
+#[test]
+fn a_forced_stop_shuts_down_the_live_draining_generation_before_stale_cleanup() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    store.save(&DaemonRecord::new(1111)).unwrap();
+    let generations = RecordingGenerations {
+        live: true,
+        shutdowns: Cell::new(0),
+    };
+
+    assert_eq!(
+        stop_daemon(
+            &store,
+            &ReusedPidProbe(1111),
+            &RecordingTerminator::default(),
+            &NoopSleeper,
+            &NoopReady,
+            &FixedCensus::of(1, 0),
+            &generations,
+            TransitionMode::Cold,
+            &info(),
+        )
+        .unwrap(),
+        "usagi v0.1.0: cleared stale daemon record"
+    );
+    assert_eq!(generations.shutdowns.get(), 1);
+    assert_eq!(store.load().unwrap(), None);
+}
+
+#[test]
+fn a_forced_restart_shuts_down_the_live_draining_generation_before_replacement() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    store.save(&DaemonRecord::new(1111)).unwrap();
+    let generations = RecordingGenerations {
+        live: true,
+        shutdowns: Cell::new(0),
+    };
+    let launcher = TestLauncher::registering(&store, 5555);
+
+    assert_eq!(
+        replace_daemon(
+            &store,
+            &ReusedPidProbe(1111),
+            &RecordingTerminator::default(),
+            &launcher,
+            &NoopSleeper,
+            &NoopReady,
+            &FixedCensus::of(1, 0),
+            &generations,
+            Some(&SeamlessRefusal::DrainingCollectionPending),
+            &NeverRollover,
+            TransitionMode::Cold,
+            None,
+            &info(),
+        )
+        .unwrap(),
+        "usagi v0.1.0: daemon restarted (pid 5555)"
+    );
+    assert_eq!(generations.shutdowns.get(), 1);
+    assert_eq!(launcher.launches(), 1);
+    assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
+}
+
+#[test]
+fn a_failed_generation_shutdown_preserves_the_record_and_never_launches() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    let stale = DaemonRecord::new(1111);
+    store.save(&stale).unwrap();
+    let launcher = TestLauncher::registering(&store, 5555);
+
+    let error = replace_daemon(
+        &store,
+        &ReusedPidProbe(1111),
+        &RecordingTerminator::default(),
+        &launcher,
+        &NoopSleeper,
+        &NoopReady,
+        &FixedCensus::of(0, 0),
+        &FailingGenerationShutdown,
+        Some(&SeamlessRefusal::DrainingCollectionPending),
+        &NeverRollover,
+        TransitionMode::Cold,
+        None,
+        &info(),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "retained generation did not stop");
+    assert_eq!(launcher.launches(), 0);
+    assert_eq!(store.load().unwrap(), Some(stale));
 }
 
 /// A live owner is asked exactly once, and its answer decides the transition.
@@ -405,6 +567,7 @@ fn a_live_owner_is_censused_once_before_it_is_signalled() {
             },
             &NoopReady,
             &census,
+            &NoGenerations,
             TransitionMode::Planned,
             &info(),
         )
@@ -429,6 +592,7 @@ fn stopping_a_busy_daemon_is_refused_with_nothing_signalled() {
         &NoopSleeper,
         &NoopReady,
         &FixedCensus::of(1, 1),
+        &NoGenerations,
         TransitionMode::Planned,
         &info(),
     )
@@ -460,6 +624,7 @@ fn an_explicit_cold_stop_terminates_the_busy_daemon() {
             },
             &NoopReady,
             &FixedCensus::of(2, 0),
+            &NoGenerations,
             TransitionMode::Cold,
             &info(),
         )
@@ -484,6 +649,7 @@ fn a_census_failure_stops_a_transition_before_it_signals_anything() {
         &NoopSleeper,
         &NoopReady,
         &FailingCensus,
+        &NoGenerations,
         TransitionMode::Cold,
         &info(),
     )
@@ -498,6 +664,7 @@ fn a_census_failure_stops_a_transition_before_it_signals_anything() {
         &NoopSleeper,
         &NoopReady,
         &FailingCensus,
+        &NoGenerations,
         Some(&SeamlessRefusal::NoGenerationRegistry),
         &NeverRollover,
         TransitionMode::Cold,
@@ -528,6 +695,7 @@ fn replacing_an_idle_daemon_performs_the_cold_transition_under_its_operation() {
             &NoopSleeper,
             &NoopReady,
             &FixedCensus::of(0, 0),
+            &NoGenerations,
             Some(&SeamlessRefusal::NoGenerationRegistry),
             &NeverRollover,
             TransitionMode::Planned,
@@ -555,6 +723,7 @@ fn a_replacement_without_a_safe_operation_key_still_reports_the_transition() {
             &NoopSleeper,
             &NoopReady,
             &FixedCensus::of(0, 0),
+            &NoGenerations,
             Some(&SeamlessRefusal::NoGenerationRegistry),
             &NeverRollover,
             TransitionMode::Planned,
@@ -584,6 +753,7 @@ fn a_failed_cold_transition_propagates_its_own_error() {
         &NoopSleeper,
         &NoopReady,
         &FixedCensus::of(0, 0),
+        &NoGenerations,
         Some(&SeamlessRefusal::NoGenerationRegistry),
         &NeverRollover,
         TransitionMode::Planned,
@@ -612,6 +782,7 @@ fn replacing_a_busy_daemon_is_refused_and_names_the_missing_prerequisite() {
         &NoopSleeper,
         &NoopReady,
         &FixedCensus::of(0, 3),
+        &NoGenerations,
         Some(&SeamlessRefusal::NoGenerationRegistry),
         &NeverRollover,
         TransitionMode::Planned,
@@ -645,6 +816,7 @@ fn seamless_rollover_requires_and_forwards_the_durable_operation() {
         &NoopSleeper,
         &NoopReady,
         &FixedCensus::of(1, 0),
+        &NoGenerations,
         None,
         &SuccessfulRollover,
         TransitionMode::Planned,
@@ -664,6 +836,7 @@ fn seamless_rollover_requires_and_forwards_the_durable_operation() {
             &NoopSleeper,
             &NoopReady,
             &FixedCensus::of(1, 0),
+            &NoGenerations,
             None,
             &SuccessfulRollover,
             TransitionMode::Planned,
