@@ -3375,18 +3375,21 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 overlay.error = None;
             }
             // An explicit `p` request is kept as a hidden pending overlay until
-            // its snapshot arrives. Only a non-empty projection may become a
-            // modal; an empty result closes an already-visible stale modal too.
+            // its snapshot arrives. Only an inventory with no visible PR at all
+            // closes the modal. A status tab with no matches remains open so the
+            // user can navigate to another tab without reopening the inventory.
             if state
                 .pr_overlay
                 .as_ref()
                 .is_some_and(|overlay| overlay.target == *target)
             {
-                if state
-                    .pr_overlay
-                    .as_ref()
-                    .is_some_and(|overlay| overlay.prs.is_empty())
-                {
+                let has_visible_prs = match target {
+                    Target::Root(_) => !filtered_prs(prs, PrFilter::All).is_empty(),
+                    Target::Session(session) => state
+                        .session_prs(*session)
+                        .is_some_and(|prs| !filtered_prs(prs, PrFilter::All).is_empty()),
+                };
+                if !has_visible_prs {
                     state.pr_overlay = None;
                     if state.overlay == Some(Overlay::Prs) {
                         state.overlay = None;
@@ -9751,6 +9754,35 @@ mod tests {
     }
 
     #[test]
+    fn root_pr_overlay_uses_the_unfiltered_inventory_to_decide_visibility() {
+        let (workspace, _, _) = ids();
+        let target = Target::Root(workspace);
+        let mut state = AppState::home(workspace, Vec::new());
+        state.pr_overlay = Some(PrOverlay::loading(target));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![pr_link(1)],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 2,
+                prs: Vec::new(),
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+    }
+
+    #[test]
     fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);
@@ -10034,14 +10066,36 @@ mod tests {
             assert_eq!(state.pr_overlay().unwrap().filter(), filter);
             assert_eq!(state.pr_overlay().unwrap().prs().len(), expected);
         }
+
+        // A resident refresh while the active status tab has no matches keeps
+        // the modal open. The unfiltered inventory still has PRs, so the user
+        // must be able to navigate to another tab without reopening it.
         let _ = update(&mut state, AppEvent::Key(AppKey::Left));
-        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Merged);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
+        assert!(state.pr_overlay().unwrap().prs().is_empty());
+        let mut refreshed_merged = newly_detected.clone();
+        refreshed_merged.state = PrState::Merged;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 3,
+                prs: vec![pr_link(1), refreshed_merged],
+            }),
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
+        assert!(state.pr_overlay().unwrap().prs().is_empty());
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
         assert_eq!(state.pr_overlay().unwrap().prs().len(), 1);
 
         // The old hidden `f` shortcut is inert now that the visible tabs own
         // status navigation.
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('f')));
-        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Merged);
+        assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
         assert_eq!(PrFilter::All.label(), "all");
         assert_eq!(PrFilter::Open.label(), "open");
         assert_eq!(PrFilter::Closed.label(), "closed");
