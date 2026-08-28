@@ -13,7 +13,7 @@ use usagi_core::usecase::claude_sandbox::{
 use usagi_core::usecase::client::{ClientError, ClientPolicy, DaemonClient, DaemonReply};
 use usagi_tui::usecase::application::EntryScreen;
 
-use super::{daemon, tui};
+use super::{clean, daemon, tui};
 
 // 各 `RunOutcome` を実行面へ接続するだけの routing match。arm が増えて 100 行を超えるが、
 // 分割しても routing の一覧性が下がるだけなので too_many_lines を許容する。
@@ -38,6 +38,7 @@ enum Action {
     LaunchDaemon,
     RequestDaemonReplacement,
     LaunchMcp,
+    Clean,
     CaptureCodexSession,
     ReportAgentPhase,
     GuardWorkspace,
@@ -57,6 +58,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
             RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
             RunOutcome::LaunchMcp => Self::LaunchMcp,
+            RunOutcome::Clean { .. } => Self::Clean,
             RunOutcome::CaptureCodexSession => Self::CaptureCodexSession,
             RunOutcome::ReportAgentPhase { .. } => Self::ReportAgentPhase,
             RunOutcome::GuardWorkspace => Self::GuardWorkspace,
@@ -74,7 +76,7 @@ mod action_io {
 
     use super::{
         Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
-        LauncherPolicyInputs, RunOutcome, TuiRequest, Write, claude_sandbox, daemon,
+        LauncherPolicyInputs, RunOutcome, TuiRequest, Write, claude_sandbox, clean, daemon,
         execute_self_update, exit_code, guard_workspace, tui, write_client_error,
         write_daemon_outcome,
     };
@@ -153,6 +155,9 @@ mod action_io {
                         Ok(ExitCode::FAILURE)
                     }
                 }
+            }
+            (Action::Clean, RunOutcome::Clean { apply, force }) => {
+                clean::run(out, err, apply, force)
             }
             (Action::CaptureCodexSession, RunOutcome::CaptureCodexSession) => {
                 let stdin = std::io::stdin();

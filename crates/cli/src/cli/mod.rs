@@ -96,6 +96,13 @@ pub enum RunOutcome {
     RequestDaemonReplacement { force: bool },
     /// stdio MCP server の起動を依頼する。
     LaunchMcp,
+    /// 孤立 resource の棚卸しまたは削除を合成ルートへ依頼する。
+    Clean {
+        /// 候補へ削除効果を適用するか。
+        apply: bool,
+        /// user changes を含み得る Git resource も削除するか。
+        force: bool,
+    },
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
     CaptureCodexSession,
     /// エージェントのライフサイクルフックが名乗る phase を daemon へ報告する。
@@ -188,6 +195,15 @@ pub enum Command {
     Config,
     /// 必要ツールの導入状況を診断する（TUI の Doctor を開く）
     Doctor,
+    /// 紐付いていない workspace・daemon data・worktree・branch を整理する
+    Clean {
+        /// 検出した安全な候補を実際に削除する（省略時は dry-run）
+        #[arg(long)]
+        apply: bool,
+        /// dirty worktree と未マージ branch も削除する（--apply が必要）
+        #[arg(long, requires = "apply")]
+        force: bool,
+    },
     /// usagi バイナリを GitHub Releases から更新する
     Update {
         /// 更新先の release を一覧から選択する
@@ -379,6 +395,7 @@ impl Command {
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
             Command::Doctor => Box::new(h::Doctor),
+            Command::Clean { apply, force } => Box::new(Clean { apply, force }),
             Command::Update { select_version } => Box::new(h::Update { select_version }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
@@ -413,6 +430,20 @@ impl Command {
                 command,
             }),
         }
+    }
+}
+
+struct Clean {
+    apply: bool,
+    force: bool,
+}
+
+impl Run for Clean {
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::Clean {
+            apply: self.apply,
+            force: self.force,
+        })
     }
 }
 
@@ -587,6 +618,13 @@ mod tests {
             Some(Command::Doctor)
         ));
         assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean"]).unwrap().command,
+            Some(Command::Clean {
+                apply: false,
+                force: false
+            })
+        ));
+        assert!(matches!(
             Cli::try_parse_from(["usagi", "update"]).unwrap().command,
             Some(Command::Update {
                 select_version: false
@@ -742,6 +780,44 @@ mod tests {
                 .command,
             Some(Command::Completion { shell: Shell::Zsh })
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean", "--apply", "--force"])
+                .unwrap()
+                .command,
+            Some(Command::Clean {
+                apply: true,
+                force: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "clean", "--force"]).is_err());
+    }
+
+    #[test]
+    fn clean_becomes_a_typed_composition_request() {
+        let (dry_run, output) = super::execute(Command::Clean {
+            apply: false,
+            force: false,
+        });
+        assert_eq!(
+            dry_run,
+            RunOutcome::Clean {
+                apply: false,
+                force: false
+            }
+        );
+        assert!(output.is_empty());
+
+        let (apply, _) = super::execute(Command::Clean {
+            apply: true,
+            force: true,
+        });
+        assert_eq!(
+            apply,
+            RunOutcome::Clean {
+                apply: true,
+                force: true
+            }
+        );
     }
 
     #[test]
