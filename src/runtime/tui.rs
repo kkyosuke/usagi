@@ -8333,10 +8333,6 @@ mod tests {
         let concurrent = Settings {
             theme: Theme::Light,
             default_model: usagi_core::domain::settings::DefaultModel::SakanaAi,
-            local_llm: usagi_core::domain::settings::LocalLlm {
-                enabled: true,
-                model: "qwen2.5-coder:3b".to_owned(),
-            },
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -8359,7 +8355,6 @@ mod tests {
             usagi_core::domain::settings::DefaultModel::Claude
         );
         assert!(!saved.issue_enabled);
-        assert_eq!(saved.local_llm, concurrent.local_llm);
         assert_eq!(saved.env, concurrent.env);
     }
 
@@ -8579,10 +8574,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
-            local_llm: usagi_core::domain::settings::LocalLlm {
-                enabled: true,
-                model: "qwen2.5-coder:3b".to_owned(),
-            },
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

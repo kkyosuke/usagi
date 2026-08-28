@@ -1,7 +1,6 @@
 use super::{
-    AgentReadinessCommand, AvailableModels, DEFAULT_LOCAL_LLM_MODEL, DefaultModel, EnvBindings,
-    LOCAL_LLM_MODELS, LocalLlm, LocalSettings, ModalSelectionMode, PrAutoOpen, Settings,
-    TeamTemplate, Theme,
+    AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, LocalSettings,
+    ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
 };
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
@@ -49,35 +48,21 @@ fn settings_default_uses_the_system_theme() {
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
     assert!(settings.issue_enabled);
     assert!(settings.memory_enabled);
-    assert_eq!(settings.local_llm, LocalLlm::default());
-    assert!(!settings.local_llm.enabled);
-    assert_eq!(settings.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
     assert!(settings.env.is_empty());
 }
 
 #[test]
-fn local_llm_model_is_sanitized_to_the_closed_vocabulary() {
-    for model in LOCAL_LLM_MODELS {
-        let settings = Settings {
-            local_llm: LocalLlm {
-                enabled: true,
-                model: model.to_owned(),
-            },
-            ..Settings::default()
-        };
-        assert_eq!(settings.sanitized().local_llm.model, model);
-    }
-
-    let settings = Settings {
-        local_llm: LocalLlm {
-            enabled: true,
-            model: "x'; touch /tmp/pwned; #\"\\\n".to_owned(),
-        },
-        ..Settings::default()
-    }
-    .sanitized();
-    assert!(settings.local_llm.enabled);
-    assert_eq!(settings.local_llm.model, DEFAULT_LOCAL_LLM_MODEL);
+fn settings_ignore_the_removed_local_llm_field() {
+    let settings: Settings = serde_json::from_str(
+        r#"{"theme":"dark","local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
+    )
+    .unwrap();
+    assert_eq!(settings.theme, Theme::Dark);
+    assert!(
+        !serde_json::to_string(&settings)
+            .unwrap()
+            .contains("local_llm")
+    );
 }
 
 #[test]
@@ -90,10 +75,6 @@ fn settings_round_trip_through_json() {
         issue_enabled: false,
         memory_enabled: false,
         team_template: TeamTemplate::Pipeline,
-        local_llm: LocalLlm {
-            enabled: true,
-            model: "qwen2.5-coder:3b".to_owned(),
-        },
         env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
     };
     let json = serde_json::to_string(&settings).unwrap();
@@ -103,7 +84,6 @@ fn settings_round_trip_through_json() {
     assert!(json.contains("\"default_model\":\"claude\""));
     assert!(json.contains("\"issue_enabled\":false"));
     assert!(json.contains("\"memory_enabled\":false"));
-    assert!(json.contains("\"local_llm\":{\"enabled\":true,\"model\":\"qwen2.5-coder:3b\"}"));
     let back: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(back, settings);
     // Exercise the derived Clone / Debug.
@@ -371,7 +351,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         issue_enabled: true,
         memory_enabled: false,
         team_template: TeamTemplate::Hierarchical,
-        local_llm: LocalLlm::default(),
         env: EnvBindings::new(),
     };
     let local = LocalSettings {
@@ -391,7 +370,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             issue_enabled: false,
             memory_enabled: false,
             team_template: TeamTemplate::Flat,
-            local_llm: LocalLlm::default(),
             env: EnvBindings::new(),
         }
     );
@@ -459,10 +437,6 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
     let latest = Settings {
         theme: Theme::Light,
         default_model: DefaultModel::SakanaAi,
-        local_llm: LocalLlm {
-            enabled: true,
-            model: "qwen2.5-coder:3b".to_owned(),
-        },
         env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
         ..Settings::default()
     };
@@ -482,7 +456,6 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
     assert_eq!(saved.default_model, DefaultModel::Claude);
     assert!(!saved.issue_enabled);
     assert!(!saved.memory_enabled);
-    assert_eq!(saved.local_llm, latest.local_llm);
     assert_eq!(saved.env, latest.env);
 }
 
@@ -515,10 +488,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         issue_enabled: false,
         memory_enabled: true,
         team_template: TeamTemplate::Pipeline,
-        local_llm: LocalLlm {
-            enabled: true,
-            model: "qwen2.5-coder:3b".to_owned(),
-        },
         env: EnvBindings::new(),
     };
     let local = LocalSettings::from(&settings);
@@ -532,7 +501,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             issue_enabled: false,
             memory_enabled: true,
             team_template: TeamTemplate::Pipeline,
-            local_llm: LocalLlm::default(),
             env: EnvBindings::new(),
         }
     );
@@ -541,19 +509,4 @@ fn full_settings_convert_to_workspace_owned_values_only() {
     assert!(!json.contains("modal_selection_mode"));
     assert!(format!("{local:?}").contains("Claude"));
     assert_eq!(local.clone(), local);
-}
-
-#[test]
-fn the_wired_local_llm_model_follows_the_enabled_flag() {
-    // One accessor, so "the delegation server is wired" and "a model was
-    // chosen" cannot be answered differently by two callers.
-    let mut settings = Settings::default();
-    assert!(!settings.local_llm.enabled);
-    assert_eq!(settings.wired_local_llm_model(), None);
-
-    settings.local_llm.enabled = true;
-    assert_eq!(
-        settings.wired_local_llm_model(),
-        Some(DEFAULT_LOCAL_LLM_MODEL)
-    );
 }

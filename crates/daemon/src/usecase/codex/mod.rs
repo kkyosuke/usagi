@@ -63,11 +63,10 @@ pub trait CodexProvisioner {
 
 /// Render daemon-owned MCP servers as Codex `-c` overrides.
 ///
-/// `usagi` always precedes the optional `usagi-llm` server. Every value is a
-/// TOML basic string rendered through `serde_json`'s compatible string escaping,
-/// so neither a command path nor a model token can create another override.
+/// Every value is a TOML basic string rendered through `serde_json`'s compatible
+/// string escaping, so a command path cannot create another override.
 #[must_use]
-pub fn mcp_arguments(usagi_command: &str, local_llm_model: Option<&str>) -> Vec<String> {
+pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     fn assignment(key: &str, value: &str) -> [String; 2] {
         ["-c".to_owned(), format!("{key} = {value}")]
     }
@@ -99,20 +98,6 @@ pub fn mcp_arguments(usagi_command: &str, local_llm_model: Option<&str>) -> Vec<
         "mcp_servers.usagi.default_tools_approval_mode",
         &string("approve"),
     ));
-    if let Some(model) = local_llm_model {
-        arguments.extend(assignment(
-            "mcp_servers.usagi-llm.command",
-            &string(usagi_command),
-        ));
-        arguments.extend(assignment(
-            "mcp_servers.usagi-llm.args",
-            &array(&["llm-mcp", "--model", model]),
-        ));
-        arguments.extend(assignment(
-            "mcp_servers.usagi-llm.default_tools_approval_mode",
-            &string("approve"),
-        ));
-    }
     arguments
 }
 
@@ -352,11 +337,10 @@ mod wiring_tests {
     use super::mcp_arguments;
 
     #[test]
-    fn mcp_arguments_add_local_llm_after_usagi_only_when_enabled() {
-        let disabled = mcp_arguments("/opt/usagi", None);
-        assert!(!disabled.join(" ").contains("usagi-llm"));
+    fn mcp_arguments_wire_only_the_implemented_usagi_server() {
+        let arguments = mcp_arguments("/opt/usagi");
         assert_eq!(
-            disabled,
+            arguments,
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi\"",
@@ -368,40 +352,22 @@ mod wiring_tests {
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
             ]
         );
-
-        let enabled = mcp_arguments("/opt/usagi", Some("qwen2.5-coder:7b"));
-        let usagi = enabled
-            .iter()
-            .position(|value| value.starts_with("mcp_servers.usagi.command"))
-            .unwrap();
-        let local = enabled
-            .iter()
-            .position(|value| value.starts_with("mcp_servers.usagi-llm.command"))
-            .unwrap();
-        assert!(usagi < local);
-        assert!(enabled.iter().any(|value| {
-            value == "mcp_servers.usagi-llm.args = [\"llm-mcp\", \"--model\", \"qwen2.5-coder:7b\"]"
-        }));
+        assert!(!arguments.join(" ").contains("usagi-llm"));
     }
 
     #[test]
-    fn mcp_arguments_toml_escape_untrusted_values_without_new_overrides() {
-        let model = "x\"], owned = \"pwned\\\n";
-        let arguments = mcp_arguments("/opt/\"usagi", Some(model));
+    fn mcp_arguments_toml_escape_untrusted_command_without_new_overrides() {
+        let arguments = mcp_arguments("/opt/\"usagi");
         assert_eq!(
             arguments
                 .iter()
                 .filter(|value| value.starts_with("mcp_servers."))
                 .count(),
-            7
+            4
         );
-        let model_override = arguments
-            .iter()
-            .find(|value| value.starts_with("mcp_servers.usagi-llm.args"))
-            .unwrap();
         assert_eq!(
-            model_override,
-            r#"mcp_servers.usagi-llm.args = ["llm-mcp", "--model", "x\"], owned = \"pwned\\\n"]"#
+            arguments[1],
+            r#"mcp_servers.usagi.command = "/opt/\"usagi""#
         );
     }
 }

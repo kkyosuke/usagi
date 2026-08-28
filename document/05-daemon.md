@@ -776,7 +776,7 @@ daemon が起動する Agent child には、mode を適用する**前**の base�
   broker は ping と daemon start だけを受理し、session sandbox と同様に data home の mutation は daemon IPC に閉じる。
   child は mode の子 directory を自分で作る必要があるため、root coordinator に selected directory だけを渡すことは
   できない。
-- daemon 所有の global settings（local LLM の有効/無効とモデル名など）は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
+- daemon 所有の global settings は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
 
 開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
 
@@ -1362,10 +1362,9 @@ public launch plan、durable snapshot、IPC response に残らない。注入し
 呼べる。Codex は spawn 時に `mcp_servers.usagi.default_tools_approval_mode = "approve"` を渡し、注入した
 `usagi` server を事前許可する。子 server には daemon 接続に必要な環境だけを forward する。
 詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も
-`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Global local LLM 設定が有効なときだけ
-両 product は optional `usagi-llm` も追加して事前許可する（条件・順序・prompt 合成の正本は
-[7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)）。それ以外の MCP server・shell・ファイル編集・
-network の permission model は通常どおり維持され、無効化・緩和しない。
+`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Agent launch に配線するのはこの `usagi`
+server だけである。それ以外の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、
+無効化・緩和しない。
 
 daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
 caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と
