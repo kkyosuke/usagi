@@ -461,6 +461,15 @@ impl AddWorkspace {
                     self.selected.insert(path);
                 }
             }
+            Key::CtrlD => {
+                let path = self
+                    .visible()
+                    .get(self.cursor)
+                    .map(|workspace| workspace.path.clone());
+                if let Some(path) = path.filter(|path| self.opened.contains(path)) {
+                    return OverlayIntent::Close(path);
+                }
+            }
             Key::Char(character) => {
                 self.filter.push(*character);
                 self.cursor = 0;
@@ -725,7 +734,7 @@ fn render_add(
         body.push(modal::error_line(notice, inner));
     }
     body.push(modal::footer(
-        "type filter / Space select / Enter add / Esc cancel",
+        "type filter / Space select / Ctrl-D close / Enter add / Esc",
     ));
     modal::render_body_over(height, width, base, "Add workspace", inner, 13, body)
 }
@@ -935,6 +944,27 @@ mod tests {
     }
 
     #[test]
+    fn add_overlay_closes_only_the_open_workspace_under_its_cursor() {
+        let alpha = snapshot("alpha", "/alpha");
+        let beta = Workspace::new("beta", "/beta");
+        let mut deck = WorkspaceDeck::new(&alpha);
+        deck.open_add(&[alpha.workspace.clone(), beta]);
+
+        assert_eq!(
+            deck.handle_overlay_key(&Key::CtrlD),
+            OverlayIntent::Close(PathBuf::from("/alpha"))
+        );
+        assert_eq!(deck.handle_overlay_key(&Key::Down), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::CtrlD), OverlayIntent::Stay);
+
+        // Plain `x` remains filter text; close does not steal a searchable name.
+        assert_eq!(
+            deck.handle_overlay_key(&Key::Char('x')),
+            OverlayIntent::Stay
+        );
+    }
+
+    #[test]
     fn switcher_reaches_tenth_tab_and_closes_selected_identity() {
         let snapshots = (0..10)
             .map(|index| snapshot(&format!("project-{index}"), &format!("/project-{index}")))
@@ -1132,12 +1162,15 @@ mod tests {
     fn overlay_rendering_preserves_frame_size() {
         let alpha = snapshot("alpha", "/alpha");
         let beta = snapshot("beta", "/beta");
-        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta]).unwrap();
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta]).unwrap();
         deck.open_switcher();
         deck.set_notice("safe failure");
         let frame = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
         assert_eq!(frame.len(), 20);
         assert!(frame.iter().any(|line| line.contains("Projects")));
+        deck.open_add(std::slice::from_ref(&alpha.workspace));
+        let add = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
+        assert!(add.iter().any(|line| line.contains("Ctrl-D close")));
         deck.close_overlay();
         assert!(!deck.overlay_open());
         assert_eq!(render_overlay(&deck, 20, 80, &frame), frame);

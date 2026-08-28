@@ -67,7 +67,7 @@ Home の基本操作は次のとおり。
 | `←` / `→` | Switch で前 / 次の project tab へ移動する |
 | `Enter` / `t` | 選択した session の Closeup を開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
-| `Ctrl-O` → `+` | workspace を project tab として追加する |
+| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
 | `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
 | `:` | Overview のコマンドパレットを開く |
