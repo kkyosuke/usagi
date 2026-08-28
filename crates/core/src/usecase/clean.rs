@@ -24,7 +24,8 @@ pub struct DaemonWorkspaceData {
     pub dir: PathBuf,
     pub root_exists: bool,
     /// `None` means the lifecycle document is missing or unreadable. Such a
-    /// subtree is never used to classify Git resources as orphaned.
+    /// subtree is never used to classify Git resources as orphaned, and its
+    /// data is retained for repair rather than treated as disposable.
     pub sessions: Option<BTreeSet<String>>,
 }
 
@@ -124,7 +125,7 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
     data.sort_by(|left, right| left.root.cmp(&right.root));
     candidates.extend(
         data.into_iter()
-            .filter(|data| !data.root_exists)
+            .filter(|data| !data.root_exists && data.sessions.is_some())
             .map(|data| CleanCandidate::Data {
                 root: data.root.clone(),
                 dir: data.dir.clone(),
@@ -287,7 +288,7 @@ mod tests {
             daemon_data: vec![DaemonWorkspaceData {
                 root: "/repo".into(),
                 dir: "/data/repo".into(),
-                root_exists: true,
+                root_exists: false,
                 sessions: None,
             }],
             repositories: vec![RepositoryInventory {

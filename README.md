@@ -232,7 +232,7 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi open [path]` | workspace を登録して直接開く |
 | `usagi config` | Global Config を開く |
 | `usagi doctor` | 必要ツールの診断画面を開く |
-| `usagi clean [--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch を検出・削除する |
+| `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch を検出・削除する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |

@@ -197,6 +197,9 @@ pub enum Command {
     Doctor,
     /// 紐付いていない workspace・daemon data・worktree・branch を整理する
     Clean {
+        /// 削除せず候補だけを表示する（既定動作）
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
         /// 検出した安全な候補を実際に削除する（省略時は dry-run）
         #[arg(long)]
         apply: bool,
@@ -395,7 +398,11 @@ impl Command {
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
             Command::Doctor => Box::new(h::Doctor),
-            Command::Clean { apply, force } => Box::new(Clean { apply, force }),
+            Command::Clean {
+                dry_run: _,
+                apply,
+                force,
+            } => Box::new(Clean { apply, force }),
             Command::Update { select_version } => Box::new(h::Update { select_version }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
@@ -620,6 +627,7 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "clean"]).unwrap().command,
             Some(Command::Clean {
+                dry_run: false,
                 apply: false,
                 force: false
             })
@@ -785,16 +793,29 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Clean {
+                dry_run: false,
                 apply: true,
                 force: true
             })
         ));
         assert!(Cli::try_parse_from(["usagi", "clean", "--force"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean", "--dry-run"])
+                .unwrap()
+                .command,
+            Some(Command::Clean {
+                dry_run: true,
+                apply: false,
+                force: false
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "clean", "--dry-run", "--apply"]).is_err());
     }
 
     #[test]
     fn clean_becomes_a_typed_composition_request() {
         let (dry_run, output) = super::execute(Command::Clean {
+            dry_run: false,
             apply: false,
             force: false,
         });
@@ -808,6 +829,7 @@ mod tests {
         assert!(output.is_empty());
 
         let (apply, _) = super::execute(Command::Clean {
+            dry_run: false,
             apply: true,
             force: true,
         });
