@@ -151,9 +151,8 @@ impl Storage {
     ///
     /// Returns an error when `settings.json` cannot be read or parsed.
     pub fn load_settings(&self) -> Result<Settings> {
-        let settings = json_file::read(&self.dir.join(SETTINGS_FILE))?
-            .map(Settings::sanitized)
-            .unwrap_or_default();
+        let settings: Settings =
+            json_file::read(&self.dir.join(SETTINGS_FILE))?.unwrap_or_default();
         crate::domain::settings::validate_env_limits(&settings.env)?;
         Ok(settings)
     }
@@ -242,7 +241,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
-            local_llm: crate::domain::settings::LocalLlm::default(),
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -257,21 +255,20 @@ mod tests {
     }
 
     #[test]
-    fn load_settings_sanitizes_a_hand_edited_local_llm_model() {
+    fn load_settings_ignores_the_removed_local_llm_field() {
         let (_dir, storage) = temp_storage();
         fs::create_dir_all(storage.dir()).unwrap();
         fs::write(
             storage.dir().join(SETTINGS_FILE),
-            r#"{"local_llm":{"enabled":true,"model":"x';touch /tmp/pwned;#\"\\\n"}}"#,
+            r#"{"theme":"dark","local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
         )
         .unwrap();
 
         let loaded = storage.load_settings().unwrap();
-        assert!(loaded.local_llm.enabled);
-        assert_eq!(
-            loaded.local_llm.model,
-            crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL
-        );
+        assert_eq!(loaded.theme, crate::domain::settings::Theme::Dark);
+        storage.save_settings(&loaded).unwrap();
+        let saved = fs::read_to_string(storage.dir().join(SETTINGS_FILE)).unwrap();
+        assert!(!saved.contains("local_llm"));
     }
 
     #[test]

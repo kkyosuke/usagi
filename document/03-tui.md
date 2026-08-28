@@ -207,7 +207,7 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
 merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Team・Issue・Memory を所有し、Environment 行の
-editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` と `local_llm` を保持する。
+editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
 Workspace Config は Agent・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
@@ -217,7 +217,7 @@ Agent は `default_model`、Team は `team_template`、Issue と Memory はそ�
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、
 実行するのは `codex-fugu`（daemon profile は `sakana-ai`）である。
 Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
-全体設定を上書きしない。
+全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field も読み飛ばし、次の保存時に除去する。
 Workspace の Agent・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog)を正本とする。
 MCP server は起動時に解決した Issue / Memory の実効値を tool 公開・実行へ適用する。
 無効時の tool 範囲と server lifetime の契約は [MCP サーバ](07-mcp.md#tool-面)を正本とする。

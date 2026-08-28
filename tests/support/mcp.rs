@@ -370,6 +370,19 @@ impl McpHarness {
         self.channel.data_dir(self.home.path())
     }
 
+    /// Persist the v1-only setting shape without passing it through the v2
+    /// settings serializer. Migration regressions use this to prove that stale
+    /// user data cannot affect a shipping Agent launch.
+    pub fn write_legacy_local_llm_settings(&self) {
+        let data_dir = self.data_dir();
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(
+            data_dir.join("settings.json"),
+            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
+        )
+        .unwrap();
+    }
+
     /// `$USAGI_HOME`（mode を適用する前の base）。
     #[must_use]
     pub fn home(&self) -> &Path {
@@ -420,13 +433,6 @@ impl McpHarness {
                 Some(FixtureArgv { runtime, arguments })
             })
             .collect()
-    }
-
-    pub fn enable_local_llm(&self) {
-        let storage = Storage::new(self.data_dir());
-        let mut settings = storage.load_settings().unwrap();
-        settings.local_llm.enabled = true;
-        storage.save_settings(&settings).unwrap();
     }
 
     /// Replace one fixture runtime before dispatching it. Follow-up MCP suites
