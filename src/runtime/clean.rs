@@ -564,12 +564,24 @@ mod tests {
                 name: "usagi/x".into(),
                 requires_force: true,
             },
+            CleanCandidate::Worktree {
+                root: "/repo".into(),
+                path: "/repo/.usagi/sessions/safe".into(),
+                requires_force: false,
+            },
+            CleanCandidate::Branch {
+                root: "/repo".into(),
+                name: "usagi/safe".into(),
+                requires_force: false,
+            },
         ]
         .map(|candidate| describe(&candidate));
         assert!(rendered[0].starts_with("workspace "));
         assert!(rendered[1].contains("missing workspace"));
         assert!(rendered[2].contains("force required"));
         assert!(rendered[3].contains("usagi/x"));
+        assert_eq!(rendered[4], "worktree /repo/.usagi/sessions/safe");
+        assert_eq!(rendered[5], "branch usagi/safe in /repo");
     }
 
     #[test]

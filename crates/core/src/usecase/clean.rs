@@ -342,6 +342,52 @@ mod tests {
     }
 
     #[test]
+    fn sorts_repositories_and_accepts_detached_managed_worktrees() {
+        let inventory = CleanInventory {
+            daemon_data: vec![
+                DaemonWorkspaceData {
+                    root: "/b".into(),
+                    dir: "/data/b".into(),
+                    root_exists: true,
+                    sessions: Some(BTreeSet::new()),
+                },
+                DaemonWorkspaceData {
+                    root: "/a".into(),
+                    dir: "/data/a".into(),
+                    root_exists: true,
+                    sessions: Some(BTreeSet::new()),
+                },
+            ],
+            repositories: vec![
+                RepositoryInventory {
+                    root: "/b".into(),
+                    worktrees: vec![ObservedWorktree {
+                        path: "/b/.usagi/sessions/detached".into(),
+                        branch: None,
+                        dirty: true,
+                    }],
+                    branches: Vec::new(),
+                },
+                RepositoryInventory {
+                    root: "/a".into(),
+                    worktrees: Vec::new(),
+                    branches: Vec::new(),
+                },
+            ],
+            ..CleanInventory::default()
+        };
+
+        assert_eq!(
+            plan(&inventory),
+            vec![CleanCandidate::Worktree {
+                root: "/b".into(),
+                path: "/b/.usagi/sessions/detached".into(),
+                requires_force: true,
+            }]
+        );
+    }
+
+    #[test]
     fn candidate_force_flag_matches_only_destructive_git_cases() {
         assert!(!CleanCandidate::Workspace { path: "/x".into() }.requires_force());
         assert!(
