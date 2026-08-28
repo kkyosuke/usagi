@@ -483,7 +483,8 @@ pub fn run(entry: &EntryScreen, runner: &mut dyn ScreenRunner) -> io::Result<()>
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_refusal_notice, run,
+        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+        WorkspaceLoader, WorkspaceSnapshot, open_refusal_notice, run,
     };
     use std::io;
     use std::path::{Path, PathBuf};
@@ -508,6 +509,37 @@ mod tests {
     }
 
     struct DefaultClipboardTerminal;
+
+    #[derive(Default)]
+    struct DefaultRefreshLoader {
+        opened: Vec<PathBuf>,
+    }
+
+    impl WorkspaceLoader for DefaultRefreshLoader {
+        fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            self.opened.push(path.to_path_buf());
+            Ok(WorkspaceSnapshot::new(
+                Workspace::new("work", path),
+                WorkspaceState::default(),
+            ))
+        }
+
+        fn cleanup_missing(&mut self, _: &[Workspace]) -> io::Result<Vec<PathBuf>> {
+            Ok(Vec::new())
+        }
+
+        fn unregister(&mut self, _: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+            Ok(Vec::new())
+        }
+
+        fn dispatch_create(&mut self, _: WorkspaceCreateEffect) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn take_create_completion(&mut self) -> Option<WorkspaceCreateCompletion> {
+            None
+        }
+    }
 
     impl Terminal for DefaultClipboardTerminal {
         fn size(&mut self) -> io::Result<(usize, usize)> {
@@ -535,6 +567,17 @@ mod tests {
         let mut term = DefaultClipboardTerminal;
 
         assert_eq!(term.wait_for_key(Duration::from_millis(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn default_workspace_refresh_uses_the_open_adapter() {
+        let mut loader = DefaultRefreshLoader::default();
+        let path = Path::new("/tmp/work");
+
+        let refreshed = loader.refresh(path).unwrap();
+
+        assert_eq!(loader.opened, vec![path.to_path_buf()]);
+        assert_eq!(refreshed.workspace.path, path);
     }
 
     impl ScreenRunner for RecordingRunner {
