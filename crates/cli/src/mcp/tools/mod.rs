@@ -35,8 +35,7 @@ pub fn registry() -> Vec<ToolDescriptor> {
 ///
 /// `families` is the shared rule's answer for this server lifetime
 /// (`McpToolFamilies::from_settings`), so the registry and the Agent launch
-/// prompt cannot describe different families. `families.local_llm` is a separate
-/// server, so it never adds or removes a descriptor here.
+/// prompt cannot describe different families.
 ///
 /// # Panics
 ///
@@ -447,7 +446,6 @@ mod tests {
         let neither = registry_with_families(McpToolFamilies {
             issue: false,
             memory: false,
-            local_llm: false,
         });
         assert_eq!(neither.len(), 38);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));

@@ -1154,7 +1154,6 @@ mod tests {
             McpToolFamilies {
                 issue: false,
                 memory: false,
-                local_llm: false,
             },
         )
         .unwrap();

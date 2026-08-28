@@ -638,7 +638,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         let mut arguments = tools
             .as_ref()
-            .map(|tools| codex_integration_arguments(&self.mcp_command, tools.model()))
+            .map(|_| codex_integration_arguments(&self.mcp_command))
             .transpose()
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
@@ -909,7 +909,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let mut arguments = tools
             .as_ref()
-            .map(|tools| claude_mcp_arguments(&self.mcp_command, tools.model()))
+            .map(|_| claude_mcp_arguments(&self.mcp_command))
             .transpose()
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
             .unwrap_or_default();
@@ -1533,14 +1533,11 @@ fn mcp_environment(
 /// [`SpawnProvision`] so the durable launch plan never stores configuration
 /// paths or rendered product payloads.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
-fn codex_integration_arguments(
-    command: &Path,
-    local_llm_model: Option<&str>,
-) -> Result<Vec<String>, ()> {
+fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
     let hook_command = format!("{} codex-session-capture", shell_quote(command));
     let hook_command = serde_json::to_string(&hook_command).map_err(|_| ())?;
-    let mut arguments = codex_product_mcp_arguments(command, local_llm_model);
+    let mut arguments = codex_product_mcp_arguments(command);
     arguments.extend([
         // SessionStart is Codex's documented structured lifecycle channel. It
         // sends a JSON object containing the current `session_id` on stdin.
@@ -1604,24 +1601,14 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_disabled_family_leaves_both_the_registry_and_the_agent_prompt
-fn claude_mcp_arguments(command: &Path, local_llm_model: Option<&str>) -> Result<Vec<String>, ()> {
+fn claude_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    Ok(claude_product_mcp_arguments(command, local_llm_model))
+    Ok(claude_product_mcp_arguments(command))
 }
 
-/// What the MCP server this launch injects will expose: the tool families it
-/// registers and the local-LLM model it wires beside itself.
+/// What the MCP server this launch injects will expose.
 struct ConfiguredMcpTools {
     families: McpToolFamilies,
-    local_llm_model: Option<String>,
-}
-
-impl ConfiguredMcpTools {
-    /// The model as the MCP wiring needs it. `Some` exactly when
-    /// `families.local_llm` is set, because both come from one accessor.
-    fn model(&self) -> Option<&str> {
-        self.local_llm_model.as_deref()
-    }
 }
 
 /// Resolve the effective MCP tool configuration for one launch.
@@ -1652,7 +1639,6 @@ fn configured_mcp_tools(
         let effective = global.with_local(&local);
         Ok(ConfiguredMcpTools {
             families: McpToolFamilies::from_settings(&effective),
-            local_llm_model: effective.wired_local_llm_model().map(str::to_owned),
         })
     };
     resolve().map_err(|error| {
@@ -17698,7 +17684,7 @@ mod tests {
         let command = Path::new("/opt/usagi/bin/usagi");
 
         assert_eq!(
-            codex_integration_arguments(command, None).unwrap(),
+            codex_integration_arguments(command).unwrap(),
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
@@ -17715,7 +17701,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            claude_mcp_arguments(command, None).unwrap(),
+            claude_mcp_arguments(command).unwrap(),
             [
                 "--mcp-config",
                 r#"{"mcpServers":{"usagi":{"args":["mcp"],"command":"/opt/usagi/bin/usagi"}}}"#,
@@ -17726,81 +17712,35 @@ mod tests {
     }
 
     #[test]
-    fn product_mcp_arguments_append_local_llm_and_keep_payloads_parseable() {
-        let command = Path::new("/opt/usagi/bin/usagi");
-        let model = "qwen2.5-coder:7b";
-
-        let codex = codex_integration_arguments(command, Some(model)).unwrap();
-        let usagi_position = codex
-            .iter()
-            .position(|value| value.starts_with("mcp_servers.usagi.command"))
-            .unwrap();
-        let local_position = codex
-            .iter()
-            .position(|value| value.starts_with("mcp_servers.usagi-llm.command"))
-            .unwrap();
-        assert!(usagi_position < local_position);
-        for assignment in codex
-            .iter()
-            .filter(|value| value.starts_with("mcp_servers.") || value.starts_with("features."))
-        {
-            toml::from_str::<toml::Value>(assignment).unwrap();
-        }
-
-        let claude = claude_mcp_arguments(command, Some(model)).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&claude[1]).unwrap();
-        assert_eq!(
-            config["mcpServers"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .collect::<Vec<_>>(),
-            ["usagi", "usagi-llm"]
-        );
-        assert_eq!(
-            config["mcpServers"]["usagi-llm"]["args"],
-            serde_json::json!(["llm-mcp", "--model", model])
-        );
-        assert_eq!(&claude[3..], ["mcp__usagi", "mcp__usagi-llm"]);
-    }
-
-    #[test]
-    fn local_llm_setting_is_sanitized_before_daemon_provisioning() {
-        use usagi_core::domain::settings::{LocalLlm, Settings};
-
+    fn removed_local_llm_setting_is_ignored_before_daemon_provisioning() {
         let base = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // Production selects the base itself, so its settings file is the base's.
         let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
         let storage = Storage::new(data_home.selected());
         let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
-        assert_eq!(tools.model(), None);
-        // Both stores default to enabled, so a workspace with no files gets both
-        // families and no delegation server.
         assert_eq!(
             tools.families,
             McpToolFamilies {
                 issue: true,
                 memory: true,
-                local_llm: false,
             }
         );
 
-        storage
-            .save_settings(&Settings {
-                local_llm: LocalLlm {
-                    enabled: true,
-                    model: "x\"], owned = \"pwned'; #".to_owned(),
-                },
-                ..Settings::default()
-            })
-            .unwrap();
+        std::fs::create_dir_all(storage.dir()).unwrap();
+        std::fs::write(
+            storage.dir().join("settings.json"),
+            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
+        )
+        .unwrap();
         let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
         assert_eq!(
-            tools.model(),
-            Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
+            tools.families,
+            McpToolFamilies {
+                issue: true,
+                memory: true,
+            }
         );
-        assert!(tools.families.local_llm);
     }
 
     #[test]
@@ -17826,7 +17766,6 @@ mod tests {
             McpToolFamilies {
                 issue: false,
                 memory: true,
-                local_llm: false,
             }
         );
 
@@ -17881,7 +17820,6 @@ mod tests {
         let families = McpToolFamilies {
             issue: false,
             memory: true,
-            local_llm: true,
         };
         let expected = launch_system_prompt(PromptScope::Session, Some(families), None);
         assert_eq!(
@@ -18032,7 +17970,7 @@ instructions = "{instructions}"
     #[test]
     fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
         let mut codex_arguments =
-            codex_integration_arguments(Path::new("/opt/usagi/bin/usagi"), None).unwrap();
+            codex_integration_arguments(Path::new("/opt/usagi/bin/usagi")).unwrap();
         codex_arguments.extend(codex_system_prompt_arguments(
             SandboxMode::Session,
             None,
@@ -18254,7 +18192,7 @@ instructions = "{instructions}"
     /// the sandbox — the directory *above* the data home.
     #[test]
     fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
-        use usagi_core::domain::settings::{LocalLlm, Settings};
+        use usagi_core::domain::settings::Settings;
 
         let context = provision_context(Some(SessionId::new()));
         for mode in [
@@ -18306,18 +18244,15 @@ instructions = "{instructions}"
             std::fs::create_dir_all(&selected).unwrap();
             Storage::new(&selected)
                 .save_settings(&Settings {
-                    local_llm: LocalLlm {
-                        enabled: true,
-                        model: usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL.to_owned(),
-                    },
+                    issue_enabled: false,
                     ..Settings::default()
                 })
                 .unwrap();
-            assert_eq!(
-                configured_mcp_tools(&data_home, home.path())
+            assert!(
+                !configured_mcp_tools(&data_home, home.path())
                     .unwrap()
-                    .model(),
-                Some(usagi_core::domain::settings::DEFAULT_LOCAL_LLM_MODEL)
+                    .families
+                    .issue
             );
 
             // 3. Root sandbox scope: daemon bootstrap is brokered out of process,

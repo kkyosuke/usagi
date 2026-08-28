@@ -146,14 +146,12 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 | `- session:` | MCP を配線する launch では常に載る（session 系統は無効化できない） |
 | `- issue:` | effective `issue_enabled` |
 | `- memory:` | effective `memory_enabled` |
-| `- local_llm_ask:` | Global `local_llm.enabled` |
 
 `issue_enabled` / `memory_enabled` の effective 値は、Global 設定に **daemon に登録された workspace root** の
 `.usagi/settings.json` を重ねて解決する。設定を tool 系統へ写す規則は `usagi-core` の `domain::agent::mcp_tools` に
 1 つだけあり、`usagi mcp` が registry を組むときも同じ関数を通る。prompt が述べる系統と `tools/list` が登録する
 系統が同じ設定から出ることは、この共有によって構造的に保証する。session worktree は `.usagi/settings.json` を
-持たない（git 追跡外）ため、worktree を権威にすると workspace の上書きが消える。`local_llm` は Global だけが権威である
-（正本は [7. MCP サーバ#daemon Agent への local LLM 配線](07-mcp.md#daemon-agent-への-local-llm-配線)）。
+持たない（git 追跡外）ため、worktree を権威にすると workspace の上書きが消える。
 
 設定が読めない場合は既定値へ倒さず launch を拒否し、error log に記録する。`usagi mcp` が serve loop の開始前に
 失敗するのと同じ規則である。既定へ倒すと、自身の MCP server が登録できない tool 系統を prompt が述べた Agent が起動する。

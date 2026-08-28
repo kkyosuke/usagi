@@ -18,7 +18,6 @@ use usagi_core::domain::{
     agent::{AgentProfileId, CallerRef, ModelSelector},
     id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
     role::RoleId,
-    settings::DEFAULT_LOCAL_LLM_MODEL,
     user_decision::UserDecision,
 };
 use usagi_core::infrastructure::store::{
@@ -388,7 +387,7 @@ printf '%s\n%s\n%s\n' \
     assert!(dispatch.contains("investigate flaky startup"));
     assert!(!dispatch.contains("DELEGATE_ROLE_SECRET"));
     let argv = wait_for_fixture_argv(&mcp, "codex", None, "DELEGATE_ROLE_SECRET");
-    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None, false);
+    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None);
     let sessions = tool_text(&mcp.tool("session_list", &json!({})));
     let delegated_session = sessions["sessions"]
         .as_array()
@@ -1155,12 +1154,11 @@ fn assert_shipping_role_argv(
     role_id: &str,
     instructions: &str,
     user_prompt: Option<&str>,
-    local_llm: bool,
 ) {
     let role = RoleId::new(role_id).unwrap();
     let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
         usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(local_llm)),
+        Some(shipping_tool_families()),
         Some((&role, instructions)),
     );
     let system_prompt = shipping_system_prompt(capture);
@@ -1202,22 +1200,18 @@ fn assert_shipping_role_argv(
 }
 
 /// The families a shipping launch gets: this harness leaves Issue and Memory at
-/// their default (enabled) in both settings layers, so only the delegation server
-/// varies with the local-LLM setting.
-fn shipping_tool_families(
-    local_llm: bool,
-) -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
+/// their default (enabled) in both settings layers.
+fn shipping_tool_families() -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
     usagi_core::domain::agent::mcp_tools::McpToolFamilies {
         issue: true,
         memory: true,
-        local_llm,
     }
 }
 
 fn assert_shipping_legacy_argv(capture: &FixtureArgv) {
     let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
         usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(false)),
+        Some(shipping_tool_families()),
         None,
     );
     let assignments = capture
@@ -1238,10 +1232,19 @@ fn assert_secret_absent_from_durable_data(mcp: &McpHarness, secrets: &[&str]) {
         if path == fixture_argv {
             return;
         }
-        if path.is_dir() {
+        let Ok(metadata) = path.symlink_metadata() else {
+            return;
+        };
+        if metadata.is_dir() {
             for entry in fs::read_dir(path).unwrap() {
                 visit(&entry.unwrap().path(), fixture_argv, secrets);
             }
+            return;
+        }
+        // The production harness keeps its MCP transport FIFOs and daemon
+        // sockets live while this assertion runs. Reading a FIFO would block;
+        // only durable regular files belong to this scan.
+        if !metadata.is_file() {
             return;
         }
         let Ok(bytes) = fs::read(path) else {
@@ -1278,7 +1281,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         .expect("legacy caller argv was captured");
     assert_shipping_legacy_argv(&legacy);
     mcp.restart_with_credential(&caller_credential);
-    mcp.enable_local_llm();
+    mcp.write_legacy_local_llm_settings();
     write_session_role_catalog(
         &mcp,
         "shipping-reviewer",
@@ -1316,24 +1319,21 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         assert!(!response.to_string().contains(ROLE_SECRET));
         responses.push(response);
         let capture = wait_for_fixture_argv(&mcp, executable, Some(prompt), ROLE_SECRET);
-        assert_shipping_role_argv(
-            &capture,
-            "shipping-reviewer",
-            ROLE_SECRET,
-            Some(prompt),
-            true,
-        );
+        assert_shipping_role_argv(&capture, "shipping-reviewer", ROLE_SECRET, Some(prompt));
         captures.push(capture);
     }
 
     for capture in &captures {
-        assert!(
-            capture
-                .arguments
-                .iter()
-                .any(|argument| argument.contains(DEFAULT_LOCAL_LLM_MODEL)),
-            "local-LLM MCP configuration was not provisioned"
-        );
+        for removed_value in ["usagi-llm", "llm-mcp", "qwen2.5-coder:7b"] {
+            assert!(
+                capture
+                    .arguments
+                    .iter()
+                    .all(|argument| !argument.contains(removed_value)),
+                "legacy local-LLM setting entered shipping {runtime} argv",
+                runtime = capture.runtime
+            );
+        }
     }
 
     // Editing the catalog cannot rewrite the already-running process argv.
@@ -1656,7 +1656,6 @@ printf '%s\n%s\n%s\n' \
         "coder",
         "DISPATCH_ROLE_SECRET",
         Some("complete through MCP"),
-        false,
     );
 
     let session = tool_text(&mcp.tool("session_get", &json!({"name":"mcp-worker"})));
