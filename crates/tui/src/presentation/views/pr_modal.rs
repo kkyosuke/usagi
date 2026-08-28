@@ -20,9 +20,9 @@ const INNER_WIDTH: usize = 88;
 /// 一度に表示する Pull Request の最大数。
 const MAX_VISIBLE: usize = 8;
 const BODY_HEIGHT: usize = 15;
-const TAB_HEIGHT: usize = 2;
-const FOOTER_HEIGHT: usize = 3;
-const LIST_HEIGHT: usize = BODY_HEIGHT - TAB_HEIGHT - FOOTER_HEIGHT;
+const TAB_HEIGHT: usize = 1;
+const FOOTER_HEIGHT: usize = 2;
+const MAX_GAP_HEIGHT: usize = 2;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -248,14 +248,14 @@ fn grouped_pr_rows(prs: &[PrLink], start: usize, end: usize, selected: usize) ->
 /// in the fixed list region. PR rows retain priority and the cursor always stays
 /// visible; only the number of visible PRs shrinks when several repositories
 /// need headings at once.
-fn grouped_window(state: &PrModal) -> Vec<String> {
+fn grouped_window(state: &PrModal, list_height: usize) -> Vec<String> {
     let len = state.prs.len();
-    let mut capacity = len.min(MAX_VISIBLE);
+    let mut capacity = len.min(MAX_VISIBLE).min(list_height);
     loop {
         let (start, end) = modal::list_window(len, state.selected, capacity);
         let rows = grouped_pr_rows(&state.prs, start, end, state.selected);
         let indicators = usize::from(start > 0) + usize::from(end < len);
-        if rows.len() + indicators <= LIST_HEIGHT {
+        if rows.len() + indicators <= list_height {
             let mut visible = Vec::with_capacity(rows.len() + indicators);
             if start > 0 {
                 visible.push(modal::scroll_above(start));
@@ -265,6 +265,9 @@ fn grouped_window(state: &PrModal) -> Vec<String> {
                 visible.push(modal::scroll_below(len - end));
             }
             return visible;
+        }
+        if capacity == 1 {
+            return vec![pr_row(&state.prs[state.selected], true, INNER_WIDTH)];
         }
         capacity -= 1;
     }
@@ -287,18 +290,34 @@ fn status_tabs(active: PrFilter) -> String {
 ///
 /// 選択追従の viewport は [`modal::list_window`] を使い、repository 見出しと
 /// `↑/↓ N more` を含めて固定高へ収める。
-fn body(state: &PrModal) -> Vec<String> {
-    let mut lines = vec![status_tabs(state.filter), String::new()];
-    if state.selected_pr().is_some() {
-        lines.extend(grouped_window(state));
-    } else {
-        lines.push(modal::empty_notice("no pull requests"));
+fn body(state: &PrModal, body_height: usize) -> Vec<String> {
+    let footer_height = FOOTER_HEIGHT.min(body_height.saturating_sub(TAB_HEIGHT));
+    let flexible = body_height.saturating_sub(TAB_HEIGHT + footer_height);
+    let gap_height = MAX_GAP_HEIGHT.min(flexible.saturating_sub(1));
+    let list_height = flexible.saturating_sub(gap_height);
+
+    let mut lines = vec![status_tabs(state.filter)];
+    if gap_height > 0 {
+        lines.push(String::new());
     }
-    lines.push(String::new());
-    lines.push(modal::footer("←→: status  ↑↓: select"));
-    lines.push(modal::footer(
-        "c: copy  d: dismiss  Enter: open  Esc: close",
-    ));
+    if list_height > 0 {
+        if state.selected_pr().is_some() {
+            lines.extend(grouped_window(state, list_height));
+        } else {
+            lines.push(modal::empty_notice("no pull requests"));
+        }
+    }
+    if gap_height > 1 {
+        lines.push(String::new());
+    }
+    if footer_height > 0 {
+        lines.push(modal::footer("←→: status  ↑↓: select"));
+    }
+    if footer_height > 1 {
+        lines.push(modal::footer(
+            "c: copy  d: dismiss  Enter: open  Esc: close",
+        ));
+    }
     lines
 }
 
@@ -320,7 +339,7 @@ pub fn render(raw_height: usize, raw_width: usize, state: &PrModal) -> Vec<Strin
         "Pull Request",
         INNER_WIDTH,
         BODY_HEIGHT,
-        body(state),
+        body(state, BODY_HEIGHT),
     )
 }
 
@@ -333,6 +352,7 @@ pub fn render_over(
     base: &[String],
     state: &PrModal,
 ) -> Vec<String> {
+    let body_height = modal::reserved_body_height(raw_height, raw_width, BODY_HEIGHT);
     modal::render_body_over(
         raw_height,
         raw_width,
@@ -340,14 +360,14 @@ pub fn render_over(
         "Pull Request",
         INNER_WIDTH,
         BODY_HEIGHT,
-        body(state),
+        body(state, body_height),
     )
 }
 
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{PrModal, contains, render, render_over, status_tabs};
+    use super::{PrModal, body, contains, render, render_over, status_tabs};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use crate::usecase::application::controller::PrFilter;
     use usagi_core::domain::pr_inventory::{
@@ -681,5 +701,43 @@ mod tests {
         assert!(frame.iter().all(|line| display_width(line) == 9));
         assert!(frame.iter().any(|line| line.contains('┌')));
         assert!(frame.iter().any(|line| line.contains("\u{1b}[36m")));
+    }
+
+    #[test]
+    fn short_terminal_keeps_the_selected_pr_tabs_and_footer_visible() {
+        let prs = (1..=10)
+            .map(|number| PrLink::new(number, format!("https://example.com/pull/{number}")))
+            .collect();
+        let mut modal = PrModal::new(prs);
+        for _ in 0..8 {
+            modal.select_next();
+        }
+        let base = vec![".".repeat(80); 10];
+        let frame = render_over(10, 80, &base, &modal);
+        let text = frame
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("all"));
+        assert!(text.contains("#9"));
+        assert!(text.contains("←→: status  ↑↓: select"));
+        assert!(text.contains("Enter: open  Esc: close"));
+        assert!(!text.contains("#8"));
+    }
+
+    #[test]
+    fn minimal_body_prioritizes_tabs_and_footers_over_the_pr_list() {
+        let lines = body(&PrModal::dummy(), 3)
+            .into_iter()
+            .map(|line| strip_ansi(&line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("all"));
+        assert_eq!(lines[1], "  ←→: status  ↑↓: select");
+        assert!(lines[2].contains("Enter: open  Esc: close"));
+        assert!(lines.iter().all(|line| !line.contains("#812")));
     }
 }

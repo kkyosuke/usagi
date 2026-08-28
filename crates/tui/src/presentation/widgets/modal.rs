@@ -349,8 +349,7 @@ pub fn render_body_over(
     body_height: usize,
     lines: Vec<String>,
 ) -> Vec<String> {
-    let (height, _) = normalize_size(raw_height, raw_width);
-    let reserved = body_height.min(height.saturating_sub(6));
+    let reserved = reserved_body_height(raw_height, raw_width, body_height);
     render_over(
         raw_height,
         raw_width,
@@ -359,6 +358,18 @@ pub fn render_body_over(
         inner_width,
         &fixed_body(lines, reserved),
     )
+}
+
+/// Body rows available to a centred overlay while preserving one background
+/// row above and below its border and internal vertical padding.
+///
+/// Modal views whose list composition depends on the terminal height use this
+/// same calculation as [`render_body_over`] and [`body_contains`], so the rows
+/// they prioritize cannot be clipped after layout.
+#[must_use]
+pub fn reserved_body_height(raw_height: usize, raw_width: usize, desired: usize) -> usize {
+    let (height, _) = normalize_size(raw_height, raw_width);
+    desired.min(height.saturating_sub(6))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,7 +428,7 @@ pub fn body_contains(
     row: u16,
 ) -> bool {
     let (height, width) = normalize_size(raw_height, raw_width);
-    let reserved = body_height.min(height.saturating_sub(6));
+    let reserved = reserved_body_height(raw_height, raw_width, body_height);
     ModalGeometry::new(height, width, inner_width, reserved)
         .is_some_and(|geometry| geometry.contains(column, row))
 }
@@ -847,8 +858,9 @@ mod tests {
         ConfirmationModal, ConfirmationView, body_contains, bounded_list_rows, boxed, caption,
         columns, compact_boxed, confirmation_buttons, content_line, empty_notice, filter_line,
         fixed_body, footer, heading, list_window, modal_inner_width, prompt_line, render_body,
-        render_body_over, render_confirmation_over, render_modal, render_over, scroll_above,
-        scroll_below, scroll_window, selection_marker, subcommand_row, viewport_window,
+        render_body_over, render_confirmation_over, render_modal, render_over,
+        reserved_body_height, scroll_above, scroll_below, scroll_window, selection_marker,
+        subcommand_row, viewport_window,
     };
     use crate::presentation::theme::{Role, Style};
     use crate::presentation::widgets::{clip_to_width, strip_ansi};
@@ -985,6 +997,14 @@ mod tests {
         assert_eq!(modal_inner_width(80, 40), 40); // 収まる
         assert_eq!(modal_inner_width(10, 40), 6); // 10 - 4
         assert_eq!(modal_inner_width(2, 40), 0); // 飽和
+    }
+
+    #[test]
+    fn reserved_body_height_preserves_vertical_background_margins() {
+        assert_eq!(reserved_body_height(24, 80, 15), 15);
+        assert_eq!(reserved_body_height(10, 80, 15), 4);
+        assert_eq!(reserved_body_height(5, 80, 15), 0);
+        assert_eq!(reserved_body_height(0, 0, 15), 15);
     }
 
     #[test]
