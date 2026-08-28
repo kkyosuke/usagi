@@ -31,3 +31,4 @@
 | 15 | [15-session-garden.md](15-session-garden.md) | 無操作時に session を庭のうさぎとして映す screen saver、状態別 animation、click-to-Closeup と安全な wake-up | [03-tui.md](../03-tui.md) へ畳み込み済み（実装 issue #674、採用理由の履歴） |
 | 16 | [16-restart-state-restoration.md](16-restart-state-restoration.md) | daemon の cold restart / crash 後に作業面を取り戻す設計（generic terminal の lineage と `ResumeTerminal`、durable screen checkpoint、workspace restore plan） | 提案（PTY 継続は [07](07-pty-crash-continuation.md) と分離） |
 | 17 | [17-multi-workspace-daemon.md](17-multi-workspace-daemon.md) | 1 つの daemon が複数 workspace を tenant として adopt し、daemon を止めずに workspace を切り替えられるようにする設計 | [05-daemon.md](../05-daemon.md) / [04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) へ畳み込み済み（実装 issue #708–#714） |
+| 18 | [18-director-multi-workspace.md](18-director-multi-workspace.md) | workspace-local Director と multi-workspace daemon の境界、および将来の read-only Portfolio view / 明示 grant 付き Portfolio Director | 提案 |

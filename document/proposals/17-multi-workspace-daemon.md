@@ -44,7 +44,7 @@ fence そのものは残す。
 | 目標 | machine あたり daemon は 1 つのまま。locator・bootstrap・supervisor・`daemon status` が単数のまま保たれる |
 | 目標 | 「1 machine × 1 canonical workspace root に所有者は 1 つ」の invariant を維持する（fence は残す） |
 | 非目標 | 1 つの TUI process が複数 workspace へ同時接続すること（[workspace の離脱と終了](../03-tui.md#workspace-の離脱と終了)の契約は不変） |
-| 非目標 | workspace をまたぐ横断ビュー（全 repo の session を 1 画面に出す等）。本提案はそれを**可能にするが、実装しない** |
+| 非目標 | workspace をまたぐ横断ビュー（全 repo の session を 1 画面に出す等）。本提案はそれを**可能にするが、実装しない**。Director との境界と将来の横断面は [18](18-director-multi-workspace.md) で扱う |
 | 非目標 | runtime mode（`production` / `development` / `local`）の分離規則の変更 |
 | 非目標 | tenant 境界での障害隔離（[受け入れるコスト](#受け入れるコスト)） |
 
