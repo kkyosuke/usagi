@@ -5,6 +5,7 @@
 
 pub(crate) mod agent_tab_intent;
 pub(crate) mod bootstrap;
+pub(crate) mod clean;
 pub(crate) mod cli;
 pub(crate) mod clipboard;
 pub(crate) mod daemon;

@@ -32,6 +32,7 @@
 pub mod agent;
 pub mod agent_phase;
 pub mod claude_sandbox;
+pub mod clean;
 pub mod client;
 pub mod daemon_health;
 pub mod env;

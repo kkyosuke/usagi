@@ -244,12 +244,17 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
 | `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
 | `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
+| `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch を検出・削除する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
 | `usagi session ...` | daemon-owned session を作成・削除・resume する |
 | `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
 | `usagi daemon install-service` | daemon を OS の service として登録する（macOS は LaunchAgent、Linux は systemd user unit） |
+
+`usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
+daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
+未マージ branch は `--apply --force` を明示した場合だけ削除し、daemon が使用中の workspace はスキップする。
 
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。
