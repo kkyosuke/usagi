@@ -1636,6 +1636,9 @@ fn hydrated_records(
             || record.runtime.session_id != record.operation.session_id
             || record.runtime.terminal.workspace_id != record.operation.workspace_id
             || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
+            || record.launch.request.scope.workspace_id != record.runtime.terminal.workspace_id
+            || record.launch.request.scope.session_id != record.runtime.terminal.session_id
+            || record.launch.request.scope.worktree_id != record.runtime.terminal.worktree_id
         {
             return Err(RuntimeSnapshotError::ScopeMismatch);
         }
@@ -2156,6 +2159,18 @@ mod tests {
             hydrated_records(RuntimeStoreSnapshot {
                 schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
                 records: vec![mismatched],
+                generation: GenerationSnapshot::default(),
+            })
+            .unwrap_err(),
+            RuntimeSnapshotError::ScopeMismatch
+        );
+
+        let mut mismatched_launch_scope = record.clone();
+        mismatched_launch_scope.launch.request.scope.worktree_id = WorktreeId::new();
+        assert_eq!(
+            hydrated_records(RuntimeStoreSnapshot {
+                schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
+                records: vec![mismatched_launch_scope],
                 generation: GenerationSnapshot::default(),
             })
             .unwrap_err(),
