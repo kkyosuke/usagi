@@ -6011,12 +6011,23 @@ fn prepare_deck_workspace(
         return None;
     };
     match (**loader).open(path) {
-        Ok(snapshot) => Some(snapshot),
+        Ok(snapshot) => Some(refresh_empty_workspace_snapshot(&mut **loader, snapshot)),
         Err(error) => {
             deck.set_notice(error.to_string());
             None
         }
     }
+}
+
+fn refresh_empty_workspace_snapshot(
+    loader: &mut dyn WorkspaceLoader,
+    snapshot: WorkspaceSnapshot,
+) -> WorkspaceSnapshot {
+    if snapshot.session_ids.is_empty() {
+        let path = snapshot.workspace.path.clone();
+        return loader.refresh(&path).unwrap_or(snapshot);
+    }
+    snapshot
 }
 
 fn prepare_activation_settings(
@@ -7499,9 +7510,11 @@ fn prepare_workspace_deck(
         ));
     };
     let primary = loader.open(first_path)?;
+    let primary = refresh_empty_workspace_snapshot(loader, primary);
     let mut snapshots = vec![primary.clone()];
     for path in remaining_paths {
-        snapshots.push(loader.open(path)?);
+        let snapshot = loader.open(path)?;
+        snapshots.push(refresh_empty_workspace_snapshot(loader, snapshot));
     }
     loader.activate_prepared(&primary.workspace.path)?;
     let mut deck = WorkspaceDeck::new(&primary);
@@ -21993,9 +22006,18 @@ mod tests {
         );
     }
 
+    #[derive(Clone, Copy, Default, Eq, PartialEq)]
+    enum FakeOpenSnapshot {
+        #[default]
+        Populated,
+        Empty,
+    }
+
     #[derive(Default)]
     struct FakeLoader {
         opened: Vec<PathBuf>,
+        refreshed: Vec<PathBuf>,
+        open_snapshot: FakeOpenSnapshot,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
         unregistered: Vec<PathBuf>,
@@ -22041,10 +22063,23 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workspace");
             let mut snapshot = snapshot(name);
+            if self.open_snapshot == FakeOpenSnapshot::Empty {
+                snapshot.state.sessions.clear();
+                snapshot.session_ids.clear();
+            }
             if let Some(opened_at) = self.opened_at {
                 snapshot.workspace.updated_at = opened_at;
             }
             Ok(snapshot)
+        }
+
+        fn refresh(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            self.refreshed.push(path.to_path_buf());
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace");
+            Ok(snapshot(name))
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -25963,6 +25998,30 @@ mod tests {
             vec![PathBuf::from("/tmp/alpha")]
         );
         assert!(recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))).is_empty());
+    }
+
+    #[test]
+    fn deck_preparation_retries_an_empty_lifecycle_snapshot_for_garden() {
+        let mut fake = FakeLoader {
+            open_snapshot: FakeOpenSnapshot::Empty,
+            ..FakeLoader::default()
+        };
+        let paths = vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")];
+        let (_, active, mut deck) = prepare_workspace_deck(&mut fake, &paths).unwrap();
+
+        assert_eq!(fake.opened, paths);
+        assert_eq!(fake.refreshed, paths);
+        assert_eq!(active.session_ids.len(), 1);
+        assert_eq!(deck.garden_projection(&[]).1.len(), 1);
+
+        fake.opened.clear();
+        fake.refreshed.clear();
+        let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut fake);
+        let gamma = prepare_deck_workspace(&mut loader, &mut deck, Path::new("/tmp/gamma"))
+            .expect("an added project is prepared");
+        assert_eq!(gamma.session_ids.len(), 1);
+        assert_eq!(fake.opened, vec![PathBuf::from("/tmp/gamma")]);
+        assert_eq!(fake.refreshed, vec![PathBuf::from("/tmp/gamma")]);
     }
 
     /// #556 acceptance: the workspace fence still refuses, and it refuses as a

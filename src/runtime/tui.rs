@@ -3846,6 +3846,30 @@ impl FsWorkspaceLoader {
             .initialize(&LocalSettings::from(&defaults))
             .map_err(io_error)
     }
+
+    fn runtime_snapshot(
+        workspace: Workspace,
+        lifecycle: LifecycleSnapshot,
+    ) -> std::io::Result<WorkspaceSnapshot> {
+        let mut state = load_workspace_state(&workspace.path)?;
+        let workspace_id = lifecycle.workspace_id;
+        // Identities align with the listed rows (`project` lists the same set),
+        // so a `Failed` row shows on the first frame with a removable action.
+        let session_ids = lifecycle
+            .listed_sessions()
+            .map(|session| session.session_id)
+            .collect();
+        let session_lifecycles = lifecycle.session_lifecycles();
+        state.sessions = lifecycle.project(&workspace, &state.sessions);
+        Ok(WorkspaceSnapshot::with_runtime_projection(
+            workspace,
+            state,
+            workspace_id,
+            session_ids,
+            lifecycle.agent_resumes,
+            session_lifecycles,
+        ))
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
@@ -3870,24 +3894,36 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             // the first open performs the same one-time initialization. The store
             // never overwrites an existing workspace file.
             self.initialize_workspace_settings(&workspace.path)?;
-            let mut state = load_workspace_state(&workspace.path)?;
-            let workspace_id = lifecycle.workspace_id;
-            // Identities align with the listed rows (`project` lists the same set),
-            // so a `Failed` row shows on the first frame with a removable action.
-            let session_ids = lifecycle
-                .listed_sessions()
-                .map(|session| session.session_id)
-                .collect();
-            let session_lifecycles = lifecycle.session_lifecycles();
-            state.sessions = lifecycle.project(&workspace, &state.sessions);
-            Ok(WorkspaceSnapshot::with_runtime_projection(
-                workspace,
-                state,
-                workspace_id,
-                session_ids,
-                lifecycle.agent_resumes,
-                session_lifecycles,
-            ))
+            Self::runtime_snapshot(workspace, lifecycle)
+        })();
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
+        }
+        result
+    }
+
+    fn refresh(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
+        validate_workspace_directory(path)?;
+        let previous = crate::runtime::daemon::opened_workspace();
+        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
+        let result = (|| {
+            let lifecycle = request_lifecycle_snapshot()
+                .map_err(|error| workspace_open_error(error, &opened))?;
+            let workspace = self
+                .storage
+                .load_workspaces()
+                .map_err(io_error)?
+                .into_iter()
+                .find(|workspace| workspace.path == path)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("workspace is no longer registered: {}", path.display()),
+                    )
+                })?;
+            Self::runtime_snapshot(workspace, lifecycle)
         })();
         if result.is_err()
             && let Some(previous) = previous
