@@ -25516,6 +25516,40 @@ mod tests {
     }
 
     #[test]
+    fn add_workspace_overlay_can_close_its_checked_active_project() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::CtrlD,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                vec![ws("alpha"), ws("beta")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert_eq!(factory.drops_at_create, vec![0]);
+        assert!(term.frames.last().unwrap().join("\n").contains("Recent"));
+    }
+
+    #[test]
     fn switch_arrows_follow_project_tab_order_and_wrap() {
         let mut term = FakeTerminal::with_keys(&[
             Key::Char('o'),
