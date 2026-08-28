@@ -2127,6 +2127,37 @@ fn start_daemon_for(home: &DaemonHome, workspace: &Path) {
         .output()
         .expect("usagi バイナリを起動できる");
     assert!(output.status.success(), "{}", stderr(&output));
+
+    // `daemon start` returns after the process record is published; selecting
+    // the workspace is a separate surface handshake. Wait for the endpoint and
+    // explicitly select this repository before a session-scoped MCP client asks
+    // to bind to it. Otherwise a loaded runner can reach the daemon while it
+    // still serves no workspace.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let stream = loop {
+        if let Ok(stream) = connect_current(&channel_data_dir(home.path())) {
+            break stream;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture daemon socket was not published"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    usagi_core::usecase::client::IpcClient::connect(
+        stream,
+        "cli-tui-mcp-workspace-opener".into(),
+        usagi_core::domain::id::OperationId::new().to_string(),
+        usagi_core::usecase::client::ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                usagi_core::infrastructure::paths::canonical_workspace_root(workspace)
+                    .expect("the fixture workspace resolves"),
+            ),
+        },
+    )
+    .expect("fixture explicitly opens its repository root");
 }
 
 #[test]

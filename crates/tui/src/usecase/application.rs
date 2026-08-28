@@ -151,6 +151,15 @@ pub trait WorkspaceLoader {
     /// 呼び出し元へ伝播する。
     fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
 
+    /// Refresh an already-open workspace without changing registry/Recent
+    /// ordering. Garden uses this to replace the read-only cache of inactive
+    /// project tabs before it is shown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace snapshot cannot be refreshed.
+    fn refresh(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
+
     /// Make an already prepared workspace the declaration used by subsequently
     /// created daemon ports. Batch preparation may have inspected another
     /// member last, so activation reasserts the chosen target without loading

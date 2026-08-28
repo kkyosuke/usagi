@@ -100,6 +100,13 @@ pub enum RunOutcome {
     RequestDaemonReplacement { force: bool },
     /// stdio MCP server の起動を依頼する。
     LaunchMcp,
+    /// 孤立 resource の棚卸しまたは削除を合成ルートへ依頼する。
+    Clean {
+        /// 候補へ削除効果を適用するか。
+        apply: bool,
+        /// user changes を含み得る Git resource も削除するか。
+        force: bool,
+    },
     /// Codex `SessionStart` hook の structured payload を daemon へ渡す。
     CaptureCodexSession,
     /// エージェントのライフサイクルフックが名乗る phase を daemon へ報告する。
@@ -200,6 +207,18 @@ pub enum Command {
         restart_agents: bool,
         /// 実行中 tool を含む live Agent の停止を許可する
         #[arg(long, requires = "restart_agents")]
+        force: bool,
+    },
+    /// 紐付いていない workspace・daemon data・worktree・branch を整理する
+    Clean {
+        /// 削除せず候補だけを表示する（既定動作）
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// 検出した安全な候補を実際に削除する（省略時は dry-run）
+        #[arg(long)]
+        apply: bool,
+        /// dirty worktree と未マージ branch も削除する（--apply が必要）
+        #[arg(long, requires = "apply")]
         force: bool,
     },
     /// usagi バイナリを GitHub Releases から更新する
@@ -397,6 +416,11 @@ impl Command {
                 restart_agents,
                 force,
             }),
+            Command::Clean {
+                dry_run: _,
+                apply,
+                force,
+            } => Box::new(Clean { apply, force }),
             Command::Update { select_version } => Box::new(h::Update { select_version }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
@@ -431,6 +455,20 @@ impl Command {
                 command,
             }),
         }
+    }
+}
+
+struct Clean {
+    apply: bool,
+    force: bool,
+}
+
+impl Run for Clean {
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::Clean {
+            apply: self.apply,
+            force: self.force,
+        })
     }
 }
 
@@ -598,6 +636,14 @@ mod tests {
                 fix: false,
                 restart_agents: false,
                 force: false,
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean"]).unwrap().command,
+            Some(Command::Clean {
+                dry_run: false,
+                apply: false,
+                force: false
             })
         ));
         assert!(matches!(
@@ -807,6 +853,58 @@ mod tests {
                 .command,
             Some(Command::Completion { shell: Shell::Zsh })
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean", "--apply", "--force"])
+                .unwrap()
+                .command,
+            Some(Command::Clean {
+                dry_run: false,
+                apply: true,
+                force: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "clean", "--force"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "clean", "--dry-run"])
+                .unwrap()
+                .command,
+            Some(Command::Clean {
+                dry_run: true,
+                apply: false,
+                force: false
+            })
+        ));
+        assert!(Cli::try_parse_from(["usagi", "clean", "--dry-run", "--apply"]).is_err());
+    }
+
+    #[test]
+    fn clean_becomes_a_typed_composition_request() {
+        let (dry_run, output) = super::execute(Command::Clean {
+            dry_run: false,
+            apply: false,
+            force: false,
+        });
+        assert_eq!(
+            dry_run,
+            RunOutcome::Clean {
+                apply: false,
+                force: false
+            }
+        );
+        assert!(output.is_empty());
+
+        let (apply, _) = super::execute(Command::Clean {
+            dry_run: false,
+            apply: true,
+            force: true,
+        });
+        assert_eq!(
+            apply,
+            RunOutcome::Clean {
+                apply: true,
+                force: true
+            }
+        );
     }
 
     #[test]
