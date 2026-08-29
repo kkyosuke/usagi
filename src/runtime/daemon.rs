@@ -5427,7 +5427,11 @@ fn dispatch_agent_tool(
                     .handle(
                         usagi_core::usecase::client::SessionAction::Create,
                         &operation_id,
-                        &serde_json::json!({"name": session_name, "role": requested_role}),
+                        &serde_json::json!({
+                            "name": session_name,
+                            "role": requested_role,
+                            "parent_session_id": caller.session_id,
+                        }),
                     )
                     .map_err(|error| {
                         let code = if matches!(error, SessionRuntimeError::RoleConflict(..)) {
@@ -5437,11 +5441,24 @@ fn dispatch_agent_tool(
                         };
                         ProtocolError::new(code, error.safe_message())
                     })?;
-                let session_id =
-                    session_id_by_name(&created.body, &session_name).ok_or_else(|| {
+                let (session_id, parent_session_id) =
+                    session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
                         ProtocolError::new(
                             ErrorCode::Unavailable,
                             "created session is not available",
+                        )
+                    })?;
+                agent
+                    .lock()
+                    .map_err(|_| {
+                        ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                    })?
+                    .dispatch_store()
+                    .record_session_parent(workspace, session_id, parent_session_id)
+                    .map_err(|_| {
+                        ProtocolError::new(
+                            ErrorCode::Unavailable,
+                            "session parentage is unavailable",
                         )
                     })?;
                 let scope = bound.scope_resolver();
@@ -6624,15 +6641,48 @@ fn dispatch_dispatch(
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<SessionId> {
-    snapshot
+    session_lineage_by_name(snapshot, name).map(|(session_id, _)| session_id)
+}
+
+fn session_lineage_by_name(
+    snapshot: &serde_json::Value,
+    name: &str,
+) -> Option<(SessionId, Option<SessionId>)> {
+    let session = snapshot
         .get("sessions")?
         .as_array()?
         .iter()
         .find(|session| {
             session.get("name").and_then(serde_json::Value::as_str) == Some(name)
                 && session.get("lifecycle").and_then(serde_json::Value::as_str) == Some("available")
-        })
-        .and_then(|session| serde_json::from_value(session.get("session_id")?.clone()).ok())
+        })?;
+    let session_id = serde_json::from_value(session.get("session_id")?.clone()).ok()?;
+    let parent_session_id = session
+        .get("parent_session_id")
+        .filter(|parent| !parent.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .ok()?;
+    Some((session_id, parent_session_id))
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_into_an_existing_session_does_not_reparent_it
+fn record_session_lineage(
+    agent: &SharedAgentRuntime,
+    workspace_id: WorkspaceId,
+    snapshot: &serde_json::Value,
+    name: &str,
+) -> Result<SessionId, SessionRuntimeError> {
+    let (session_id, parent_session_id) =
+        session_lineage_by_name(snapshot, name).ok_or(SessionRuntimeError::Storage)?;
+    agent
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .dispatch_store()
+        .record_session_parent(workspace_id, session_id, parent_session_id)
+        .map_err(|_| SessionRuntimeError::Storage)?;
+    Ok(session_id)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
@@ -7111,12 +7161,6 @@ fn dispatch_session_action(
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let store = runtime.dispatch_store();
             let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;
-            let workspace = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .workspace_id()
-                .map_err(|_| SessionRuntimeError::Storage)?;
             if let Some(items) = status
                 .body
                 .get_mut("sessions")
@@ -7137,10 +7181,12 @@ fn dispatch_session_action(
                             .filter(|agent| agent.session_id == Some(id))
                             .max_by_key(|agent| agent.current_run.is_some());
                         item["agent_status"] = serde_json::json!(member.map(|agent| agent.status));
-                        let parent_session = store
-                            .session_parent(workspace, id)
-                            .map_err(|_| SessionRuntimeError::Storage)?;
-                        item["parent_session_id"] = serde_json::json!(parent_session);
+                        // Parentage is immutable lifecycle metadata captured when
+                        // the session is created. A later dispatch into an existing
+                        // session must never reorganize it.
+                        if item.get("parent_session_id").is_none() {
+                            item["parent_session_id"] = serde_json::Value::Null;
+                        }
                     }
                 }
                 let names = items
@@ -7430,13 +7476,13 @@ fn dispatch_session_action(
                 .handle(
                     SessionAction::Create,
                     operation_id,
-                    &serde_json::json!({"name": name, "role": requested_role}),
+                    &serde_json::json!({
+                        "name": name,
+                        "role": requested_role,
+                        "parent_session_id": caller.as_ref().and_then(|caller| caller.session_id),
+                    }),
                 )?;
-            let id = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .session_id(&name)?;
+            let id = record_session_lineage(agent, workspace, &created.body, &name)?;
             let delivery = if let Some(caller) = caller {
                 let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
                 runtime
@@ -7471,7 +7517,25 @@ fn dispatch_session_action(
         // readers (session list, terminal poll, user-decision list) on the
         // daemon. The fast durable transitions still run under the lock.
         SessionAction::Create => {
-            perform_create(bound.sessions(), &SystemGit, operation_id, payload)
+            let parent_session_id = payload
+                .get("_caller_credential")
+                .and_then(serde_json::Value::as_str)
+                .map(|credential| {
+                    agent
+                        .lock()
+                        .map_err(|_| SessionRuntimeError::Storage)?
+                        .mcp_dispatch_caller(credential)
+                        .map(|caller| caller.session_id)
+                        .ok_or(SessionRuntimeError::ScopeUnavailable)
+                })
+                .transpose()?
+                .flatten();
+            let mut create_payload = payload.clone();
+            create_payload["parent_session_id"] = serde_json::json!(parent_session_id);
+            let created =
+                perform_create(bound.sessions(), &SystemGit, operation_id, &create_payload)?;
+            record_session_lineage(agent, bound_workspace()?, &created.body, string("name")?)?;
+            Ok(created)
         }
         // Remove goes further: it answers as soon as the session is durably
         // `Deleting` and hands the unbounded worktree teardown to the daemon's
@@ -7764,13 +7828,13 @@ fn delegate_brief(
         bound.sessions(),
         &SystemGit,
         operation_id,
-        &serde_json::json!({"name": name, "role": payload.get("role").cloned()}),
+        &serde_json::json!({
+            "name": name,
+            "role": payload.get("role").cloned(),
+            "parent_session_id": caller.session_id,
+        }),
     )?;
-    let id = bound
-        .sessions()
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .session_id(&name)?;
+    let id = record_session_lineage(agent, workspace, &created.body, &name)?;
     let scope = bound.scope_resolver();
     let dispatch_intent = DispatchIntent {
         workspace,
@@ -20075,7 +20139,7 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn root_dispatch_admission_refuses_reparenting_before_registry_effects() {
+    fn root_dispatch_admission_does_not_reparent_existing_session() {
         use usagi_core::domain::agent::{
             Agent, AgentStatus, CallerRef, DispatchBinding, DispatchRun, RunStatus, WorkerRef,
         };
@@ -20098,6 +20162,10 @@ instructions = "{instructions}"
             current_run: None,
         };
         dispatch.upsert_agent(workspace, worker.clone()).unwrap();
+        let initial_parent = SessionId::new();
+        dispatch
+            .record_session_parent(workspace, session, Some(initial_parent))
+            .unwrap();
         dispatch
             .upsert_binding(DispatchBinding {
                 run_id: DispatchOperationId::new(),
@@ -20113,39 +20181,41 @@ instructions = "{instructions}"
             .unwrap();
 
         let conflicting = DispatchOperationId::new();
-        assert!(
-            dispatch
-                .reserve_admission(
-                    worker,
-                    DispatchRun {
-                        run_id: conflicting,
+        dispatch
+            .reserve_admission(
+                worker,
+                DispatchRun {
+                    run_id: conflicting,
+                    agent_id,
+                    prompt: "dispatch without reparenting".into(),
+                    started_at: chrono::Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: conflicting,
+                    caller: CallerRef {
+                        session_id: Some(SessionId::new()),
+                        agent_id: AgentId::new(),
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(session),
                         agent_id,
-                        prompt: "reparent".into(),
-                        started_at: chrono::Utc::now(),
-                        ended_at: None,
-                        status: RunStatus::Preparing,
                     },
-                    DispatchBinding {
-                        run_id: conflicting,
-                        caller: CallerRef {
-                            session_id: Some(SessionId::new()),
-                            agent_id: AgentId::new(),
-                        },
-                        worker: WorkerRef {
-                            session_id: Some(session),
-                            agent_id,
-                        },
-                    },
-                    AgentAdmissionReservation {
-                        operation_id: conflicting,
-                        semantic_key: "reparent".into(),
-                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
-                    },
-                )
-                .is_err()
+                },
+                AgentAdmissionReservation {
+                    operation_id: conflicting,
+                    semantic_key: "dispatch-existing".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        assert!(dispatch.run(conflicting).unwrap().is_some());
+        assert!(dispatch.admission(conflicting).unwrap().is_some());
+        assert_eq!(
+            dispatch.session_parent(workspace, session).unwrap(),
+            Some(initial_parent)
         );
-        assert!(dispatch.run(conflicting).unwrap().is_none());
-        assert!(dispatch.admission(conflicting).unwrap().is_none());
     }
 
     /// A delegation builds its worktree before it can dispatch into it, so a

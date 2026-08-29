@@ -245,12 +245,12 @@ impl WorkspacePrompt {
 fn record_lineage(
     registry: &mut WorkspaceRegistry,
     workspace_id: WorkspaceId,
-    session_id: Option<SessionId>,
+    session_id: SessionId,
     parent_session_id: Option<SessionId>,
 ) -> Result<()> {
-    let Some(session_id) = session_id.filter(|session| Some(*session) != parent_session_id) else {
+    if Some(session_id) == parent_session_id {
         return Ok(());
-    };
+    }
     if let Some(existing) = registry
         .lineages
         .iter()
@@ -593,16 +593,10 @@ impl DispatchStore {
             caller,
             operation_id,
         };
-        if let Some(caller) = &queued.caller {
-            if workspace_registry.agent_workspaces.get(&caller.agent_id) != Some(&workspace_id) {
-                anyhow::bail!("delegation caller does not belong to the workspace");
-            }
-            record_lineage(
-                &mut workspace_registry,
-                workspace_id,
-                queued.session_id,
-                caller.session_id,
-            )?;
+        if let Some(caller) = &queued.caller
+            && workspace_registry.agent_workspaces.get(&caller.agent_id) != Some(&workspace_id)
+        {
+            anyhow::bail!("delegation caller does not belong to the workspace");
         }
         let existing = workspace_registry
             .prompts
@@ -898,22 +892,6 @@ impl DispatchStore {
             .copied())
     }
 
-    fn record_binding_lineage(
-        registry: &mut WorkspaceRegistry,
-        binding: &DispatchBinding,
-    ) -> Result<()> {
-        let worker_id = binding.worker.agent_id;
-        let Some(workspace_id) = registry.agent_workspaces.get(&worker_id).copied() else {
-            return Ok(());
-        };
-        record_lineage(
-            registry,
-            workspace_id,
-            binding.worker.session_id,
-            binding.caller.session_id,
-        )
-    }
-
     /// Atomically reserves one delegation concurrency slot until the caller
     /// publishes a queued prompt or active admission.
     ///
@@ -1048,6 +1026,31 @@ impl DispatchStore {
             .and_then(|lineage| lineage.parent))
     }
 
+    /// Records the parent fixed by the lifecycle create operation. Repeating
+    /// the same fact is idempotent; a later dispatch cannot reassign it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when durable state cannot be read or written, or when
+    /// the same session incarnation was already registered with another parent.
+    pub fn record_session_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        parent_session_id: Option<SessionId>,
+    ) -> Result<()> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        let mut workspace_registry = self.load_workspace_registry()?;
+        record_lineage(
+            &mut workspace_registry,
+            workspace_id,
+            session_id,
+            parent_session_id,
+        )?;
+        self.validate_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&workspace_registry)
+    }
+
     /// Resolves the absolute delegation depth of an organization member from
     /// durable session parentage. Runtime/model replacement does not reset it.
     ///
@@ -1154,15 +1157,11 @@ impl DispatchStore {
     ) -> Result<AgentAdmissionReservation> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
-        let mut workspace_registry = self.load_workspace_registry()?;
-        let workspace_id = workspace_registry
+        let workspace_registry = self.load_workspace_registry()?;
+        workspace_registry
             .agent_workspaces
             .get(&binding.worker.agent_id)
-            .copied()
             .context("worker workspace ownership is unavailable")?;
-        let child = binding.worker.session_id;
-        let parent = binding.caller.session_id;
-        record_lineage(&mut workspace_registry, workspace_id, child, parent)?;
         let reservation = registry.reserve_admission(agent, run, binding, admission);
         self.prepare_registry(&mut registry)?;
         self.validate_workspace_registry(&workspace_registry)?;
@@ -1336,8 +1335,7 @@ impl DispatchStore {
     pub fn upsert_binding(&self, binding: DispatchBinding) -> Result<DispatchBinding> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
-        let mut workspace_registry = self.load_workspace_registry()?;
-        Self::record_binding_lineage(&mut workspace_registry, &binding)?;
+        let workspace_registry = self.load_workspace_registry()?;
         if let Some(existing) = registry
             .bindings
             .iter_mut()
@@ -2418,6 +2416,9 @@ mod tests {
                 ModelSelector::new("director").unwrap(),
             )
             .unwrap();
+        store
+            .record_session_parent(workspace, manager_session, None)
+            .unwrap();
         let manager_run = OperationId::new();
         store
             .upsert_binding(DispatchBinding {
@@ -2523,7 +2524,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // One graph covers every reservation and immutable-lineage boundary.
-    fn delegation_reservation_replay_and_lineage_fail_closed() {
+    fn delegation_reservation_replay_keeps_creation_lineage_immutable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
         let workspace = WorkspaceId::new();
@@ -2593,6 +2594,9 @@ mod tests {
                 agent_id: child.agent_id,
             },
         };
+        store
+            .record_session_parent(workspace, child_session, Some(parent_session))
+            .unwrap();
         store.upsert_binding(binding.clone()).unwrap();
         assert_eq!(store.bindings().unwrap(), vec![binding]);
         assert_eq!(
@@ -2608,6 +2612,9 @@ mod tests {
 
         let queued_operation = OperationId::new();
         let queued_session = SessionId::new();
+        store
+            .record_session_parent(workspace, queued_session, Some(parent_session))
+            .unwrap();
         store
             .queue_delegated_prompt(
                 workspace,
@@ -2650,29 +2657,55 @@ mod tests {
             session_id: Some(other_parent_session),
             agent_id: other_parent.agent_id,
         };
-        assert!(
-            store
-                .queue_delegated_prompt(
-                    workspace,
-                    Some(queued_session),
-                    "reparent".into(),
-                    now(),
-                    conflicting.clone(),
-                    OperationId::new(),
-                )
-                .is_err()
+        store
+            .queue_delegated_prompt(
+                workspace,
+                Some(queued_session),
+                "dispatch without reparenting".into(),
+                now(),
+                conflicting.clone(),
+                OperationId::new(),
+            )
+            .unwrap();
+        store
+            .upsert_binding(DispatchBinding {
+                run_id: OperationId::new(),
+                caller: conflicting,
+                worker: WorkerRef {
+                    session_id: Some(child_session),
+                    agent_id: child.agent_id,
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            store.session_parent(workspace, child_session).unwrap(),
+            Some(parent_session)
+        );
+        store
+            .record_session_parent(workspace, child_session, Some(parent_session))
+            .unwrap();
+        assert_eq!(
+            store.session_parent(workspace, queued_session).unwrap(),
+            Some(parent_session)
         );
         assert!(
             store
-                .upsert_binding(DispatchBinding {
-                    run_id: OperationId::new(),
-                    caller: conflicting,
-                    worker: WorkerRef {
-                        session_id: Some(child_session),
-                        agent_id: child.agent_id,
-                    },
-                })
+                .record_session_parent(workspace, child_session, Some(other_parent_session),)
                 .is_err()
+        );
+        let self_parented_session = SessionId::new();
+        store
+            .record_session_parent(
+                workspace,
+                self_parented_session,
+                Some(self_parented_session),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .session_parent(workspace, self_parented_session)
+                .unwrap(),
+            None
         );
 
         let unowned_agent = AgentId::new();
@@ -2713,6 +2746,9 @@ mod tests {
             .agent_workspaces
             .insert(admitted_agent_id, workspace);
         store.write_workspace_registry(&ownership).unwrap();
+        store
+            .record_session_parent(workspace, admitted_session, Some(parent_session))
+            .unwrap();
         let admitted = agent(admitted_session, admitted_agent_id);
         store
             .reserve_admission(
@@ -2743,39 +2779,41 @@ mod tests {
         assert!(store.agent(admitted_agent_id).unwrap().is_some());
 
         let conflicting_operation = OperationId::new();
-        assert!(
-            store
-                .reserve_admission(
-                    agent(admitted_session, admitted_agent_id),
-                    DispatchRun {
-                        run_id: conflicting_operation,
+        store
+            .reserve_admission(
+                agent(admitted_session, admitted_agent_id),
+                DispatchRun {
+                    run_id: conflicting_operation,
+                    agent_id: admitted_agent_id,
+                    prompt: "dispatch without reparenting".into(),
+                    started_at: now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: conflicting_operation,
+                    caller: CallerRef {
+                        session_id: Some(other_parent_session),
+                        agent_id: other_parent.agent_id,
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(admitted_session),
                         agent_id: admitted_agent_id,
-                        prompt: "reparent admitted worker".into(),
-                        started_at: now(),
-                        ended_at: None,
-                        status: RunStatus::Preparing,
                     },
-                    DispatchBinding {
-                        run_id: conflicting_operation,
-                        caller: CallerRef {
-                            session_id: Some(other_parent_session),
-                            agent_id: other_parent.agent_id,
-                        },
-                        worker: WorkerRef {
-                            session_id: Some(admitted_session),
-                            agent_id: admitted_agent_id,
-                        },
-                    },
-                    AgentAdmissionReservation {
-                        operation_id: conflicting_operation,
-                        semantic_key: "conflicting-parent".into(),
-                        credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
-                    },
-                )
-                .is_err()
+                },
+                AgentAdmissionReservation {
+                    operation_id: conflicting_operation,
+                    semantic_key: "conflicting-parent".into(),
+                    credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+            .unwrap();
+        assert!(store.run(conflicting_operation).unwrap().is_some());
+        assert!(store.admission(conflicting_operation).unwrap().is_some());
+        assert_eq!(
+            store.session_parent(workspace, admitted_session).unwrap(),
+            Some(parent_session)
         );
-        assert!(store.run(conflicting_operation).unwrap().is_none());
-        assert!(store.admission(conflicting_operation).unwrap().is_none());
 
         assert_eq!(
             store
@@ -2813,6 +2851,9 @@ mod tests {
                 AgentProfileId::new("codex").unwrap(),
                 ModelSelector::new("child").unwrap(),
             )
+            .unwrap();
+        store
+            .record_session_parent(workspace, child_session, Some(parent_session))
             .unwrap();
         let lineage_run = OperationId::new();
         store

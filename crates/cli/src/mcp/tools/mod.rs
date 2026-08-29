@@ -72,7 +72,7 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
 
     let (route, policy) = match tool.name() {
         name if name.starts_with("issue_") || name.starts_with("memory_") => (Store, Public),
-        "session_create" => (SessionRoute(Session::Create), Public),
+        "session_create" => (SessionRoute(Session::Create), SessionCredential),
         "session_list" => (SessionRoute(Session::List), Public),
         "session_status" => (SessionRoute(Session::Status), Public),
         "session_complete" => (SessionRoute(Session::Complete), SessionCredential),

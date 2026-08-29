@@ -240,6 +240,10 @@ pub struct ManagedSession {
     /// and survives daemon restart; a display name is never used as its key.
     pub worktree_id: WorktreeId,
     pub name: String,
+    /// Session whose authenticated Agent created this session. This is fixed at
+    /// creation and is never inferred from later dispatch history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<SessionId>,
     /// Stable role assignment for this incarnation. Missing on legacy records
     /// and never populated implicitly during migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -270,10 +274,22 @@ impl ManagedSession {
         now: DateTime<Utc>,
         role_id: Option<RoleId>,
     ) -> Self {
+        Self::new_creating_with_role_and_parent(name, operation_id, now, role_id, None)
+    }
+
+    #[must_use]
+    pub fn new_creating_with_role_and_parent(
+        name: String,
+        operation_id: OperationId,
+        now: DateTime<Utc>,
+        role_id: Option<RoleId>,
+        parent_session_id: Option<SessionId>,
+    ) -> Self {
         Self {
             session_id: SessionId::new(),
             worktree_id: WorktreeId::new(),
             name,
+            parent_session_id,
             role_id,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
@@ -294,6 +310,7 @@ impl ManagedSession {
             session_id: SessionId::new(),
             worktree_id: WorktreeId::new(),
             name,
+            parent_session_id: None,
             role_id: None,
             lifecycle: SessionLifecycle::Available,
             attempt: 1,
@@ -479,6 +496,7 @@ pub enum LifecycleEvent {
     ReserveCreate {
         name: String,
         role_id: Option<RoleId>,
+        parent_session_id: Option<SessionId>,
         operation: OperationJournal,
     },
     CreateCompleted {
@@ -522,20 +540,9 @@ pub fn reduce(
         LifecycleEvent::ReserveCreate {
             name,
             role_id,
+            parent_session_id,
             operation,
-        } => {
-            validate_session_name(&name)?;
-            if state.sessions.iter().any(|s| s.name == name) {
-                return Err(LifecycleError::DuplicateSessionName);
-            }
-            let id = operation.operation_id;
-            state.sessions.push(ManagedSession::new_creating_with_role(
-                name, id, now, role_id,
-            ));
-            state.operations.push(operation);
-            state.changed(now);
-            Ok(())
-        }
+        } => reserve_create(state, name, role_id, parent_session_id, operation, now),
         LifecycleEvent::BeginRemove {
             session_id,
             operation,
@@ -614,6 +621,33 @@ pub fn reduce(
             Ok(())
         }
     }
+}
+
+fn reserve_create(
+    state: &mut WorkspaceLifecycleState,
+    name: String,
+    role_id: Option<RoleId>,
+    parent_session_id: Option<SessionId>,
+    operation: OperationJournal,
+    now: DateTime<Utc>,
+) -> Result<(), LifecycleError> {
+    validate_session_name(&name)?;
+    if state.sessions.iter().any(|session| session.name == name) {
+        return Err(LifecycleError::DuplicateSessionName);
+    }
+    let id = operation.operation_id;
+    state
+        .sessions
+        .push(ManagedSession::new_creating_with_role_and_parent(
+            name,
+            id,
+            now,
+            role_id,
+            parent_session_id,
+        ));
+    state.operations.push(operation);
+    state.changed(now);
+    Ok(())
 }
 
 /// Validates the canonical, path-safe spelling used for every managed session.
@@ -837,6 +871,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "a".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -875,6 +910,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "x".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -916,6 +952,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "x".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: fresh,
             },
             now(),
@@ -946,6 +983,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "a".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1018,6 +1056,7 @@ mod tests {
                 LifecycleEvent::ReserveCreate {
                     name: "../victim".into(),
                     role_id: None,
+                    parent_session_id: None,
                     operation: op(),
                 },
                 now(),
@@ -1067,6 +1106,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "a".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1078,6 +1118,7 @@ mod tests {
                 LifecycleEvent::ReserveCreate {
                     name: "a".into(),
                     role_id: None,
+                    parent_session_id: None,
                     operation: op()
                 },
                 now()
@@ -1171,6 +1212,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "b".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1272,6 +1314,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "legacy".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: create.clone(),
             },
             now(),
@@ -1353,6 +1396,7 @@ mod tests {
             LifecycleEvent::ReserveCreate {
                 name: "terminal".into(),
                 role_id: None,
+                parent_session_id: None,
                 operation: operation.clone(),
             },
             now(),

@@ -59,10 +59,12 @@ default は各 layer で指定された scope だけを上書きする。
 catalog 編集は両立する。`none` を選び両ファイルも無い場合は role を適用しない。
 
 role は組織上の責務を prompt として与える。階層型チームで Director が小さいタスクを Worker へ直接 dispatch
-する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker を dispatch する場合は
-3 層になる。dispatch binding が実行ごとの親子関係を保持するため、完了報告は Worker → Manager → Director と
-一段ずつ返る。`delegation` block を定義した role は daemon admission で `enabled`、`child_roles`、`max_depth`、
-`max_concurrency` を検証し、prompt の自己申告には依存しない。block を持たない role は従来の許可動作を維持する。
+する場合は 2 層、大きいタスクを Manager へ dispatch し、その Manager が Worker session を作る場合は
+3 層になる。session の親は作成時の authenticated caller session として lifecycle state に固定し、既存 session
+への dispatch では変更しない。dispatch binding は実行ごとの immediate caller を保持するため、完了報告は
+Worker → Manager → Director と一段ずつ返る。`delegation` block を定義した role は daemon admission で
+`enabled`、`child_roles`、`max_depth`、`max_concurrency` を検証し、prompt の自己申告には依存しない。block を
+持たない role は従来の許可動作を維持する。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
@@ -158,10 +160,10 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 
 ## safe projection と非永続データ
 
-`session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて `parent_session_id` / `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、同一 session 内の Agent handoff は階層を増やさない。
+`session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて lifecycle state に作成時だけ保存した `parent_session_id` と、そこから導出する `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、既存 session への dispatch や同一 session 内の Agent handoff は階層を変更しない。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
-TUI は `role_id` / `role_summary` と dispatch binding 由来の `parent_session_id` / `agent_status` を stable session identity keyed の controller projection として保持し、
+TUI は `role_id` / `role_summary`、lifecycle state 由来の `parent_session_id`、dispatch state 由来の `agent_status` を stable session identity keyed の controller projection として保持し、
 legacy `SessionRecord` や `state.json` へコピーしない。sidebar は role ID だけを badge 表示し、role metadata を
 attach / remove などの lifecycle capability 判定には使わない。
 
