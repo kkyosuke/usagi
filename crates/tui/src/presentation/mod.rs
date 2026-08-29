@@ -15574,10 +15574,11 @@ mod tests {
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
         let inputs = Arc::new(Mutex::new(Vec::new()));
-        let (mut ui, mut runtime) = focused_live_pane(
+        let (mut ui, mut runtime) = focused_live_pane_of_kind(
             workspace,
             session,
             terminal.clone(),
+            PaneKind::Terminal,
             Box::new(WheelRecordingPort {
                 terminal,
                 replay: b"retained".to_vec(),
