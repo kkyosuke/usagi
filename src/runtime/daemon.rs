@@ -1029,6 +1029,7 @@ fn session_git_writable_roots(worktree: &Path) -> Result<Vec<PathBuf>, ()> {
     Ok(roots.into_iter().collect())
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 fn read_git_indirection(
     path: &Path,
     prefix: Option<&str>,
