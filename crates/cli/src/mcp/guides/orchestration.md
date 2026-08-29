@@ -81,9 +81,11 @@ credential を必要とする。手動で
 
 ## 階層的に委譲する
 
-dispatch された worker も authenticated caller なので、さらに `session_delegate_brief` または
-`session_dispatch` を呼び出せる。これにより Director → Manager → Executor の階層を同じ仕組みで作る。
-親子関係は session 名や role 名から推測せず、dispatch ごとに daemon が保存する `DispatchBinding` を権威にする。
+dispatch された worker も authenticated caller なので、さらに `session_delegate_brief`、`session_create`、
+または `session_dispatch` を呼び出せる。これにより Director → Manager → Executor の階層を同じ仕組みで作る。
+session の親は、その session を新規作成した authenticated caller の session として lifecycle state に一度だけ
+保存する。既存 session への `session_dispatch` は所属を変更しない。完了報告の immediate caller は実行ごとに
+daemon が保存する `DispatchBinding` を権威にする。
 
 ```text
 Director

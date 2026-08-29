@@ -4333,7 +4333,7 @@ mod tests {
     // ---- tests ---------------------------------------------------------------
 
     #[test]
-    fn daemon_dispatch_store_fails_closed_for_missing_ownership_and_reparenting() {
+    fn daemon_dispatch_store_requires_ownership_without_reparenting() {
         let directory = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(directory.path());
         let workspace = WorkspaceId::new();
@@ -4386,6 +4386,10 @@ mod tests {
         assert!(store.run(missing).unwrap().is_none());
 
         store.upsert_agent(workspace, worker.clone()).unwrap();
+        let initial_parent = SessionId::new();
+        store
+            .record_session_parent(workspace, session, Some(initial_parent))
+            .unwrap();
         let admitted = OperationId::new();
         let (agent, run, binding, reservation) = admission(admitted, SessionId::new());
         store
@@ -4394,13 +4398,15 @@ mod tests {
 
         let conflicting = OperationId::new();
         let (agent, run, binding, reservation) = admission(conflicting, SessionId::new());
-        assert!(
-            store
-                .reserve_admission(agent, run, binding, reservation)
-                .is_err()
+        store
+            .reserve_admission(agent, run, binding, reservation)
+            .unwrap();
+        assert!(store.run(conflicting).unwrap().is_some());
+        assert!(store.admission(conflicting).unwrap().is_some());
+        assert_eq!(
+            store.session_parent(workspace, session).unwrap(),
+            Some(initial_parent)
         );
-        assert!(store.run(conflicting).unwrap().is_none());
-        assert!(store.admission(conflicting).unwrap().is_none());
     }
 
     /// The Agent runtime is the authority a metrics observer reads through: the
