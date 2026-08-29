@@ -598,6 +598,9 @@ mod tests {
         let source = FakeSource::with([
             wheel(MouseEventKind::ScrollUp, 4, 7),
             wheel(MouseEventKind::ScrollUp, 5, 8),
+            // An ignored focus notification neither splits nor reorders the
+            // surrounding wheel burst.
+            Event::FocusGained,
             wheel(MouseEventKind::ScrollUp, 6, 9),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         ]);
