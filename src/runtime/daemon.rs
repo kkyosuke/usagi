@@ -1043,10 +1043,18 @@ fn session_git_policy(
         }
         Err(_) => return Err(()),
     };
-    // Managed sessions are linked worktrees. Refuse a standalone repository:
-    // its `.git` directory is the whole authority and is too broad a grant.
+    // A standalone repository needs no external Git grant: its administrative
+    // directory is already contained by the writable checkout. Accept it only
+    // when the selected session directory is the registered workspace itself;
+    // a nested or foreign repository must not become additional authority.
     if !marker_metadata.file_type().is_file() {
-        return Err(());
+        let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
+        let worktree = worktree.canonicalize().map_err(|_| ())?;
+        return if marker_metadata.file_type().is_dir() && worktree == workspace_root {
+            Ok(None)
+        } else {
+            Err(())
+        };
     }
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
     let common = session_git_common_dir(worktree)?.ok_or(())?;
@@ -18950,7 +18958,16 @@ instructions = "{instructions}"
 
         let standalone = tempfile::tempdir_in("target").unwrap();
         std::fs::create_dir(standalone.path().join(".git")).unwrap();
-        assert!(session_git_policy(standalone.path(), standalone.path()).is_err());
+        assert!(
+            session_git_policy(standalone.path(), standalone.path())
+                .unwrap()
+                .is_none(),
+            "a standalone workspace needs no grant outside its writable root"
+        );
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), standalone.path()).is_err(),
+            "a foreign standalone repository is not session authority"
+        );
 
         let plain_workspace = tempfile::tempdir_in("target").unwrap();
         let plain_session = plain_workspace.path().join(".usagi/sessions/plain");

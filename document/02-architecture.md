@@ -965,7 +965,8 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   worktree 内の `.git` pointer は writable な agent input なので grant の権威にはしない。daemon が選択した workspace の
   common directory と一致し、private admin directory がその common directory の direct `worktrees/*` child で、admin 側の
   backlink が選択した worktree の `.git` marker を指すことを起動ごとに再検証してから launcher へ渡す。Git 管理されて
-  いない workspace は追加 Git root を持たず、own worktree だけを書き込み可能にする。
+  いない workspace と、workspace root 自体が standalone Git repository である場合は追加 Git root を持たず、own
+  worktree だけを書き込み可能にする。後者の `.git` directory は既に writable な worktree の内側にある。
   したがって sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や
   symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
