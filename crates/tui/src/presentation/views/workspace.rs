@@ -1885,7 +1885,7 @@ pub fn right_pane_tab_at(
 /// `Unavailable` (spawn failure, unprovable ownership) never became attachable.
 /// None of the three is an interrupted tab either, so drawing them would put a
 /// rabbit and a sidebar glyph on an Agent the user cannot open.
-const fn present_agent_phase(state: AgentRuntimeInventoryState) -> Option<AgentPhase> {
+pub(crate) const fn present_agent_phase(state: AgentRuntimeInventoryState) -> Option<AgentPhase> {
     match state {
         AgentRuntimeInventoryState::Reserved => Some(AgentPhase::Ready),
         AgentRuntimeInventoryState::Live => Some(AgentPhase::Running),

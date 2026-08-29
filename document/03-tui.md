@@ -656,6 +656,9 @@ Agent PTY へ送る。
 入力` だけで構成し、daemon への request はすべて背景 lane が発行する。この不変条件は Home の 3 lane（decision /
 session / metrics）と、live terminal の
 [背景 observation lane](#背景-observation-lane)（foreground poll pump / background inventory pump）に共通である。
+Garden が前面にある間だけ動く
+[inactive project の Agent 観測](#inactive-project-の-agent-観測)も同じ不変条件に従い、1 round ずつ detach した
+worker が request を発行して frame は結果を drain するだけである。
 
 Home の 3 lane はそれぞれ**専用の常駐 worker thread と専用の永続接続**を持ち、cadence は 250ms〜1s の範囲に clamp する。
 worker は workspace を開いたときに 1 本ずつ起動して閉じるまで生存するため、frame が thread を作ることはない。
@@ -924,9 +927,10 @@ Overview と Closeup は保存完了の `EnvironmentSaved` を受けると edito
 
 session を庭の区画、その session に属する Agent runtime を区画内のうさぎとして眺める screen saver である。
 Home の一時的な全幅レイヤーで、開いている project tab 全件の session を tab 順に並べる。active project は daemon 権威の
-lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase を写し、inactive project は
-最後に準備または active だった daemon snapshot の session / lifecycle を read-only plot として保持する。inactive controller を
-resident にせず、inactive plot に Agent runtime を推測して描かない。背面の route・active target・pane・terminal subscription は変えず、
+lifecycle・最新の coherent Agent inventory・controller が runtime ごとに保持する Agent phase を写す。inactive project は
+session / lifecycle を最後に準備または active だった daemon snapshot の cache として保持し、Agent membership だけは
+[cross-project 観測](#inactive-project-の-agent-観測)で daemon から読み直してうさぎを描く。inactive controller は
+resident にせず、観測できていない membership を推測もしない。背面の route・active target・pane・terminal subscription は変えず、
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
@@ -943,9 +947,10 @@ footer は表示中のsession範囲と全件数を示し、最後のprojectを�
 1 区画は 1 session、1 うさぎは 1 Agent runtime である。project が複数なら nameplate の先頭へ `project /` を置き、その後を
 `role-icon Role · parent › session`（直下の session は `role-icon Role · session`）として役割と直接の親を表示する。階層型チームの標準role iconは `◆ Manager` / `● Worker` で、rootは `♛ Director` である。session の lifecycle は nameplate と区画の pose、Agent
 phase は各うさぎの pose と状態内訳へ投影する。利用可能な session に runtime が無ければ `no agents` の空区画を
-描く。inactive project は Agent membership を観測していないため `no agents` と断定せず、利用可能なら `project inactive`、
-遷移中または失敗した cached lifecycle なら `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
-cached lifecycle は live の進行状況ではないためうさぎを描かず、animation させない。
+描く。inactive project も観測できた `Available` の session は同じ規則で描き、観測していない間（daemon が答える前・
+daemon が居ない・観測できる project 数の上限を超えた分）は `no agents` と断定せず `project inactive` と表示する。
+遷移中または失敗した cached lifecycle は `cached · creating` / `cached · deleting` / `cached · failed` と表示する。
+cached lifecycle は live の進行状況ではないため、Agent を観測できていてもうさぎを描かず、animation させない。
 runtime が 1 つなら従来と同じ大きなうさぎを描き、複数なら固定幅の区画に小さなうさぎを最大 3 羽並べる。
 
 **どの runtime が居るかは最新の coherent Agent inventory が決める**。Closeup の tab strip と同じ observation を
@@ -987,6 +992,28 @@ Garden の背景は workspace 名から決定的に配置した `.` / `*` の空
 状態ラベルに加え、`Ready` は足元の草、`Done` は `z`、`Failed` は枯れ草を小さく添える。これらは雰囲気の補助であり、
 状態の意味は引き続き文字ラベルと顔で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。
 
+### inactive project の Agent 観測
+
+Garden は開いている project 全件を描くが、workspace controller が resident なのは active project 1 つだけである。
+残りの project のうさぎは、**Garden が画面に出ている間だけ**動く read-only の観測 lane が daemon から読む。
+
+| 性質 | 内容 |
+|---|---|
+| 何を読むか | project ごとの `AgentInventory`。request が名指しした `WorkspaceId` を daemon が自分の Agent record から filter して答えるので、その project の tenant へ接続し直す必要も IPC の追加も無い |
+| いつ読むか | Garden が前面にある間だけ。1 round ずつ直列で、成功後は 1 秒、daemon が 1 件も答えなかった round のあとは 5 秒あけて次の round に入る。Garden を閉じると次に開いた瞬間へ再武装する |
+| 何をしないか | daemon の cold start、session の変更、terminal の attach。observation 専用の port を使い、active project の lane とは接続を共有しない |
+| 上限 | 1 round で観測する project は 16 件まで。超えた分は `project inactive` のまま残る |
+
+観測が届いた区画は active project と同じ規則（[区画とうさぎ](#区画とうさぎ)）でうさぎを描く。届く前・daemon が
+居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。phase は inventory の粗い state
+（`reserved → ready`、`live → running`、`interrupted → interrupted`）で、runtime-local phase を持つのは
+controller が resident な active project だけである。
+
+**session と lifecycle は cache のままである**。inactive project の session 一覧・lifecycle・failure summary は、
+その tab が最後に active だったときの daemon snapshot で、そこで新しく生まれた session は tab を開くまで区画にならない。
+だから cached lifecycle が `Available` でない区画は Agent を観測できていてもうさぎを描かず、`cached · creating` などの
+静止表示にとどめる（[区画とうさぎ](#区画とうさぎ)）。
+
 ### 自動表示
 
 **最終操作から 5 分**で開く。キー、paste、pointer の press と wheel、端末 copy、live pane への passthrough、
@@ -1019,7 +1046,7 @@ notice に表示するため、見えない overlay が入力だけを所有す�
 | 上記以外の key / paste / wheel / pointer drag | 最初の入力を wake-up として消費して Home へ戻る。背面の terminal や form へは渡さない |
 | terminal resize | Garden を閉じ、idle timer を測り直す |
 | active project のうさぎを single click | その plot に束縛した stable `SessionId` を選択・active にして Garden を閉じ、既存の Closeup へ入り、**押したうさぎ自身の Agent tab を選ぶ**。double click 待ちは無い |
-| inactive project の区画を click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く |
+| inactive project の区画・うさぎを click | stable `WorkspaceId` から project tab を準備・active にし、fresh snapshot に同じ `SessionId` があればその Closeup を開く。押した相手が[観測されたうさぎ](#inactive-project-の-agent-観測)でも Agent tab の選択までは運ばない（その project の controller はまだ存在しない） |
 | 区画のうさぎ以外（nameplate・状態行・余白）を click | 同じ project / session の Closeup へ入るところまでで、tab の選択は動かさない |
 | 区画の外を click | click を消費して Garden を閉じ、表示前の Home へ戻る |
 
