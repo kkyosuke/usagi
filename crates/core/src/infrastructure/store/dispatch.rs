@@ -24,6 +24,7 @@ use crate::domain::agent::{
 };
 use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
+use crate::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
@@ -201,6 +202,10 @@ struct WorkspaceRegistry {
 struct SessionLineage {
     workspace: WorkspaceId,
     session: SessionId,
+    parent: Option<SessionId>,
+}
+
+struct ManagedSessionParent {
     parent: Option<SessionId>,
 }
 
@@ -1018,12 +1023,35 @@ impl DispatchStore {
         workspace_id: WorkspaceId,
         session_id: SessionId,
     ) -> Result<Option<SessionId>> {
+        let _lock = StoreLock::acquire(&self.dir)?;
+        if let Some(parent) = self.managed_session_parent(workspace_id, session_id)? {
+            return Ok(parent.parent);
+        }
         Ok(self
             .load_workspace_registry()?
             .lineages
             .into_iter()
             .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
             .and_then(|lineage| lineage.parent))
+    }
+
+    fn managed_session_parent(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+    ) -> Result<Option<ManagedSessionParent>> {
+        Ok(DaemonLifecycleStore::new(&self.dir)
+            .load()?
+            .filter(|state| state.workspace_id == workspace_id)
+            .and_then(|state| {
+                state
+                    .sessions
+                    .into_iter()
+                    .find(|session| session.session_id == session_id)
+                    .map(|session| ManagedSessionParent {
+                        parent: session.parent_session_id,
+                    })
+            }))
     }
 
     /// Records the parent fixed by the lifecycle create operation. Repeating
@@ -1066,21 +1094,38 @@ impl DispatchStore {
             .get(&caller.agent_id)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("caller workspace ownership is unavailable"))?;
+        let lifecycle = DaemonLifecycleStore::new(&self.dir)
+            .load()?
+            .filter(|state| state.workspace_id == workspace_id);
         let mut depth = 0usize;
         let mut cursor = caller.session_id;
         let mut seen = BTreeSet::new();
         while let Some(session_id) = cursor
             && seen.insert(session_id)
         {
-            let Some(parent) = workspace_registry
-                .lineages
-                .iter()
-                .find(|lineage| lineage.workspace == workspace_id && lineage.session == session_id)
+            let Some(parent) = lifecycle
+                .as_ref()
+                .and_then(|state| {
+                    state
+                        .sessions
+                        .iter()
+                        .find(|session| session.session_id == session_id)
+                        .map(|session| session.parent_session_id)
+                })
+                .or_else(|| {
+                    workspace_registry
+                        .lineages
+                        .iter()
+                        .find(|lineage| {
+                            lineage.workspace == workspace_id && lineage.session == session_id
+                        })
+                        .map(|lineage| lineage.parent)
+                })
             else {
                 break;
             };
             depth = depth.saturating_add(1);
-            cursor = parent.parent;
+            cursor = parent;
         }
         Ok(depth)
     }
@@ -2465,6 +2510,77 @@ mod tests {
             agent_id: AgentId::new(),
         };
         assert!(store.delegation_depth(&unknown).is_err());
+    }
+
+    #[test]
+    fn managed_lifecycle_parentage_overrides_a_stale_dispatch_sidecar() {
+        use crate::domain::session_lifecycle::{ManagedSession, WorkspaceLifecycleState};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let parent = ManagedSession::adopt_available("parent".into(), now());
+        let parent_session = parent.session_id;
+        let mut child = ManagedSession::adopt_available("child".into(), now());
+        child.parent_session_id = Some(parent_session);
+        let child_session = child.session_id;
+        let top_level = ManagedSession::adopt_available("top-level".into(), now());
+        let top_level_session = top_level.session_id;
+        let mut lifecycle = WorkspaceLifecycleState::new(workspace, now());
+        lifecycle.sessions = vec![parent, child, top_level];
+        DaemonLifecycleStore::new(tmp.path())
+            .initialize(&lifecycle, tmp.path())
+            .unwrap();
+
+        let child_agent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(child_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("child").unwrap(),
+            )
+            .unwrap();
+        let top_level_agent = store
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(top_level_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("top-level").unwrap(),
+            )
+            .unwrap();
+        store
+            .record_session_parent(workspace, child_session, None)
+            .unwrap();
+        store
+            .record_session_parent(workspace, top_level_session, Some(parent_session))
+            .unwrap();
+
+        assert_eq!(
+            store.session_parent(workspace, child_session).unwrap(),
+            Some(parent_session)
+        );
+        assert_eq!(
+            store.session_parent(workspace, top_level_session).unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(child_session),
+                    agent_id: child_agent.agent_id,
+                })
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .delegation_depth(&CallerRef {
+                    session_id: Some(top_level_session),
+                    agent_id: top_level_agent.agent_id,
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

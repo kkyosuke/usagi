@@ -64,7 +64,9 @@ role は組織上の責務を prompt として与える。階層型チームで 
 への dispatch では変更しない。dispatch binding は実行ごとの immediate caller を保持するため、完了報告は
 Worker → Manager → Director と一段ずつ返る。`delegation` block を定義した role は daemon admission で
 `enabled`、`child_roles`、`max_depth`、`max_concurrency` を検証し、prompt の自己申告には依存しない。block を
-持たない role は従来の許可動作を維持する。
+持たない role は従来の許可動作を維持する。depth admission も managed session では lifecycle state を直接読み、
+作成完了直後の daemon crash で dispatch sidecar への複製が遅れても深さを過小評価しない。sidecar は lifecycle に
+存在しない legacy / supervisor scope の fallback に限る。
 durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
