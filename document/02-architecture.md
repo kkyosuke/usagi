@@ -912,7 +912,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
   起動する。session の repository content 書き込みは own worktree に閉じ込め、Git workspace では linked worktree が
-  checkout 外に持つ Git common directory も administrative state として許可する。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  checkout 外に持つ own Git admin directory、共有 object store、`usagi/*` ref / reflog namespace だけを許可する。
+  Git common directory 全体は許可しない。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される

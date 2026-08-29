@@ -18961,8 +18961,6 @@ instructions = "{instructions}"
                 "/home/dev",
                 "--writable-root",
                 "/repo/.usagi/sessions/work",
-                "--writable-root",
-                "/repo/.git",
                 "--",
             ]
         );
