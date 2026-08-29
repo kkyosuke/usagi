@@ -344,6 +344,7 @@ fn managed_worktree_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
 
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -364,6 +365,92 @@ mod tests {
             start_identity: format!("identity-{pid}"),
             accounted,
         }
+    }
+
+    #[test]
+    fn repository_observation_classifies_managed_git_resources() {
+        let worktrees = "worktree /repo\nHEAD root\nbranch refs/heads/main\n\
+                         \nworktree /elsewhere\nHEAD other\nbranch refs/heads/usagi/elsewhere\n\
+                         \nworktree /repo/.usagi/sessions/clean\nHEAD clean\nbranch refs/heads/usagi/clean\n\
+                         \nworktree /repo/.usagi/sessions/detached\nHEAD detached\ndetached\n";
+        let git = FakeGit::new(vec![
+            ok("true\n"),
+            ok(worktrees),
+            ok(""),
+            fail("status unavailable"),
+            ok("usagi/clean\n\nusagi/detached\n"),
+            ok(""),
+            fail("not merged"),
+        ]);
+
+        assert_eq!(
+            observe_repository(&git, Path::new("/repo")).unwrap(),
+            Some(RepositoryInventory {
+                root: "/repo".into(),
+                worktrees: vec![
+                    ObservedWorktree {
+                        path: "/repo/.usagi/sessions/clean".into(),
+                        dirty: false,
+                        branch: Some("usagi/clean".into()),
+                    },
+                    ObservedWorktree {
+                        path: "/repo/.usagi/sessions/detached".into(),
+                        dirty: true,
+                        branch: None,
+                    },
+                ],
+                branches: vec![
+                    ObservedBranch {
+                        name: "usagi/clean".into(),
+                        merged: true,
+                    },
+                    ObservedBranch {
+                        name: "usagi/detached".into(),
+                        merged: false,
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            git.calls.borrow().as_slice(),
+            &[
+                vec!["rev-parse", "--is-inside-work-tree"],
+                vec!["worktree", "list", "--porcelain"],
+                vec!["status", "--porcelain"],
+                vec!["status", "--porcelain"],
+                vec![
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads/usagi/",
+                ],
+                vec!["merge-base", "--is-ancestor", "usagi/clean", "HEAD"],
+                vec!["merge-base", "--is-ancestor", "usagi/detached", "HEAD",],
+            ]
+        );
+    }
+
+    #[test]
+    fn repository_observation_fails_closed_when_git_evidence_is_missing() {
+        let outside = FakeGit::new(vec![fail("not a repository")]);
+        assert_eq!(
+            observe_repository(&outside, Path::new("/repo")).unwrap(),
+            None
+        );
+
+        let worktrees_unavailable = FakeGit::new(vec![ok("true"), fail("broken worktrees")]);
+        assert!(observe_repository(&worktrees_unavailable, Path::new("/repo")).is_err());
+
+        let branches_unavailable = FakeGit::new(vec![
+            ok("true"),
+            ok("worktree /repo\nHEAD root\nbranch refs/heads/main\n"),
+            fail("broken refs"),
+        ]);
+        assert!(
+            observe_repository(&branches_unavailable, Path::new("/repo"))
+                .unwrap_err()
+                .to_string()
+                .contains("broken refs")
+        );
     }
 
     /// Only a helper whose build is gone *and* which this data home does not

@@ -564,6 +564,12 @@ mod tests {
         assert!(expanded.contains("remove"));
         assert!(modal.collapse());
         assert!(!modal.collapse());
+
+        let mut plain = OverviewModal::new();
+        plain.paste("config");
+        plain.expand_selected();
+        assert!(!plain.collapse());
+        assert_eq!(plain.submission(), "config");
     }
 
     #[test]

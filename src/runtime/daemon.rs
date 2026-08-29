@@ -12829,6 +12829,7 @@ fn connect_deadline_client(
 /// write, response read) and `reconnect_attempts` bounds retries gated by the
 /// request's retry eligibility. CLI, MCP, and the TUI's per-request calls use
 /// this so a hung daemon cannot block a surface indefinitely.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=mcp_e2e
 pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
     policy_client_for(policy, client_workspace())
 }
@@ -12870,8 +12871,7 @@ fn policy_client_for(
             policy.timeout_ms,
         )
     })?;
-    let data_dir =
-        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let data_dir = paths::data_dir().map_err(client_unavailable)?;
     let build = current_build();
     // Reconnects target the already-running daemon; the initial bootstrap above
     // owns cold-start and rollover, so a plain connect that fails simply exhausts
@@ -12888,6 +12888,12 @@ fn policy_client_for(
         .map_err(|error| ClientError::Unavailable(error.to_string()))
     };
     Ok(PolicyClient::new(clock, policy, reconnect, Some(initial)))
+}
+
+fn client_unavailable(error: anyhow::Error) -> ClientError {
+    let message = error.to_string();
+    drop(error);
+    ClientError::Unavailable(message)
 }
 
 /// Connect a resilient per-request client to the already-running generation
@@ -15783,6 +15789,14 @@ mod tests {
         assert!(!daemon.join("current.json").exists());
         // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
         unsafe { ManuallyDrop::drop(&mut listener) };
+    }
+
+    #[test]
+    fn unavailable_client_errors_preserve_the_safe_reason() {
+        assert!(matches!(
+            client_unavailable(anyhow::anyhow!("data directory unavailable")),
+            ClientError::Unavailable(message) if message == "data directory unavailable"
+        ));
     }
 
     #[test]

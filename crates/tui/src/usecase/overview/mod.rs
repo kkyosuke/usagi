@@ -525,7 +525,15 @@ mod tests {
                 force: true,
             })
         );
+        assert_eq!(
+            parse_clean("--force --apply"),
+            Ok(CleanCommand {
+                apply: true,
+                force: true,
+            })
+        );
         assert!(parse_clean("--force").is_err());
+        assert!(parse_clean("--apply extra").is_err());
     }
 
     #[test]
