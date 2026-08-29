@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use fs2::FileExt;
+use serde::Deserialize;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, confined_git_command, delete_branch, list_worktrees, remove_worktree,
@@ -20,6 +21,8 @@ use usagi_core::usecase::clean::{
     ObservedProcess, ObservedWorktree, RegisteredWorkspace, RepositoryInventory,
 };
 use usagi_daemon::infrastructure::unix_transport::ensure_private_dir;
+use usagi_daemon::usecase::authority::registry::RegistryDocument;
+use usagi_daemon::usecase::generation::GenerationRole;
 
 /// Discover and optionally remove orphan resources. Discovery is always done
 /// first, so an apply run prints the exact same plan it is about to execute.
@@ -600,7 +603,7 @@ fn discover_processes(daemon_dir: &Path) -> Vec<ObservedProcess> {
     if !listing.status.success() {
         return Vec::new();
     }
-    let accounted = accounted_pids(daemon_dir);
+    let accounted = accounted_processes(daemon_dir);
     // SAFETY: `geteuid` reads the calling process's own effective uid and has
     // no arguments, no allocation, and no failure mode.
     let uid = unsafe { libc::geteuid() };
@@ -610,60 +613,125 @@ fn discover_processes(daemon_dir: &Path) -> Vec<ObservedProcess> {
         std::process::id(),
     )
     .into_iter()
-    .map(|(pid, role, executable)| ObservedProcess {
-        executable_exists: path_node_may_exist(&executable),
-        start_identity: crate::runtime::daemon::process_start_identity(pid).unwrap_or_default(),
-        accounted: accounted.contains(&pid),
-        pid,
-        role,
-        executable,
+    .map(|(pid, role, executable)| {
+        let start_identity =
+            crate::runtime::daemon::process_start_identity(pid).unwrap_or_default();
+        let identity = AccountedProcess {
+            pid,
+            start_identity: start_identity.clone(),
+        };
+        ObservedProcess {
+            executable_exists: path_node_may_exist(&executable),
+            accounted: accounted.contains(&identity),
+            start_identity,
+            pid,
+            role,
+            executable,
+        }
     })
     .collect()
 }
 
-/// Every pid this data home still refers to.
-///
-/// The lifecycle record, the generation registry, and the broker records all
-/// name pids this installation is relying on. Collecting them by field name
-/// rather than by document shape keeps the fence intact when those documents
-/// grow: a pid this data home mentions anywhere is not residue.
-#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=helper_process_listing_is_read_conservatively
-fn accounted_pids(daemon_dir: &Path) -> BTreeSet<u32> {
-    let mut pids = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(daemon_dir) else {
-        return pids;
-    };
-    for entry in entries.flatten() {
-        if entry.path().extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(entry.path()) else {
-            continue;
-        };
-        let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        collect_pids(&document, &mut pids);
-    }
-    pids
+/// Exact process identity this data home still relies on.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AccountedProcess {
+    pid: u32,
+    start_identity: String,
 }
 
-/// Collect every `"pid"` number reachable in `value`.
-fn collect_pids(value: &serde_json::Value, into: &mut BTreeSet<u32>) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, child) in fields {
-                if key == "pid"
-                    && let Some(pid) = child.as_u64().and_then(|pid| u32::try_from(pid).ok())
-                {
-                    into.insert(pid);
-                }
-                collect_pids(child, into);
+impl AccountedProcess {
+    fn insert(pid: u32, start_identity: Option<&str>, into: &mut BTreeSet<Self>) {
+        if let Some(start_identity) = start_identity.filter(|identity| !identity.is_empty()) {
+            into.insert(Self {
+                pid,
+                start_identity: start_identity.to_owned(),
+            });
+        }
+    }
+}
+
+/// The persisted shape of one bootstrap broker record.
+///
+/// The producer lives in the daemon composition root. Keeping this read-only
+/// shape local prevents `clean` from depending on that private implementation
+/// type while still requiring both parts of its process identity.
+#[derive(Deserialize)]
+struct RecordedBroker {
+    pid: u32,
+    process_start_identity: String,
+}
+
+/// Every exact process identity this data home still relies on.
+///
+/// Only authority-bearing records count. A retired generation is historical,
+/// and a numeric PID alone is not authority: after PID reuse it can name a
+/// completely different orphan process. Parsing each known document shape
+/// keeps those distinctions instead of treating every `"pid"` field in every
+/// JSON document as a live ownership claim.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=helper_process_listing_is_read_conservatively
+fn accounted_processes(daemon_dir: &Path) -> BTreeSet<AccountedProcess> {
+    let mut processes = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(daemon_dir) else {
+        return processes;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !accounting_document(name) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        collect_accounted_processes(name, &text, &mut processes);
+    }
+    processes
+}
+
+fn accounting_document(name: &str) -> bool {
+    name == "daemon.json"
+        || name == "generations.json"
+        || name
+            .strip_prefix("bootstrap-broker-")
+            .is_some_and(|suffix| {
+                Path::new(suffix)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            })
+}
+
+/// Parse one known authority document into exact identities.
+fn collect_accounted_processes(name: &str, text: &str, into: &mut BTreeSet<AccountedProcess>) {
+    match name {
+        "daemon.json" => {
+            if let Ok(record) = serde_json::from_str::<DaemonRecord>(text) {
+                AccountedProcess::insert(
+                    record.pid,
+                    record.process_start_identity.as_deref(),
+                    into,
+                );
             }
         }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_pids(item, into);
+        "generations.json" => {
+            if let Ok(document) = serde_json::from_str::<RegistryDocument>(text) {
+                for entry in document
+                    .generations
+                    .into_iter()
+                    .filter(|entry| entry.role != GenerationRole::Retired)
+                {
+                    AccountedProcess::insert(
+                        entry.process.pid,
+                        Some(&entry.process.start_identity),
+                        into,
+                    );
+                }
+            }
+        }
+        name if accounting_document(name) => {
+            if let Ok(record) = serde_json::from_str::<RecordedBroker>(text) {
+                AccountedProcess::insert(record.pid, Some(&record.process_start_identity), into);
             }
         }
         _ => {}
@@ -728,13 +796,19 @@ impl GitRunner for SystemGit {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitOutput, GitRunner, acquire_exclusive_fence, clean_exit_code, collect_pids, describe,
-        ensure_data_unlinked, ensure_managed_worktree, parse_helper_processes, remove_daemon_data,
+        AccountedProcess, GitOutput, GitRunner, acquire_exclusive_fence, clean_exit_code,
+        collect_accounted_processes, describe, ensure_data_unlinked, ensure_managed_worktree,
+        parse_helper_processes, remove_daemon_data,
     };
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
+    use usagi_core::domain::daemon::DaemonRecord;
+    use usagi_core::domain::id::DaemonGeneration;
+    use usagi_core::infrastructure::ipc::BuildIdentity;
     use usagi_core::usecase::clean::{CleanCandidate, HelperRole};
+    use usagi_daemon::usecase::authority::registry::{GenerationEntry, RegistryDocument};
+    use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity};
 
     /// A `ps` listing is the only thing standing between this plan and a signal,
     /// so it is read conservatively: another user's process, this process, a
@@ -779,23 +853,81 @@ not a process line
         );
     }
 
-    /// A pid this data home mentions anywhere is one it is relying on. Reading
-    /// them by field name rather than by document shape keeps that fence intact
-    /// as the documents grow.
+    /// A stale retired PID is not authority over a later process that reused the
+    /// number. Every authority-bearing document has to match the exact start
+    /// identity, and unrelated JSON fields never become ownership claims.
     #[test]
-    fn every_recorded_pid_is_collected_whatever_document_holds_it() {
-        let document = serde_json::json!({
-            "pid": 1,
-            "handoff": { "process": { "pid": 2 } },
-            "generations": [{ "process": { "pid": 3 } }, { "process": { "pid": 4 } }],
-            "unrelated": "pid",
-            "negative": { "pid": -5 },
-            "huge": { "pid": 9_999_999_999_u64 },
-        });
+    fn accounting_requires_exact_identity_and_ignores_retired_generations() {
+        let mut accounted = BTreeSet::new();
+        let daemon = DaemonRecord::identified(11, "daemon-start".to_owned());
+        collect_accounted_processes(
+            "daemon.json",
+            &serde_json::to_string(&daemon).unwrap(),
+            &mut accounted,
+        );
 
-        let mut pids = BTreeSet::new();
-        collect_pids(&document, &mut pids);
-        assert_eq!(pids, BTreeSet::from([1, 2, 3, 4]));
+        let generation = |pid: u32, start_identity: &str, role: GenerationRole| GenerationEntry {
+            generation: DaemonGeneration::new(),
+            role,
+            endpoint: format!("generations/{pid}/daemon.sock"),
+            process: ProcessIdentity {
+                pid,
+                start_identity: start_identity.to_owned(),
+                process_group: pid,
+            },
+            expected_build: BuildIdentity::default(),
+            verified_build: None,
+            revision: 1,
+        };
+        let registry = RegistryDocument {
+            generations: vec![
+                generation(22, "active-start", GenerationRole::Active),
+                generation(33, "retired-start", GenerationRole::Retired),
+            ],
+            ..RegistryDocument::default()
+        };
+        collect_accounted_processes(
+            "generations.json",
+            &serde_json::to_string(&registry).unwrap(),
+            &mut accounted,
+        );
+        collect_accounted_processes("generations.json", "not json", &mut accounted);
+        collect_accounted_processes(
+            "bootstrap-broker-fixture.json",
+            r#"{"pid":44,"process_start_identity":"broker-start"}"#,
+            &mut accounted,
+        );
+        collect_accounted_processes(
+            "unrelated.json",
+            r#"{"pid":55,"process_start_identity":"unrelated-start"}"#,
+            &mut accounted,
+        );
+
+        assert_eq!(
+            accounted,
+            BTreeSet::from([
+                AccountedProcess {
+                    pid: 11,
+                    start_identity: "daemon-start".to_owned(),
+                },
+                AccountedProcess {
+                    pid: 22,
+                    start_identity: "active-start".to_owned(),
+                },
+                AccountedProcess {
+                    pid: 44,
+                    start_identity: "broker-start".to_owned(),
+                },
+            ])
+        );
+        assert!(
+            accounted.iter().all(|process| process.pid != 33),
+            "a retired generation's stale PID must not account for its successor"
+        );
+        assert!(!accounted.contains(&AccountedProcess {
+            pid: 22,
+            start_identity: "different-start".to_owned(),
+        }));
     }
 
     #[derive(Clone)]

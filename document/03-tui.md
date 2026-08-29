@@ -448,6 +448,11 @@ Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない�
 `Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で背面へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
+daemon 未登録の `.usagi/sessions/<name>` が見つかった場合は、attach 不能・remove 可能な `failed` recovery row として
+sidebar に現れ、failure detail に actual branch、dirty、未統合 commit 件数を表示する。clean かつ基点へ統合済みなら `x` で
+安全に回収できる。dirty、未統合、detached、`usagi/` 外 branch、診断不能な entry は `x` / `X` のどちらでも削除せず、
+commit/stash または PR の作成・merge を促す。orphan recovery では `X` もこの保護を迂回しない。
+
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
 変更しない。実 session は、同じ stable `SessionId` を 400ms 以内（境界を含む）にもう一度左クリックした場合だけ、
 Enter と同じくその session を active target にして Closeup を開く。座標や表示順は同一性の判定に使わないため、
@@ -1619,7 +1624,7 @@ tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。描画前に ready になった同方向の wheel burst は最大 32 notch まで 1 action に集約し、移動量を保ったまま frame rebuild / diff / flush を 1 回にする。逆方向または wheel 以外の最初の event は次回へ保持して入力順序を変えず、上限到達時はいったん描画する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
 snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
@@ -1634,7 +1639,7 @@ daemon の cell / checkpoint frame budget で oldest row の eviction と追記�
 一方の origin を他方の追記量へ混ぜない。保持している間は live bottom までの距離が会話とともに伸びるため、
 `Ctrl-O b` / `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
 
-出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
+出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。複数の物理行にまたがる選択では、PTY の明示改行だけを改行としてコピーし、端末幅による自動折り返し境界は改行を挿入せず連結する。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が
 新しい選択を始めるか、その terminal が論理 close / bounded cache eviction されるまで terminal identity ごとに保持する。
 別 terminal へ focus が移った間は非表示になり、focus が戻ると scroll offset・selection・feedback を復元する（release で即座に消えない）。保持中の選択は OS 標準の copy shortcut（macOS: Command+C、Linux: Ctrl+Shift+C、Windows: Ctrl+C）で再コピーできる。この click は text selection

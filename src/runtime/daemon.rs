@@ -16921,6 +16921,7 @@ mod tests {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                branch_name: None,
                 force_delete_branch: false,
                 merged_head_oid: None,
             });
@@ -17000,6 +17001,7 @@ mod tests {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                branch_name: None,
                 force_delete_branch: false,
                 merged_head_oid: None,
             },
