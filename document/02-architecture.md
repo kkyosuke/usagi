@@ -913,7 +913,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
   起動する。session の repository content 書き込みは own worktree に閉じ込め、Git workspace では linked worktree が
-  checkout 外に持つ Git common directory も administrative state として許可する。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  checkout 外に持つ own Git admin directory、共有 object store、`usagi/*` ref / reflog namespace だけを許可する。
+  Git common directory 全体は許可しない。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
@@ -958,12 +959,16 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
-- **起動固有 writable root**: session は own worktree と、その repository の Git common directory を受け取る。
-  linked worktree の index・refs・logs・object database は checkout 外の common directory にあるため、後者が無いと
-  checkout 内の編集が可能でも `git add` / `git commit` は失敗する。workspace の `.usagi` と data home は追加しないため、
-  sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や symlink alias に
-  かかわらず read-only である。Git common directory は worktree 間で共有される administrative authority なので、
-  session 名・branch・worktree の対応と teardown は引き続き daemon lifecycle state が権威を持つ。root coordinator には起動固有 writable root を
+- **起動固有 writable root**: session は own worktree に加え、linked worktree が commit に使う自分専用の Git
+  管理 directory、共有 object store、`usagi/*` branch の ref / reflog namespace だけを受け取る。Git common dir
+  全体、`main` / remote ref、repository config、workspace のそのほかの `.usagi`、data home は追加しない。
+  worktree 内の `.git` pointer は writable な agent input なので grant の権威にはしない。daemon が選択した workspace の
+  common directory と一致し、private admin directory がその common directory の direct `worktrees/*` child で、admin 側の
+  backlink が選択した worktree の `.git` marker を指すことを起動ごとに再検証してから launcher へ渡す。Git 管理されて
+  いない workspace と、workspace root 自体が standalone Git repository である場合は追加 Git root を持たず、own
+  worktree だけを書き込み可能にする。後者の `.git` directory は既に writable な worktree の内側にある。
+  したがって sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や
+  symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)と
@@ -1074,10 +1079,12 @@ Codex と Codex 互換の sakana.ai は同じ合成済み system prompt を TOML
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 root 起動は daemon-owned OS sandbox launcher で checkout を read-only にする。外側 launcher がある場合、Codex
-自身には `--sandbox danger-full-access --ask-for-approval never` を渡して、macOS Seatbelt / Linux namespace の
-入れ子を作らない。この `danger-full-access` は外側 hard boundary の内側だけで使い、launcher が無い構成では
-`--sandbox read-only` へ fail-closed する。session 起動は interactive の `workspace-write` と headless の session
-専用 bypass を使う。workspace 設定の `CODEX_HOME` は launcher control として拒否し、Codex process の state / arg0
+自身には scope にかかわらず `--sandbox danger-full-access --ask-for-approval never` を渡して、macOS Seatbelt /
+Linux namespace の入れ子を作らない。この `danger-full-access` は外側 hard boundary の内側だけで使い、session の
+filesystem 境界は launcher が維持するため、linked worktree の Git 管理領域と `git push` / `gh pr create` に必要な
+通信を内側 sandbox が遮断しない。launcher が無い構成では root を `--sandbox read-only`、session interactive を
+`workspace-write` へ fail-closed にし、session headless は専用 bypass を使う。workspace 設定の `CODEX_HOME` は
+launcher control として拒否し、Codex process の state / arg0
 書き込み先を checkout 内へ差し替えさせない。daemon bootstrap は所有者権限を失った stale arg0 directory の mode
 だけを有界に修復し、lock-aware cleanup と削除は Codex 自身へ委ねる。
 

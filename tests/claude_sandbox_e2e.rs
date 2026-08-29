@@ -21,17 +21,19 @@ fn fixture_root() -> PathBuf {
 }
 
 fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
-    run_in_session_with_roots(&fixture_root(), own, &[], script, arguments)
+    let protected = fixture_root()
+        .canonicalize()
+        .expect("canonical protected root");
+    run_in_session_with_roots(&protected, own, &[], script, arguments)
 }
 
 fn run_in_session_with_roots(
     protected: &Path,
     own: &Path,
-    additional_writable_roots: &[&Path],
+    additional_roots: &[PathBuf],
     script: &str,
     arguments: &[&Path],
 ) -> Output {
-    let protected = protected.canonicalize().expect("canonical protected root");
     let own = own.canonicalize().expect("canonical writable root");
     let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
     command
@@ -39,10 +41,8 @@ fn run_in_session_with_roots(
         .arg(protected)
         .arg("--writable-root")
         .arg(&own);
-    for root in additional_writable_roots {
-        command
-            .arg("--writable-root")
-            .arg(root.canonicalize().expect("canonical writable root"));
+    for root in additional_roots {
+        command.arg("--writable-root").arg(root);
     }
     #[cfg(target_os = "macos")]
     command.arg("--backend").arg(
@@ -59,77 +59,19 @@ fn run_in_session_with_roots(
         .expect("shipping launcher starts")
 }
 
-#[test]
-fn session_scope_can_commit_its_linked_worktree_without_writing_sibling_content() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("agent-session-git-scope");
-    let _ = fs::remove_dir_all(&fixture);
-    let repository = fixture.join("repository");
-    let own = fixture.join("sessions/a");
-    let sibling = fixture.join("sessions/b/sentinel");
-    fs::create_dir_all(&repository).unwrap();
-    fs::create_dir_all(sibling.parent().unwrap()).unwrap();
-    fs::write(&sibling, ORIGINAL).unwrap();
-
-    let git = |cwd: &Path, arguments: &[&str]| {
-        let output = Command::new("git")
-            .args(arguments)
-            .current_dir(cwd)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&repository, &["init", "--quiet"]);
-    git(&repository, &["config", "user.name", "fixture"]);
-    git(
-        &repository,
-        &["config", "user.email", "fixture@example.invalid"],
-    );
-    fs::write(repository.join("tracked"), "base\n").unwrap();
-    git(&repository, &["add", "tracked"]);
-    git(&repository, &["commit", "--quiet", "-m", "base"]);
-    git(
-        &repository,
-        &[
-            "worktree",
-            "add",
-            "--quiet",
-            "-b",
-            "usagi/a",
-            own.to_str().unwrap(),
-        ],
-    );
-    let common = repository.join(".git");
-    let output = run_in_session_with_roots(
-        &fixture,
-        &own,
-        &[&common],
-        "printf change >> tracked && git add tracked && git -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m change",
-        &[],
-    );
-    if !output.status.success() && sandbox_backend_unavailable(&output) {
-        let _ = fs::remove_dir_all(&fixture);
-        return;
-    }
-    assert!(
-        output.status.success(),
-        "linked-worktree commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_unchanged(&sibling);
-    let count = Command::new("git")
-        .args(["rev-list", "--count", "usagi/a"])
-        .current_dir(&repository)
+fn git(repo: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(repo)
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8(count.stdout).unwrap().trim(), "2");
-
-    let _ = fs::remove_dir_all(&fixture);
+    assert!(
+        output.status.success(),
+        "git {}: {}",
+        arguments.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn run_in_root(root: &Path, script: &str) -> Output {
@@ -373,6 +315,71 @@ fn session_scope_preserves_sibling_issue_and_daemon_authority_for_path_alias_mat
     }
 
     let _ = fs::remove_dir_all(&fixture);
+}
+
+#[test]
+fn session_scope_can_commit_without_granting_the_main_ref() {
+    let protected = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("claude-sandbox-session-git");
+    let _ = fs::remove_dir_all(&protected);
+    fs::create_dir_all(protected.join(".usagi/sessions")).unwrap();
+    git(&protected, &["init", "--quiet"]);
+    git(&protected, &["config", "user.name", "fixture"]);
+    git(
+        &protected,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(protected.join("tracked"), "base\n").unwrap();
+    git(&protected, &["add", "tracked"]);
+    git(&protected, &["commit", "--quiet", "-m", "base"]);
+    let main_before = git(&protected, &["rev-parse", "HEAD"]);
+    let worktree = protected.join(".usagi/sessions/commit");
+    git(
+        &protected,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "usagi/sandbox-commit",
+            worktree.to_str().unwrap(),
+        ],
+    );
+
+    let git_dir = PathBuf::from(git(&worktree, &["rev-parse", "--git-dir"]))
+        .canonicalize()
+        .unwrap();
+    let common = PathBuf::from(git(&worktree, &["rev-parse", "--git-common-dir"]))
+        .canonicalize()
+        .unwrap();
+    let roots = [
+        git_dir,
+        common.join("objects").canonicalize().unwrap(),
+        common.join("refs/heads/usagi").canonicalize().unwrap(),
+        common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+    ];
+    let protected = protected.canonicalize().unwrap();
+    let output = run_in_session_with_roots(
+        &protected,
+        &worktree,
+        &roots,
+        "printf committed > tracked && git add tracked && git commit --quiet -m sandbox",
+        &[],
+    );
+    if !output.status.success() && sandbox_backend_unavailable(&output) {
+        let _ = fs::remove_dir_all(&protected);
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "sandboxed commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(git(&worktree, &["rev-parse", "HEAD"]), main_before);
+    assert_eq!(git(&protected, &["rev-parse", "HEAD"]), main_before);
+
+    let _ = fs::remove_dir_all(&protected);
 }
 
 /// A root coordinator must be able to write the state its own CLI needs — Codex

@@ -256,25 +256,24 @@ fn render_plan(
     program: &str,
 ) -> Result<LaunchPlan, LaunchValidationError> {
     let root = request.scope.session_id.is_none();
-    // A production root launch is already confined by the daemon-owned outer
-    // sandbox. Ask Codex not to apply a nested platform sandbox, which macOS
-    // Seatbelt and Linux namespaces may reject. If the outer launcher is ever
-    // absent, retain Codex's native read-only fallback.
-    let root_sandbox = if provision.spawn.sandbox_launcher().is_some() {
+    // A production launch is already confined by the daemon-owned outer
+    // sandbox. Ask Codex not to apply a nested platform sandbox: besides nested
+    // Seatbelt / namespace failures, Codex's `workspace-write` scope cannot see
+    // a linked worktree's external Git administration directory and disables
+    // network access needed by `git push` / `gh pr create`. If the outer
+    // launcher is absent, retain Codex's native scope-specific fallback.
+    let codex_sandbox = if provision.spawn.sandbox_launcher().is_some() {
         "danger-full-access"
-    } else {
+    } else if root {
         "read-only"
+    } else {
+        "workspace-write"
     };
     let mut argv = match (request.mode, root) {
         (LaunchMode::Interactive, _) => vec![
             "--dangerously-bypass-hook-trust".into(),
             "--sandbox".into(),
-            if root {
-                root_sandbox
-            } else {
-                "workspace-write"
-            }
-            .into(),
+            codex_sandbox.into(),
             "--ask-for-approval".into(),
             "never".into(),
         ],
@@ -287,7 +286,7 @@ fn render_plan(
             "approval_policy=\"never\"".into(),
             "exec".into(),
             "--sandbox".into(),
-            root_sandbox.into(),
+            codex_sandbox.into(),
         ],
     };
     if let Some(model) = &request.model {
