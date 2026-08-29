@@ -126,6 +126,12 @@ pub struct CellRun {
     pub ch: char,
     /// Whether these cells are the trailing half of a wide glyph.
     pub continuation: bool,
+    /// Whether this cell ends a row continued by terminal auto-wrap.
+    ///
+    /// Older revision-2 checkpoints did not carry this bit and decode it as a
+    /// hard row boundary.
+    #[serde(default)]
+    pub wrapped: bool,
     /// How many consecutive cells this run represents (at least 1).
     pub repeat: u32,
 }
