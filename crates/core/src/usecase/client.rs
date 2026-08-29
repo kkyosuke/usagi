@@ -965,9 +965,9 @@ impl<S: Read + Write> IpcClient<S> {
             workspace: Some(workspace),
         });
         write_json_frame(&mut stream, &hello, 1_048_576)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?;
         match read_json_frame::<Bootstrap>(&mut stream, 1_048_576)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))?
+            .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?
         {
             Some(Bootstrap::ServerHello(hello)) => {
                 if hello.connection_nonce != expected_nonce {
@@ -1063,6 +1063,25 @@ impl<S: Read + Write> IpcClient<S> {
     }
 }
 
+/// Describe a transport failure in terms an operator can act on.
+///
+/// A [`DeadlineStream`] reports an expired budget the way the OS does: the
+/// receive timeout surfaces as `WouldBlock` — `EAGAIN`, whose std rendering is
+/// "Resource temporarily unavailable (os error 35)" — and other paths as
+/// `TimedOut`. Passing either through verbatim names neither the daemon nor the
+/// deadline, so a lifecycle command could report `Unavailable: OwnershipUnknown:
+/// Unavailable: Resource temporarily unavailable (os error 35)` for the ordinary
+/// case of a daemon too busy to finish the handshake, leaving the operator with
+/// nothing to act on.
+fn transport_failure(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            "the daemon did not answer within this connection's deadline".to_owned()
+        }
+        _ => error.to_string(),
+    }
+}
+
 fn verify_owner_binding(
     hello: &ServerHello,
     owner: &ExpectedOwner<'_>,
@@ -1108,10 +1127,10 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
             },
         };
         write_json_frame(&mut self.stream, &envelope, 1_048_576)
-            .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?;
         loop {
             let response = read_json_frame::<Envelope>(&mut self.stream, 1_048_576)
-                .map_err(|error| ClientError::Unavailable(error.to_string()))?
+                .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?
                 .ok_or_else(|| {
                     ClientError::Unavailable("daemon closed while awaiting response".into())
                 })?;
@@ -2632,6 +2651,27 @@ mod tests {
             ),
             Err(ClientError::Unavailable(_))
         ));
+    }
+
+    /// A deadline-bounded connection reports an expired budget the way the OS
+    /// does. On the receive timeout that is `EAGAIN`, whose std rendering —
+    /// "Resource temporarily unavailable (os error 35)" — names neither the
+    /// daemon nor the deadline, so an operator cannot tell a busy daemon from a
+    /// broken socket.
+    #[test]
+    fn an_expired_connection_deadline_reads_as_a_deadline_not_an_errno() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            let message = transport_failure(&io::Error::from(kind));
+            assert_eq!(
+                message,
+                "the daemon did not answer within this connection's deadline"
+            );
+            assert!(!message.contains("os error"), "{message}");
+        }
+        // Every other transport failure already says what happened, so it keeps
+        // its own wording: only the deadline was ambiguous.
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "no listener");
+        assert_eq!(transport_failure(&refused), "no listener");
     }
 
     #[test]
