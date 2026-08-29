@@ -8284,6 +8284,7 @@ mod tests {
     use std::collections::{BTreeSet, VecDeque};
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12087,6 +12088,36 @@ mod tests {
         assert_eq!(
             super::session_branch_catalog(&root.path().join("missing")),
             crate::usecase::application::controller::SessionBranchCatalog::default()
+        );
+    }
+
+    #[test]
+    fn branch_catalog_reads_the_current_local_branch() {
+        let root = tempdir().unwrap();
+        let git = |arguments: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(arguments)
+                .status()
+                .unwrap()
+        };
+        assert!(git(&["init", "--initial-branch=main"]).success());
+        assert!(git(&["config", "user.name", "fixture"]).success());
+        assert!(git(&["config", "user.email", "fixture@example.invalid"]).success());
+        std::fs::write(root.path().join("tracked"), "base\n").unwrap();
+        assert!(git(&["add", "tracked"]).success());
+        assert!(git(&["commit", "-m", "base"]).success());
+
+        let catalog = super::session_branch_catalog(root.path());
+
+        assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
+        assert_eq!(
+            catalog.branches,
+            vec![crate::usecase::application::controller::BranchChoice {
+                label: "local:main".into(),
+                refname: "refs/heads/main".into(),
+            }]
         );
     }
 
