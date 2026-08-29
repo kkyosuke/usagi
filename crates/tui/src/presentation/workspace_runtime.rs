@@ -715,7 +715,6 @@ impl WorkspaceRuntime {
         let effects = update(&mut self.state, event);
         self.remember_root_surface_selection(director_was_open, terminal_was_open);
         self.follow_active_target();
-        self.select_root_surface_on_entry(director_was_open, terminal_was_open);
         self.sync_overlay_modals();
         effects
     }
@@ -747,43 +746,6 @@ impl WorkspaceRuntime {
                 .is_some_and(|selection| self.selection_has_kind(selection, PaneKind::Terminal))
         {
             self.root_terminal_selection = selection;
-        }
-    }
-
-    fn select_root_surface_on_entry(&mut self, director_was_open: bool, terminal_was_open: bool) {
-        let kind = if self.state.director_drawer_open() && !director_was_open {
-            Some(PaneKind::Agent)
-        } else if self.state.root_terminal_drawer_open() && !terminal_was_open {
-            Some(PaneKind::Terminal)
-        } else {
-            None
-        };
-        let Some(kind) = kind else { return };
-        let remembered = if kind == PaneKind::Agent {
-            self.root_agent_selection.clone()
-        } else {
-            self.root_terminal_selection.clone()
-        };
-        let current = self
-            .panes
-            .pane(Target::Root(self.state.workspace()))
-            .and_then(|pane| match pane.selected() {
-                PaneSelection::Tab(selection) => Some(selection.clone()),
-                PaneSelection::Target(_) | PaneSelection::None => None,
-            });
-        let selection = current
-            .filter(|selection| self.selection_has_kind(selection, kind))
-            .or_else(|| remembered.filter(|selection| self.selection_has_kind(selection, kind)))
-            .or_else(|| self.first_selection_of_kind(kind));
-        if let Some(selection) = selection {
-            let _ = reduce_registry(
-                &mut self.panes,
-                PaneRegistryEvent::Pane {
-                    target: Target::Root(self.state.workspace()),
-                    event: PaneEvent::Select(PaneSelection::Tab(selection)),
-                },
-            );
-            self.sync_live_pane();
         }
     }
 
