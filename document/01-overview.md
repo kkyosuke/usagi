@@ -32,7 +32,7 @@ usagi は workspace の骨組み（[2. アーキテクチャ](02-architecture.md
 | `usagi open [path]` | `path` の workspace を登録・最終利用日時更新して Workspace 画面を開く。`path` 省略時はカレントディレクトリを使う |
 | `usagi config` | Config 画面を対話的に表示する（scope を Tab で切替、`↑↓` で項目を選び `←→` で変更、dirty 時だけ Save で保存。`Esc` で Welcome へ、`Ctrl-C` で終了） |
 | `usagi doctor` | Doctor TUI を起動画面に選ぶ |
-| `usagi clean` | 登録 workspace、workspace ごとの daemon lifecycle data、Git worktree と `usagi/*` branch、**消えた build から取り残された daemon / bootstrap broker process** を照合し、紐付いていない resource を dry-run 表示する。`--apply` で安全な候補を削除し、dirty worktree・未マージ branch・session を 1 つも記録していない lifecycle document が根拠の候補・取り残された daemon process は `--force` も指定した場合だけ削除する。workspace fence を取得できない使用中 workspace は変更しない |
+| `usagi clean` | 登録 workspace、workspace ごとの daemon lifecycle data、Git worktree と `usagi/*` branch、**消えた build から取り残された daemon / bootstrap broker process** を照合し、紐付いていない resource を dry-run 表示する。process の所属は PID と process-start identity の組で照合し、retired generation の stale PID は現行 process の所属根拠にしない。`--apply` で安全な候補を削除し、dirty worktree・未マージ branch・session を 1 つも記録していない lifecycle document が根拠の候補・取り残された daemon process は `--force` も指定した場合だけ削除する。workspace fence を取得できない使用中 workspace は変更しない |
 | `usagi update` | GitHub Releases の最新バイナリを download して `~/.usagi/bin/` へ導入する。`usagi update -v` は release 一覧を5行固定で表示し、`↑` / `↓` で選択して Enter で選んだ版を導入する。更新後の CLI は次回起動から使われる。起動中の TUI は開き直し、古い daemon は `usagi doctor --fix` で入れ替える |
 | `usagi version` / `usagi --version` | 配布 version を表示する |
 | `usagi daemon start` | daemon をバックグラウンドで起動し、登録された pid を表示する。すでに稼働中ならその pid を表示する |
