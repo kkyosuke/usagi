@@ -26,8 +26,18 @@ use crate::usecase::serve::DaemonRecordPort;
 use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 
 /// How many times to poll for the launched daemon's record before giving up.
-/// At the synthesis root's ~50ms sleep this is a ~2s window.
-pub(crate) const MAX_POLLS: usize = 40;
+/// At the synthesis root's ~50ms sleep this is a ~30s window.
+///
+/// A cold start does more than bind a socket: it recovers the generation
+/// registry, hydrates runtime state, and adopts the workspaces it is asked to
+/// serve. The window was ~2s, which a loaded host exceeds routinely — one
+/// observed start registered ~11s after `start` had already reported a failure.
+/// That outcome is the worst of both: the operator is told the daemon did not
+/// start while a healthy daemon is coming up behind the message, so the obvious
+/// next step (start it again) then refuses because one is already running.
+/// The window is sized for the slow-but-healthy case; a daemon that actually
+/// failed still reports its own reason through [`startup_timeout_message`].
+pub(crate) const MAX_POLLS: usize = 600;
 
 /// Launch a background daemon and report the outcome.
 ///
@@ -151,7 +161,9 @@ fn startup_timeout_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{start, startup_timeout_message};
+    use super::{launch_and_confirm, start, startup_timeout_message};
+    use std::cell::Cell;
+
     use crate::test_support::{
         FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, TestLauncher,
     };
@@ -167,6 +179,50 @@ mod tests {
             name: "usagi",
             version: "0.1.0",
         }
+    }
+
+    /// Reports `Gone` for the first `slow` observations and `Exact` afterwards,
+    /// holding the confirmation loop the way a cold start does while it recovers
+    /// the generation registry, hydrates runtime state, and adopts workspaces.
+    struct SlowToConfirm {
+        seen: Cell<usize>,
+        slow: usize,
+    }
+
+    impl LivenessProbe for SlowToConfirm {
+        fn observe(&self, _record: &DaemonRecord) -> DaemonProcessObservation {
+            let seen = self.seen.get();
+            self.seen.set(seen + 1);
+            if seen < self.slow {
+                DaemonProcessObservation::Gone
+            } else {
+                DaemonProcessObservation::Exact
+            }
+        }
+    }
+
+    /// A cold start slower than the old ~2s window is confirmed, not reported as
+    /// a timeout.
+    ///
+    /// Reporting it was the worst outcome available: the operator was told the
+    /// daemon had not started while a healthy one came up behind the message,
+    /// and the obvious retry then refused because one was already running.
+    #[test]
+    fn a_slow_cold_start_is_confirmed_rather_than_reported_as_a_timeout() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let launcher = TestLauncher::registering(&store, 4242);
+        // Past the old limit of 40 polls, and past the ~11s that was actually
+        // observed at the production sleep of ~50ms.
+        let probe = SlowToConfirm {
+            seen: Cell::new(0),
+            slow: 300,
+        };
+
+        assert_eq!(
+            launch_and_confirm(&store, &probe, &launcher, &NoopSleeper).unwrap(),
+            4242
+        );
+        assert!(probe.seen.get() > 40, "the old window would have given up");
     }
 
     /// Reports the seeded pid as reused by an unrelated process and every other

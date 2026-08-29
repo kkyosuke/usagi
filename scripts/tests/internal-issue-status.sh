@@ -31,6 +31,9 @@ unchanged=$(git -C "$fixture" rev-parse HEAD)
   PR_BODY='Internal-Issue: #7' GITHUB_EVENT_NAME=pull_request bash "$checker" "$base" "$head"
   PR_BODY='Internal-Issue: none' GITHUB_EVENT_NAME=pull_request bash "$checker" "$base" "$unchanged"
   GITHUB_EVENT_NAME=push bash "$checker" "$base" "$head"
+  # Dependabot cannot template its body, so a markerless dependency PR reads as none.
+  PR_BODY='Bumps serde from 1.0.0 to 1.0.1' PR_AUTHOR='dependabot[bot]' \
+    GITHUB_EVENT_NAME=pull_request bash "$checker" "$base" "$unchanged"
 )
 
 for invalid in 'missing marker' $'Internal-Issue: #7\nInternal-Issue: none'; do
@@ -60,6 +63,29 @@ assert_rejected() {
 
 assert_rejected 'Internal-Issue: #7' "$base" "$unchanged" 'an unchanged todo issue'
 assert_rejected 'Internal-Issue: none' "$base" "$head" 'a done transition marked none'
+
+assert_rejected_as() {
+  local body=$1
+  local pr_author=$2
+  local comparison_base=$3
+  local candidate=$4
+  local description=$5
+  if (
+    cd "$fixture"
+    PR_BODY="$body" PR_AUTHOR="$pr_author" GITHUB_EVENT_NAME=pull_request \
+      bash "$checker" "$comparison_base" "$candidate"
+  ) >/dev/null 2>&1; then
+    echo "$description was accepted" >&2
+    exit 1
+  fi
+}
+
+# The dependabot exemption reads as none, so it must not let an issue completion through.
+assert_rejected_as 'Bumps serde from 1.0.0 to 1.0.1' 'dependabot[bot]' "$base" "$head" \
+  'a done transition in a dependabot PR'
+# The exemption is author-scoped: other bots and humans still owe a marker.
+assert_rejected_as 'missing marker' 'github-actions[bot]' "$base" "$unchanged" \
+  'a markerless github-actions PR'
 
 git -C "$fixture" switch -q --detach "$base"
 printf '%s\n' '---' 'number: 7' 'status: todo' '---' 'body changed' \

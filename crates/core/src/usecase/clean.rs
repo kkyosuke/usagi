@@ -138,6 +138,15 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
         let Some(sessions) = lifecycle.get(&repository.root) else {
             continue;
         };
+        // An empty session list is absence of evidence, not evidence of absence.
+        // It makes *every* managed worktree and branch of the workspace look
+        // unlinked at once, which is the one shape of this plan that can remove
+        // a whole workspace's work in a single run — and the states that produce
+        // it (a workspace the daemon released, a document written before its
+        // sessions were recorded) say nothing about the worktrees on disk. It
+        // still authorises removal, because a workspace whose sessions really
+        // are all gone can leak worktrees, but only as a deliberate act.
+        let unproven = sessions.is_empty();
         let expected_parent = repository.root.join(STATE_DIR).join(SESSIONS_DIR);
         let mut worktrees = repository.worktrees.iter().collect::<Vec<_>>();
         worktrees.sort_by(|left, right| left.path.cmp(&right.path));
@@ -149,7 +158,7 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
                 candidates.push(CleanCandidate::Worktree {
                     root: repository.root.clone(),
                     path: worktree.path.clone(),
-                    requires_force: worktree.dirty,
+                    requires_force: worktree.dirty || unproven,
                 });
             }
         }
@@ -164,7 +173,7 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
                 candidates.push(CleanCandidate::Branch {
                     root: repository.root.clone(),
                     name: branch.name.clone(),
-                    requires_force: !branch.merged,
+                    requires_force: !branch.merged || unproven,
                 });
             }
         }
@@ -196,6 +205,56 @@ mod tests {
 
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// An empty session list is *absence of evidence*, not evidence of absence.
+    ///
+    /// A lifecycle document that lists no sessions authorises removing every
+    /// managed worktree and branch of that workspace at once — including work
+    /// that was never pushed. The document is empty in states that have nothing
+    /// to do with the worktrees on disk (a workspace the daemon released, a
+    /// document written before the sessions were recorded), so it must not be
+    /// read as "none of these worktrees is linked".
+    #[test]
+    fn an_empty_session_list_does_not_authorise_removing_every_worktree() {
+        let inventory = CleanInventory {
+            registered: Vec::new(),
+            daemon_data: vec![DaemonWorkspaceData {
+                root: "/a".into(),
+                dir: "/data/a".into(),
+                root_exists: true,
+                sessions: Some(BTreeSet::new()),
+            }],
+            repositories: vec![RepositoryInventory {
+                root: "/a".into(),
+                worktrees: vec![ObservedWorktree {
+                    path: "/a/.usagi/sessions/live".into(),
+                    branch: Some("usagi/live".into()),
+                    dirty: false,
+                }],
+                branches: vec![ObservedBranch {
+                    name: "usagi/live".into(),
+                    merged: true,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            plan(&inventory),
+            vec![
+                CleanCandidate::Worktree {
+                    root: "/a".into(),
+                    path: "/a/.usagi/sessions/live".into(),
+                    requires_force: true,
+                },
+                CleanCandidate::Branch {
+                    root: "/a".into(),
+                    name: "usagi/live".into(),
+                    requires_force: true,
+                },
+            ],
+            "an empty session list must not authorise an unforced removal"
+        );
     }
 
     #[test]

@@ -82,6 +82,10 @@ live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入�
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
 
+generic terminal の `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。
+`Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、再度開くと新しい terminal になる。Director は画面の
+右側を高さ一杯に使い、同時表示する managed terminal は Director の左端までの幅へ resize する。
+
 ## 必要なもの
 
 - Rust / Cargo（`rust-toolchain.toml` で必要な nightly toolchain を固定）
