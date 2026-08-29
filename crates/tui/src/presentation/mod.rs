@@ -12070,7 +12070,7 @@ mod tests {
     fn branch_choices_distinguish_local_remote_and_skip_symbolic_aliases() {
         assert_eq!(
             super::parse_session_branch_choices(
-                "refs/heads/main \nrefs/heads/feature \nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/main \n"
+                "refs/heads/main \nrefs/heads/feature \nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/main \nnot-a-ref\n"
             ),
             vec![
                 crate::usecase::application::controller::BranchChoice {
