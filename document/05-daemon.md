@@ -165,7 +165,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 
 | コマンド | 動作 |
 |---|---|
-| `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
+| `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで最大 30 秒待つ（[起動窓](#起動窓)）。すでに稼働中なら新しい process を起動しない |
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
@@ -175,6 +175,22 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | `usagi daemon install-service` | platform の supervisor（macOS は LaunchAgent、Linux は systemd user unit）を明示的に install し、前景 `serve` を login と異常終了後に supervise する（[service supervision](#service-supervision)） |
 | `usagi daemon uninstall-service` | install 済みの supervisor 定義を停止・無効化して remove する |
+
+### 起動窓
+
+`usagi daemon start` と `usagi daemon restart` は、起動した `serve` が `daemon.json` に自分を
+登録するまで **最大 30 秒**待つ。cold start は socket を bind するだけでなく、generation registry の
+recovery、runtime state の hydrate、serve する workspace の adopt を経てから登録するため、
+負荷のかかった host ではここが数秒から十数秒に伸びる。
+
+窓を短く取ると、**健全な daemon が起動している最中に「起動しなかった」と報告する**という最悪の
+結果になる。operator は失敗を告げられ、当然の次手であるもう一度の `start` は「すでに稼働中」で
+拒否され、実際には daemon が上がっている。窓は「遅いが健全」な場合に合わせて取り、本当に失敗した
+daemon は自分の error log に記録した理由で報告される。
+
+> 期限切れの報告は error log の最後の entry を根拠にするため、待っている間に無関係な entry が
+> 書かれると、そちらを原因として表示することがある。表示される理由が状況と噛み合わないときは
+> log 全体を確認する。
 
 ### sandbox bootstrap broker
 
