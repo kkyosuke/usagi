@@ -446,6 +446,11 @@ Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない�
 `Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で背面へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
+daemon 未登録の `.usagi/sessions/<name>` が見つかった場合は、attach 不能・remove 可能な `failed` recovery row として
+sidebar に現れ、failure detail に actual branch、dirty、未統合 commit 件数を表示する。clean かつ基点へ統合済みなら `x` で
+安全に回収できる。dirty、未統合、detached、`usagi/` 外 branch、診断不能な entry は `x` / `X` のどちらでも削除せず、
+commit/stash または PR の作成・merge を促す。orphan recovery では `X` もこの保護を迂回しない。
+
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
 変更しない。実 session は、同じ stable `SessionId` を 400ms 以内（境界を含む）にもう一度左クリックした場合だけ、
 Enter と同じくその session を active target にして Closeup を開く。座標や表示順は同一性の判定に使わないため、
