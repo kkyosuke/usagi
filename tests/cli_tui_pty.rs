@@ -1931,6 +1931,7 @@ fn real_pty_closeup_agent_m_codex_launches_codex_in_the_managed_session() {
             &["open".as_ref(), workspace.as_os_str()],
         )
         .env("PATH", &fixture_path)
+        .env(SANDBOX_PASSTHROUGH, "1")
         .output()
         .expect("workspace registers");
     assert!(registered.status.success());
