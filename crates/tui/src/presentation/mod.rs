@@ -4055,7 +4055,7 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 .map(ToString::to_string);
             if let Some(role) = ui.workspace.session_roles().get(id) {
                 projected.parent_session_id = role.parent_session_id;
-                projected.organization_depth = 1;
+                projected.organization_depth = 0;
                 let mut parent = role.parent_session_id;
                 let mut seen = BTreeSet::from([*id]);
                 while let Some(parent_id) = parent
@@ -10396,12 +10396,12 @@ mod tests {
                 .map(|session| (session.label.as_str(), session.organization_depth))
                 .collect::<Vec<_>>(),
             vec![
-                ("manager", 1),
-                ("worker", 2),
-                ("stopped", 3),
-                ("running", 1),
-                ("failed", 2),
-                ("orphan", 1),
+                ("manager", 0),
+                ("worker", 1),
+                ("stopped", 2),
+                ("running", 0),
+                ("failed", 1),
+                ("orphan", 0),
             ]
         );
         assert_eq!(projected[1].parent_session_id, Some(director_child));
