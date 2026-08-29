@@ -3224,10 +3224,17 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         command: SessionCommand,
     ) -> Result<SessionCommandResult, String> {
         let (action, payload) = match command {
-            SessionCommand::Create { name, role_id } => (
-                SessionAction::Create,
-                serde_json::json!({"name": name, "role": role_id}),
-            ),
+            SessionCommand::Create {
+                name,
+                role_id,
+                base_ref,
+            } => {
+                let mut payload = serde_json::json!({"name": name, "role": role_id});
+                if let Some(base_ref) = base_ref {
+                    payload["base_ref"] = serde_json::json!(base_ref);
+                }
+                (SessionAction::Create, payload)
+            }
             SessionCommand::List => (SessionAction::List, serde_json::json!({})),
             SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
             SessionCommand::Resume { .. } => {

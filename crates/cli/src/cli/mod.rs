@@ -372,6 +372,9 @@ pub enum SessionCommand {
         /// Stable session role selected from the effective role catalog.
         #[arg(long)]
         role: Option<String>,
+        /// Fully-qualified local or remote-tracking ref used as the base.
+        #[arg(long = "base")]
+        base_ref: Option<String>,
     },
     Remove {
         name: String,
@@ -500,10 +503,17 @@ struct Session {
 impl Run for Session {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         let (action, payload) = match &self.command {
-            SessionCommand::Create { name, role } => (
-                SessionAction::Create,
-                serde_json::json!({"name": name, "role": role}),
-            ),
+            SessionCommand::Create {
+                name,
+                role,
+                base_ref,
+            } => {
+                let mut payload = serde_json::json!({"name": name, "role": role});
+                if let Some(base_ref) = base_ref {
+                    payload["base_ref"] = serde_json::json!(base_ref);
+                }
+                (SessionAction::Create, payload)
+            }
             SessionCommand::Remove { name } => {
                 (SessionAction::Remove, serde_json::json!({"name": name}))
             }
@@ -937,6 +947,7 @@ mod tests {
             SessionCommand::Create {
                 name: "a".into(),
                 role: None,
+                base_ref: None,
             },
             SessionCommand::Create { .. }
         ));
@@ -1007,6 +1018,31 @@ mod tests {
                 payload,
                 ..
             }) if payload == serde_json::json!({"name":"review-auth", "role":"reviewer"})
+        ));
+
+        let parsed = Cli::try_parse_from([
+            "usagi",
+            "session",
+            "create",
+            "remote-fix",
+            "--base",
+            "refs/remotes/origin/main",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        let (outcome, _) = super::execute(parsed);
+        assert!(matches!(
+            outcome,
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
+                action: usagi_core::usecase::client::SessionAction::Create,
+                payload,
+                ..
+            }) if payload == serde_json::json!({
+                "name":"remote-fix",
+                "role":null,
+                "base_ref":"refs/remotes/origin/main"
+            })
         ));
     }
 

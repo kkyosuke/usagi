@@ -66,16 +66,25 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         workspace_root: &Path,
         destination: &Path,
         branch: &str,
+        base_ref: Option<&str>,
     ) -> anyhow::Result<()> {
         if self.is_repo_root(workspace_root) {
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            return add_worktree(git, workspace_root, destination, branch, None);
+            return add_worktree(git, workspace_root, destination, branch, base_ref);
         }
         std::fs::create_dir_all(destination)?;
         let mut created = Vec::new();
-        let result = mirror_directory(self, git, workspace_root, destination, branch, &mut created);
+        let result = mirror_directory(
+            self,
+            git,
+            workspace_root,
+            destination,
+            branch,
+            base_ref,
+            &mut created,
+        );
         if let Err(error) = result {
             let mut cleanup = Vec::new();
             for (repository, worktree) in created.into_iter().rev() {
@@ -130,6 +139,7 @@ fn mirror_directory(
     source: &Path,
     destination: &Path,
     branch: &str,
+    base_ref: Option<&str>,
     created: &mut Vec<(PathBuf, PathBuf)>,
 ) -> anyhow::Result<()> {
     let mut entries = std::fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?;
@@ -147,11 +157,11 @@ fn mirror_directory(
                 continue;
             }
             if io.is_repo_root(&source) {
-                add_worktree(git, &source, &target, branch, None)?;
+                add_worktree(git, &source, &target, branch, base_ref)?;
                 created.push((source, target));
             } else {
                 std::fs::create_dir_all(&target)?;
-                mirror_directory(io, git, &source, &target, branch, created)?;
+                mirror_directory(io, git, &source, &target, branch, base_ref, created)?;
             }
         } else {
             std::fs::copy(source, target)?;

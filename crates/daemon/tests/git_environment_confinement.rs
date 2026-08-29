@@ -69,7 +69,7 @@ fn a_hostile_git_environment_cannot_redirect_a_session_worktree_effect() {
 
     // create: a repository workspace root becomes a worktree of that repository.
     let session_root = root.join("sessions/direct");
-    io.build_session_tree(&git, &target, &session_root, BRANCH)
+    io.build_session_tree(&git, &target, &session_root, BRANCH, None)
         .expect("build session tree");
     assert_eq!(
         worktree_paths(&git, &target),
@@ -93,7 +93,7 @@ fn a_hostile_git_environment_cannot_redirect_a_session_worktree_effect() {
     // create, nested: each repository inside a mirrored tree gets its own
     // worktree at the same relative path, and plain files are copied.
     let mirror_session = root.join("sessions/mirror");
-    io.build_session_tree(&git, &mirror_root, &mirror_session, BRANCH)
+    io.build_session_tree(&git, &mirror_root, &mirror_session, BRANCH, None)
         .expect("build mirrored session tree");
     assert_eq!(
         worktree_paths(&git, &nested),
