@@ -261,7 +261,14 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 |---|---|
 | Welcome の Recent、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
 | New の作成成功後の open | draft を保ったまま同画面の notice に出す |
-| `usagi open <path>` / `usagi <path>` | TUI を開かず stderr へ 1 行で出す |
+| `usagi open <path>` / `usagi <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
+
+**daemon へ到達できないことは、この表の拒否と同じ扱いにする**。workspace が今開けない理由が
+「この daemon は別 workspace を serve している」でも「daemon へ到達できない」でも、利用者に必要なのは
+*画面に留まったまま理由を知り、別の workspace を選ぶか同じものを開き直すこと*である。したがって
+どちらも entry 画面の notice になり、TUI を畳まない。とくに後者で畳むと、wedge した daemon が
+利用者を shell へ締め出してしまう。daemon が応答した上での失敗（decode 失敗など）は待っても変わらないので
+従来どおり伝播する。
 
 entry 画面（Welcome・Open・New・Config）は **daemon を必要としない**。表示に使うのは registry と Recent という
 local store だけであり、workspace 切り替え画面はどの directory からでも開ける必要がある。ここで daemon の readiness を

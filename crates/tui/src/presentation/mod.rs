@@ -95,7 +95,7 @@ use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
 };
-use crate::usecase::application::{Key, ScreenRunner, Terminal, open_refusal_notice};
+use crate::usecase::application::{Key, ScreenRunner, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
 use crate::usecase::terminal_input::{
     LiveTerminalAction, PointerEvent, PointerKind, WHEEL_LINES, encode_mouse_wheel,
@@ -7701,7 +7701,7 @@ impl EntryFrameMaterial {
 /// # Errors
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_screen_graph_with_backend(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -7713,8 +7713,49 @@ pub fn run_screen_graph_with_backend(
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
+    run_screen_graph_with_backend_and_notice(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+        None,
+    )
+}
+
+/// [`run_screen_graph_with_backend`] that opens with `notice` already on the
+/// Welcome screen.
+///
+/// This is what makes an entry that could not open its workspace land *inside*
+/// the TUI rather than back at the shell: the composition root turns the failure
+/// into the same notice the Recent list would have shown
+/// ([`open_failure_notice`]), and the switcher comes up with it. The first frame
+/// therefore explains why the requested workspace is not on screen, and the user
+/// can pick another one or retry the same one.
+///
+/// # Errors
+///
+/// Returns workspace loading, settings, or terminal IO failures.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn run_screen_graph_with_backend_and_notice(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    backend_factory: &mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
+    notice: Option<String>,
+) -> io::Result<Exit> {
     let mut registry = workspaces.clone();
     let mut welcome = Welcome::new(recent);
+    welcome.set_notice(notice);
     let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
     let mut config_form = Config::load_with_available_models(settings, available_models);
@@ -7821,7 +7862,7 @@ pub fn run_screen_graph_with_backend(
                     // screen with the reason, so another Recent entry can be tried.
                     let (snapshots, snapshot, deck) = match prepare_workspace_deck(loader, &paths) {
                         Ok(prepared) => prepared,
-                        Err(error) => match open_refusal_notice(&error) {
+                        Err(error) => match open_failure_notice(&error) {
                             Some(notice) => {
                                 welcome.set_notice(Some(notice));
                                 continue;
@@ -7858,7 +7899,7 @@ pub fn run_screen_graph_with_backend(
                     // the workspace this daemon does serve can be chosen instead.
                     let (snapshots, snapshot, deck) = match prepare_workspace_deck(loader, &paths) {
                         Ok(prepared) => prepared,
-                        Err(error) => match open_refusal_notice(&error) {
+                        Err(error) => match open_failure_notice(&error) {
                             Some(notice) => {
                                 open.set_notice(Some(notice));
                                 continue;
@@ -8182,7 +8223,7 @@ mod tests {
         render_home_material, render_home_snapshot, reset_projection_build_counts,
         restore_open_panes, retarget_director_chords, route_garden_input, route_pr_modal_click,
         route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
-        run_with_settings,
+        run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
@@ -22178,6 +22219,10 @@ mod tests {
         /// Which paths `refuse` applies to. Empty means every path, so a fence
         /// that rejects only some registered workspaces can be expressed.
         refuse_paths: Vec<PathBuf>,
+        /// Stands in for the daemon being unreachable while the workspace is
+        /// opened: the loader reports it as `NotConnected`, which entry screens
+        /// present in place rather than ending the process for.
+        unreachable: Option<String>,
         /// Number of leading `create_workspace` calls that reject before the
         /// loader starts succeeding, standing in for a pre-flight rejection
         /// (e.g. the workspace already exists) that the user then corrects.
@@ -22201,6 +22246,9 @@ mod tests {
                     io::ErrorKind::PermissionDenied,
                     refusal.clone(),
                 ));
+            }
+            if let Some(outage) = self.unreachable.as_ref().filter(|_| fenced) {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, outage.clone()));
             }
             if self.fail {
                 return Err(io::Error::other("open failed"));
@@ -25411,6 +25459,87 @@ mod tests {
         let mut workspace = ws(name);
         workspace.updated_at = updated_at;
         Recent::Workspace(WorkspaceOverview::new(workspace, 1, 0, 0))
+    }
+
+    /// `usagi open <path>` that could not reach a daemon lands in the switcher
+    /// instead of back on the shell, so the very first frame has to say why the
+    /// workspace it asked for is not on screen.
+    #[test]
+    fn a_notice_seeded_switcher_opens_with_the_reason_on_its_first_frame() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('q'), Key::Enter]);
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend_and_notice(
+                &mut term,
+                Vec::new(),
+                vec![recent_at("first", now())],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+                Some("daemon unavailable: the daemon did not answer".to_owned()),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        let first = term.frames.first().expect("the switcher drew no frame");
+        assert!(
+            first
+                .iter()
+                .any(|line| line.contains("the daemon did not answer")),
+            "the first frame must carry the reason: {first:?}"
+        );
+        // Nothing was opened: the notice explains an absence, it does not stand
+        // in for a workspace that did load.
+        assert!(loader.opened.is_empty());
+    }
+
+    /// A daemon that cannot be reached must not end the process from an entry
+    /// screen. It is the same shape of failure as a workspace this daemon does
+    /// not serve — the switcher stays up with the reason — and collapsing to the
+    /// shell here is exactly how a wedged daemon locks a user out of usagi.
+    #[test]
+    fn an_unreachable_daemon_keeps_the_switcher_up_instead_of_ending_the_process() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q'), Key::Enter]);
+        let mut loader = FakeLoader {
+            unreachable: Some("daemon unavailable: the daemon did not answer".to_owned()),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        assert_eq!(
+            run_screen_graph_with_backend(
+                &mut term,
+                Vec::new(),
+                vec![recent_at("first", now())],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+                AvailableAgentModels::all(),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/first")]);
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.iter().any(|line| line.contains("did not answer"))),
+            "the switcher must show why the workspace did not open"
+        );
+        // The outage happened before any workspace runtime existed, so no daemon
+        // port was created for a workspace that never opened.
+        assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
     }
 
     /// #556 acceptance. Home can return to Welcome, another workspace opens from
