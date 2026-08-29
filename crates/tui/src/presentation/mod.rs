@@ -9402,6 +9402,10 @@ mod tests {
             session,
             agent: Some(AgentRuntimeId::new()),
         };
+        // The Garden overlay owns input before the visit reaches Closeup, so a
+        // covered pane strip cannot receive the agent click.
+        visit_garden_agent(&mut ui, &mut runtime, click);
+        assert_eq!(runtime.focused_terminal(), None);
         let _ = runtime.apply_event(AppEvent::GardenClick(click));
         assert_eq!(runtime.state().overlay(), None);
         visit_garden_agent(&mut ui, &mut runtime, click);

@@ -456,6 +456,17 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     // Enter explicitly opens the tab-less action modal.
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
+    let projection = HomeProjection::from_state(
+        &state,
+        "fixture",
+        Path::new("/work/root"),
+        &[session_projection(session, "alpha")],
+    );
+    assert!(
+        render_home(24, 80, &projection)
+            .join("\n")
+            .contains("Closeup: alpha")
+    );
 
     // 4: once a pane is available the tab surface is frontmost. The runtime
     // samples the tab level first and the live level second, so mirror that order

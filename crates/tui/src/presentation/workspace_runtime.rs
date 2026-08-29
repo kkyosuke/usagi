@@ -1083,13 +1083,6 @@ impl WorkspaceRuntime {
         // A dropped placeholder can never complete, so retire its focus gate.
         self.pane_focus_at_request.remove(&operation);
         self.sync_live_pane();
-        // Losing the last pending tab reopens Closeup automatically. Materialize
-        // that modal now and copy the failure into its visible danger row; the
-        // underlying empty-pane feedback is covered by the modal itself.
-        self.sync_overlay_modals();
-        if let Some(modal) = self.closeup_modal.as_mut() {
-            modal.set_error(self.panes.active_pane().error().map(str::to_owned));
-        }
         effects
     }
 
