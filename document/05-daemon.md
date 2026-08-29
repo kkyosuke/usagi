@@ -197,13 +197,22 @@ broker が daemon より長生きするのは意図した設計だが、**終わ
 | 終端 | 契機 | 挙動 |
 |---|---|---|
 | stop 要求 | `usagi daemon stop`（`--force` を含む）が成功したとき | 合成ルートが同じ `(workspace, executable)` の broker へ stop request を送る。broker は ack してから endpoint を閉じる。stop が拒否された場合は送らない（後の cold start に broker が要る） |
-| idle 失効 | 最後の request から 1 時間が経過し、かつ daemon endpoint へ接続できないとき | broker 自身の idle watch が 1 分ごとに判定し、条件を満たすと自分の endpoint へ stop request を送って終了する |
+| idle 失効 | 最後の request から 1 時間が経過し、かつ daemon endpoint へ接続できないとき | broker 自身の idle watch が 1 分ごとに判定し、条件を満たすと自分の endpoint へ stop request を送って終了する。**request が拒否された場合は watch を続ける** |
+| endpoint の消失 | 自分の socket が消えていることに idle watch が気づいたとき | 自分で exit する。回収すべき endpoint は既に存在しない |
 | workspace の消失 | workspace directory が消えた後に request が届いたとき | 従来どおり終了して socket を回収する |
 
 idle 失効が **daemon の不在を条件にする**のは、broker の役目が「daemon が死んだときにそこに居ること」だからである。
 daemon が動いている間は、どれだけ request が無くても idle とはみなさない。逆に daemon が居らず誰も要求しない状態が続く
 workspace は、もう使われていない。`usagi daemon stop` の直後は daemon も broker も残らないため、次の起動は通常の
 client bootstrap が broker を起動し直すところから始まる。
+
+**「到達不能」は「idle」とは別の終端である**。broker の endpoint が消えると、client も、idle watch が送る stop request も、
+その broker へ二度と届かない。この状態の broker は accept で永久に blocking するだけなので、idle watch は
+socket の存在を毎回確かめ、失われていれば stop request を試みずに exit する。data directory ごと消える temporary home
+（test fixture の teardown が典型）がこの状態を作る。
+
+同じ理由で、idle watch は **拒否された retirement で降りない**。stop request は daemon が戻っていれば veto されるため、
+1 度の拒否で watch を終えると、その daemon が後に死んでも二度と retire できない broker が残る。watch は次の判定へ進む。
 
 cold-start authority を持つ通常 client は `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によって
 その lock を開けない client だけが broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の
@@ -426,6 +435,13 @@ generation に live runtime があれば従来どおり拒否する。live runti
 registry に記録された exact process identity を再検証して全 non-retired generation へ shutdown を要求し、その消滅を
 有界に待ってから stale endpoint / lifecycle record cleanup と replacement 起動へ進む。PID だけ、retired entry、identity
 不明な process は signal 対象にしない。
+
+この shutdown 要求は **SIGTERM から SIGKILL へ段階化する**。Agent runtime と generic terminal を持つ daemon は
+終了前に PTY child を閉じて reap するため、固定の短い窓では正常な drain の途中で「停止しなかった」と報告されてしまう。
+そこで SIGTERM に 30 秒の猶予を与え、それでも残る generation へ exact identity を保ったまま SIGKILL を送り、さらに
+5 秒待つ。失敗を返すのは SIGKILL でも消えなかった場合だけで、これは kernel 側で pid が固着している状態を意味する。
+`--force` は operator の最後の逃げ道なので、**process を生かしたまま timeout を返さない**ことが要件である。生かしたまま
+返すと、以降のあらゆる lifecycle command が同じ generation を理由に拒否し続け、operator の手段が尽きる。
 
 stale `stop` は scoped `daemon.lock` を取得し、lock 下で最初の lifecycle record 全体がまだ exact current record であることを
 再確認する。その後 `current.lock` 下で current が指す socket と安全に検証できる orphan socket を先に回収し、exact locator、

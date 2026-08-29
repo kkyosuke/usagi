@@ -3331,6 +3331,19 @@ impl LifecycleRequestError {
         }
     }
 
+    /// Whether the daemon could not be reached at all, as opposed to answering.
+    ///
+    /// Only this case is worth keeping an entry screen open for: the same
+    /// workspace becomes openable again once a daemon answers, so the switcher
+    /// shows the reason and stays up. A decode failure or a typed error means the
+    /// daemon *did* answer, and waiting does not change the outcome.
+    fn is_daemon_unreachable(&self) -> bool {
+        match self {
+            Self::Connect(error) | Self::Request(error) => error.is_transport_failure(),
+            Self::Decode(_) => false,
+        }
+    }
+
     /// The workspace-fence refusal behind this failure, if the daemon answered
     /// that it does not serve the workspace this client declared.
     fn workspace_refusal(&self) -> Option<&usagi_core::infrastructure::ipc::ProtocolError> {
@@ -3386,6 +3399,14 @@ fn workspace_open_error(error: LifecycleRequestError, opened: &Path) -> std::io:
                 message = refusal.message,
             ),
         );
+    }
+    // An unreachable daemon is tagged so entry screens can keep the TUI up and
+    // show the reason instead of collapsing to the shell
+    // (`usagi_tui::usecase::application::open_failure_notice`). A daemon that
+    // answered — with a decode failure or a typed error — is not this case: the
+    // workspace is not openable for a reason waiting will not fix.
+    if error.is_daemon_unreachable() {
+        return std::io::Error::new(std::io::ErrorKind::NotConnected, error.reason());
     }
     io_error(error.reason())
 }
@@ -4130,7 +4151,11 @@ fn run_in_terminal(
 }
 
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
-fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
+fn launch_screen_graph(
+    out: &mut dyn Write,
+    start: Start,
+    notice: Option<String>,
+) -> std::io::Result<()> {
     let now = Utc::now();
     // Capture once before raw mode and retain it across Config reopens and
     // workspace leave/entry transitions for this process.
@@ -4143,13 +4168,16 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut backend_factory = ProductionBackendFactory::default();
         let mut splash = presentation::StartupSplash::new();
         run_in_terminal(|terminal| {
-            if start == Start::Welcome {
+            // A graph opened to carry a notice is already the user's second
+            // frame: they asked for a workspace and are being told why it is not
+            // on screen, so the splash would only delay that answer.
+            if start == Start::Welcome && notice.is_none() {
                 splash.play(terminal)?;
             }
             // The graph resolves "leave this workspace" into its own Welcome
             // screen, so it only returns when the process is ending. The
             // splash therefore plays once per launch, not once per Welcome.
-            presentation::run_screen_graph_with_backend(
+            presentation::run_screen_graph_with_backend_and_notice(
                 terminal,
                 workspaces,
                 recent,
@@ -4159,6 +4187,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 &mut settings,
                 &mut backend_factory,
                 available_models,
+                notice,
             )
         })?;
     } else {
@@ -4306,10 +4335,30 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     // Direct entry and its later Welcome graph share one immutable snapshot.
     let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
-    let snapshot = loader.open(path)?;
+    let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let snapshot = match loader.open(path) {
+        Ok(snapshot) => snapshot,
+        // A workspace that cannot be opened *right now* must not put an
+        // interactive user back on the shell: a wedged daemon would otherwise
+        // have locked them out of usagi entirely, with no surface left to
+        // diagnose or retry from. Fall into the switcher instead, carrying the
+        // reason on its first frame, where another workspace can be chosen or
+        // this one retried once a daemon answers. Without a terminal there is no
+        // switcher to fall into, so the failure stays a reported failure.
+        Err(error) => {
+            let notice = interactive
+                .then(|| application::open_failure_notice(&error))
+                .flatten();
+            let Some(notice) = notice else {
+                return Err(error);
+            };
+            drop(loader);
+            return launch_screen_graph(out, Start::Welcome, Some(notice));
+        }
+    };
     let registry = loader.storage.load_workspaces().map_err(io_error)?;
     let mut settings = PersistentSettingsPort::open()?;
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    if interactive {
         let mut backend_factory = ProductionBackendFactory::default();
         run_in_terminal(|terminal| {
             // A direct workspace entry has no Welcome behind it, so leaving
@@ -4373,11 +4422,13 @@ fn with_daemon_ready(
     if let EntryScreen::Workspace { path } = entry {
         // A path that cannot be declared is reported by `launch_workspace` as the
         // workspace error it is, not as an unavailable daemon.
-        if crate::runtime::daemon::declare_opened_workspace(path).is_ok()
-            && let Err(error) = crate::runtime::daemon::ensure_ready()
-        {
-            writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
-            return Ok(());
+        if crate::runtime::daemon::declare_opened_workspace(path).is_ok() {
+            // Best effort. Warming a cold start before the screen appears is
+            // worth doing, but an unready daemon is not a reason to refuse the
+            // entry: `launch_workspace` owns that decision and falls into the
+            // switcher carrying the reason, rather than returning the user to
+            // the shell. Reporting here as well would only duplicate the notice.
+            let _ = crate::runtime::daemon::ensure_ready();
         }
     }
     launch_ready(out, info, entry)
@@ -4385,8 +4436,8 @@ fn with_daemon_ready(
 
 fn launch_ready(out: &mut dyn Write, info: &AppInfo, entry: &EntryScreen) -> std::io::Result<()> {
     match entry {
-        EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome),
-        EntryScreen::Config => launch_screen_graph(out, Start::Config),
+        EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome, None),
+        EntryScreen::Config => launch_screen_graph(out, Start::Config, None),
         EntryScreen::Workspace { path } => launch_workspace(out, path),
         EntryScreen::Doctor => {
             let report = doctor::diagnose(&mut RuntimeDoctorPort);
