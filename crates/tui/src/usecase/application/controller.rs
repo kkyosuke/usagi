@@ -5796,8 +5796,8 @@ mod tests {
                 .as_str(),
             "coder"
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        state.create_session.as_mut().unwrap().move_role(true);
         for character in "feature".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }

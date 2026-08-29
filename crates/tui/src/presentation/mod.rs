@@ -12076,6 +12076,16 @@ mod tests {
     }
 
     #[test]
+    fn branch_catalog_falls_back_when_git_cannot_start() {
+        let root = tempdir().unwrap();
+
+        assert_eq!(
+            super::session_branch_catalog(&root.path().join("missing")),
+            crate::usecase::application::controller::SessionBranchCatalog::default()
+        );
+    }
+
+    #[test]
     fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         // Once a create request is in flight, the shell threads its name here and
         // the sidebar draws a two-line loading skeleton just above `+ new
