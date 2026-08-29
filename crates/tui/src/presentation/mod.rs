@@ -7033,20 +7033,18 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
 /// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
 /// default instead of making the workspace unusable.
 fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
-    let output = usagi_core::infrastructure::git::confined_git_command(workspace_root)
-        .args([
-            "for-each-ref",
-            "--format=%(refname) %(symref)",
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .output();
-    let Ok(output) = output else {
+    let Some(output) = successful_git_output(
+        usagi_core::infrastructure::git::confined_git_command(workspace_root)
+            .args([
+                "for-each-ref",
+                "--format=%(refname) %(symref)",
+                "refs/heads",
+                "refs/remotes",
+            ])
+            .output(),
+    ) else {
         return SessionBranchCatalog::default();
     };
-    if !output.status.success() {
-        return SessionBranchCatalog::default();
-    }
     let branches = parse_session_branch_choices(&String::from_utf8_lossy(&output.stdout));
     let default = usagi_core::infrastructure::git::confined_git_command(workspace_root)
         .args(["symbolic-ref", "--quiet", "HEAD"])
@@ -7056,6 +7054,10 @@ fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .filter(|refname| branches.iter().any(|branch| &branch.refname == refname));
     SessionBranchCatalog { branches, default }
+}
+
+fn successful_git_output(output: io::Result<std::process::Output>) -> Option<std::process::Output> {
+    output.ok().filter(|output| output.status.success())
 }
 
 fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
@@ -12079,6 +12081,9 @@ mod tests {
     fn branch_catalog_falls_back_when_git_cannot_start() {
         let root = tempdir().unwrap();
 
+        assert!(
+            super::successful_git_output(Err(std::io::Error::other("git unavailable"))).is_none()
+        );
         assert_eq!(
             super::session_branch_catalog(&root.path().join("missing")),
             crate::usecase::application::controller::SessionBranchCatalog::default()
