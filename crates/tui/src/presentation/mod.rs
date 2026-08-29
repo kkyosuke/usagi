@@ -2465,17 +2465,20 @@ impl WorkspaceUi {
         }
     }
 
-    /// Hide one generic terminal for the rest of this workspace UI while only
-    /// detaching its client subscription. Daemon process ownership is unchanged.
+    /// Hide one generic terminal while its requested shell exit is still being
+    /// observed, and detach this client's subscription.
     fn close_generic_terminal(&mut self, terminal: &TerminalRef) {
         self.closed_generic_terminals.insert(terminal.clone());
         self.close_terminal(terminal);
     }
 
-    /// An explicit `terminal open` is the user's request to show an existing
-    /// daemon terminal again, so it releases the process-local close fence.
-    fn reopen_generic_terminal(&mut self, terminal: &TerminalRef) {
-        self.closed_generic_terminals.remove(terminal);
+    /// Whether a launch completion points back to a shell whose exit has not
+    /// reached coherent inventory yet. Reusing it would resurrect the exact
+    /// scrollback the user just closed.
+    fn generic_terminal_is_closing(&self, terminal: &TerminalRef) -> bool {
+        self.closed_generic_terminals
+            .iter()
+            .any(|closed| closed.fences(terminal))
     }
 
     /// A coherent inventory proves which process-local close fences can still
@@ -4852,10 +4855,10 @@ fn restore_open_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime, geom
     }
 }
 
-/// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work
-/// the runtime reports: detach a live subscription, or drop a still-pending
-/// launch (both its queued work and its completion routing) so it cannot spawn a
-/// detached daemon terminal behind the vanished placeholder.
+/// Close the focused pane tab (Ctrl-O x / Ctrl-O Ctrl-X) and perform the daemon transport work:
+/// request a live process exit, or drop a still-pending launch (both its queued
+/// work and its completion routing) so it cannot spawn a detached daemon
+/// terminal behind the vanished placeholder.
 fn close_focused_terminal_pane(
     ui: &mut WorkspaceUi,
     runtime: &mut WorkspaceRuntime,
@@ -4898,9 +4901,6 @@ fn close_focused_terminal_pane(
         return;
     }
     let outcome = runtime.close_focused_pane();
-    if let Some(terminal) = outcome.detach {
-        ui.close_generic_terminal(&terminal);
-    }
     if let Some(operation) = outcome.cancel {
         pending_targets.remove(&operation);
         // Only a launch still waiting for admission is cancellable: an admitted
@@ -5891,26 +5891,16 @@ fn drain_pane_completions_into_runtime(
                 };
                 match result {
                     Ok(terminal) => {
-                        let completed = terminal.clone();
+                        if ui.generic_terminal_is_closing(&terminal) {
+                            let _ = runtime.fail_pane(
+                                target,
+                                operation,
+                                "terminal is still closing; try again".to_owned(),
+                            );
+                            continue;
+                        }
                         let _ = runtime
                             .complete_pane_focus_if_uninterrupted(target, operation, terminal);
-                        // Release the close fence only after the target-scoped
-                        // reducer accepted this exact completion. A stale or
-                        // wrong-scope daemon answer must not make a later
-                        // inventory replay resurrect the closed terminal.
-                        let accepted = runtime.panes().pane(target).is_some_and(|pane| {
-                            pane.tabs().iter().any(|tab| {
-                                matches!(
-                                    tab,
-                                    PaneTab::Live(live)
-                                        if live.kind == PaneKind::Terminal
-                                            && live.terminal.fences(&completed)
-                                )
-                            })
-                        });
-                        if accepted {
-                            ui.reopen_generic_terminal(&completed);
-                        }
                     }
                     Err(message) => {
                         let _ = runtime.fail_pane(target, operation, message);
@@ -20104,8 +20094,9 @@ mod tests {
         assert!(ui.closed_generic_terminals.contains(&terminal));
         let _ = runtime.fail_pane(target, refused_operation, "wrong scope".to_owned());
 
-        // `terminal open` resolves to that existing daemon terminal. Its
-        // completion deliberately releases the local close fence.
+        // An immediate `terminal open` may race the shell exit and resolve to
+        // that exact daemon terminal. Reject it instead of resurrecting the
+        // scrollback the user just closed.
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
         let mut pending = std::collections::HashMap::from([(operation, target)]);
@@ -20124,15 +20115,15 @@ mod tests {
             &mut pending,
             terminal_geometry(20, 80),
         );
-        assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
-        assert!(ui.closed_generic_terminals.is_empty());
-
-        // A later logical close is retained only while the terminal is live.
-        super::close_focused_terminal_pane(
-            &mut ui,
-            &mut runtime,
-            &mut std::collections::HashMap::new(),
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(
+            runtime.active_pane().error(),
+            Some("terminal is still closing; try again")
         );
+        assert!(ui.closed_generic_terminals.contains(&terminal));
+
+        // Coherent exit observation retires the fence. A later open can then
+        // accept only the fresh daemon terminal and its blank scrollback.
         let exit_fence = runtime.restore_fence();
         let exited = super::apply_restore_completion(
             completion(false, exit_fence, replay.port),
@@ -20144,6 +20135,27 @@ mod tests {
         assert_eq!(exited.outcome, super::RestoreJobOutcome::Applied);
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(ui.closed_generic_terminals.is_empty());
+
+        let fresh = scoped_terminal_ref(workspace, Some(session));
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+        let mut pending = std::collections::HashMap::from([(operation, target)]);
+        ui.pane_completion_sender
+            .send(super::PaneLaunchCompletion {
+                launch_id: super::PANE_LAUNCH_UNADMITTED,
+                outcome: super::PaneLaunchOutcome::Terminal {
+                    operation,
+                    result: Ok(fresh.clone()),
+                },
+            })
+            .unwrap();
+        super::drain_pane_completions_into_runtime(
+            &mut ui,
+            &mut runtime,
+            &mut pending,
+            terminal_geometry(20, 80),
+        );
+        assert_eq!(runtime.focused_terminal(), Some(fresh));
     }
 
     #[test]
