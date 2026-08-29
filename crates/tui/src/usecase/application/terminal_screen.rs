@@ -576,7 +576,9 @@ mod tests {
         // The window renderer must scan back to the logical-line boundary so
         // underline cells and global row coordinates match the full reference.
         let start = 2;
-        let end = full.len().saturating_sub(1);
+        // Stop inside the wrapped URL too, so link scanning must expand both
+        // before and after the requested window.
+        let end = start + 1;
         assert_eq!(
             screen.rows_with_scrollback_window(start, end, true),
             full[start..end]
@@ -584,7 +586,7 @@ mod tests {
         let count = screen.rows_with_scrollback_count(true);
         let (scan_start, scan_end) = screen.logical_scan_range(start, end, count);
         assert!(scan_start < start, "wrapped predecessor was not scanned");
-        assert!(scan_end >= end);
+        assert!(scan_end > end, "wrapped successor was not scanned");
     }
 
     #[test]
