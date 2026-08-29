@@ -2969,6 +2969,23 @@ mod tests {
     }
 
     #[test]
+    fn a_detached_or_outside_namespace_orphan_requires_manual_recovery() {
+        let diagnosis = OrphanDiagnosis {
+            branch: None,
+            dirty: Some(false),
+            unmerged_commits: Some(0),
+            path_present: true,
+            linked_worktree: true,
+        };
+
+        assert!(!diagnosis.safe_to_remove());
+        assert_eq!(
+            diagnosis.summary("detached"),
+            "orphan session \"detached\": branch=unknown, dirty=false, unmerged_commits=0; cleanup blocked: the checked-out branch is detached or outside the usagi/ namespace"
+        );
+    }
+
+    #[test]
     fn dirty_or_unmerged_orphans_refuse_even_forced_cleanup_with_guidance() {
         for (dirty, unmerged_commits, expected) in [
             (true, 0, "commit or stash local changes first"),
