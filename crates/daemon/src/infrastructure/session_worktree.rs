@@ -59,6 +59,20 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         path.join(".git").is_file()
     }
 
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=orphan_session_entries_are_sorted_and_direct
+    fn session_entries(&self, container: &Path) -> anyhow::Result<Vec<String>> {
+        let mut names = match std::fs::read_dir(container) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect::<Vec<_>>(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        names.sort();
+        Ok(names)
+    }
+
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
     fn build_session_tree(
         &self,
@@ -194,4 +208,29 @@ fn collect_session_worktrees(
 
 fn skipped_entry(name: &OsStr) -> bool {
     name == OsStr::new(".git") || name == OsStr::new(STATE_DIR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orphan_session_entries_are_sorted_and_direct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let container = tmp.path().join("sessions");
+        std::fs::create_dir_all(container.join("zeta").join("nested")).unwrap();
+        std::fs::create_dir_all(container.join("alpha")).unwrap();
+        std::fs::write(container.join("marker"), b"not a worktree").unwrap();
+
+        assert_eq!(
+            SystemSessionWorktreeIo.session_entries(&container).unwrap(),
+            ["alpha", "marker", "zeta"]
+        );
+        assert!(
+            SystemSessionWorktreeIo
+                .session_entries(&tmp.path().join("missing"))
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
