@@ -891,6 +891,7 @@ not a process line
             &serde_json::to_string(&registry).unwrap(),
             &mut accounted,
         );
+        collect_accounted_processes("generations.json", "not json", &mut accounted);
         collect_accounted_processes(
             "bootstrap-broker-fixture.json",
             r#"{"pid":44,"process_start_identity":"broker-start"}"#,
