@@ -5,18 +5,19 @@
 //! Mutable session, pane, and Agent state remain owned by the active workspace
 //! controller.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use usagi_core::domain::agent::AgentInventory;
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::views::workspace::ProjectedSession;
+use crate::presentation::views::workspace::{ProjectedSession, present_agent_phase};
 use crate::presentation::widgets::button::InlineButton;
-use crate::presentation::widgets::garden::GardenSession;
+use crate::presentation::widgets::garden::{GardenAgent, GardenSession};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
@@ -31,6 +32,11 @@ pub struct WorkspaceSlot {
     workspace_id: WorkspaceId,
     label: String,
     sessions: Vec<CachedGardenSession>,
+    /// Whether the Garden's cross-project observation lane has seen this
+    /// project's daemon Agent inventory since the cache was last rebuilt. An
+    /// unobserved slot keeps drawing the read-only `project inactive` plot
+    /// instead of claiming that an empty cached list means "no Agents".
+    agents_observed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +45,10 @@ struct CachedGardenSession {
     label: String,
     lifecycle: SessionLifecycle,
     failure_summary: Option<String>,
+    /// Agent runtimes the observation lane last saw in this session. They are
+    /// membership only: the lane observes the daemon inventory, never this
+    /// project's controller, so the phases stay the coarse inventory states.
+    agents: Vec<GardenAgent>,
 }
 
 impl CachedGardenSession {
@@ -48,18 +58,31 @@ impl CachedGardenSession {
             label: session.label.clone(),
             lifecycle: session.lifecycle,
             failure_summary: session.failure_summary.clone(),
+            agents: Vec::new(),
         }
     }
 
-    fn garden_session(&self) -> GardenSession {
+    /// Project one cached session, carrying the observed Agents when the lane
+    /// has seen this project.
+    ///
+    /// `observed` covers Agent membership only. A cached lifecycle that is not
+    /// `Available` describes a transition this deck stopped watching when the
+    /// tab went inactive, so it keeps the still read-only plot rather than
+    /// being animated as if it were live.
+    fn garden_session(&self, observed: bool) -> GardenSession {
+        let observed = observed && self.lifecycle == SessionLifecycle::Available;
         GardenSession {
             id: self.id,
             label: self.label.clone(),
             lifecycle: self.lifecycle,
             selected: false,
             failure_summary: self.failure_summary.clone(),
-            agents_observed: false,
-            agents: Vec::new(),
+            agents_observed: observed,
+            agents: if observed {
+                self.agents.clone()
+            } else {
+                Vec::new()
+            },
             pr_merged: false,
         }
     }
@@ -84,6 +107,7 @@ impl WorkspaceSlot {
                     }),
                     failure_summary: projection
                         .and_then(|projection| projection.failure_summary.clone()),
+                    agents: Vec::new(),
                 }
             })
             .collect();
@@ -92,6 +116,7 @@ impl WorkspaceSlot {
             workspace_id: snapshot.workspace_id,
             label: snapshot.workspace.name.clone(),
             sessions,
+            agents_observed: false,
         }
     }
 
@@ -239,6 +264,7 @@ impl WorkspaceDeck {
             slot.workspace_id = snapshot.workspace_id;
             slot.label.clone_from(&snapshot.workspace.name);
             slot.sessions = WorkspaceSlot::from_snapshot(snapshot).sessions;
+            slot.agents_observed = false;
             self.active = snapshot.workspace_id;
         }
         self.overlay = None;
@@ -344,7 +370,71 @@ impl WorkspaceDeck {
                 .iter()
                 .map(CachedGardenSession::from_projected)
                 .collect();
+            // The active project draws from its controller, so this cache is
+            // only what the plot falls back to once the tab goes inactive. It
+            // describes no observation until the lane makes one.
+            slot.agents_observed = false;
         }
+    }
+
+    /// Every open project the Garden observes from the outside: the tabs whose
+    /// workspace controller is not resident in this process.
+    ///
+    /// The active project is excluded because its own controller already
+    /// projects richer, runtime-local Agent phases into the Garden.
+    #[must_use]
+    pub fn observable_workspaces(&self) -> Vec<WorkspaceId> {
+        self.slots
+            .iter()
+            .map(WorkspaceSlot::workspace_id)
+            .filter(|workspace| *workspace != self.active)
+            .collect()
+    }
+
+    /// Attach one inactive project's daemon Agent inventory to its cached plots.
+    ///
+    /// The inventory is membership authority exactly as it is for the active
+    /// project's `HomeProjection::with_agent_inventory`: a runtime it does not
+    /// hold in a present state draws no rabbit, workspace-root runtimes belong
+    /// to no plot, and a runtime naming a session this cache does not know is
+    /// dropped rather than inventing a plot for it.
+    ///
+    /// Returns whether the projection changed, so the shell can redraw a Garden
+    /// whose other material (session list, animation tick) stood still.
+    pub fn apply_garden_inventory(&mut self, inventory: &AgentInventory) -> bool {
+        if inventory.workspace_id == self.active {
+            return false;
+        }
+        let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.workspace_id == inventory.workspace_id)
+        else {
+            return false;
+        };
+        let mut observed: BTreeMap<SessionId, Vec<GardenAgent>> = BTreeMap::new();
+        for item in &inventory.runtimes {
+            let Some(session_id) = item.runtime.session_id else {
+                continue;
+            };
+            let Some(phase) = present_agent_phase(item.state) else {
+                continue;
+            };
+            observed.entry(session_id).or_default().push(GardenAgent {
+                runtime_id: item.runtime.agent_runtime_id,
+                phase,
+            });
+        }
+        let mut changed = !slot.agents_observed;
+        slot.agents_observed = true;
+        for session in &mut slot.sessions {
+            let agents = observed.remove(&session.id).unwrap_or_default();
+            if session.agents != agents {
+                session.agents = agents;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Flatten every open project's cached sessions for the process-level
@@ -376,7 +466,11 @@ impl WorkspaceDeck {
                 projected.extend(slot.sessions.iter().map(|session| {
                     (
                         slot.workspace_id,
-                        project_labeled(session.garden_session(), slot, multiple_projects),
+                        project_labeled(
+                            session.garden_session(slot.agents_observed),
+                            slot,
+                            multiple_projects,
+                        ),
                     )
                 }));
             }
@@ -782,6 +876,7 @@ mod tests {
     use chrono::Utc;
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+    use usagi_core::domain::session_lifecycle::AgentPhase;
     use usagi_core::domain::workspace_state::WorkspaceState;
 
     use super::*;
@@ -1131,12 +1226,12 @@ mod tests {
         );
         deck.update_active_sessions(std::slice::from_ref(&fresh));
         deck.activate_snapshot(&beta);
-        let active_beta = deck.slots[1].sessions[0].garden_session();
+        let active_beta = deck.slots[1].sessions[0].garden_session(false);
         let (_, sessions) = deck.garden_projection(std::slice::from_ref(&active_beta));
         assert_eq!(sessions[0].1.label, "alpha / fresh");
 
         let single = WorkspaceDeck::new(&alpha);
-        let active_alpha = single.slots[0].sessions[0].garden_session();
+        let active_alpha = single.slots[0].sessions[0].garden_session(false);
         let (scope, sessions) = single.garden_projection(std::slice::from_ref(&active_alpha));
         assert_eq!(scope, "alpha");
         assert_eq!(sessions[0].1.label, "old");
@@ -1145,6 +1240,170 @@ mod tests {
         empty.close_path(Path::new("/alpha"));
         empty.update_active_sessions(&[]);
         assert_eq!(empty.garden_projection(&[]), (String::new(), Vec::new()));
+    }
+
+    fn runtime_ref(
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+    ) -> usagi_core::domain::id::AgentRuntimeRef {
+        usagi_core::domain::id::AgentRuntimeRef {
+            agent_runtime_id: usagi_core::domain::id::AgentRuntimeId::new(),
+            terminal: usagi_core::domain::id::TerminalRef {
+                daemon_generation: usagi_core::domain::id::DaemonGeneration::new(),
+                terminal_id: usagi_core::domain::id::TerminalId::new(),
+                workspace_id: workspace,
+                session_id: session,
+                worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            },
+            session_id: session,
+        }
+    }
+
+    /// The plot the deck projects for one open project, of which these
+    /// fixtures give every project exactly one.
+    fn plot_of(deck: &WorkspaceDeck, workspace: WorkspaceId) -> GardenSession {
+        deck.garden_projection(&[])
+            .1
+            .into_iter()
+            .find(|(id, _)| *id == workspace)
+            .expect("every open project owns a plot")
+            .1
+    }
+
+    fn inventory(
+        workspace: WorkspaceId,
+        runtimes: Vec<(
+            usagi_core::domain::id::AgentRuntimeRef,
+            usagi_core::domain::agent::AgentRuntimeInventoryState,
+        )>,
+    ) -> AgentInventory {
+        AgentInventory {
+            workspace_id: workspace,
+            runtimes: runtimes
+                .into_iter()
+                .map(
+                    |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
+                        runtime,
+                        continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+                        state,
+                        resumed_from: None,
+                    },
+                )
+                .collect(),
+            resumable: Vec::new(),
+        }
+    }
+
+    /// The Garden draws every open project, so an inactive project's plots take
+    /// their rabbits from the daemon inventory observed for *that* workspace.
+    #[test]
+    fn an_inactive_projects_plot_draws_the_agents_observed_for_its_own_workspace() {
+        use usagi_core::domain::agent::AgentRuntimeInventoryState;
+
+        let alpha = snapshot_with_session("alpha", "/alpha", "build");
+        let beta = snapshot_with_session("beta", "/beta", "review");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        assert_eq!(deck.observable_workspaces(), vec![beta.workspace_id]);
+
+        // Before any observation the plot stays the read-only one: an empty
+        // cached list is not evidence that the project owns no Agents.
+        let plot = plot_of(&deck, beta.workspace_id);
+        assert!(!plot.agents_observed);
+        assert!(plot.agents.is_empty());
+
+        let live = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
+        let closed = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
+        let root = runtime_ref(beta.workspace_id, None);
+        let foreign = runtime_ref(beta.workspace_id, Some(SessionId::new()));
+        assert!(deck.apply_garden_inventory(&inventory(
+            beta.workspace_id,
+            vec![
+                (live.clone(), AgentRuntimeInventoryState::Live),
+                (closed, AgentRuntimeInventoryState::Exited),
+                (root, AgentRuntimeInventoryState::Live),
+                (foreign, AgentRuntimeInventoryState::Live),
+            ],
+        )));
+
+        let plot = plot_of(&deck, beta.workspace_id);
+        assert!(plot.agents_observed);
+        // Only the runtime that owns a tab in a known session becomes a rabbit.
+        assert_eq!(
+            plot.agents
+                .iter()
+                .map(|agent| (agent.runtime_id, agent.phase))
+                .collect::<Vec<_>>(),
+            vec![(live.agent_runtime_id, AgentPhase::Running)]
+        );
+
+        // Re-observing the same inventory changes no draw material.
+        assert!(!deck.apply_garden_inventory(&inventory(
+            beta.workspace_id,
+            vec![(live.clone(), AgentRuntimeInventoryState::Live)],
+        )));
+        // The Agent leaving is membership too: the rabbit goes with it.
+        assert!(deck.apply_garden_inventory(&inventory(beta.workspace_id, Vec::new())));
+        let plot = plot_of(&deck, beta.workspace_id);
+        assert!(plot.agents_observed);
+        assert!(plot.agents.is_empty());
+    }
+
+    /// The active project's own controller owns its plots, and a cached
+    /// lifecycle that is not `Available` describes a transition this deck
+    /// stopped watching — neither may be overwritten by an observation.
+    #[test]
+    fn garden_observation_skips_the_active_project_and_cached_transitions() {
+        use usagi_core::domain::agent::AgentRuntimeInventoryState;
+
+        let alpha = snapshot_with_session("alpha", "/alpha", "build");
+        let beta = snapshot_with_session("beta", "/beta", "review");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let active_runtime = runtime_ref(alpha.workspace_id, Some(alpha.session_ids[0]));
+        assert!(!deck.apply_garden_inventory(&inventory(
+            alpha.workspace_id,
+            vec![(active_runtime, AgentRuntimeInventoryState::Live)],
+        )));
+        // A workspace no tab holds is not a plot of this deck either.
+        assert!(!deck.apply_garden_inventory(&inventory(WorkspaceId::new(), Vec::new())));
+
+        deck.slots[1].sessions[0].lifecycle = SessionLifecycle::Creating;
+        let creating = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
+        assert!(deck.apply_garden_inventory(&inventory(
+            beta.workspace_id,
+            vec![(creating, AgentRuntimeInventoryState::Live)],
+        )));
+        let plot = plot_of(&deck, beta.workspace_id);
+        assert!(!plot.agents_observed);
+        assert!(plot.agents.is_empty());
+    }
+
+    /// Rebuilding a slot's cache — the active tab's sessions changing, or a tab
+    /// being activated — drops the observation it carried, so a plot never
+    /// shows Agents that belong to a session list it no longer describes.
+    #[test]
+    fn rebuilding_a_slots_cache_forgets_its_garden_observation() {
+        use usagi_core::domain::agent::AgentRuntimeInventoryState;
+
+        let alpha = snapshot_with_session("alpha", "/alpha", "build");
+        let beta = snapshot_with_session("beta", "/beta", "review");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let runtime = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
+        assert!(deck.apply_garden_inventory(&inventory(
+            beta.workspace_id,
+            vec![(runtime, AgentRuntimeInventoryState::Live)],
+        )));
+
+        deck.activate_snapshot(&beta);
+        assert_eq!(deck.observable_workspaces(), vec![alpha.workspace_id]);
+        assert!(!deck.slots[1].agents_observed);
+
+        // The now-active project's cache is a fallback for when its tab goes
+        // inactive again; it claims no observation of its own.
+        deck.update_active_sessions(&[ProjectedSession::from_record(
+            beta.session_ids[0],
+            &beta.state.sessions[0],
+        )]);
+        assert!(!deck.slots[1].agents_observed);
     }
 
     #[test]
