@@ -469,12 +469,6 @@ impl ResourceCensus for DurableResourceCensus {
     }
 }
 
-/// Exact process control for all non-retired generations in this data home.
-///
-/// `daemon.json` follows the active generation across a handoff, but a draining
-/// predecessor legitimately remains alive with its PTYs and the singleton lock.
-/// Cold lifecycle transitions therefore use the generation registry rather
-/// than assuming the lifecycle record names every process that must stop.
 /// How long a forced cold transition lets SIGTERM drain a generation before it
 /// escalates.
 ///
@@ -493,6 +487,12 @@ const FORCED_SHUTDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
 /// How often a forced cold transition re-reads the registry while waiting.
 const FORCED_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
 
+/// Exact process control for all non-retired generations in this data home.
+///
+/// `daemon.json` follows the active generation across a handoff, but a draining
+/// predecessor legitimately remains alive with its PTYs and the singleton lock.
+/// Cold lifecycle transitions therefore use the generation registry rather
+/// than assuming the lifecycle record names every process that must stop.
 struct RegistryGenerationControl {
     data_dir: PathBuf,
     /// How long SIGTERM is given to drain a generation before the transition

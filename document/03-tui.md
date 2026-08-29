@@ -263,16 +263,6 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 | New の作成成功後の open | draft を保ったまま同画面の notice に出す |
 | `usagi open <path>` / `usagi <path>` | TUI を開かず stderr へ 1 行で出す |
 
-**daemon が ready でないことは拒否ではない**。`usagi open <path>` / `usagi <path>` は workspace の申告を書いた後に
-daemon の readiness を確かめるが、その確認が失敗しても **workspace は開く**。daemon 依存の面はいずれも接続を遅延させ、
-失敗すれば自分の "daemon unavailable" 行を描くので、local store だけで成立する表示（Recent・設定・session 一覧）は
-使えるまま残り、daemon が応答し次第つながる。ここで開くのをやめると wedge した daemon が利用者を shell へ締め出すことに
-なり、これは daemon の不調が作ってよい状態ではない。readiness 失敗の理由は error log と stderr の 1 行に残す。
-申告は先に書いてあるので、後から起きる cold start はこの workspace に束縛される。
-
-上表の「拒否」はこれとは別である。そちらは daemon が typed refusal を返した場合（所有者違い・非 UTF-8 など）で、
-workspace を開かない。
-
 entry 画面（Welcome・Open・New・Config）は **daemon を必要としない**。表示に使うのは registry と Recent という
 local store だけであり、workspace 切り替え画面はどの directory からでも開ける必要がある。ここで daemon の readiness を
 確かめると、起動 directory に束縛された daemon を作ってしまい、その後のどの workspace の open も拒否されることに
