@@ -9036,7 +9036,7 @@ impl Terminator for SigtermTerminator {
 
 #[cfg(target_os = "linux")]
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
-fn process_start_identity(pid: u32) -> std::io::Result<String> {
+pub(crate) fn process_start_identity(pid: u32) -> std::io::Result<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let close = stat.rfind(')').ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid /proc stat")
@@ -9058,7 +9058,7 @@ fn process_start_identity(pid: u32) -> std::io::Result<String> {
 
 #[cfg(target_os = "macos")]
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
-fn process_start_identity(pid: u32) -> std::io::Result<String> {
+pub(crate) fn process_start_identity(pid: u32) -> std::io::Result<String> {
     let pid = libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
     // SAFETY: `info` is initialized and the buffer pointer/length describe the
     // exact `proc_bsdinfo` allocation for the duration of `proc_pidinfo`.
@@ -9119,7 +9119,10 @@ impl Drop for PidFd {
 
 #[cfg(target_os = "linux")]
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
-fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
+pub(crate) fn signal_exact_process(
+    record: &DaemonRecord,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
         .as_deref()
@@ -9166,7 +9169,10 @@ fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::
 
 #[cfg(target_os = "macos")]
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_generation_process_is_only_verified_by_its_exact_recorded_identity
-fn signal_exact_process(record: &DaemonRecord, signal: libc::c_int) -> std::io::Result<()> {
+pub(crate) fn signal_exact_process(
+    record: &DaemonRecord,
+    signal: libc::c_int,
+) -> std::io::Result<()> {
     let expected = record
         .process_start_identity
         .as_deref()

@@ -44,6 +44,37 @@ pub struct ObservedBranch {
     pub merged: bool,
 }
 
+/// What a `usagi` helper process was started to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HelperRole {
+    /// `usagi daemon serve`. Owns PTYs and workspace state while it runs, so
+    /// reaping one is destructive even when it is residue.
+    Daemon,
+    /// `usagi daemon bootstrap-broker`. Exists only so a sandboxed client can
+    /// cold-start a daemon; it owns nothing a user can lose.
+    Broker,
+}
+
+/// One `usagi` helper process observed on this host under this user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedProcess {
+    pub pid: u32,
+    pub role: HelperRole,
+    /// The absolute executable path the process runs. The daemon and the broker
+    /// are always spawned from a canonical path, so a bare or relative one is
+    /// not a process this plan is entitled to judge.
+    pub executable: PathBuf,
+    /// Whether that executable still exists on disk.
+    pub executable_exists: bool,
+    /// The process-start identity observed with the pid. Carried through to the
+    /// candidate so the removal can re-verify it immediately before signalling
+    /// and never act on a pid the OS has since handed to someone else.
+    pub start_identity: String,
+    /// Whether this data home still accounts for the process: its lifecycle
+    /// record, its generation registry, or a broker record names this pid.
+    pub accounted: bool,
+}
+
 /// Git resources observed for one repository root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryInventory {
@@ -58,6 +89,7 @@ pub struct CleanInventory {
     pub registered: Vec<RegisteredWorkspace>,
     pub daemon_data: Vec<DaemonWorkspaceData>,
     pub repositories: Vec<RepositoryInventory>,
+    pub processes: Vec<ObservedProcess>,
 }
 
 /// A provably unlinked resource. Ordering is significant: worktrees precede
@@ -81,6 +113,14 @@ pub enum CleanCandidate {
         name: String,
         requires_force: bool,
     },
+    /// A `usagi` helper process left behind by a build that no longer exists.
+    Process {
+        pid: u32,
+        role: HelperRole,
+        executable: PathBuf,
+        start_identity: String,
+        requires_force: bool,
+    },
 }
 
 impl CleanCandidate {
@@ -88,9 +128,9 @@ impl CleanCandidate {
     #[must_use]
     pub const fn requires_force(&self) -> bool {
         match self {
-            Self::Worktree { requires_force, .. } | Self::Branch { requires_force, .. } => {
-                *requires_force
-            }
+            Self::Worktree { requires_force, .. }
+            | Self::Branch { requires_force, .. }
+            | Self::Process { requires_force, .. } => *requires_force,
             Self::Workspace { .. } | Self::Data { .. } => false,
         }
     }
@@ -100,6 +140,27 @@ impl CleanCandidate {
 #[must_use]
 pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
     let mut candidates = Vec::new();
+
+    // Processes come first. A leaked daemon holds the worktree it was started
+    // in, so reaping it is what lets the Git steps below succeed rather than
+    // fail against a busy checkout.
+    let mut processes = inventory.processes.iter().collect::<Vec<_>>();
+    processes.sort_by_key(|process| process.pid);
+    candidates.extend(
+        processes
+            .into_iter()
+            .filter(|process| residue(process))
+            .map(|process| CleanCandidate::Process {
+                pid: process.pid,
+                role: process.role,
+                executable: process.executable.clone(),
+                start_identity: process.start_identity.clone(),
+                // A daemon may still own PTYs whose output nobody has read yet, so
+                // ending one is a deliberate act. A broker owns nothing.
+                requires_force: process.role == HelperRole::Daemon,
+            }),
+    );
+
     let lifecycle = inventory
         .daemon_data
         .iter()
@@ -181,6 +242,21 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
     candidates
 }
 
+/// Whether a helper process is residue this plan may end.
+///
+/// Both conditions are required. A missing executable proves the process cannot
+/// belong to any current installation — it can neither be restarted nor
+/// upgraded, and nothing will ever address it again. Being unaccounted for
+/// proves this data home is not relying on it. Either one alone is ordinary: a
+/// live daemon's executable exists, and a healthy daemon started from another
+/// data home is simply not ours to judge.
+fn residue(process: &ObservedProcess) -> bool {
+    !process.executable_exists
+        && !process.accounted
+        && process.executable.is_absolute()
+        && !process.start_identity.is_empty()
+}
+
 fn managed_worktree_name<'a>(
     expected_parent: &Path,
     worktree: &'a ObservedWorktree,
@@ -207,6 +283,102 @@ mod tests {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
+    fn process(
+        pid: u32,
+        role: HelperRole,
+        exe: &str,
+        exists: bool,
+        accounted: bool,
+    ) -> ObservedProcess {
+        ObservedProcess {
+            pid,
+            role,
+            executable: exe.into(),
+            executable_exists: exists,
+            start_identity: format!("identity-{pid}"),
+            accounted,
+        }
+    }
+
+    /// Only a helper whose build is gone *and* which this data home does not
+    /// account for is residue. Either condition alone describes an ordinary
+    /// process: a live daemon's executable exists, and a healthy daemon started
+    /// from another data home is not ours to end.
+    #[test]
+    fn only_an_unaccounted_helper_from_a_vanished_build_is_reaped() {
+        let inventory = CleanInventory {
+            processes: vec![
+                // Residue: the worktree that built it was removed, and nothing
+                // here refers to it.
+                process(
+                    31,
+                    HelperRole::Broker,
+                    "/gone/target/debug/usagi",
+                    false,
+                    false,
+                ),
+                process(
+                    30,
+                    HelperRole::Daemon,
+                    "/gone/target/debug/usagi",
+                    false,
+                    false,
+                ),
+                // The running daemon of this data home.
+                process(40, HelperRole::Daemon, "/usr/local/bin/usagi", true, true),
+                // Someone else's daemon: its build exists, so it is current.
+                process(41, HelperRole::Daemon, "/opt/usagi/bin/usagi", true, false),
+                // Accounted for, even though its build was replaced underneath
+                // it — this data home is still relying on it.
+                process(
+                    42,
+                    HelperRole::Broker,
+                    "/gone/target/debug/usagi",
+                    false,
+                    true,
+                ),
+                // Not spawned the way the daemon and broker are spawned, so its
+                // identity cannot be judged from here.
+                process(43, HelperRole::Broker, "usagi", false, false),
+                // The pid was gone before its start identity could be read, so
+                // signalling it later could hit whoever inherits the number.
+                ObservedProcess {
+                    start_identity: String::new(),
+                    ..process(
+                        44,
+                        HelperRole::Broker,
+                        "/gone/target/debug/usagi",
+                        false,
+                        false,
+                    )
+                },
+            ],
+            ..CleanInventory::default()
+        };
+
+        assert_eq!(
+            plan(&inventory),
+            vec![
+                // Sorted by pid, and a daemon needs an explicit force because it
+                // may still own PTYs; a broker owns nothing.
+                CleanCandidate::Process {
+                    pid: 30,
+                    role: HelperRole::Daemon,
+                    executable: "/gone/target/debug/usagi".into(),
+                    start_identity: "identity-30".into(),
+                    requires_force: true,
+                },
+                CleanCandidate::Process {
+                    pid: 31,
+                    role: HelperRole::Broker,
+                    executable: "/gone/target/debug/usagi".into(),
+                    start_identity: "identity-31".into(),
+                    requires_force: false,
+                },
+            ]
+        );
+    }
+
     /// An empty session list is *absence of evidence*, not evidence of absence.
     ///
     /// A lifecycle document that lists no sessions authorises removing every
@@ -218,6 +390,7 @@ mod tests {
     #[test]
     fn an_empty_session_list_does_not_authorise_removing_every_worktree() {
         let inventory = CleanInventory {
+            processes: Vec::new(),
             registered: Vec::new(),
             daemon_data: vec![DaemonWorkspaceData {
                 root: "/a".into(),
@@ -260,6 +433,7 @@ mod tests {
     #[test]
     fn plans_only_unlinked_managed_resources_in_stable_order() {
         let inventory = CleanInventory {
+            processes: Vec::new(),
             registered: vec![
                 RegisteredWorkspace {
                     path: "/z".into(),
@@ -344,6 +518,7 @@ mod tests {
     #[test]
     fn refuses_to_infer_git_orphans_without_readable_lifecycle_state() {
         let inventory = CleanInventory {
+            processes: Vec::new(),
             daemon_data: vec![DaemonWorkspaceData {
                 root: "/repo".into(),
                 dir: "/data/repo".into(),
@@ -370,6 +545,7 @@ mod tests {
     #[test]
     fn ignores_branch_mismatches_and_marks_unmerged_unchecked_branches_force_only() {
         let inventory = CleanInventory {
+            processes: Vec::new(),
             daemon_data: vec![DaemonWorkspaceData {
                 root: "/repo".into(),
                 dir: "/data/repo".into(),
@@ -403,6 +579,7 @@ mod tests {
     #[test]
     fn sorts_repositories_and_accepts_detached_managed_worktrees() {
         let inventory = CleanInventory {
+            processes: Vec::new(),
             daemon_data: vec![
                 DaemonWorkspaceData {
                     root: "/b".into(),
