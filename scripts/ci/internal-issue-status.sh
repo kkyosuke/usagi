@@ -12,10 +12,20 @@ if [[ "$event_name" != "pull_request" ]]; then
 fi
 
 body=${PR_BODY:-}
+author=${PR_AUTHOR:-}
 marker=$(printf '%s\n' "$body" | sed -nE 's/^Internal-Issue:[[:space:]]*(#[0-9]+|none)[[:space:]]*$/\1/p')
 if [[ -z "$marker" ]]; then
-  echo "PR body must contain exactly one 'Internal-Issue: #<number>' or 'Internal-Issue: none' line" >&2
-  exit 1
+  # Dependabot writes its own body and offers no template hook, so a dependency
+  # update PR can never carry the marker. Read it as `none`; the completion
+  # check below still rejects an issue transition that rides along in such a PR.
+  # Generators whose body we do control (create-release-pr.yml) write the marker
+  # themselves and are not exempted here.
+  if [[ "$author" == "dependabot[bot]" ]]; then
+    marker=none
+  else
+    echo "PR body must contain exactly one 'Internal-Issue: #<number>' or 'Internal-Issue: none' line" >&2
+    exit 1
+  fi
 fi
 if [[ $(printf '%s\n' "$marker" | wc -l | tr -d ' ') != 1 ]]; then
   echo "PR body must contain exactly one Internal-Issue marker" >&2
