@@ -1656,6 +1656,7 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
     let mut persistent = client(&data_dir);
     let (workspace, session, worktree) = available_scope(&mut persistent);
     let (_, agent_terminal) = launch(&mut persistent, workspace, session, None);
+    wait_for_spawns(&agent_spawns, 1);
     let agent_subscription = attach(&mut persistent, &agent_terminal);
     let DaemonReply::Ok(launched) = persistent
         .request(DaemonRequest::Terminal {
@@ -1685,7 +1686,6 @@ fn root_restart_rolls_over_two_real_pty_children_without_provider_resume() {
         shell_terminal.daemon_generation,
         agent_terminal.daemon_generation
     );
-    wait_for_spawns(&agent_spawns, 1);
     wait_for_spawns(&shell_spawns, 1);
 
     let old_generation = agent_terminal.daemon_generation;
