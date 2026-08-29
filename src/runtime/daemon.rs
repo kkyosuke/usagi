@@ -11226,6 +11226,19 @@ const fn broker_may_retire(idle_for: Duration, timeout: Duration, daemon_live: b
     !daemon_live && idle_for.as_secs() >= timeout.as_secs()
 }
 
+/// Whether a broker's published endpoint is still a socket on disk.
+///
+/// A broker whose endpoint was removed underneath it is *unreachable* rather
+/// than idle: no client can connect to it, and neither can the retirement
+/// request its own idle watch sends. Presence is enough to tell the two apart,
+/// because the per-address instance lock already keeps a second broker from
+/// publishing over this one.
+fn broker_endpoint_present(socket: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    std::fs::symlink_metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
 /// How long a broker tolerates being unused before retiring itself.
 #[derive(Debug, Clone, Copy)]
 struct BrokerIdlePolicy {
@@ -11303,7 +11316,7 @@ impl BrokerActivity {
 /// than by killing the loop from outside: the accept loop stays blocked (so a
 /// cold start pays no polling latency), and the endpoint is torn down by the
 /// same path an operator's `usagi daemon stop` takes.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive,an_unreachable_broker_endpoint_is_not_mistaken_for_an_idle_one
 fn spawn_broker_idle_watch(
     activity: &Arc<BrokerActivity>,
     address: BootstrapBrokerAddress,
@@ -11317,12 +11330,28 @@ fn spawn_broker_idle_watch(
             let Some(idle_for) = activity.wait_for_poll(idle.poll) else {
                 return;
             };
+            // An endpoint that is gone can never be reached again — not by a
+            // client, and not by the retirement request below. Leaving the
+            // broker running then means blocking in `accept` forever on a
+            // socket nobody can connect to, which is how brokers outlived by
+            // weeks the temporary homes that owned them. Exiting is the whole
+            // cleanup: the directory that held the socket and the record file
+            // is already gone.
+            if !broker_endpoint_present(&address.socket) {
+                std::process::exit(0);
+            }
             let daemon_live =
                 usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
-            if broker_may_retire(idle_for, idle.timeout, daemon_live) {
-                let _ = request_bootstrap_broker(&address, BROKER_STOP);
+            if broker_may_retire(idle_for, idle.timeout, daemon_live)
+                && request_bootstrap_broker(&address, BROKER_STOP).is_ok()
+            {
                 return;
             }
+            // Either the broker is still needed, or a daemon appeared between
+            // the probe and the request and vetoed the retirement. Keep
+            // watching. Returning on a *refused* retirement left a broker that
+            // could never retire afterwards, however long the daemon it exists
+            // to outlive had been gone.
         }
     })
 }
@@ -18632,6 +18661,37 @@ instructions = "{instructions}"
                 "a live daemon must keep its broker"
             );
         }
+    }
+
+    /// A broker whose endpoint was removed underneath it can never be reached
+    /// again — not by a client, and not by the retirement request its own idle
+    /// watch sends. That state has to be told apart from a broker that is merely
+    /// idle, because only the first one has to leave without being asked.
+    #[test]
+    fn an_unreachable_broker_endpoint_is_not_mistaken_for_an_idle_one() {
+        // `/tmp` keeps the path inside the platform limit for a socket name.
+        let fixture = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = fixture.path().join("broker.sock");
+        assert!(
+            !broker_endpoint_present(&socket),
+            "a path that was never bound is not an endpoint"
+        );
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(broker_endpoint_present(&socket));
+
+        // A regular file at the same path is not the endpoint either: only a
+        // socket can carry the retirement request.
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::write(&socket, b"").unwrap();
+        assert!(!broker_endpoint_present(&socket));
+
+        std::fs::remove_file(&socket).unwrap();
+        assert!(
+            !broker_endpoint_present(&socket),
+            "a removed endpoint leaves the broker unreachable"
+        );
     }
 
     #[test]
