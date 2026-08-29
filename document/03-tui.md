@@ -15,6 +15,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
 - [Home と target](#home-と-target)
   - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
+- [workspace terminal drawer](#workspace-terminal-drawer)
 - [指示モード（Director mode）](#指示モードdirector-mode)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
@@ -337,6 +338,7 @@ scroll、tab close / reorder、text selection、copy、link open は入力を受
 | Closeup で pending / interrupted tab を選択中（live terminal viewport が無い） | Closeup の management input |
 | overlay・Closeup action modal が前面にある | その overlay |
 | [指示モード](#指示モードdirector-mode)の drawer が開いている | drawer の root conversation |
+| [workspace terminal drawer](#workspace-terminal-drawer)が開いている | drawer の root shell |
 
 Switch の `←` / `→` は、上部に開いている project tab の安定した並びで前 / 次へ移動する。端では
 反対側へ循環し、tab が 1 件だけなら no-op になる。overlay、Closeup、編集欄、Director drawer が
@@ -472,6 +474,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-P` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
+| `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する（[指示モード](#指示モードdirector-mode)が開いている間は NextTab） |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
@@ -482,7 +485,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `,` / `n` / `p` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `,` / `n` / `p` / `t` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
 **指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
 NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は
@@ -493,6 +496,23 @@ auto-repeat は press と同じ follow-up として 1 件だけ解決する。�
 control byte と semantic control event は同じ global shortcut に解決する。
 
 Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択が無い場合は PTY へ SIGINT として送る。
+
+## workspace terminal drawer
+
+root scope（`session_id: None`）の generic Terminal は、managed session の Closeup や Agent-only の
+[指示モード](#指示モードdirector-mode)には混ぜず、Home 全幅の下端から重なる workspace terminal drawer に表示する。
+Home header の `[ ⌂ Shell ]` button または `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
+`OpenTerminal` を発行する。daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
+
+drawer の通常高は Home の 55% とし、10 rows 以上 32 rows 以下へ clamp する。背景に必要な高さを残せない短い端末では
+header の直下から下端までを使う。terminal viewport は border、title、footer を除いた drawer 専用 geometry で計算し、
+背景 Home は header を除いて dim にする。`[ ⌂ Shell ]` と `[ ♛ Director ]` は同じ header layout で描画・hit-test し、
+2 つの drawer は排他的に開く。一方を開くと他方を閉じるが、managed Closeup と root Agent/Terminal の各選択状態は保持する。
+
+drawer が開いている間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
+`Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O t` または header button に限定する。
+workspace open / daemon reconnect では live root generic Terminal を inventory から復元するが、drawer は自動で開かず、
+明示的に開くまで背景で detached のまま保持する。root Diff は引き続き admission しない。
 
 ## 指示モード（Director mode）
 
@@ -526,8 +546,8 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
 
 drawer は root scope（`session_id: None`）の live / pending / interrupted Agent conversation だけを
-conversation selector に表示する。generic Terminal、Diff、Terminal pending/action は restore projection と pane
-admission の両方で拒否する。live Agent の continuation が intent context 未作成、未 observe、CAS 後の投影遅延で
+conversation selector に表示する。generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
+Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。live Agent の continuation が intent context 未作成、未 observe、CAS 後の投影遅延で
 まだ得られない場合も terminal fence を identity として selector に残し、provider metadata を含まない `Agent` を
 fallback label にする。terminal view がある frame は conversation inventory の有無にかかわらず PTY 出力を描き、
 terminal view も conversation も無い場合だけ empty state を描く。drawer が閉じている間の `Ctrl-O n`、開いている
@@ -1738,8 +1758,9 @@ runtime bridge を確認する手順である。profile の install 状態、認
 
 daemon は terminal / Agent runtime の権威 owner であり、TUI を閉じても runtime は daemon 内で継続する。
 そのため workspace を開き直した（同じ client の再 open、または 2 つ目の client の open）とき、root scope の
-**live Agent** は[指示モード](#指示モードdirector-mode)、各 available session scope の
-**live Agent / Terminal** は Closeup の pane tab に復元する。root scope の generic Terminal / Diff は復元しない。planned restart 中は active と draining の
+**live Agent** は[指示モード](#指示モードdirector-mode)、root scope の **live generic Terminal** は
+[workspace terminal drawer](#workspace-terminal-drawer)、各 available session scope の
+**live Agent / Terminal** は Closeup の pane tab に復元する。root scope の Diff は復元しない。planned restart 中は active と draining の
 両 generation が inventory に答え、完全な `TerminalRef` で merge / dedup した結果を投影する
 （[4. IPC の owner generation routing](04-ipc.md#owner-generation-routing)）。
 
@@ -1774,7 +1795,7 @@ resume を自動送信せず、managed session は `session resume <name>`、roo
 - **投影**: saved Agent は完全な `TerminalRef` が両 inventory で trusted live と確認できたときだけ保存順で復元する。
   inventory にだけある live Agent は continuation / terminal fence の決定的順序で末尾へ追加し、duplicate snapshot は
   exact ref で 1 枚へ収束する。managed session の generic Terminal はその後ろへ決定的に追加し、root scope の generic
-  Terminal は拒否する。saved ref が non-live でも同じ continuation が resumable なら slot intent を保持し、
+  Terminal は workspace terminal drawer の inventory として追加する。saved ref が non-live でも同じ continuation が resumable なら slot intent を保持し、
   interrupted tab として root drawer または managed-session Closeup へ投影する。表示中 surface の selected foreground
   tab に加え、Director 背景で実際に見えている selected managed tab だけを attach / resync し、不可視の background target と
   選択外 tab は detached のまま保持する。

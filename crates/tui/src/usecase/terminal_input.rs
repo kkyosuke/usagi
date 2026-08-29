@@ -199,6 +199,8 @@ pub enum LiveTerminalAction {
     /// (`Ctrl-O n`). Plain `n` is intentionally distinct from `Ctrl-N`, which
     /// remains [`LiveTerminalAction::NextTab`].
     DirectorNew,
+    /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O t`).
+    RootTerminal,
     /// Close the active tab.
     CloseTab,
     /// Explicitly resume the selected interrupted Agent tab (#510). Nothing else
@@ -455,6 +457,7 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         )),
         KeyCode::Char(',') => Some(LiveTerminalAction::OpenGarden),
         KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
+        KeyCode::Char('t') => Some(LiveTerminalAction::RootTerminal),
         KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('r') => Some(LiveTerminalAction::ResumeTab),
@@ -787,6 +790,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table audits every reserved prefix action.
     fn input_two_acceptance_table_reserves_only_documented_prefix_actions() {
         struct Case {
             follow_up: LiveInput,
@@ -808,6 +812,10 @@ mod tests {
             Case {
                 follow_up: key(KeyCode::Char('n')),
                 action: LiveTerminalAction::DirectorNew,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('t')),
+                action: LiveTerminalAction::RootTerminal,
             },
             Case {
                 follow_up: ctrl('p'),

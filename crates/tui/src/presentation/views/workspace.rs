@@ -38,6 +38,9 @@ use crate::presentation::views::decision_modal;
 use crate::presentation::views::director_drawer::{self, DIRECTOR_ICON, DirectorDrawerProjection};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::root_terminal_drawer::{
+    self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
+};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
@@ -362,6 +365,8 @@ pub struct HomeProjection {
     /// conversation selector and terminal rows through
     /// [`Self::with_director_drawer`].
     director_drawer: Option<DirectorDrawerProjection>,
+    /// Frontmost bottom-anchored workspace-root generic terminal drawer.
+    root_terminal_drawer: Option<RootTerminalDrawerProjection>,
 }
 
 /// Left-sidebar draft for the inline new-session input.
@@ -584,6 +589,9 @@ impl HomeProjection {
             director_drawer: state
                 .director_drawer_open()
                 .then(DirectorDrawerProjection::default),
+            root_terminal_drawer: state
+                .root_terminal_drawer_open()
+                .then(RootTerminalDrawerProjection::default),
         }
     }
 
@@ -888,6 +896,16 @@ impl HomeProjection {
         self
     }
 
+    /// Replace the open root-terminal drawer's presentation material without
+    /// allowing runtime inventory to open the surface implicitly.
+    #[must_use]
+    pub fn with_root_terminal_drawer(mut self, projection: RootTerminalDrawerProjection) -> Self {
+        if self.root_terminal_drawer.is_some() {
+            self.root_terminal_drawer = Some(projection);
+        }
+        self
+    }
+
     /// Collapse the animation clock onto the frame it actually draws.
     ///
     /// `mascot_tick` advances on every 16ms tick, so comparing two projections
@@ -937,6 +955,7 @@ impl HomeProjection {
         self.mode == HomeMode::Closeup
             && self.terminal_view.is_some()
             && self.director_drawer.is_none()
+            && self.root_terminal_drawer.is_none()
             && !self.closeup_action_visible
             && self.overview_modal.is_none()
             && self.pr_overlay.is_none()
@@ -1278,6 +1297,7 @@ fn mode_toggle(current: Mode) -> String {
 /// narrow-width clipping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeHeaderAction {
+    RootTerminal,
     Director,
     Decisions,
 }
@@ -1336,6 +1356,17 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             home.unread_decision_ids.len()
         )
     });
+    let root_terminal = if home.root_terminal_drawer.is_some() {
+        Role::Accent
+            .style()
+            .bold()
+            .reverse()
+            .paint(&format!("[ {ROOT_TERMINAL_ICON} Shell ]"))
+    } else {
+        Style::new()
+            .dim()
+            .paint(&format!("[ {ROOT_TERMINAL_ICON} Shell ]"))
+    };
     let mode = mode_toggle(mode);
 
     // Preserve the drawer entry first, then the mode indicator, then the notice.
@@ -1344,6 +1375,11 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
     // remaining cells are quiet spacing rather than a duplicate breadcrumb.
     let mut right_segments = vec![(Some(HomeHeaderAction::Director), director)];
     let mut used = widgets::display_width(&right_segments[0].1);
+    let terminal_width = widgets::display_width(&root_terminal);
+    if used.saturating_add(2).saturating_add(terminal_width) <= width {
+        right_segments.insert(0, (Some(HomeHeaderAction::RootTerminal), root_terminal));
+        used += 2 + terminal_width;
+    }
     let mode_width = widgets::display_width(&mode);
     if used.saturating_add(2).saturating_add(mode_width) <= width {
         right_segments.insert(0, (None, mode));
@@ -2047,6 +2083,8 @@ pub fn render_home_at(
     frame.truncate(height);
     let frame = if let Some(drawer) = &home.director_drawer {
         director_drawer::render_over(height, width, &frame, drawer)
+    } else if let Some(drawer) = &home.root_terminal_drawer {
+        root_terminal_drawer::render_over(height, width, &frame, drawer)
     } else {
         frame
     };
@@ -2939,6 +2977,9 @@ mod tests {
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
         DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
+    };
+    use crate::presentation::views::root_terminal_drawer::{
+        ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
@@ -3850,6 +3891,7 @@ mod tests {
         assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} Director")));
         assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
         assert!(!strip(&layout.line).contains('🔔'));
+        assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -3857,8 +3899,12 @@ mod tests {
         let notice_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Decisions))
             .collect::<Vec<_>>();
+        let terminal_columns = (0..100)
+            .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::RootTerminal))
+            .collect::<Vec<_>>();
         assert!(!workspace_columns.is_empty());
         assert!(!notice_columns.is_empty());
+        assert!(!terminal_columns.is_empty());
         for column in workspace_columns {
             assert_eq!(
                 home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
@@ -3869,6 +3915,12 @@ mod tests {
             assert_eq!(
                 home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
                 Some(HomeHeaderAction::Decisions)
+            );
+        }
+        for column in terminal_columns {
+            assert_eq!(
+                home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
+                Some(HomeHeaderAction::RootTerminal)
             );
         }
         assert_eq!(home_header_action_at(100, &home, 99, 1), None);
@@ -3940,6 +3992,38 @@ mod tests {
         let open_text = render_home(20, 100, &open).join("\n");
         assert!(open_text.contains("root conversation"));
         assert!(open_text.contains("director agent output"));
+
+        let terminal_material = RootTerminalDrawerProjection {
+            terminal_view: Some(TerminalViewProjection {
+                rows: vec!["workspace shell output".to_owned()],
+                row_offset: 0,
+                total_rows: 1,
+                scroll: 0,
+                feedback: None,
+            }),
+            pending: false,
+            feedback: None,
+        };
+        let closed_terminal =
+            HomeProjection::from_state(&closed_state, "atlas", Path::new("/work"), &[])
+                .with_root_terminal_drawer(terminal_material.clone());
+        assert!(
+            !render_home(20, 100, &closed_terminal)
+                .join("\n")
+                .contains("workspace shell output")
+        );
+
+        let mut terminal_state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut terminal_state,
+            AppEvent::Key(AppKey::ToggleRootTerminalDrawer),
+        );
+        let open_terminal =
+            HomeProjection::from_state(&terminal_state, "atlas", Path::new("/work"), &[])
+                .with_root_terminal_drawer(terminal_material);
+        let terminal_text = render_home(20, 100, &open_terminal).join("\n");
+        assert!(terminal_text.contains("workspace shell output"));
+        assert!(terminal_text.contains("1;7"));
     }
 
     #[test]

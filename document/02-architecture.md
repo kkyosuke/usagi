@@ -162,9 +162,10 @@ pointer クリックは `Key::Click` を `AppEvent::Pointer`（座標＋種別�
 追跡する。terminal pane 内の drag / copy は Home 行契約と無関係なので shell +
 `TerminalSession` に残る。指示モード（呼び名・chord・表示・入力所有の正本は
 [3. TUI](03-tui.md#指示モードdirector-mode)）は `AppState` の専用 open/closed state と root target の
-Agent-only pane admission を controller が所有し、描画は `director_drawer` の right-anchored
-geometry と drawer 専用 terminal viewport を使う。root generic Terminal / Diff は pane/runtime に
-admission されない。前面の Pull Request
+Agent-only projection を controller が所有し、描画は `director_drawer` の right-anchored
+geometry と drawer 専用 terminal viewport を使う。root generic Terminal は同じ root pane registry に admission しつつ
+[workspace terminal drawer](03-tui.md#workspace-terminal-drawer)だけへ投影し、下端から重なる専用 geometry を使う。
+2 つの drawer の open state と foreground input は排他的であり、root Diff は pane/runtime に admission しない。前面の Pull Request
 一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
 素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
 `BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として
