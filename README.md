@@ -62,11 +62,15 @@ shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer
 
 Home の基本操作は次のとおり。
 
+session がない workspace を開いた直後は session 行を選択しない。`+ new session` は `↑` / `↓` で明示選択してから
+`Enter` / `t` で開くか、`Ctrl-A` で直接開く。
+
 | 操作 | 動作 |
 |---|---|
 | `↑` / `↓`、`j` / `k` | session を選ぶ |
 | `←` / `→` | Switch で前 / 次の project tab へ移動する |
-| `Enter` / `t` | 選択した session の Closeup を開く |
+| `Enter` / `t` | 選択した session の Closeup、または明示選択した `+ new session` の作成を開く |
+| `Ctrl-A` | Switch で新規 session の作成を直接開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
 | `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |

@@ -322,8 +322,8 @@ alternate screen を復元する。
 Home の navigation target は managed `Session(SessionId)` である。表示名と配列 index は identity に
 使わない。selected は cursor、active は command と Closeup の managed session であり、cursor の移動だけでは
 active を変更しない。session が 0 件なら selected / active はともに `None` 相当の中立状態となり、
-`+ new session` action を暗黙には選択しない。矢印で action row を明示選択するか、`Ctrl-A` / `t` を入力した
-場合だけ作成フォームを開く。
+`+ new session` action を暗黙には選択しない。矢印で action row を明示選択して `Enter` / `t` を入力するか、
+`Ctrl-A` を入力した場合だけ作成フォームを開く。
 
 Closeup の `agent` / `terminal` action は active managed session の `SessionId` から scope を導出する。
 managed session が無い Home は Closeup を開かず、これらの effect を発行しない。`Target::Root` と

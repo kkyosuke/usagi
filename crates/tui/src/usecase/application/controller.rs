@@ -4266,12 +4266,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.closeup_action_forced = false;
             Vec::new()
         }
-        AppKey::Char('t')
-            if matches!(state.route, Route::Home(HomeMode::Switch))
-                && state.selected == Selection::Idle =>
-        {
-            open_create_session(state)
-        }
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
         AppKey::CtrlN
         | AppKey::CtrlP
@@ -6170,13 +6164,13 @@ mod tests {
         let mut empty = empty;
         assert!(update(&mut empty, AppEvent::Key(AppKey::Enter)).is_empty());
         assert_eq!(empty.overlay(), None);
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Char('t'))).is_empty());
+        assert_eq!(empty.selected(), Selection::Idle);
+        assert_eq!(empty.overlay(), None);
         let _ = update(&mut empty, AppEvent::Key(AppKey::Down));
         assert_eq!(empty.selected(), Selection::NewSession);
-
-        let mut shortcut = AppState::home(workspace, Vec::new());
-        assert!(update(&mut shortcut, AppEvent::Key(AppKey::Char('t'))).is_empty());
-        assert_eq!(shortcut.selected(), Selection::NewSession);
-        assert_eq!(shortcut.overlay(), Some(Overlay::CreateSession));
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Char('t'))).is_empty());
+        assert_eq!(empty.overlay(), Some(Overlay::CreateSession));
     }
 
     #[test]
