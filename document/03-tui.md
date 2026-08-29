@@ -76,7 +76,7 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 
 Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
-実行した場合は、Home 上の overlay modal に Agent・Team・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
+実行した場合は、Home 上の overlay modal に Agent・Base branch・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
 `←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
 `Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
@@ -204,16 +204,17 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
 | Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
-| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Team・Issue・Memory だけを保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
+| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
 merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
-Workspace Config は Agent・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
+Workspace Config は Agent・Base branch・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Agent は `default_model`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ安全に戻す。
 `default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai`）であり、Config 画面の
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、
 実行するのは `codex-fugu`（daemon profile は `sakana-ai`）である。
@@ -784,7 +785,7 @@ skeleton には Accent（青）を使わないため、静的行から入力欄�
 request を非同期に開始し、完了まで行の直前に 2 行の skeleton を表示する。skeleton の activity glyph と session 名は Success（緑）で同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
-同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、現在 checkout 中の local branch を初期選択する。remote の symbolic alias（`origin/HEAD` など）は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
+同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、Config の Base branch が現在の inventory にあればそれを、なければ現在 checkout 中の local branch を初期選択する。remote の symbolic alias（`origin/HEAD` など）は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
 作成 request の受付後、完了まで入力がなければ、作成された session を選択して Closeup へ移る。完了前に入力があればこの自動遷移を取り消し、
 作成完了後もその時点の操作 surface を保つ。
 完了 snapshot は sidebar row と daemon-issued session ID を同時に置換するため、`a` のような短い名前も
