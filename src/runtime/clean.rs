@@ -3,10 +3,11 @@
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use fs2::FileExt;
+use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, confined_git_command, delete_branch, list_worktrees, remove_worktree,
 };
@@ -15,8 +16,8 @@ use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::clean::{
-    CleanCandidate, CleanInventory, DaemonWorkspaceData, ObservedBranch, ObservedWorktree,
-    RegisteredWorkspace, RepositoryInventory,
+    CleanCandidate, CleanInventory, DaemonWorkspaceData, HelperRole, ObservedBranch,
+    ObservedProcess, ObservedWorktree, RegisteredWorkspace, RepositoryInventory,
 };
 use usagi_daemon::infrastructure::unix_transport::ensure_private_dir;
 
@@ -184,6 +185,7 @@ fn discover() -> io::Result<Discovery> {
     }
     Ok(Discovery {
         inventory: CleanInventory {
+            processes: discover_processes(&daemon_dir),
             registered,
             daemon_data,
             repositories,
@@ -292,7 +294,53 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
             ensure_unlinked(root, session)?;
             delete_branch(&SystemGit, root, name, force).map_err(io::Error::other)
         }
+        CleanCandidate::Process {
+            pid,
+            start_identity,
+            ..
+        } => reap_helper_process(*pid, start_identity),
     }
+}
+
+/// End one helper process, fenced on the identity observed when it was
+/// discovered.
+///
+/// SIGTERM first so a daemon still gets to close its PTYs, then SIGKILL for one
+/// that does not answer. Both signals re-verify the process-start identity, so a
+/// pid the OS has handed to someone else between discovery and now is never the
+/// one that receives them.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=clean_planner_classifies_all_effects
+fn reap_helper_process(pid: u32, start_identity: &str) -> io::Result<()> {
+    let record = DaemonRecord::identified(pid, start_identity.to_owned());
+    if helper_process_gone(pid, start_identity) {
+        return Ok(());
+    }
+    crate::runtime::daemon::signal_exact_process(&record, libc::SIGTERM)?;
+    for _ in 0..HELPER_REAP_POLLS {
+        if helper_process_gone(pid, start_identity) {
+            return Ok(());
+        }
+        std::thread::sleep(HELPER_REAP_POLL);
+    }
+    crate::runtime::daemon::signal_exact_process(&record, libc::SIGKILL)?;
+    for _ in 0..HELPER_REAP_POLLS {
+        if helper_process_gone(pid, start_identity) {
+            return Ok(());
+        }
+        std::thread::sleep(HELPER_REAP_POLL);
+    }
+    Err(io::Error::other(format!(
+        "helper process {pid} survived SIGKILL"
+    )))
+}
+
+/// Whether the exact process discovered under `pid` is gone. A pid that now
+/// carries a different start identity counts as gone: the process this plan
+/// meant to end no longer exists.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=clean_planner_classifies_all_effects
+fn helper_process_gone(pid: u32, start_identity: &str) -> bool {
+    !crate::runtime::daemon::process_start_identity(pid)
+        .is_ok_and(|observed| observed == start_identity)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=daemon_data_cleanup_revalidates_binding_and_containment
@@ -508,6 +556,158 @@ fn describe(candidate: &CleanCandidate) -> String {
                 ""
             }
         ),
+        CleanCandidate::Process {
+            pid,
+            role,
+            executable,
+            requires_force,
+            ..
+        } => format!(
+            "{} pid {pid} from the vanished build {}{}",
+            match role {
+                HelperRole::Daemon => "daemon",
+                HelperRole::Broker => "bootstrap broker",
+            },
+            executable.display(),
+            if *requires_force {
+                " [force required]"
+            } else {
+                ""
+            }
+        ),
+    }
+}
+
+/// How long a reaped helper is given to answer each signal.
+const HELPER_REAP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+/// How many polls each signal gets before the next step. A helper owns far less
+/// than a daemon generation, so a short window is enough.
+const HELPER_REAP_POLLS: usize = 100;
+
+/// Observe the `usagi` helper processes this host is running for this user.
+///
+/// An enumeration that cannot be taken yields nothing rather than an error: the
+/// rest of `clean` is about files, and a host without a usable `ps` must not
+/// stop a workspace cleanup.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=helper_process_listing_is_read_conservatively
+fn discover_processes(daemon_dir: &Path) -> Vec<ObservedProcess> {
+    let Ok(listing) = std::process::Command::new("ps")
+        .args(["-A", "-o", PS_FORMAT])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !listing.status.success() {
+        return Vec::new();
+    }
+    let accounted = accounted_pids(daemon_dir);
+    // SAFETY: `geteuid` reads the calling process's own effective uid and has
+    // no arguments, no allocation, and no failure mode.
+    let uid = unsafe { libc::geteuid() };
+    parse_helper_processes(
+        &String::from_utf8_lossy(&listing.stdout),
+        uid,
+        std::process::id(),
+    )
+    .into_iter()
+    .map(|(pid, role, executable)| ObservedProcess {
+        executable_exists: path_node_may_exist(&executable),
+        start_identity: crate::runtime::daemon::process_start_identity(pid).unwrap_or_default(),
+        accounted: accounted.contains(&pid),
+        pid,
+        role,
+        executable,
+    })
+    .collect()
+}
+
+/// Every pid this data home still refers to.
+///
+/// The lifecycle record, the generation registry, and the broker records all
+/// name pids this installation is relying on. Collecting them by field name
+/// rather than by document shape keeps the fence intact when those documents
+/// grow: a pid this data home mentions anywhere is not residue.
+#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=helper_process_listing_is_read_conservatively
+fn accounted_pids(daemon_dir: &Path) -> BTreeSet<u32> {
+    let mut pids = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(daemon_dir) else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        if entry.path().extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        collect_pids(&document, &mut pids);
+    }
+    pids
+}
+
+/// Collect every `"pid"` number reachable in `value`.
+fn collect_pids(value: &serde_json::Value, into: &mut BTreeSet<u32>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, child) in fields {
+                if key == "pid"
+                    && let Some(pid) = child.as_u64().and_then(|pid| u32::try_from(pid).ok())
+                {
+                    into.insert(pid);
+                }
+                collect_pids(child, into);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_pids(item, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The `ps` fields this plan reads, in this order.
+///
+/// `args` is last because it is the only field that can contain spaces.
+const PS_FORMAT: &str = "pid=,uid=,args=";
+
+/// Turn one `ps` listing into the helper processes this plan may judge.
+///
+/// Only the daemon and the broker are recognised, and only when they were
+/// spawned the way usagi spawns them: an absolute executable path followed by
+/// the exact verb. Anything else — another user's process, this process, a
+/// `usagi` invoked from `PATH` as a bare name — is not something this plan can
+/// identify well enough to end.
+fn parse_helper_processes(
+    listing: &str,
+    uid: u32,
+    own_pid: u32,
+) -> Vec<(u32, HelperRole, PathBuf)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let owner = fields.next()?.parse::<u32>().ok()?;
+            let executable = fields.next()?;
+            let role = helper_role(fields)?;
+            (owner == uid && pid != own_pid && Path::new(executable).is_absolute())
+                .then(|| (pid, role, PathBuf::from(executable)))
+        })
+        .collect()
+}
+
+/// Which helper an argument tail names, if any.
+fn helper_role<'a>(argv: impl Iterator<Item = &'a str>) -> Option<HelperRole> {
+    let tail = argv.collect::<Vec<_>>();
+    match tail.as_slice() {
+        ["daemon", "serve"] | ["daemon", "serve", "--standby"] => Some(HelperRole::Daemon),
+        ["daemon", "bootstrap-broker"] => Some(HelperRole::Broker),
+        _ => None,
     }
 }
 
@@ -528,12 +728,75 @@ impl GitRunner for SystemGit {
 #[cfg(test)]
 mod tests {
     use super::{
-        GitOutput, GitRunner, acquire_exclusive_fence, clean_exit_code, describe,
-        ensure_data_unlinked, ensure_managed_worktree, remove_daemon_data,
+        GitOutput, GitRunner, acquire_exclusive_fence, clean_exit_code, collect_pids, describe,
+        ensure_data_unlinked, ensure_managed_worktree, parse_helper_processes, remove_daemon_data,
     };
-    use std::path::Path;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
     use std::process::ExitCode;
-    use usagi_core::usecase::clean::CleanCandidate;
+    use usagi_core::usecase::clean::{CleanCandidate, HelperRole};
+
+    /// A `ps` listing is the only thing standing between this plan and a signal,
+    /// so it is read conservatively: another user's process, this process, a
+    /// non-absolute executable, and any verb that is not one usagi spawns are all
+    /// outside what the plan can identify well enough to end.
+    #[test]
+    fn helper_process_listing_is_read_conservatively() {
+        let listing = "\
+  101 501 /opt/usagi/bin/usagi daemon serve
+  102 501 /opt/usagi/bin/usagi daemon bootstrap-broker
+  103 501 /opt/usagi/bin/usagi daemon serve --standby
+  104 502 /opt/usagi/bin/usagi daemon serve
+  105 501 usagi daemon serve
+  106 501 /opt/usagi/bin/usagi daemon stop
+  107 501 /opt/usagi/bin/usagi mcp
+  108 501 /opt/usagi/bin/usagi
+  999 501 /opt/usagi/bin/usagi daemon serve
+not a process line
+";
+
+        assert_eq!(
+            parse_helper_processes(listing, 501, 999),
+            vec![
+                (
+                    101,
+                    HelperRole::Daemon,
+                    PathBuf::from("/opt/usagi/bin/usagi")
+                ),
+                (
+                    102,
+                    HelperRole::Broker,
+                    PathBuf::from("/opt/usagi/bin/usagi")
+                ),
+                (
+                    103,
+                    HelperRole::Daemon,
+                    PathBuf::from("/opt/usagi/bin/usagi")
+                ),
+            ],
+            "only this user's daemon and broker, spawned from an absolute path, \
+             and never this process itself"
+        );
+    }
+
+    /// A pid this data home mentions anywhere is one it is relying on. Reading
+    /// them by field name rather than by document shape keeps that fence intact
+    /// as the documents grow.
+    #[test]
+    fn every_recorded_pid_is_collected_whatever_document_holds_it() {
+        let document = serde_json::json!({
+            "pid": 1,
+            "handoff": { "process": { "pid": 2 } },
+            "generations": [{ "process": { "pid": 3 } }, { "process": { "pid": 4 } }],
+            "unrelated": "pid",
+            "negative": { "pid": -5 },
+            "huge": { "pid": 9_999_999_999_u64 },
+        });
+
+        let mut pids = BTreeSet::new();
+        collect_pids(&document, &mut pids);
+        assert_eq!(pids, BTreeSet::from([1, 2, 3, 4]));
+    }
 
     #[derive(Clone)]
     struct FakeGit(GitOutput);
@@ -574,6 +837,20 @@ mod tests {
                 name: "usagi/safe".into(),
                 requires_force: false,
             },
+            CleanCandidate::Process {
+                pid: 4242,
+                role: HelperRole::Daemon,
+                executable: "/gone/target/debug/usagi".into(),
+                start_identity: "identity".into(),
+                requires_force: true,
+            },
+            CleanCandidate::Process {
+                pid: 4243,
+                role: HelperRole::Broker,
+                executable: "/gone/target/debug/usagi".into(),
+                start_identity: "identity".into(),
+                requires_force: false,
+            },
         ]
         .map(|candidate| describe(&candidate));
         assert!(rendered[0].starts_with("workspace "));
@@ -582,6 +859,14 @@ mod tests {
         assert!(rendered[3].contains("usagi/x"));
         assert_eq!(rendered[4], "worktree /repo/.usagi/sessions/safe");
         assert_eq!(rendered[5], "branch usagi/safe in /repo");
+        assert_eq!(
+            rendered[6],
+            "daemon pid 4242 from the vanished build /gone/target/debug/usagi [force required]"
+        );
+        assert_eq!(
+            rendered[7],
+            "bootstrap broker pid 4243 from the vanished build /gone/target/debug/usagi"
+        );
     }
 
     #[test]
