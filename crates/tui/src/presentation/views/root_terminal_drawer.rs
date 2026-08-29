@@ -1,0 +1,267 @@
+//! Workspace-root terminal drawer anchored to the bottom of Home.
+//!
+//! The drawer is a workspace-global surface, separate from both managed-session
+//! Closeup and the Agent-only Director drawer. This module owns presentation and
+//! geometry only; launch, restore, attachment, and input stay in the controller
+//! runtime and terminal shell.
+
+use crate::presentation::theme::{Role, Style};
+use crate::presentation::views::workspace::TerminalViewProjection;
+use crate::presentation::widgets::{self, modal};
+use crate::usecase::application::terminal_selection::TerminalPoint;
+
+/// Header glyph for the workspace-root shell surface.
+pub const ROOT_TERMINAL_ICON: char = '⌂';
+/// Minimum drawer height when enough Home background can remain visible.
+pub const MIN_DRAWER_HEIGHT: usize = 10;
+/// Maximum drawer height on tall terminals.
+pub const MAX_DRAWER_HEIGHT: usize = 32;
+/// Background rows retained above a non-full-height drawer, including Home's
+/// header. Below this threshold the drawer fills everything below the header.
+const MIN_BACKGROUND_HEIGHT: usize = 6;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RootTerminalDrawerProjection {
+    pub terminal_view: Option<TerminalViewProjection>,
+    pub pending: bool,
+    pub feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootTerminalDrawerGeometry {
+    pub left: usize,
+    pub top: usize,
+    pub width: usize,
+    pub height: usize,
+    pub full_height: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootTerminalViewport {
+    pub rows: usize,
+    pub cols: usize,
+}
+
+/// Compute a full-width drawer that rises from the bottom edge.
+#[must_use]
+pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeometry {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let available = height.saturating_sub(1);
+    let desired = height.saturating_mul(11) / 20;
+    let coexist_height = desired
+        .clamp(MIN_DRAWER_HEIGHT, MAX_DRAWER_HEIGHT)
+        .min(available);
+    let full_height = height.saturating_sub(coexist_height) < MIN_BACKGROUND_HEIGHT;
+    let drawer_height = if full_height {
+        available
+    } else {
+        coexist_height
+    };
+    RootTerminalDrawerGeometry {
+        left: 0,
+        top: height.saturating_sub(drawer_height),
+        width,
+        height: drawer_height,
+        full_height,
+    }
+}
+
+/// Terminal rows/columns inside the drawer's border, padding, and footer.
+#[must_use]
+pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> RootTerminalViewport {
+    let drawer = geometry(raw_height, raw_width);
+    RootTerminalViewport {
+        // modal::boxed: borders + two padding rows; body: footer row.
+        rows: drawer.height.saturating_sub(5),
+        cols: drawer.width.saturating_sub(4),
+    }
+}
+
+#[must_use]
+pub fn terminal_point_at(
+    raw_height: usize,
+    raw_width: usize,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let drawer = geometry(raw_height, raw_width);
+    let viewport = terminal_viewport(raw_height, raw_width);
+    let column = usize::from(column).checked_sub(2)?;
+    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(2))?;
+    if column >= viewport.cols || content_row >= viewport.rows {
+        return None;
+    }
+    let start = widgets::live_terminal::window_start(rows_len, viewport.rows, scroll);
+    Some(TerminalPoint {
+        row: start + content_row,
+        column,
+    })
+}
+
+/// Render the terminal drawer above a dimmed Home background.
+#[must_use]
+pub fn render_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    projection: &RootTerminalDrawerProjection,
+) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let drawer = geometry(raw_height, raw_width);
+    let mut frame = (0..height)
+        .map(|row| {
+            let line = modal::columns(base.get(row).map_or("", String::as_str), 0, width);
+            if row == 0 {
+                line
+            } else {
+                widgets::dim_ansi(&line)
+            }
+        })
+        .collect::<Vec<_>>();
+    if drawer.width < 4 || drawer.height == 0 {
+        return frame;
+    }
+
+    let inner_width = drawer.width.saturating_sub(4);
+    let body_height = drawer.height.saturating_sub(4);
+    let footer = projection
+        .feedback
+        .as_deref()
+        .unwrap_or("Ctrl-O t: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal");
+    let body = if let Some(view) = &projection.terminal_view {
+        widgets::live_terminal::render(view, inner_width, body_height, body_height, footer)
+    } else {
+        let mut rows = vec![String::new(); body_height];
+        if body_height > 0 {
+            let message = if projection.pending {
+                "Opening workspace terminal…"
+            } else {
+                "Workspace terminal is unavailable"
+            };
+            rows[body_height / 2] = Role::Accent.style().bold().paint(message);
+            rows[body_height - 1] = Style::new().dim().paint(footer);
+        }
+        rows
+    };
+    let title = Role::Accent
+        .style()
+        .bold()
+        .paint(&format!("{ROOT_TERMINAL_ICON} Workspace Terminal"));
+    let panel = modal::boxed(&title, inner_width, &body);
+    for (offset, panel_line) in panel.iter().take(drawer.height).enumerate() {
+        let row = drawer.top + offset;
+        if row < frame.len() {
+            frame[row] = format!("{panel_line}\u{1b}[0m");
+        }
+    }
+    frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::presentation::widgets::{display_width, strip_ansi};
+
+    #[test]
+    fn geometry_rises_from_bottom_and_falls_back_below_header() {
+        let normal = geometry(30, 100);
+        assert_eq!(normal.height, 16);
+        assert_eq!(normal.top + normal.height, 30);
+        assert!(!normal.full_height);
+
+        let short = geometry(12, 80);
+        assert_eq!(short.top, 1);
+        assert_eq!(short.height, 11);
+        assert!(short.full_height);
+        assert_eq!(geometry(0, 0), geometry(24, 80));
+    }
+
+    #[test]
+    fn viewport_and_pointer_follow_bottom_drawer_content() {
+        assert_eq!(
+            terminal_viewport(30, 100),
+            RootTerminalViewport { rows: 11, cols: 96 }
+        );
+        let drawer = geometry(30, 100);
+        assert_eq!(
+            terminal_point_at(
+                30,
+                100,
+                20,
+                0,
+                2,
+                u16::try_from(drawer.top + 2).expect("test geometry fits u16"),
+            ),
+            Some(TerminalPoint { row: 9, column: 0 })
+        );
+        assert_eq!(terminal_point_at(30, 100, 20, 0, 1, 0), None);
+        assert_eq!(terminal_point_at(30, 100, 20, 0, 98, 29), None);
+    }
+
+    #[test]
+    fn render_dims_background_and_places_terminal_at_bottom() {
+        let base = (0..30)
+            .map(|row| format!("background {row}"))
+            .collect::<Vec<_>>();
+        let projection = RootTerminalDrawerProjection {
+            terminal_view: Some(TerminalViewProjection {
+                rows: vec!["root output".to_owned()],
+                row_offset: 0,
+                total_rows: 1,
+                scroll: 0,
+                feedback: None,
+            }),
+            pending: false,
+            feedback: None,
+        };
+        let frame = render_over(30, 100, &base, &projection);
+        assert_eq!(frame.len(), 30);
+        assert!(strip_ansi(&frame[0]).contains("background 0"));
+        assert!(strip_ansi(&frame[geometry(30, 100).top]).contains("Workspace Terminal"));
+        assert!(
+            frame
+                .iter()
+                .any(|line| strip_ansi(line).contains("root output"))
+        );
+        assert!(frame.iter().all(|line| display_width(line) == 100));
+    }
+
+    #[test]
+    fn render_handles_compact_pending_and_unavailable_states() {
+        let compact = render_over(
+            1,
+            3,
+            &["abc".to_owned()],
+            &RootTerminalDrawerProjection::default(),
+        );
+        assert_eq!(compact, vec!["abc"]);
+        assert_eq!(
+            render_over(4, 80, &[], &RootTerminalDrawerProjection::default()).len(),
+            4
+        );
+
+        for (pending, message) in [
+            (true, "Opening workspace terminal…"),
+            (false, "Workspace terminal is unavailable"),
+        ] {
+            let frame = render_over(
+                12,
+                80,
+                &[],
+                &RootTerminalDrawerProjection {
+                    terminal_view: None,
+                    pending,
+                    feedback: Some("terminal feedback".to_owned()),
+                },
+            );
+            assert!(frame.iter().any(|line| strip_ansi(line).contains(message)));
+            assert!(
+                frame
+                    .iter()
+                    .any(|line| strip_ansi(line).contains("terminal feedback"))
+            );
+        }
+    }
+}

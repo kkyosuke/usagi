@@ -46,7 +46,8 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 
 workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
 選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
-含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。
+含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。workspace root の
+shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
 
 ```text
  1 usagi   2 api   3 web   + Open
@@ -70,6 +71,8 @@ Home の基本操作は次のとおり。
 | `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
 | `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
+| `Ctrl-O t` | workspace root の Shell drawer を開閉する |
+| `Ctrl-O Ctrl-G` | workspace root の Director drawer を開閉する |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |

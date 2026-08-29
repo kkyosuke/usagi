@@ -936,6 +936,10 @@ pub struct AppState {
     /// while an already-open drawer is the frontmost input owner and swallows
     /// every background action until Escape or its toggle closes it.
     director_drawer_open: bool,
+    /// Home's bottom-anchored workspace-root generic terminal drawer. It is
+    /// mutually exclusive with Director and preserves the managed Home state
+    /// underneath it.
+    root_terminal_drawer_open: bool,
     /// Local `New` flow inside the Director mode drawer. Candidate
     /// availability is injected with [`AvailableModels`]; opening and moving
     /// this picker performs no daemon work.
@@ -1103,6 +1107,7 @@ impl AppState {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
             director_drawer_open: false,
+            root_terminal_drawer_open: false,
             director_new: DirectorNew::Idle,
             director_launching: None,
             note_editor: None,
@@ -1163,6 +1168,16 @@ impl AppState {
     #[must_use]
     pub const fn director_drawer_open(&self) -> bool {
         self.director_drawer_open
+    }
+    /// Whether the workspace-root terminal drawer owns Home input.
+    #[must_use]
+    pub const fn root_terminal_drawer_open(&self) -> bool {
+        self.root_terminal_drawer_open
+    }
+    /// Whether either workspace-global drawer is frontmost.
+    #[must_use]
+    pub const fn workspace_drawer_open(&self) -> bool {
+        self.director_drawer_open || self.root_terminal_drawer_open
     }
     /// Current local state of the drawer's explicit Agent CLI chooser.
     #[must_use]
@@ -1724,6 +1739,9 @@ pub enum AppKey {
     /// existing modal overlay owns input; while open, this and Escape are the
     /// only keys that mutate Home state.
     ToggleDirectorDrawer,
+    /// Toggle the bottom workspace-root terminal drawer (`Ctrl-O t`). Opening
+    /// explicitly asks the daemon to open or reuse the trusted root shell.
+    ToggleRootTerminalDrawer,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
     /// workspace scope overlay を開く。
@@ -2872,7 +2890,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             // Reconnect snapshots contain only known rows, so they preserve a
             // deliberate dismiss and never steal focus.
             if state.overlay.is_none()
-                && !state.director_drawer_open
+                && !state.workspace_drawer_open()
                 && let Some(decision) = state
                     .decisions
                     .iter()
@@ -2973,7 +2991,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
             state.has_live_pane = has_live_pane;
-            if state.director_drawer_open {
+            if state.workspace_drawer_open() {
                 return Vec::new();
             }
             if matches!(state.route, Route::Home(HomeMode::Closeup)) {
@@ -2999,7 +3017,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 return Vec::new();
             }
             state.has_pane_tab = has_pane_tab;
-            if state.director_drawer_open {
+            if state.workspace_drawer_open() {
                 return Vec::new();
             }
             if !matches!(state.route, Route::Home(HomeMode::Closeup)) {
@@ -3199,7 +3217,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 }
             } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
                 && state.overlay.is_none()
-                && !state.director_drawer_open
+                && !state.workspace_drawer_open()
             {
                 // A create accepted by the daemon later failed. Surface the safe
                 // message as a dismissible dialog over Home. The form was already
@@ -3394,7 +3412,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     if state.overlay == Some(Overlay::Prs) {
                         state.overlay = None;
                     }
-                } else if state.overlay.is_none() && !state.director_drawer_open {
+                } else if state.overlay.is_none() && !state.workspace_drawer_open() {
                     state.overlay = Some(Overlay::Prs);
                 } else if state.overlay != Some(Overlay::Prs) {
                     // Do not let a delayed explicit request steal a newer
@@ -3417,7 +3435,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 && let Some(selected) = newly_detected
                 && may_auto_open
                 && state.overlay.is_none()
-                && !state.director_drawer_open
+                && !state.workspace_drawer_open()
             {
                 let detected_url = prs.get(selected).map(|pr| pr.url.as_str());
                 let visible = filtered_prs(prs, PrFilter::All);
@@ -3447,7 +3465,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 .as_ref()
                 .is_some_and(|overlay| overlay.target == *target);
             if matching_request {
-                if state.overlay.is_none() && !state.director_drawer_open {
+                if state.overlay.is_none() && !state.workspace_drawer_open() {
                     state.overlay = Some(Overlay::Prs);
                 } else if state.overlay != Some(Overlay::Prs) {
                     state.pr_overlay = None;
@@ -3491,15 +3509,28 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if state.director_drawer_open {
         return update_director_drawer_key(state, key);
     }
+    if state.root_terminal_drawer_open {
+        return update_root_terminal_drawer_key(state, &key);
+    }
     if matches!(key, AppKey::ToggleDirectorDrawer) {
         state.director_drawer_open = true;
+        state.root_terminal_drawer_open = false;
         state.director_new = DirectorNew::Idle;
         return Vec::new();
     }
     if matches!(key, AppKey::OpenDirectorNew) {
         state.director_drawer_open = true;
+        state.root_terminal_drawer_open = false;
         open_director_new(state);
         return Vec::new();
+    }
+    if matches!(key, AppKey::ToggleRootTerminalDrawer) {
+        state.root_terminal_drawer_open = true;
+        return vec![Effect::OpenTerminal {
+            target: Target::Root(state.workspace),
+            operation_id: OperationId::new(),
+            arguments: "open".to_owned(),
+        }];
     }
     if !matches!(key, AppKey::CtrlC) {
         state.ctrl_c_grace = false;
@@ -3568,6 +3599,16 @@ fn director_picker_shows_selection(state: &AppState) -> bool {
 }
 
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    if matches!(key, AppKey::ToggleRootTerminalDrawer) {
+        state.director_drawer_open = false;
+        state.director_new = DirectorNew::Idle;
+        state.root_terminal_drawer_open = true;
+        return vec![Effect::OpenTerminal {
+            target: Target::Root(state.workspace),
+            operation_id: OperationId::new(),
+            arguments: "open".to_owned(),
+        }];
+    }
     if matches!(key, AppKey::ToggleDirectorDrawer) {
         state.director_drawer_open = false;
         state.director_new = DirectorNew::Idle;
@@ -4173,6 +4214,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::CtrlQ
         | AppKey::OpenQuitConfirmation
         | AppKey::ToggleDirectorDrawer
+        | AppKey::ToggleRootTerminalDrawer
         | AppKey::OpenDirectorNew
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
@@ -4190,6 +4232,71 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::PageDown
         | AppKey::SetDecisionFreeform(_)
         | AppKey::SubmitDecision => Vec::new(),
+    }
+}
+
+fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    match key {
+        AppKey::ToggleRootTerminalDrawer => {
+            state.root_terminal_drawer_open = false;
+            Vec::new()
+        }
+        AppKey::ToggleDirectorDrawer => {
+            state.root_terminal_drawer_open = false;
+            state.director_drawer_open = true;
+            state.director_new = DirectorNew::Idle;
+            Vec::new()
+        }
+        AppKey::OpenDirectorNew => {
+            state.root_terminal_drawer_open = false;
+            state.director_drawer_open = true;
+            open_director_new(state);
+            Vec::new()
+        }
+        // The root shell owns ordinary input, including Escape. All other Home
+        // mutations remain inert while the drawer is frontmost.
+        AppKey::CtrlN
+        | AppKey::CtrlP
+        | AppKey::Escape
+        | AppKey::Tab
+        | AppKey::Left
+        | AppKey::Right
+        | AppKey::Backspace
+        | AppKey::Paste(_)
+        | AppKey::Home
+        | AppKey::Char(_)
+        | AppKey::CtrlA
+        | AppKey::CtrlO
+        | AppKey::CtrlC
+        | AppKey::CtrlQ
+        | AppKey::OpenQuitConfirmation
+        | AppKey::OpenOverview
+        | AppKey::OpenCloseupOverlay
+        | AppKey::OpenNotes
+        | AppKey::OpenEnvironment
+        | AppKey::OpenGarden
+        | AppKey::OpenPrs
+        | AppKey::OpenPreview
+        | AppKey::OpenDecisions
+        | AppKey::DecisionPrevious
+        | AppKey::DecisionNext
+        | AppKey::PageUp
+        | AppKey::PageDown
+        | AppKey::SetDecisionFreeform(_)
+        | AppKey::SubmitDecision
+        | AppKey::SelectNoteSection(_)
+        | AppKey::SetNoteDraft(_)
+        | AppKey::CommitNoteDraft
+        | AppKey::ToggleTodo(_)
+        | AppKey::SaveNotes
+        | AppKey::SaveEnvironment
+        | AppKey::ToggleRoleScope
+        | AppKey::SaveRoles
+        | AppKey::SubmitOverview(_)
+        | AppKey::SubmitCloseup(_)
+        | AppKey::Enter
+        | AppKey::Up
+        | AppKey::Down => Vec::new(),
     }
 }
 
@@ -4884,7 +4991,7 @@ fn update_pointer(
     row: u16,
     at: std::time::Duration,
 ) -> Vec<Effect> {
-    if state.overlay.is_some() || state.director_drawer_open {
+    if state.overlay.is_some() || state.workspace_drawer_open() {
         state.pending_session_click = None;
         return Vec::new();
     }
@@ -4945,7 +5052,7 @@ fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect
 /// entirely on a terminal too small to draw a garden (`presentation::views::
 /// workspace::garden_fits`).
 fn garden_may_auto_open(state: &AppState) -> bool {
-    state.garden_available && state.overlay.is_none() && !state.director_drawer_open
+    state.garden_available && state.overlay.is_none() && !state.workspace_drawer_open()
 }
 
 /// Reduce a click the presentation layer already resolved against the garden's
@@ -6327,6 +6434,74 @@ mod tests {
             (state.selected(), state.active(), state.route()),
             background
         );
+    }
+
+    #[test]
+    fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(
+            &mut state,
+            AppEvent::PaneTabAvailability {
+                available: true,
+                error: None,
+            },
+        );
+        let background = (
+            state.route(),
+            state.selected(),
+            state.active(),
+            state.overlay(),
+        );
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        assert!(state.root_terminal_drawer_open());
+        assert!(!state.director_drawer_open());
+        assert_eq!(
+            effects.as_slice(),
+            [Effect::OpenTerminal {
+                target: Target::Root(workspace),
+                operation_id: match &effects[0] {
+                    Effect::OpenTerminal { operation_id, .. } => *operation_id,
+                    _ => unreachable!(),
+                },
+                arguments: "open".to_owned(),
+            }]
+        );
+        for key in [AppKey::Up, AppKey::OpenOverview, AppKey::Escape] {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert!(state.root_terminal_drawer_open());
+            assert_eq!(
+                (
+                    state.route(),
+                    state.selected(),
+                    state.active(),
+                    state.overlay()
+                ),
+                background
+            );
+        }
+
+        assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+        assert!(!state.root_terminal_drawer_open());
+        assert!(state.director_drawer_open());
+        assert_eq!(
+            (
+                state.route(),
+                state.selected(),
+                state.active(),
+                state.overlay()
+            ),
+            background
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+        assert!(!state.root_terminal_drawer_open());
+        assert!(state.director_drawer_open());
+        assert!(matches!(state.director_new(), DirectorNew::Choosing(_)));
     }
 
     #[test]
