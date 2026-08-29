@@ -237,6 +237,7 @@ pub trait SessionWorktreeIo {
         workspace_root: &Path,
         destination: &Path,
         branch: &str,
+        base_ref: Option<&str>,
     ) -> anyhow::Result<()>;
     /// Removes nested linked worktrees and the containing session tree.
     ///
@@ -281,6 +282,7 @@ struct SessionCreateInFlight {
     workspace_root: PathBuf,
     destination: PathBuf,
     branch: String,
+    base_ref: Option<String>,
     io: Arc<dyn SessionWorktreeIo + Send + Sync>,
 }
 
@@ -1071,9 +1073,8 @@ impl SessionRuntime {
             .transpose()
             .map_err(|_| SessionRuntimeError::InvalidRequest)?;
         let parent_session_id = parent_session_id(payload)?;
-        // Re-read both catalog layers at the daemon admission boundary. The
-        // registered repository root, never the target session worktree, is
-        // authoritative for workspace policy.
+        // Re-read both catalog layers at the daemon admission boundary; the
+        // registered repository root is authoritative for workspace policy.
         let catalog = usagi_core::infrastructure::role_catalog::load_effective(
             &self.data_home,
             &self.repo_root,
@@ -1102,7 +1103,8 @@ impl SessionRuntime {
                 .resolve(requested_role.as_ref(), RoleScope::Session)
                 .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
         };
-        let semantic_key = create_semantic_key(origin, &name, role_id.as_ref(), parent_session_id);
+        let (base_ref, semantic_key) =
+            create_identity(payload, origin, &name, role_id.as_ref(), parent_session_id)?;
         if let Some(existing) = before
             .operations
             .iter()
@@ -1169,6 +1171,7 @@ impl SessionRuntime {
             name,
             workspace_root: self.repo_root.clone(),
             destination: path,
+            base_ref,
             io: Arc::clone(&self.io),
         }))
     }
@@ -1184,6 +1187,7 @@ impl SessionRuntime {
             &in_flight.workspace_root,
             &in_flight.destination,
             &in_flight.branch,
+            in_flight.base_ref.as_deref(),
         )
     }
 
@@ -1669,6 +1673,46 @@ fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntim
         .map_err(|_| SessionRuntimeError::InvalidRequest)
 }
 
+fn session_base_ref(payload: &Value) -> Result<Option<String>, SessionRuntimeError> {
+    let Some(value) = payload.get("base_ref").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let refname = value
+        .as_str()
+        .filter(|refname| {
+            (refname.starts_with("refs/heads/") || refname.starts_with("refs/remotes/"))
+                && !refname.ends_with('/')
+                && !refname.ends_with('.')
+                && !refname.contains("..")
+                && !refname.contains("@{")
+                && !refname.chars().any(|character| {
+                    character.is_control()
+                        || character.is_whitespace()
+                        || "~^:?*[\\{}".contains(character)
+                })
+        })
+        .ok_or(SessionRuntimeError::InvalidRequest)?;
+    Ok(Some(refname.to_owned()))
+}
+
+fn create_identity(
+    payload: &Value,
+    origin: CreateOrigin,
+    name: &str,
+    role_id: Option<&RoleId>,
+    parent_session_id: Option<SessionId>,
+) -> Result<(Option<String>, String), SessionRuntimeError> {
+    let base_ref = session_base_ref(payload)?;
+    let semantic_key = create_semantic_key(
+        origin,
+        name,
+        role_id,
+        parent_session_id,
+        base_ref.as_deref(),
+    );
+    Ok((base_ref, semantic_key))
+}
+
 fn validate_teardown_target(
     io: &dyn SessionWorktreeIo,
     teardown: &PendingTeardown,
@@ -1815,13 +1859,18 @@ fn create_semantic_key(
     name: &str,
     role_id: Option<&RoleId>,
     parent_session_id: Option<SessionId>,
+    base_ref: Option<&str>,
 ) -> String {
     let action = semantic_key(origin.semantic_action(), name);
     let action = role_id.map_or_else(
         || action.clone(),
         |role_id| format!("{action}:{}", role_id.as_str()),
     );
-    parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"))
+    let action =
+        parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"));
+    base_ref.map_or(action.clone(), |base_ref| {
+        format!("{action}:base={base_ref}")
+    })
 }
 
 /// The journaled identity of one removal: its origin, session name, and request
@@ -2045,6 +2094,7 @@ mod tests {
             _: &Path,
             _: &Path,
             _: &str,
+            _: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -2074,6 +2124,7 @@ mod tests {
             _: &Path,
             _: &Path,
             _: &str,
+            _: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -2107,6 +2158,7 @@ mod tests {
             workspace_root: &Path,
             _: &Path,
             _: &str,
+            _: Option<&str>,
         ) -> anyhow::Result<()> {
             self.build_calls.fetch_add(1, Ordering::SeqCst);
             let output = git.run(workspace_root, &["worktree", "add"])?;
@@ -2554,6 +2606,51 @@ mod tests {
 
         assert_eq!(created.body["sessions"][0]["name"], "a");
         assert_eq!(created.body["sessions"][0]["lifecycle"], "available");
+    }
+
+    #[test]
+    fn session_base_ref_accepts_only_fully_qualified_branch_refs() {
+        assert_eq!(session_base_ref(&json!({})).unwrap(), None);
+        assert_eq!(
+            session_base_ref(&json!({"base_ref":"refs/heads/main"})).unwrap(),
+            Some("refs/heads/main".into())
+        );
+        assert_eq!(
+            session_base_ref(&json!({"base_ref":"refs/remotes/origin/main"})).unwrap(),
+            Some("refs/remotes/origin/main".into())
+        );
+        for invalid in [
+            "main",
+            "refs/tags/v1",
+            "refs/heads/../main",
+            "refs/heads/main^{tree}",
+            "refs/remotes/origin/main ",
+        ] {
+            assert_eq!(
+                session_base_ref(&json!({"base_ref":invalid})),
+                Err(SessionRuntimeError::InvalidRequest)
+            );
+        }
+        assert_eq!(
+            create_semantic_key(CreateOrigin::Direct, "one", None, None, None),
+            "create:one"
+        );
+        assert_ne!(
+            create_semantic_key(
+                CreateOrigin::Direct,
+                "one",
+                None,
+                None,
+                Some("refs/heads/main")
+            ),
+            create_semantic_key(
+                CreateOrigin::Direct,
+                "one",
+                None,
+                None,
+                Some("refs/remotes/origin/main")
+            )
+        );
     }
     #[test]
     fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
@@ -3611,7 +3708,13 @@ instructions = "direct"
 
         let git = RecordingGit::new();
         SystemSessionWorktreeIo
-            .build_session_tree(&git, &workspace, &destination, "usagi/feature")
+            .build_session_tree(
+                &git,
+                &workspace,
+                &destination,
+                "usagi/feature",
+                Some("refs/remotes/origin/main"),
+            )
             .unwrap();
 
         assert_eq!(
@@ -3624,6 +3727,18 @@ instructions = "direct"
         );
         let calls = git.calls.lock().unwrap();
         assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls.first().map(|(_, args)| args.as_slice()),
+            Some(
+                [
+                    "rev-parse".into(),
+                    "--verify".into(),
+                    "--end-of-options".into(),
+                    "refs/remotes/origin/main^{commit}".into(),
+                ]
+                .as_slice()
+            )
+        );
         assert_eq!(
             calls.get(3),
             Some(&(
@@ -4995,6 +5110,7 @@ instructions = "code"
                 Path::new("/source"),
                 Path::new("/destination"),
                 "branch",
+                None,
             )
             .unwrap();
         WorktreeTeardown::new(FakeGit::ok(), io_contract)
@@ -5151,7 +5267,7 @@ instructions = "code"
         assert!(!failing_io.is_repo_root(path));
         assert!(!failing_io.is_linked_worktree(path));
         failing_io
-            .build_session_tree(&FakeGit::ok(), path, path, "branch")
+            .build_session_tree(&FakeGit::ok(), path, path, "branch", None)
             .unwrap();
         let fake_io = FakeSessionWorktreeIo {
             occupied: false,

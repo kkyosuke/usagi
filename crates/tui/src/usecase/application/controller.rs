@@ -96,6 +96,22 @@ pub struct CreateSessionForm {
     existing: Vec<String>,
     roles: Vec<RoleChoice>,
     selected_role: Option<usize>,
+    branches: Vec<BranchChoice>,
+    selected_branch: Option<usize>,
+}
+
+/// One Git ref offered as a session base. The label is presentation-safe while
+/// `refname` is the fully-qualified identity sent to the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchChoice {
+    pub label: String,
+    pub refname: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionBranchCatalog {
+    pub branches: Vec<BranchChoice>,
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,15 +223,31 @@ impl CreateSessionForm {
     }
 
     #[must_use]
-    pub fn with_catalog(existing: Vec<String>, catalog: &SessionRoleCatalog) -> Self {
-        let selected_role = catalog
+    pub fn with_catalogs(
+        existing: Vec<String>,
+        roles: &SessionRoleCatalog,
+        branches: &SessionBranchCatalog,
+    ) -> Self {
+        let selected_role = roles
             .default
             .as_ref()
-            .and_then(|default| catalog.roles.iter().position(|role| &role.id == default));
+            .and_then(|default| roles.roles.iter().position(|role| &role.id == default));
+        let selected_branch = branches
+            .default
+            .as_ref()
+            .and_then(|default| {
+                branches
+                    .branches
+                    .iter()
+                    .position(|branch| &branch.refname == default)
+            })
+            .or_else(|| (!branches.branches.is_empty()).then_some(0));
         Self {
             existing,
-            roles: catalog.roles.clone(),
+            roles: roles.roles.clone(),
             selected_role,
+            branches: branches.branches.clone(),
+            selected_branch,
             ..Self::default()
         }
     }
@@ -237,6 +269,25 @@ impl CreateSessionForm {
     #[must_use]
     pub fn selected_role(&self) -> Option<&RoleChoice> {
         self.selected_role.and_then(|index| self.roles.get(index))
+    }
+
+    #[must_use]
+    pub fn selected_branch(&self) -> Option<&BranchChoice> {
+        self.selected_branch
+            .and_then(|index| self.branches.get(index))
+    }
+
+    fn move_branch(&mut self, backwards: bool) {
+        if self.branches.is_empty() {
+            self.selected_branch = None;
+            return;
+        }
+        let current = self.selected_branch.unwrap_or(0);
+        self.selected_branch = Some(if backwards {
+            (current + self.branches.len() - 1) % self.branches.len()
+        } else {
+            (current + 1) % self.branches.len()
+        });
     }
 
     fn move_role(&mut self, backwards: bool) {
@@ -297,6 +348,7 @@ impl CreateSessionForm {
         }
         Ok(SessionCreateIntent {
             name,
+            base_ref: self.selected_branch().map(|branch| branch.refname.clone()),
             profile: None,
             model: None,
             role_id: self.selected_role().map(|role| role.id.clone()),
@@ -339,6 +391,8 @@ fn validate_session_name_live(name: &str, existing: &[String]) -> Option<Notice>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCreateIntent {
     pub name: String,
+    /// Fully-qualified local or remote-tracking ref selected as the base.
+    pub base_ref: Option<String>,
     pub profile: Option<AgentProfileId>,
     pub model: Option<ModelSelector>,
     /// Only the selector crosses to the daemon; definitions stay in `roles.toml`.
@@ -977,6 +1031,7 @@ pub struct AppState {
     pr_merge_celebrations: BTreeMap<SessionId, u64>,
     /// Read-only effective session-scope catalog used by the create picker.
     role_catalog: SessionRoleCatalog,
+    branch_catalog: SessionBranchCatalog,
     selected: Selection,
     /// Managed session shown in Closeup. `None` means Home has no managed
     /// session target; workspace-root scope is deliberately not a fallback.
@@ -1130,6 +1185,7 @@ impl AppState {
             pr_auto_open: PrAutoOpen::default(),
             pr_merge_celebrations: BTreeMap::new(),
             role_catalog: SessionRoleCatalog::default(),
+            branch_catalog: SessionBranchCatalog::default(),
             selected,
             active,
             notice: None,
@@ -2002,6 +2058,8 @@ pub enum BackendEvent {
     SessionRoles(BTreeMap<SessionId, SessionRoleProjection>),
     /// Effective session-scope picker catalog. Role instructions are omitted.
     SessionRoleCatalog(SessionRoleCatalog),
+    /// Local and remote-tracking refs available as session bases.
+    SessionBranchCatalog(SessionBranchCatalog),
     /// backend が safe と保証した notice。
     Notice(Notice),
     /// A phase event for exactly one Agent runtime pane.
@@ -3146,6 +3204,10 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::Backend(BackendEvent::SessionRoleCatalog(catalog)) => {
             state.role_catalog = catalog;
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::SessionBranchCatalog(catalog)) => {
+            state.branch_catalog = catalog;
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
@@ -4796,12 +4858,17 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
         }
     };
     match command {
-        overview::SessionCommand::Create { name, role_id } => {
+        overview::SessionCommand::Create {
+            name,
+            role_id,
+            base_ref,
+        } => {
             state.overlay = None;
             request_create_session(
                 state,
                 SessionCreateIntent {
                     name,
+                    base_ref,
                     profile: None,
                     model: None,
                     role_id,
@@ -5151,9 +5218,10 @@ fn open_create_session(state: &mut AppState) -> Vec<Effect> {
     // cursor and the inline form on the same `+ new session` row. The active
     // target remains unchanged.
     state.selected = Selection::NewSession;
-    state.create_session = Some(CreateSessionForm::with_catalog(
+    state.create_session = Some(CreateSessionForm::with_catalogs(
         state.session_names.clone(),
         &state.role_catalog,
+        &state.branch_catalog,
     ));
     state.overlay = Some(Overlay::CreateSession);
     Vec::new()
@@ -5179,10 +5247,14 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
             Vec::new()
         }
         AppKey::Up => {
-            form.move_role(true);
+            form.move_branch(true);
             Vec::new()
         }
-        AppKey::Down | AppKey::Tab => {
+        AppKey::Down => {
+            form.move_branch(false);
+            Vec::new()
+        }
+        AppKey::Tab => {
             form.move_role(false);
             Vec::new()
         }
@@ -5695,6 +5767,22 @@ mod tests {
                 default: Some(coder),
             })),
         );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionBranchCatalog(SessionBranchCatalog {
+                branches: vec![
+                    BranchChoice {
+                        label: "local:main".into(),
+                        refname: "refs/heads/main".into(),
+                    },
+                    BranchChoice {
+                        label: "remote:origin/main".into(),
+                        refname: "refs/remotes/origin/main".into(),
+                    },
+                ],
+                default: Some("refs/heads/main".into()),
+            })),
+        );
         assert_eq!(state.role_catalog().roles.len(), 2);
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
         assert_eq!(state.create_session_form().unwrap().roles().len(), 2);
@@ -5709,8 +5797,7 @@ mod tests {
             "coder"
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         for character in "feature".chars() {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
         }
@@ -5718,12 +5805,15 @@ mod tests {
         assert!(
             matches!(effects.as_slice(), [Effect::CreateSession { intent, .. }]
             if intent.role_id.as_ref() == Some(&reviewer)
+                && intent.base_ref.as_deref() == Some("refs/remotes/origin/main")
                 && intent.profile.is_none() && intent.model.is_none())
         );
 
         let mut empty = CreateSessionForm::new(Vec::new());
         empty.move_role(true);
         assert!(empty.selected_role().is_none());
+        empty.move_branch(true);
+        assert!(empty.selected_branch().is_none());
     }
 
     #[test]

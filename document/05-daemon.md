@@ -56,7 +56,9 @@ client に返す session 一覧は、使用可能な `available` に加えて、
 `session create <name>` は lifecycle の reservation と Git effect の前に `.usagi/sessions/<name>` の
 存在を検査する。snapshot に未登録の stale directory や dangling symlink も占有済みとして拒否する。
 `session create <name>` は workspace root が Git repository なら session root をその repository の
-worktree にする。root が Git repository でない場合は、`.usagi/` と `.git` を除いて workspace を再帰的に
+worktree にする。create payload の `base_ref` は `refs/heads/` または `refs/remotes/` で始まる
+fully-qualified branch ref だけを受け付け、その ref が指す検証済み commit から `usagi/<name>` を作る。
+省略時は `HEAD` を使う。root が Git repository でない場合は、`.usagi/` と `.git` を除いて workspace を再帰的に
 mirror する。走査中に見つけた各 Git repository は session tree 内の同じ相対 path に `usagi/<name>` branch
 の worktree として作成し、plain file と directory は copy する。既存 linked worktree（`.git` が file）は
 source に含めない。remove は mirror 内の worktree を子から順に Git で除去してから copied entries を除去する。

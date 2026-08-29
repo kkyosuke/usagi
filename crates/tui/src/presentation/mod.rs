@@ -72,9 +72,10 @@ use crate::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit, AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken,
-    RoleChoice, Route, SessionRoleCatalog, SessionRoleProjection, Target,
+    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DirectorNew, Effect, EnvironmentEntry,
+    ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay,
+    PendingToken, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
+    SessionRoleProjection, Target,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -5570,6 +5571,7 @@ fn drain_controller_host_actions(
         match action {
             ControllerHostAction::Create(request, completions) => {
                 let name = request.intent.name;
+                let base_ref = request.intent.base_ref;
                 let role_id = request.intent.role_id;
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
@@ -5577,6 +5579,7 @@ fn drain_controller_host_actions(
                     SessionCommand::Create {
                         name: name.clone(),
                         role_id,
+                        base_ref,
                     },
                     SessionBackendCompletion::Create {
                         token: request.token,
@@ -6218,6 +6221,9 @@ fn drive_workspace_controller(
     let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
         role_catalog,
+    )));
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
+        session_branch_catalog(&root_cwd),
     )));
     runtime.set_agent_models(agent_models.available, agent_models.default);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
@@ -7020,6 +7026,60 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
             }
         })
         .unwrap_or_default()
+}
+
+/// Reads local and remote-tracking branch identities for the create picker.
+/// Symbolic remote aliases such as `origin/HEAD` are omitted so every row names
+/// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
+/// default instead of making the workspace unusable.
+fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
+    let output = usagi_core::infrastructure::git::confined_git_command(workspace_root)
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return SessionBranchCatalog::default();
+    };
+    if !output.status.success() {
+        return SessionBranchCatalog::default();
+    }
+    let branches = parse_session_branch_choices(&String::from_utf8_lossy(&output.stdout));
+    let default = usagi_core::infrastructure::git::confined_git_command(workspace_root)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|refname| branches.iter().any(|branch| &branch.refname == refname));
+    SessionBranchCatalog { branches, default }
+}
+
+fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (refname, symref) = line.split_once(' ').unwrap_or((line, ""));
+            if !symref.is_empty() {
+                return None;
+            }
+            let label = refname
+                .strip_prefix("refs/heads/")
+                .map(|name| format!("local:{name}"))
+                .or_else(|| {
+                    refname
+                        .strip_prefix("refs/remotes/")
+                        .map(|name| format!("remote:{name}"))
+                })?;
+            Some(BranchChoice {
+                label,
+                refname: refname.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
@@ -9456,6 +9516,7 @@ mod tests {
                 operation_id: OperationId::new(),
                 intent: SessionCreateIntent {
                     name: "feature".to_owned(),
+                    base_ref: None,
                     profile: None,
                     model: None,
                     role_id: None,
@@ -9593,6 +9654,7 @@ mod tests {
                 operation_id: OperationId::new(),
                 intent: SessionCreateIntent {
                     name: "feature".into(),
+                    base_ref: None,
                     profile: None,
                     model: None,
                     role_id: None,
@@ -11991,6 +12053,29 @@ mod tests {
     }
 
     #[test]
+    fn branch_choices_distinguish_local_remote_and_skip_symbolic_aliases() {
+        assert_eq!(
+            super::parse_session_branch_choices(
+                "refs/heads/main \nrefs/heads/feature \nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/main \n"
+            ),
+            vec![
+                crate::usecase::application::controller::BranchChoice {
+                    label: "local:main".into(),
+                    refname: "refs/heads/main".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "local:feature".into(),
+                    refname: "refs/heads/feature".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "remote:origin/main".into(),
+                    refname: "refs/remotes/origin/main".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn render_controller_frame_draws_a_waving_pending_create_skeleton() {
         // Once a create request is in flight, the shell threads its name here and
         // the sidebar draws a two-line loading skeleton just above `+ new
@@ -14062,6 +14147,7 @@ mod tests {
                     operation_id: OperationId::new(),
                     intent: SessionCreateIntent {
                         name: format!("session-{token}"),
+                        base_ref: None,
                         profile: None,
                         model: None,
                         role_id: None,
