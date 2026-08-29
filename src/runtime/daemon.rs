@@ -20519,6 +20519,7 @@ instructions = "{instructions}"
                 _: &Path,
                 _: &Path,
                 _: &str,
+                _: Option<&str>,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -20953,6 +20954,7 @@ instructions = "{instructions}"
             _: &Path,
             _: &Path,
             _: &str,
+            _: Option<&str>,
         ) -> anyhow::Result<()> {
             Ok(())
         }

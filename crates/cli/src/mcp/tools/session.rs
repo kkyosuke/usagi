@@ -311,10 +311,10 @@ impl Tool for SessionCreate {
         "session_create"
     }
     fn description(&self) -> &'static str {
-        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、作成は非同期に受理される。"
+        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須。base_ref は任意の fully-qualified local/remote-tracking branch ref。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、作成は非同期に受理される。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"base_ref":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
     }
 }
 
