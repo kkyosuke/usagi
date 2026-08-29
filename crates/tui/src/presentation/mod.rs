@@ -91,7 +91,7 @@ use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSel
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
-use crate::usecase::application::terminal_selection::TerminalSelection;
+use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
@@ -2892,6 +2892,17 @@ impl WorkspaceUi {
             .map(TerminalSession::cells)
     }
 
+    fn begin_terminal_selection(
+        &self,
+        terminal: &TerminalRef,
+        anchor: TerminalPoint,
+    ) -> Option<TerminalSelection> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(|session| session.begin_selection(anchor))
+    }
+
     fn terminal_error(&self, terminal: &TerminalRef) -> Option<&str> {
         self.terminals
             .iter()
@@ -5088,10 +5099,10 @@ fn handle_terminal_pointer(
             let Some(point) = point_at(pointer.column, pointer.row) else {
                 return false;
             };
-            let Some(cells) = ui.terminal_cells(&terminal) else {
+            let Some(selection) = ui.begin_terminal_selection(&terminal, point) else {
                 return false;
             };
-            controls.press_pointer(TerminalSelection::begin(cells, point));
+            controls.press_pointer(selection);
         }
         PointerKind::Drag => {
             if runtime.focused_terminal().is_none() {
