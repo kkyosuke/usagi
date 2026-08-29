@@ -161,7 +161,7 @@ fn startup_timeout_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{launch_and_confirm, start, startup_timeout_message};
+    use super::{MAX_POLLS, launch_and_confirm, start, startup_timeout_message};
     use std::cell::Cell;
 
     use crate::test_support::{
@@ -169,7 +169,7 @@ mod tests {
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
-    use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe};
+    use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, Sleeper};
 
     use crate::usecase::serve::DaemonRecordPort;
     use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
@@ -181,23 +181,30 @@ mod tests {
         }
     }
 
-    /// Reports `Gone` for the first `slow` observations and `Exact` afterwards,
-    /// holding the confirmation loop the way a cold start does while it recovers
-    /// the generation registry, hydrates runtime state, and adopts workspaces.
-    struct SlowToConfirm {
-        seen: Cell<usize>,
-        slow: usize,
+    /// Registers the daemon after a configured number of confirmation sleeps,
+    /// matching a cold start that has not written `daemon.json` yet.
+    struct DelayedRegistration<'a> {
+        store: &'a dyn DaemonRecordPort,
+        sleeps: Cell<usize>,
+        register_after: usize,
+        pid: u32,
     }
 
-    impl LivenessProbe for SlowToConfirm {
-        fn observe(&self, _record: &DaemonRecord) -> DaemonProcessObservation {
-            let seen = self.seen.get();
-            self.seen.set(seen + 1);
-            if seen < self.slow {
-                DaemonProcessObservation::Gone
-            } else {
-                DaemonProcessObservation::Exact
+    impl Sleeper for DelayedRegistration<'_> {
+        fn sleep(&self) {
+            let sleeps = self.sleeps.get() + 1;
+            self.sleeps.set(sleeps);
+            if sleeps == self.register_after {
+                self.store.save(&DaemonRecord::new(self.pid)).unwrap();
             }
+        }
+    }
+
+    struct CountingSleeper(Cell<usize>);
+
+    impl Sleeper for CountingSleeper {
+        fn sleep(&self) {
+            self.0.set(self.0.get() + 1);
         }
     }
 
@@ -210,19 +217,37 @@ mod tests {
     #[test]
     fn a_slow_cold_start_is_confirmed_rather_than_reported_as_a_timeout() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
-        let launcher = TestLauncher::registering(&store, 4242);
+        let launcher = TestLauncher::idle(&store);
         // Past the old limit of 40 polls, and past the ~11s that was actually
         // observed at the production sleep of ~50ms.
-        let probe = SlowToConfirm {
-            seen: Cell::new(0),
-            slow: 300,
+        let sleeper = DelayedRegistration {
+            store: &store,
+            sleeps: Cell::new(0),
+            register_after: 300,
+            pid: 4242,
         };
 
         assert_eq!(
-            launch_and_confirm(&store, &probe, &launcher, &NoopSleeper).unwrap(),
+            launch_and_confirm(&store, &FixedProbe(true), &launcher, &sleeper).unwrap(),
             4242
         );
-        assert!(probe.seen.get() > 40, "the old window would have given up");
+        assert!(
+            sleeper.sleeps.get() > 40,
+            "the old window would have given up"
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_never_registers_still_times_out() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let launcher = TestLauncher::idle(&store);
+        let sleeper = CountingSleeper(Cell::new(0));
+
+        let error = launch_and_confirm(&store, &FixedProbe(true), &launcher, &sleeper)
+            .expect_err("a daemon without a record must time out");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(sleeper.0.get(), MAX_POLLS);
     }
 
     /// Reports the seeded pid as reused by an unrelated process and every other
