@@ -7033,17 +7033,17 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
 /// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
 /// default instead of making the workspace unusable.
 fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
-    let Some(output) = successful_git_output(
-        usagi_core::infrastructure::git::confined_git_command(workspace_root)
-            .args([
-                "for-each-ref",
-                "--format=%(refname) %(symref)",
-                "refs/heads",
-                "refs/remotes",
-            ])
-            .output(),
-    ) else {
-        return SessionBranchCatalog::default();
+    let output = usagi_core::infrastructure::git::confined_git_command(workspace_root)
+        .args([
+            "for-each-ref",
+            "--format=%(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output();
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(_) | Err(_) => return SessionBranchCatalog::default(),
     };
     let branches = parse_session_branch_choices(&String::from_utf8_lossy(&output.stdout));
     let default = branch_default_from_output(
@@ -7055,20 +7055,20 @@ fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
     SessionBranchCatalog { branches, default }
 }
 
-fn successful_git_output(output: io::Result<std::process::Output>) -> Option<std::process::Output> {
-    output.ok().filter(|output| output.status.success())
-}
-
 fn branch_default_from_output(
     output: io::Result<std::process::Output>,
     branches: &[BranchChoice],
 ) -> Option<String> {
-    let output = successful_git_output(output)?;
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(_) | Err(_) => return None,
+    };
     let refname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    branches
-        .iter()
-        .any(|branch| branch.refname == refname)
-        .then_some(refname)
+    if branches.iter().any(|branch| branch.refname == refname) {
+        Some(refname)
+    } else {
+        None
+    }
 }
 
 fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
@@ -12097,9 +12097,6 @@ mod tests {
             refname: "refs/heads/main".into(),
         }];
 
-        assert!(
-            super::successful_git_output(Err(std::io::Error::other("git unavailable"))).is_none()
-        );
         assert!(
             super::branch_default_from_output(
                 Err(std::io::Error::other("git unavailable")),
