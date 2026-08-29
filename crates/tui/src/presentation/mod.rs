@@ -736,9 +736,15 @@ fn forward_live_terminal_input(
         && ui
             .terminal_input_modes(&terminal)
             .is_some_and(|modes| modes.paste == PasteMode::Bracketed);
-    let Some(bytes) = key_to_terminal_bytes_for_mode(key.clone(), bracketed_paste) else {
+    let Some(mut bytes) = key_to_terminal_bytes_for_mode(key.clone(), bracketed_paste) else {
         return false;
     };
+    // A generic shell's Ctrl-C is the workspace-terminal reset gesture: first
+    // interrupt the foreground job, then let readline handle Ctrl-L and repaint
+    // a fresh prompt at the top. Agent CLIs keep the ordinary SIGINT byte.
+    if matches!(key, Key::Quit) && !runtime.is_agent_terminal(&terminal) {
+        bytes.push(12);
+    }
     // The stream port is resident, so a launch in flight never drops a
     // keystroke; a genuine stream failure is surfaced instead of swallowed.
     if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
@@ -3692,6 +3698,27 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
+/// Geometry of the managed terminal that remains visible to Director's left.
+///
+/// The Director overlays the right side of Home. Resizing the background PTY
+/// to that visible band keeps wrapping and cursor placement aligned with what
+/// the operator can actually see instead of continuing underneath the drawer.
+fn director_background_terminal_geometry(height: usize, width: usize) -> Geometry {
+    let (height, _) = widgets::normalize_size(height, width);
+    let cols = director_drawer::geometry(height, width).left;
+    Geometry {
+        cols: u16::try_from(cols.min(usize::from(u16::MAX)))
+            .expect("clamped Director background width fits u16"),
+        rows: u16::try_from(
+            height
+                .saturating_sub(2 + 5)
+                .max(1)
+                .min(usize::from(u16::MAX)),
+        )
+        .expect("clamped Director background height fits u16"),
+    }
+}
+
 fn foreground_terminal_geometry(
     height: usize,
     width: usize,
@@ -4853,6 +4880,21 @@ fn close_focused_terminal_pane(
         runtime.surface_focused_pane_feedback(
             "Interrupted Agent has no live process; resume it before closing",
         );
+        return;
+    }
+    if let Some(terminal) = runtime.focused_terminal() {
+        // Generic terminals are daemon-owned too, but closing one is an
+        // explicit request to end its shell rather than merely hiding a live
+        // process. SIGINT clears a possibly-running foreground command/current
+        // edit before `exit` is consumed by the shell.
+        if let Err(message) = ui.send_terminal_bytes(&terminal, b"\x03exit\r") {
+            runtime.surface_focused_pane_feedback(message);
+            return;
+        }
+        let outcome = runtime.close_focused_pane();
+        if let Some(terminal) = outcome.detach {
+            ui.close_generic_terminal(&terminal);
+        }
         return;
     }
     let outcome = runtime.close_focused_pane();
@@ -6372,7 +6414,10 @@ fn drive_workspace_controller(
             if let Some(foreground) = foreground_terminal {
                 visible_terminals.push((foreground, geometry));
             }
-            visible_terminals.push((terminal, terminal_geometry(height, width)));
+            visible_terminals.push((
+                terminal,
+                director_background_terminal_geometry(height, width),
+            ));
             ui.sync_visible_terminals(&visible_terminals);
         } else {
             ui.sync_foreground_terminal(foreground_terminal.as_ref(), geometry);
@@ -6413,7 +6458,8 @@ fn drive_workspace_controller(
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
             .unwrap_or(0);
-        let background_rows = workspace::terminal_viewport(height, width).0;
+        let background_rows =
+            usize::from(director_background_terminal_geometry(height, width).rows);
         let next_background_key = (
             background_terminal.clone(),
             background_revision,
@@ -14648,6 +14694,16 @@ mod tests {
         terminal: TerminalRef,
         port: Box<dyn AgentCommandPort>,
     ) -> (WorkspaceUi, WorkspaceRuntime) {
+        focused_live_pane_of_kind(workspace, session, terminal, PaneKind::Agent, port)
+    }
+
+    fn focused_live_pane_of_kind(
+        workspace: WorkspaceId,
+        session: SessionId,
+        terminal: TerminalRef,
+        kind: PaneKind,
+        port: Box<dyn AgentCommandPort>,
+    ) -> (WorkspaceUi, WorkspaceRuntime) {
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
             .with_agent_context(workspace, vec![session], port);
@@ -14655,7 +14711,7 @@ mod tests {
         // The first managed session is already selected; Enter activates it.
         let _ = runtime.handle_key(Key::Enter);
         let operation = OperationId::new();
-        let _ = runtime.request_pane(Target::Session(session), operation, PaneKind::Agent);
+        let _ = runtime.request_pane(Target::Session(session), operation, kind);
         let _ = runtime.complete_pane(Target::Session(session), operation, terminal.clone());
         let _ = runtime.focus_terminal(Target::Session(session), terminal.clone());
         ui.start_terminal_session(terminal, terminal_geometry(20, 80));
@@ -15465,8 +15521,61 @@ mod tests {
         ));
 
         assert_eq!(runtime.active_pane().tabs().len(), 1);
+        assert!(ui.closed_generic_terminals.is_empty());
         assert_eq!(*inputs.lock().unwrap(), vec![vec![4]]);
         assert!(runtime.state().notice().is_none());
+    }
+
+    #[test]
+    fn generic_terminal_ctrl_c_resets_the_shell_and_close_requests_exit() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let terminal = live_terminal_ref(workspace, session);
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let (mut ui, mut runtime) = focused_live_pane_of_kind(
+            workspace,
+            session,
+            terminal.clone(),
+            PaneKind::Terminal,
+            Box::new(WheelRecordingPort {
+                terminal: terminal.clone(),
+                replay: Vec::new(),
+                inputs: Arc::clone(&inputs),
+                input_error: false,
+            }),
+        );
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::Quit,
+        ));
+
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::CloseTab),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            20,
+            80,
+            0,
+            0,
+        ));
+
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![b"\x03\x0c".to_vec(), b"\x03exit\r".to_vec()]
+        );
+        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(ui.closed_generic_terminals.contains(&terminal));
     }
 
     #[test]
@@ -19089,6 +19198,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One stream fixture proves simultaneous attach, resize, poll, and detach ownership.
     fn director_keeps_the_dimmed_managed_terminal_attached_and_moving() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -19144,6 +19254,7 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
+        let managed_director_geometry = super::director_background_terminal_geometry(24, 100);
         let drawer_geometry = foreground_terminal_geometry(24, 100, true, false);
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
@@ -19151,7 +19262,7 @@ mod tests {
         assert_director_background_visibility(&runtime, &managed);
         ui.sync_visible_terminals(&[
             (root.clone(), drawer_geometry),
-            (managed.clone(), managed_geometry),
+            (managed.clone(), managed_director_geometry),
         ]);
         close_exited_panes(&mut ui, &mut runtime);
 
@@ -19169,6 +19280,11 @@ mod tests {
                 (managed.clone(), managed_geometry),
                 (root.clone(), drawer_geometry),
             ]
+        );
+        assert!(
+            calls
+                .resize_geometries
+                .contains(&(managed.clone(), managed_director_geometry))
         );
         assert!(
             calls
@@ -19214,7 +19330,10 @@ mod tests {
                 root.clone(),
                 foreground_terminal_geometry(height, width, true, false),
             ),
-            (managed.clone(), terminal_geometry(height, width)),
+            (
+                managed.clone(),
+                super::director_background_terminal_geometry(height, width),
+            ),
         ]);
     }
 
@@ -19226,6 +19345,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One round trip retains both surfaces' independent viewport and selection state.
     fn drawer_round_trip_restores_both_views_and_restates_each_viewport_without_resync() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -19324,12 +19444,25 @@ mod tests {
         assert_eq!(
             calls.attach_geometries,
             [
-                (managed, managed_geometry),
+                (managed.clone(), managed_geometry),
                 (root.clone(), drawer_geometry),
                 (root, drawer_geometry),
             ]
         );
-        assert_eq!(calls.resize_geometries, Vec::new());
+        assert_eq!(
+            calls.resize_geometries,
+            [
+                (
+                    managed.clone(),
+                    super::director_background_terminal_geometry(24, 100),
+                ),
+                (managed.clone(), managed_geometry),
+                (
+                    managed,
+                    super::director_background_terminal_geometry(24, 100),
+                ),
+            ]
+        );
         assert_eq!(calls.attaches, 3);
         assert_eq!(calls.detaches, 1);
     }
@@ -19785,6 +19918,16 @@ mod tests {
         let durable = Arc::new(Mutex::new(intent));
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(WheelRecordingPort {
+                    terminal: generic.clone(),
+                    replay: Vec::new(),
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    input_error: false,
+                }),
+            )
             .with_agent_tab_intent(
                 workspace,
                 BTreeSet::from([session]),
@@ -19840,6 +19983,7 @@ mod tests {
         // Closing a generic tab is not a durable conversation dismissal. It
         // records only a process-local exact fence against inventory restore.
         let _ = runtime.focus_terminal(Target::Session(session), generic.clone());
+        ui.start_terminal_session(generic.clone(), terminal_geometry(20, 80));
         let before = durable.lock().unwrap().clone();
         super::close_focused_terminal_pane(
             &mut ui,
@@ -19863,6 +20007,16 @@ mod tests {
         let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
+            .with_agent_context(
+                workspace,
+                vec![session],
+                Box::new(WheelRecordingPort {
+                    terminal: terminal.clone(),
+                    replay: Vec::new(),
+                    inputs: Arc::new(Mutex::new(Vec::new())),
+                    input_error: false,
+                }),
+            )
             .with_agent_tab_intent(
                 workspace,
                 BTreeSet::from([session]),
@@ -19902,6 +20056,7 @@ mod tests {
         );
         assert_eq!(first.outcome, super::RestoreJobOutcome::Applied);
         assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+        ui.start_terminal_session(terminal.clone(), terminal_geometry(20, 80));
 
         super::close_focused_terminal_pane(
             &mut ui,
@@ -24298,7 +24453,7 @@ mod tests {
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, true, false),
-            Geometry { cols: 56, rows: 16 }
+            Geometry { cols: 56, rows: 17 }
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, false, true),
