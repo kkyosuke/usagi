@@ -39,10 +39,15 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore: bump version to ${{ inputs.version }}"
           title: "Release v${{ inputs.version }}"
+          # 本文は PR テンプレートを通らないため、`Internal-Issue` マーカーを
+          # 生成側で載せる（正本は document/06-conventions.md#プルリクエスト）。
+          # version bump は内部 issue を完了させないので none で固定する。
           body: |
             Bump version to `${{ inputs.version }}` for the next release.
-            
+
             > [!NOTE]
-            > Merging this PR will trigger the \`Auto Release on Version Bump\` workflow to automatically create the release tag and publish the artifacts.
+            > Merging this PR will trigger the `Auto Release on Version Bump` workflow to automatically create the release tag and publish the artifacts.
+
+            Internal-Issue: none
           branch: "release/v${{ inputs.version }}"
           base: main
