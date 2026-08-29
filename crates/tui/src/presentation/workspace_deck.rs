@@ -394,11 +394,10 @@ impl WorkspaceDeck {
     /// Attach one inactive project's daemon Agent inventory to its cached plots.
     ///
     /// The inventory is membership authority exactly as it is for the active
-    /// project ([`crate::presentation::views::workspace::HomeProjection::
-    /// with_agent_inventory`]): a runtime it does not hold in a present state
-    /// draws no rabbit, workspace-root runtimes belong to no plot, and a runtime
-    /// naming a session this cache does not know is dropped rather than
-    /// inventing a plot for it.
+    /// project's `HomeProjection::with_agent_inventory`: a runtime it does not
+    /// hold in a present state draws no rabbit, workspace-root runtimes belong
+    /// to no plot, and a runtime naming a session this cache does not know is
+    /// dropped rather than inventing a plot for it.
     ///
     /// Returns whether the projection changed, so the shell can redraw a Garden
     /// whose other material (session list, animation tick) stood still.
