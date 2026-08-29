@@ -48,6 +48,7 @@ pub enum SessionRuntimeError {
     InvalidRole(String),
     SessionBranchExists(String),
     SessionWorkspaceExists(String),
+    OrphanRecoveryBlocked(String),
     SessionWorkspaceCreationFailed { name: String, detail: String },
     DurableFailure(String),
     UnknownSession,
@@ -189,7 +190,8 @@ impl SessionRuntimeError {
             Self::SessionWorkspaceCreationFailed { name, detail } => {
                 format!("cannot create session \"{name}\": {detail}")
             }
-            Self::InvalidRole(message)
+            Self::OrphanRecoveryBlocked(message)
+            | Self::InvalidRole(message)
             | Self::DurableFailure(message)
             | Self::AgentFailure { message, .. }
             | Self::Delivery(message) => message.clone(),
@@ -226,6 +228,16 @@ pub trait SessionWorktreeIo {
     fn canonical_path(&self, path: &Path) -> Option<PathBuf>;
     fn is_repo_root(&self, path: &Path) -> bool;
     fn is_linked_worktree(&self, path: &Path) -> bool;
+    /// Lists direct physical entries below the canonical session container.
+    /// Invalid or non-UTF-8 names may be returned and are rejected by the
+    /// usecase before any lifecycle adoption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the container cannot be enumerated safely.
+    fn session_entries(&self, _container: &Path) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// Builds the complete session worktree layout.
     ///
     /// # Errors
@@ -286,6 +298,57 @@ struct SessionCreateInFlight {
     io: Arc<dyn SessionWorktreeIo + Send + Sync>,
 }
 
+/// Live Git diagnosis for a physical session entry without a lifecycle owner.
+/// Only booleans/counts and a validated local `usagi/` branch reach clients;
+/// status filenames and raw Git stderr never cross the daemon boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrphanDiagnosis {
+    branch: Option<String>,
+    dirty: Option<bool>,
+    unmerged_commits: Option<u64>,
+    path_present: bool,
+    linked_worktree: bool,
+}
+
+impl OrphanDiagnosis {
+    fn safe_to_remove(&self) -> bool {
+        !self.path_present
+            || (self.linked_worktree
+                && self.branch.is_some()
+                && self.dirty == Some(false)
+                && self.unmerged_commits == Some(0))
+    }
+
+    fn summary(&self, name: &str) -> String {
+        if !self.path_present {
+            return format!(
+                "orphan session \"{name}\" no longer has a worktree; cleanup can remove its stale lifecycle row"
+            );
+        }
+        let branch = self.branch.as_deref().unwrap_or("unknown");
+        let dirty = self
+            .dirty
+            .map_or_else(|| "unknown".to_owned(), |dirty| dirty.to_string());
+        let unmerged = self
+            .unmerged_commits
+            .map_or_else(|| "unknown".to_owned(), |commits| commits.to_string());
+        let guidance = if !self.linked_worktree {
+            "cleanup blocked: entry is not a registered Git worktree; inspect it manually"
+        } else if self.dirty != Some(false) {
+            "cleanup blocked: commit or stash local changes first"
+        } else if self.unmerged_commits != Some(0) {
+            "cleanup blocked: preserve the branch and open/merge a PR first"
+        } else if self.branch.is_none() {
+            "cleanup blocked: the checked-out branch is detached or outside the usagi/ namespace"
+        } else {
+            "safe cleanup is available"
+        };
+        format!(
+            "orphan session \"{name}\": branch={branch}, dirty={dirty}, unmerged_commits={unmerged}; {guidance}"
+        )
+    }
+}
+
 /// Outcome of [`SessionRuntime::begin_remove`].
 ///
 /// Both variants are a complete reply the caller can return right away; they
@@ -298,7 +361,7 @@ enum SessionRemoveStep {
     /// teardown worker owns the worktree effect from here.
     Accepted {
         reply: SessionReply,
-        pending: PendingTeardown,
+        pending: Box<PendingTeardown>,
     },
 }
 
@@ -539,20 +602,29 @@ fn delete_teardown_branch(git: &dyn GitRunner, teardown: &PendingTeardown) -> Re
     }
     // Only after the worktree is gone: git refuses to delete a branch that a
     // worktree still has checked out.
-    let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
-        git.run(
+    let conventional = session_branch(&teardown.name);
+    let mut branches = teardown.branch_name.iter().cloned().collect::<Vec<_>>();
+    if !branches.contains(&conventional) {
+        branches.push(conventional);
+    }
+    for branch in branches {
+        let branch_ref = format!("refs/heads/{branch}");
+        let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
+            git.run(
+                &teardown.repository_root,
+                &["rev-parse", "--verify", &branch_ref],
+            )
+            .is_ok_and(|output| output.success && output.stdout.trim() == expected)
+        });
+        delete_branch(
+            git,
             &teardown.repository_root,
-            &["rev-parse", "--verify", &session_branch_ref(&teardown.name)],
+            &branch,
+            teardown.force_delete_branch || squash_merged,
         )
-        .is_ok_and(|output| output.success && output.stdout.trim() == expected)
-    });
-    delete_branch(
-        git,
-        &teardown.repository_root,
-        &session_branch(&teardown.name),
-        teardown.force_delete_branch || squash_merged,
-    )
-    .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 impl SessionRuntime {
@@ -770,6 +842,7 @@ impl SessionRuntime {
                 .map_err(|_| SessionRuntimeError::Storage)?;
         }
         runtime.reconcile()?;
+        runtime.reconcile_orphan_worktrees()?;
         Ok(runtime)
     }
 
@@ -1065,13 +1138,7 @@ impl SessionRuntime {
         payload: &Value,
     ) -> Result<SessionCreateStep, SessionRuntimeError> {
         let name = session_name(payload)?;
-        let requested_role = payload
-            .get("role")
-            .filter(|value| !value.is_null())
-            .cloned()
-            .map(serde_json::from_value::<RoleId>)
-            .transpose()
-            .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+        let requested_role = requested_role(payload)?;
         let parent_session_id = parent_session_id(payload)?;
         // Re-read both catalog layers at the daemon admission boundary; the
         // registered repository root is authoritative for workspace policy.
@@ -1086,6 +1153,9 @@ impl SessionRuntime {
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
         let existing_session = before.sessions.iter().find(|session| session.name == name);
+        if let Some(summary) = orphan_failure_summary(existing_session) {
+            return Err(SessionRuntimeError::OrphanRecoveryBlocked(summary));
+        }
         let role_id = if let Some(existing) = existing_session {
             if let Some(requested) = requested_role.as_ref() {
                 catalog
@@ -1143,7 +1213,7 @@ impl SessionRuntime {
         // cannot catch it from its displayed session names alone.  Use
         // `symlink_metadata` so even a dangling symlink is treated as occupied.
         if self.io.path_occupied(&path) {
-            return Err(SessionRuntimeError::SessionWorkspaceExists(name));
+            return Err(self.adopt_orphan_conflict(&name)?);
         }
         let operation = journal(operation_id, self.generation, semantic_key);
         let reserved = self
@@ -1357,6 +1427,7 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
+        let orphan_branch = self.orphan_branch_for_remove(session, &name)?;
         let delete_branch = true;
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
@@ -1371,6 +1442,7 @@ impl SessionRuntime {
                         targets: vec![name.clone()],
                         force,
                         delete_branch,
+                        branch_name: orphan_branch.clone(),
                         force_delete_branch,
                         merged_head_oid: merged_head_oid.clone(),
                     },
@@ -1387,7 +1459,7 @@ impl SessionRuntime {
                 revision: removing.state_revision,
                 body: snapshot(&removing, self.root_worktree_id),
             },
-            pending: PendingTeardown {
+            pending: Box::new(PendingTeardown {
                 session_id,
                 operation_id,
                 repository_root: self.repo_root.clone(),
@@ -1397,9 +1469,10 @@ impl SessionRuntime {
                 name,
                 force,
                 delete_branch,
+                branch_name: orphan_branch,
                 force_delete_branch,
                 merged_head_oid,
-            },
+            }),
         })
     }
 
@@ -1486,6 +1559,7 @@ impl SessionRuntime {
                     name: session.name.clone(),
                     force: plan.force,
                     delete_branch: plan.delete_branch,
+                    branch_name: plan.branch_name.clone(),
                     force_delete_branch: plan.force_delete_branch,
                     merged_head_oid: plan.merged_head_oid.clone(),
                 })
@@ -1650,6 +1724,158 @@ impl SessionRuntime {
         }
         Ok(())
     }
+
+    /// Adopts physical session entries which have no durable lifecycle owner.
+    ///
+    /// Adoption is deliberately fail-closed: the row is `Failed`, carries only
+    /// safe Git metadata, and never resolves as an Agent scope. A later remove
+    /// re-runs the diagnosis so cleanup cannot race newly-created work.
+    fn reconcile_orphan_worktrees(&mut self) -> Result<(), SessionRuntimeError> {
+        let known = self
+            .state()?
+            .sessions
+            .into_iter()
+            .map(|session| session.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let entries = self
+            .io
+            .session_entries(&self.session_container())
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        for name in entries {
+            if known.contains(&name) || validate_session_name(&name).is_err() {
+                continue;
+            }
+            let diagnosis = self.inspect_orphan(&name);
+            self.store
+                .apply(
+                    self.generation,
+                    LifecycleEvent::AdoptOrphan {
+                        name: name.clone(),
+                        failure: Failure {
+                            stage: FailureStage::Integrity,
+                            summary: diagnosis.summary(&name),
+                        },
+                    },
+                    Utc::now(),
+                )
+                .map_err(|_| SessionRuntimeError::Storage)?;
+        }
+        Ok(())
+    }
+
+    fn adopt_orphan_conflict(
+        &mut self,
+        name: &str,
+    ) -> Result<SessionRuntimeError, SessionRuntimeError> {
+        let diagnosis = self.inspect_orphan(name);
+        let summary = diagnosis.summary(name);
+        self.store
+            .apply(
+                self.generation,
+                LifecycleEvent::AdoptOrphan {
+                    name: name.to_owned(),
+                    failure: Failure {
+                        stage: FailureStage::Integrity,
+                        summary: summary.clone(),
+                    },
+                },
+                Utc::now(),
+            )
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        Ok(SessionRuntimeError::OrphanRecoveryBlocked(summary))
+    }
+
+    fn orphan_branch_for_remove(
+        &self,
+        session: &usagi_core::domain::session_lifecycle::ManagedSession,
+        name: &str,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        if !session
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.stage == FailureStage::Integrity)
+        {
+            return Ok(None);
+        }
+        let diagnosis = self.inspect_orphan(name);
+        if !diagnosis.safe_to_remove() {
+            return Err(SessionRuntimeError::OrphanRecoveryBlocked(
+                diagnosis.summary(name),
+            ));
+        }
+        Ok(diagnosis.branch)
+    }
+
+    fn inspect_orphan(&self, name: &str) -> OrphanDiagnosis {
+        let path = self.session_root(name);
+        if !self.io.path_occupied(&path) {
+            return OrphanDiagnosis {
+                branch: None,
+                dirty: None,
+                unmerged_commits: None,
+                path_present: false,
+                linked_worktree: false,
+            };
+        }
+        if !self.io.is_linked_worktree(&path) {
+            return OrphanDiagnosis {
+                branch: None,
+                dirty: None,
+                unmerged_commits: None,
+                path_present: true,
+                linked_worktree: false,
+            };
+        }
+        let branch = self
+            .git
+            .run(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .ok()
+            .filter(|output| output.success)
+            .map(|output| output.stdout.trim().to_owned())
+            .filter(|branch| valid_orphan_branch(branch));
+        let dirty = self
+            .git
+            .run(&path, &["status", "--porcelain"])
+            .ok()
+            .filter(|output| output.success)
+            .map(|output| !output.stdout.trim().is_empty());
+        let base = self
+            .git
+            .run(&self.repo_root, &["rev-parse", "HEAD"])
+            .ok()
+            .filter(|output| output.success)
+            .map(|output| output.stdout.trim().to_owned());
+        let unmerged_commits = base.and_then(|base| {
+            let range = format!("{base}..HEAD");
+            self.git
+                .run(&path, &["rev-list", "--count", &range])
+                .ok()
+                .filter(|output| output.success)
+                .and_then(|output| output.stdout.trim().parse().ok())
+        });
+        OrphanDiagnosis {
+            branch,
+            dirty,
+            unmerged_commits,
+            path_present: true,
+            linked_worktree: true,
+        }
+    }
+}
+
+fn orphan_failure_summary(
+    session: Option<&usagi_core::domain::session_lifecycle::ManagedSession>,
+) -> Option<String> {
+    session
+        .and_then(|session| session.failure.as_ref())
+        .filter(|failure| failure.stage == FailureStage::Integrity)
+        .map(|failure| failure.summary.clone())
+}
+
+fn valid_orphan_branch(branch: &str) -> bool {
+    branch.starts_with("usagi/")
+        && branch.len() > "usagi/".len()
+        && !branch.chars().any(char::is_control)
 }
 
 fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
@@ -1661,6 +1887,16 @@ fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
         .filter(|name| validate_session_name(name).is_ok())
         .ok_or(SessionRuntimeError::InvalidRequest)?;
     Ok(name.to_owned())
+}
+
+fn requested_role(payload: &Value) -> Result<Option<RoleId>, SessionRuntimeError> {
+    payload
+        .get("role")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)
 }
 
 fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntimeError> {
@@ -2053,6 +2289,74 @@ mod tests {
         build_calls: Arc<AtomicUsize>,
     }
 
+    struct OrphanSessionWorktreeIo {
+        entries: Vec<String>,
+        remove_calls: Arc<AtomicUsize>,
+    }
+
+    impl SessionWorktreeIo for OrphanSessionWorktreeIo {
+        fn remove_file_best_effort(&self, _: &Path) {}
+        fn path_occupied(&self, _: &Path) -> bool {
+            true
+        }
+        fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+            Some(path.into())
+        }
+        fn is_repo_root(&self, _: &Path) -> bool {
+            false
+        }
+        fn is_linked_worktree(&self, _: &Path) -> bool {
+            true
+        }
+        fn session_entries(&self, _: &Path) -> anyhow::Result<Vec<String>> {
+            Ok(self.entries.clone())
+        }
+        fn build_session_tree(
+            &self,
+            _: &dyn GitRunner,
+            _: &Path,
+            _: &Path,
+            _: &str,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            unreachable!("an adopted orphan is never rebuilt")
+        }
+        fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+            self.remove_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct OrphanGit {
+        branch: &'static str,
+        dirty: bool,
+        unmerged_commits: u64,
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl GitRunner for OrphanGit {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            let stdout = match args {
+                ["symbolic-ref", "--quiet", "--short", "HEAD"] => {
+                    format!("{}\n", self.branch)
+                }
+                ["status", "--porcelain"] if self.dirty => " M protected.rs\n".into(),
+                ["rev-parse", "HEAD"] => "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".into(),
+                ["rev-list", "--count", _] => format!("{}\n", self.unmerged_commits),
+                _ => String::new(),
+            };
+            Ok(GitOutput {
+                success: true,
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
     struct FailingSessionWorktreeIo;
 
     struct ConfinementIo {
@@ -2384,6 +2688,7 @@ mod tests {
             session_root: PathBuf::from("/repo/.usagi/sessions/one"),
             force: false,
             delete_branch: false,
+            branch_name: None,
             force_delete_branch: false,
             merged_head_oid: None,
         }
@@ -2558,17 +2863,127 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            runtime.handle(
+        let error = runtime
+            .handle(
                 SessionAction::Create,
                 &operation(),
                 &json!({"name": "occupied"}),
-            ),
-            Err(SessionRuntimeError::SessionWorkspaceExists(
-                "occupied".into()
-            ))
-        );
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SessionRuntimeError::OrphanRecoveryBlocked(_)
+        ));
+        let row = &runtime.snapshot().unwrap()["sessions"][0];
+        assert_eq!(row["name"], "occupied");
+        assert_eq!(row["lifecycle"], "failed");
+        assert_eq!(row["failure"]["stage"], "integrity");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn startup_adopts_a_clean_merged_orphan_and_safe_remove_deletes_actual_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remove_calls = Arc::new(AtomicUsize::new(0));
+        let git_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = SessionRuntime::open(
+            tmp.path().join("repository"),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            OrphanGit {
+                branch: "usagi/retained-work",
+                dirty: false,
+                unmerged_commits: 0,
+                calls: Arc::clone(&git_calls),
+            },
+            OrphanSessionWorktreeIo {
+                entries: vec!["review".into()],
+                remove_calls: Arc::clone(&remove_calls),
+            },
+        )
+        .unwrap();
+
+        let row = &runtime.snapshot().unwrap()["sessions"][0];
+        assert_eq!(row["name"], "review");
+        assert_eq!(row["lifecycle"], "failed");
+        assert_eq!(row["failure"]["stage"], "integrity");
+        assert_eq!(
+            row["failure"]["summary"],
+            "orphan session \"review\": branch=usagi/retained-work, dirty=false, unmerged_commits=0; safe cleanup is available"
+        );
+        assert_eq!(
+            runtime.session_id("review"),
+            Err(SessionRuntimeError::UnknownSession),
+            "adoption must not make the orphan attachable"
+        );
+
+        let removed = runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"review"}),
+            )
+            .unwrap();
+        assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+        assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
+        let calls = git_calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|args| { args == &["branch", "-d", "--", "usagi/retained-work"] })
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|args| args == &["branch", "-d", "--", "usagi/review"])
+        );
+    }
+
+    #[test]
+    fn dirty_or_unmerged_orphans_refuse_even_forced_cleanup_with_guidance() {
+        for (dirty, unmerged_commits, expected) in [
+            (true, 0, "commit or stash local changes first"),
+            (false, 3, "preserve the branch and open/merge a PR first"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let remove_calls = Arc::new(AtomicUsize::new(0));
+            let mut runtime = SessionRuntime::open(
+                tmp.path().join("repository"),
+                &tmp.path().join("daemon"),
+                DaemonGeneration::new(),
+                OrphanGit {
+                    branch: "usagi/protected-work",
+                    dirty,
+                    unmerged_commits,
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                },
+                OrphanSessionWorktreeIo {
+                    entries: vec!["review".into()],
+                    remove_calls: Arc::clone(&remove_calls),
+                },
+            )
+            .unwrap();
+
+            let error = runtime
+                .handle(
+                    SessionAction::Remove,
+                    &operation(),
+                    &json!({
+                        "name":"review",
+                        "force":true,
+                        "force_delete_branch":true
+                    }),
+                )
+                .unwrap_err();
+            let message = error.safe_message();
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains(&format!("unmerged_commits={unmerged_commits}")));
+            assert_eq!(remove_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                runtime.snapshot().unwrap()["sessions"][0]["lifecycle"],
+                "failed"
+            );
+        }
     }
 
     #[test]
@@ -2932,7 +3347,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_stale_workspace_before_reserving_or_invoking_git() {
+    fn adopts_a_non_worktree_stale_workspace_before_create_without_invoking_git() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let stale = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("test");
@@ -2953,12 +3368,22 @@ mod tests {
             .handle(SessionAction::Create, &operation(), &json!({"name":"test"}))
             .unwrap_err();
 
-        assert_eq!(
+        assert!(matches!(
             error,
-            SessionRuntimeError::SessionWorkspaceExists("test".into())
-        );
+            SessionRuntimeError::OrphanRecoveryBlocked(ref summary)
+                if summary.contains("not a registered Git worktree")
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        assert!(runtime.state().unwrap().sessions.is_empty());
+        let lifecycle_state = runtime.state().unwrap();
+        assert_eq!(lifecycle_state.sessions.len(), 1);
+        assert_eq!(
+            lifecycle_state.sessions[0].lifecycle,
+            SessionLifecycle::Failed
+        );
+        assert_eq!(
+            lifecycle_state.sessions[0].failure.as_ref().unwrap().stage,
+            FailureStage::Integrity
+        );
         assert!(runtime.state().unwrap().operations.is_empty());
     }
 
@@ -3876,6 +4301,7 @@ instructions = "direct"
             targets: vec!["missing-operation".into()],
             force: false,
             delete_branch: false,
+            branch_name: None,
             force_delete_branch: false,
             merged_head_oid: None,
         });
@@ -4980,6 +5406,7 @@ instructions = "code"
             session_root: container.join("one"),
             force: true,
             delete_branch: false,
+            branch_name: None,
             force_delete_branch: false,
             merged_head_oid: None,
         };
@@ -5358,6 +5785,7 @@ instructions = "code"
                     session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                     force: false,
                     delete_branch: false,
+                    branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
                 }
@@ -5665,6 +6093,7 @@ instructions = "code"
             session_root: tmp.path().join("missing"),
             force: false,
             delete_branch: false,
+            branch_name: None,
             force_delete_branch: false,
             merged_head_oid: None,
         };
