@@ -5331,7 +5331,12 @@ fn intercept_live_terminal_control(
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
             Key::Live(LiveTerminalAction::ScrollBottom) => controls.scroll_to_bottom(),
-            Key::Live(LiveTerminalAction::Wheel { up, column, row }) => {
+            Key::Live(LiveTerminalAction::Wheel {
+                up,
+                column,
+                row,
+                notches,
+            }) => {
                 let point = if runtime.state().director_drawer_open() {
                     director_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
                 } else if runtime.state().root_terminal_drawer_open() {
@@ -5349,14 +5354,12 @@ fn intercept_live_terminal_control(
                     return true;
                 };
                 let bytes = if modes.mouse_protocol {
-                    Some(encode_mouse_wheel(
-                        *up,
-                        point.column,
-                        point.row,
-                        modes.mouse_encoding,
-                    ))
+                    Some(
+                        encode_mouse_wheel(*up, point.column, point.row, modes.mouse_encoding)
+                            .repeat(*notches),
+                    )
                 } else if modes.alternate_screen {
-                    Some(encode_wheel_arrows(*up, modes.application_cursor))
+                    Some(encode_wheel_arrows(*up, modes.application_cursor).repeat(*notches))
                 } else {
                     None
                 };
@@ -5365,7 +5368,7 @@ fn intercept_live_terminal_control(
                         controls.set_feedback(message);
                     }
                 } else {
-                    for _ in 0..WHEEL_LINES {
+                    for _ in 0..WHEEL_LINES.saturating_mul(*notches) {
                         if *up {
                             controls.scroll_up();
                         } else {
@@ -16090,11 +16093,11 @@ mod tests {
         let cases = [
             (
                 b"\x1b[?1000h\x1b[?1006hclaude".as_slice(),
-                Some(b"\x1b[<64;5;1M".to_vec()),
+                Some(b"\x1b[<64;5;1M".repeat(3)),
             ),
             (
                 b"\x1b[?1049h\x1b[?1hcodex".as_slice(),
-                Some(b"\x1bOA".repeat(super::WHEEL_LINES)),
+                Some(b"\x1bOA".repeat(super::WHEEL_LINES * 3)),
             ),
             (b"\x1b[?1000hclaude".as_slice(), None),
         ];
@@ -16128,6 +16131,7 @@ mod tests {
                     up: true,
                     column: 41,
                     row: 5,
+                    notches: 3,
                 }),
                 &mut ui,
                 &mut runtime,
@@ -16179,6 +16183,7 @@ mod tests {
                 up: true,
                 column: 0,
                 row: 0,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16196,6 +16201,7 @@ mod tests {
                 up: true,
                 column: 41,
                 row: 5,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16218,6 +16224,7 @@ mod tests {
                 up: false,
                 column: 41,
                 row: 5,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16240,6 +16247,7 @@ mod tests {
                 up: true,
                 column: 41,
                 row: 5,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16263,6 +16271,7 @@ mod tests {
                 up: true,
                 column: u16::try_from(drawer.left.saturating_add(2)).expect("drawer column"),
                 row: u16::try_from(drawer.top.saturating_add(4)).expect("drawer row"),
+                notches: 1,
             }),
             &mut empty_ui,
             &mut empty_runtime,
@@ -17181,6 +17190,7 @@ mod tests {
                 up: true,
                 column: 2,
                 row,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
