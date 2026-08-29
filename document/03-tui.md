@@ -1622,7 +1622,7 @@ tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。描画前に ready になった同方向の wheel burst は最大 32 notch まで 1 action に集約し、移動量を保ったまま frame rebuild / diff / flush を 1 回にする。逆方向または wheel 以外の最初の event は次回へ保持して入力順序を変えず、上限到達時はいったん描画する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
 snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
