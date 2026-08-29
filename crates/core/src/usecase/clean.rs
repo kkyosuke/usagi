@@ -345,6 +345,24 @@ fn managed_worktree_name<'a>(
 mod tests {
     use super::*;
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::{GitOutput, GitRunner};
+    use std::cell::Cell;
+
+    struct BrokenBranchInventory {
+        calls: Cell<usize>,
+    }
+
+    impl GitRunner for BrokenBranchInventory {
+        fn run(&self, _repo: &Path, _args: &[&str]) -> anyhow::Result<GitOutput> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            match call {
+                0 => Ok(ok("true")),
+                1 => Ok(ok("")),
+                _ => Err(anyhow::anyhow!("branch inventory transport failed")),
+            }
+        }
+    }
 
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -450,6 +468,16 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("broken refs")
+        );
+
+        let branch_transport = BrokenBranchInventory {
+            calls: Cell::new(0),
+        };
+        assert!(
+            observe_repository(&branch_transport, Path::new("/repo"))
+                .unwrap_err()
+                .to_string()
+                .contains("branch inventory transport failed")
         );
     }
 
