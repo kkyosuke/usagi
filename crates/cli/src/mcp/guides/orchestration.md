@@ -131,7 +131,9 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 
 ## session を作成する
 
-`session_create` は session 名を受け取り、daemon が lifecycle operation として処理する。
+`session_create` は session 名と任意の `base_ref` を受け取り、daemon が lifecycle operation として処理する。
+`base_ref` は `refs/heads/<name>` または `refs/remotes/<remote>/<name>` の fully-qualified ref で、
+省略時は workspace の `HEAD` を使う。
 optional `role` は effective role catalog の ID である。省略時の default 解決と scope 検証は daemon が行い、
 既存 session では保存済み role と同一なら冪等、不一致なら conflict になる。role instruction 本文は wire に載らない。
 

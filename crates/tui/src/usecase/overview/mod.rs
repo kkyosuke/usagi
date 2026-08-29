@@ -53,6 +53,7 @@ pub enum SessionCommand {
     Create {
         name: String,
         role_id: Option<usagi_core::domain::role::RoleId>,
+        base_ref: Option<String>,
     },
     List,
     Overview,
@@ -236,6 +237,7 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
         "create" if !rest.is_empty() => Ok(SessionCommand::Create {
             name: rest.to_owned(),
             role_id: None,
+            base_ref: None,
         }),
         "list" if rest.is_empty() => Ok(SessionCommand::List),
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
@@ -492,6 +494,7 @@ mod tests {
             Ok(SessionCommand::Create {
                 name: "feature-x".into(),
                 role_id: None,
+                base_ref: None,
             })
         );
         assert_eq!(parse_session("list"), Ok(SessionCommand::List));

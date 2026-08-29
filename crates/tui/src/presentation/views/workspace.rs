@@ -370,6 +370,7 @@ pub struct HomeProjection {
 struct CreateDraft {
     name: String,
     error: Option<String>,
+    branch: Option<String>,
 }
 
 impl From<&CreateSessionForm> for CreateDraft {
@@ -377,6 +378,7 @@ impl From<&CreateSessionForm> for CreateDraft {
         Self {
             name: form.name().to_owned(),
             error: form.error().map(clone_notice_message),
+            branch: form.selected_branch().map(|branch| branch.label.clone()),
         }
     }
 }
@@ -2751,10 +2753,22 @@ fn create_session_input_lines(
     role: Option<&str>,
 ) -> Vec<String> {
     let mut lines = new_session_input_lines(width, draft);
-    if let Some(role) = role {
-        let role_line = format!("  role: {role}  (↑/↓)");
+    if let Some(branch) = &draft.branch {
+        let branch_line = format!("  base: {branch}  (↑/↓)");
         lines.insert(
             1,
+            widgets::pad_to_width(
+                &Style::new()
+                    .dim()
+                    .paint(&widgets::clip_to_width(&branch_line, width)),
+                width,
+            ),
+        );
+    }
+    if let Some(role) = role {
+        let role_line = format!("  role: {role}  (Tab)");
+        lines.insert(
+            1 + usize::from(draft.branch.is_some()),
             widgets::pad_to_width(
                 &Style::new()
                     .dim()
@@ -2985,9 +2999,10 @@ mod tests {
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, Feedback, GARDEN_IDLE_THRESHOLD, GardenClick,
-        HomeMode, RoleChoice, Route, SafeError, SafeMessage, Selection, SessionRoleCatalog,
-        SessionRoleProjection, Target, TargetPhase, update,
+        AppEvent, AppKey, AppState, BackendEvent, BranchChoice, Feedback, GARDEN_IDLE_THRESHOLD,
+        GardenClick, HomeMode, RoleChoice, Route, SafeError, SafeMessage, Selection,
+        SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection, Target, TargetPhase,
+        update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -4317,6 +4332,7 @@ mod tests {
         let draft = CreateDraft {
             name: "feature-x".into(),
             error: None,
+            branch: None,
         };
         let lines = new_session_input_lines(30, &draft);
         assert_eq!(lines.len(), 1);
@@ -4346,7 +4362,45 @@ mod tests {
             &[],
         ));
         assert!(frame.contains("role: coder"));
-        assert!(frame.contains("↑/↓"));
+        assert!(frame.contains("Tab"));
+    }
+
+    #[test]
+    fn create_session_projection_renders_local_and_remote_base_labels() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionBranchCatalog(SessionBranchCatalog {
+                branches: vec![
+                    BranchChoice {
+                        label: "local:main".into(),
+                        refname: "refs/heads/main".into(),
+                    },
+                    BranchChoice {
+                        label: "remote:origin/main".into(),
+                        refname: "refs/remotes/origin/main".into(),
+                    },
+                ],
+                default: Some("refs/heads/main".into()),
+            })),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        let local = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(local.contains("base: local:main"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let remote = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(remote.contains("base: remote:origin/main"));
     }
 
     #[test]
@@ -4415,6 +4469,7 @@ mod tests {
         let draft = CreateDraft {
             name: "feature-x".into(),
             error: None,
+            branch: None,
         };
         let caret = new_session_input_lines(30, &draft).remove(0);
         // Affordance carries the Success SGR and never the accent one.
@@ -4437,6 +4492,7 @@ mod tests {
         let draft = CreateDraft {
             name: "ok".into(),
             error: Some("invalid character".to_string()),
+            branch: None,
         };
         let lines = new_session_input_lines(24, &draft);
         assert!(lines[0].contains("\u{1b}[1;32m+ new:\u{1b}[0m"));
@@ -4452,6 +4508,7 @@ mod tests {
         let draft = CreateDraft {
             name: "dup".into(),
             error: Some(error.to_string()),
+            branch: None,
         };
         let width = 20;
         let lines = new_session_input_lines(width, &draft);
@@ -4477,6 +4534,7 @@ mod tests {
         let draft = CreateDraft {
             name: "重複".into(),
             error: Some(error.to_string()),
+            branch: None,
         };
         let width = 12;
         let lines = new_session_input_lines(width, &draft);
@@ -4496,6 +4554,7 @@ mod tests {
         let draft = CreateDraft {
             name: String::new(),
             error: Some("invalid character; use a-z0-9-_".to_string()),
+            branch: None,
         };
         let width = 16;
         let lines = new_session_input_lines(width, &draft);
@@ -4511,6 +4570,7 @@ mod tests {
         let draft = CreateDraft {
             name: "name".into(),
             error: Some("too long".to_string()),
+            branch: None,
         };
         for width in [0usize, 1, 2, 3] {
             let lines = new_session_input_lines(width, &draft);

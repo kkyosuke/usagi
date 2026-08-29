@@ -837,6 +837,7 @@ mod tests {
     fn intent() -> SessionCreateIntent {
         SessionCreateIntent {
             name: "feature".to_owned(),
+            base_ref: None,
             profile: None,
             model: None,
             role_id: None,
