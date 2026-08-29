@@ -658,14 +658,22 @@ impl CodexProvisioner for RootCodexProvisioner {
             ),
             arguments,
         );
+        let session_git = if mode == SandboxMode::Session {
+            session_git_policy(&workspace_root, &working_directory)
+                .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
+        } else {
+            None
+        };
         let mut sandbox_roots = if mode == SandboxMode::Root {
             root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
                 .map_err(|_| CodexProvisionFailure::MaterializationFailed)?
         } else {
             let mut roots = claude_writable_roots(mode, &working_directory);
             roots.extend(
-                session_git_writable_roots(&working_directory)
-                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
+                session_git
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|policy| policy.writable_roots.iter().cloned()),
             );
             roots
         };
@@ -873,13 +881,19 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
+        let session_git = if mode == SandboxMode::Session {
+            session_git_policy(&workspace_root, &working_directory)
+                .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?
+        } else {
+            None
+        };
         let mut launch_roots = claude_writable_roots(mode, &working_directory);
-        if mode == SandboxMode::Session {
-            launch_roots.extend(
-                session_git_writable_roots(&working_directory)
-                    .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?,
-            );
-        }
+        launch_roots.extend(
+            session_git
+                .as_ref()
+                .into_iter()
+                .flat_map(|policy| policy.writable_roots.iter().cloned()),
+        );
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -975,7 +989,7 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
 ///
 /// A managed session receives its own checkout. The caller adds the narrow Git
-/// metadata roots resolved by [`session_git_writable_roots`]; a root coordinator
+/// metadata roots resolved by [`session_git_policy`]; a root coordinator
 /// receives no repository-local writable root.
 fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
@@ -996,6 +1010,11 @@ fn session_git_common_dir(workspace_root: &Path) -> Result<Option<PathBuf>, ()> 
     }
 }
 
+/// Git authority granted to one linked session worktree.
+struct SessionGitPolicy {
+    writable_roots: Vec<PathBuf>,
+}
+
 /// Resolve the narrow Git metadata set a linked session worktree needs for a
 /// normal `git add` / `git commit` transaction.
 ///
@@ -1005,11 +1024,25 @@ fn session_git_common_dir(workspace_root: &Path) -> Result<Option<PathBuf>, ()> 
 /// therefore makes file edits work while every commit fails with `EPERM`.
 /// Granting the whole common directory would also expose `main`, remotes and
 /// repository configuration, so the session receives only its private admin
-/// directory, the content-addressed object store, and the `usagi/*` branch ref
-/// and reflog namespaces.
-fn session_git_writable_roots(worktree: &Path) -> Result<Vec<PathBuf>, ()> {
+/// directory, the shared content-addressed object store, and the `usagi/*`
+/// branch ref / reflog namespaces. The mutable `.git` pointer is not authority:
+/// both its common directory and its private-admin backlink must match the
+/// daemon-selected workspace/worktree pair before any external path is granted.
+fn session_git_policy(
+    workspace_root: &Path,
+    worktree: &Path,
+) -> Result<Option<SessionGitPolicy>, ()> {
     let marker = worktree.join(".git");
-    let marker_metadata = std::fs::symlink_metadata(&marker).map_err(|_| ())?;
+    let marker_metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return match std::fs::symlink_metadata(workspace_root.join(".git")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                _ => Err(()),
+            };
+        }
+        Err(_) => return Err(()),
+    };
     // Managed sessions are linked worktrees. Refuse a standalone repository:
     // its `.git` directory is the whole authority and is too broad a grant.
     if !marker_metadata.file_type().is_file() {
@@ -1017,16 +1050,29 @@ fn session_git_writable_roots(worktree: &Path) -> Result<Vec<PathBuf>, ()> {
     }
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
     let common = session_git_common_dir(worktree)?.ok_or(())?;
-    let roots = [
+    let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
+    if common != expected_common {
+        return Err(());
+    }
+    let worktrees = common.join("worktrees").canonicalize().map_err(|_| ())?;
+    if git_dir.parent() != Some(worktrees.as_path()) {
+        return Err(());
+    }
+    let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
+    if backlink != marker.canonicalize().map_err(|_| ())? {
+        return Err(());
+    }
+
+    let writable_roots = vec![
         git_dir,
         common.join("objects"),
         common.join("refs/heads/usagi"),
         common.join("logs/refs/heads/usagi"),
     ];
-    for root in &roots {
+    for root in &writable_roots {
         validate_owned_directory(root).map_err(|_| ())?;
     }
-    Ok(roots.into_iter().collect())
+    Ok(Some(SessionGitPolicy { writable_roots }))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
@@ -18851,7 +18897,7 @@ instructions = "{instructions}"
     }
 
     #[test]
-    fn session_git_roots_include_commit_authority_without_main_or_config() {
+    fn session_git_policy_anchors_authority_to_the_registered_worktree() {
         std::fs::create_dir_all("target").unwrap();
         let fixture = tempfile::tempdir_in("target").unwrap();
         let common = fixture.path().join("repo/.git");
@@ -18872,10 +18918,17 @@ instructions = "{instructions}"
         )
         .unwrap();
         std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            git_dir.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
 
-        let roots = session_git_writable_roots(&worktree).unwrap();
+        let policy = session_git_policy(&fixture.path().join("repo"), &worktree)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            roots,
+            policy.writable_roots,
             [
                 git_dir.canonicalize().unwrap(),
                 common.join("objects").canonicalize().unwrap(),
@@ -18883,13 +18936,45 @@ instructions = "{instructions}"
                 common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
             ]
         );
-        assert!(!roots.contains(&common.canonicalize().unwrap()));
-        assert!(!roots.contains(&common.join("refs/heads/main")));
-        assert!(!roots.contains(&common.join("config")));
+        assert!(
+            !policy
+                .writable_roots
+                .contains(&common.canonicalize().unwrap())
+        );
+        assert!(
+            !policy
+                .writable_roots
+                .contains(&common.join("refs/heads/main"))
+        );
+        assert!(!policy.writable_roots.contains(&common.join("config")));
 
         let standalone = tempfile::tempdir_in("target").unwrap();
         std::fs::create_dir(standalone.path().join(".git")).unwrap();
-        assert!(session_git_writable_roots(standalone.path()).is_err());
+        assert!(session_git_policy(standalone.path(), standalone.path()).is_err());
+
+        let plain_workspace = tempfile::tempdir_in("target").unwrap();
+        let plain_session = plain_workspace.path().join(".usagi/sessions/plain");
+        std::fs::create_dir_all(&plain_session).unwrap();
+        assert!(
+            session_git_policy(plain_workspace.path(), &plain_session)
+                .unwrap()
+                .is_none()
+        );
+
+        let foreign = fixture.path().join("foreign/.git/worktrees/session");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            foreign.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", foreign.display()),
+        )
+        .unwrap();
+        assert!(session_git_policy(&fixture.path().join("repo"), &worktree).is_err());
     }
 
     #[test]

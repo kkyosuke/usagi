@@ -81,8 +81,8 @@ The documentation index is [document/README.md](../document/README.md).
 ### 4. PR を作成する
 
 ```bash
-git push -u origin <branch>
-gh pr create --draft --title "<type>: <説明>" --body "<概要>"
+git push origin HEAD:refs/heads/<branch>
+gh pr create --head <branch> --draft --title "<type>: <説明>" --body "<概要>"
 # CI（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になったら:
 gh pr ready <number>
 ```
@@ -112,6 +112,6 @@ gh pr ready <number>
 変更によって PR のスコープが変わった場合は、タイトルと本文を実態に合わせて更新する。
 
 ```bash
-git push
+git push origin HEAD:refs/heads/<branch>
 gh pr edit <number> --title "<新しいタイトル>" --body "<更新した概要>"
 ```
