@@ -1725,15 +1725,9 @@ fn validate_acyclic_resume_lineage(
 ) -> Result<(), RuntimeSnapshotError> {
     let mut acyclic = std::collections::BTreeSet::new();
     for record in records.values() {
-        if acyclic.contains(&record.runtime.agent_runtime_id) {
-            continue;
-        }
         let mut seen = std::collections::BTreeSet::new();
         let mut cursor = record;
-        loop {
-            if acyclic.contains(&cursor.runtime.agent_runtime_id) {
-                break;
-            }
+        while !acyclic.contains(&cursor.runtime.agent_runtime_id) {
             if !seen.insert(cursor.runtime.agent_runtime_id) {
                 return Err(RuntimeSnapshotError::ResumeRelation);
             }
