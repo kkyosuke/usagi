@@ -1920,8 +1920,8 @@ pub enum AppEvent {
     Input(LiveInput),
     /// The runtime's current live-pane availability, sampled on every event.
     /// The reducer treats it as a *level* and reacts only on the edge: a
-    /// live→non-live transition arms the one-shot Ctrl-C grace and restores the
-    /// forced Closeup action modal, while a non-live→live transition drops it. A
+    /// live→non-live transition arms the one-shot Ctrl-C grace, while a
+    /// non-live→live transition drops an unforced Closeup action modal. A
     /// re-sampled level that has not changed is inert, so an overlay opened in
     /// the same event batch (quit confirmation, PR / Preview, notes) and the
     /// Ctrl-C grace both survive the next sample.
@@ -1930,15 +1930,14 @@ pub enum AppEvent {
     /// the pane registry.
     ///
     /// Like [`Self::LivePaneAvailability`] this is a level, and only its edge
-    /// matters. Gaining a tab steps the auto-opened Closeup action launcher
-    /// aside so a non-live tab — an interrupted Agent history above all — can be
-    /// selected and acted on; losing the last tab restores the launcher. A
-    /// forced action modal and every other overlay are left untouched.
+    /// matters. A non-live tab — an interrupted Agent history above all — can be
+    /// selected and acted on without changing overlay state. A forced action
+    /// modal and every other overlay are left untouched.
     ///
     /// `error` is the pane's safe failure message (set when a launch failed
-    /// rather than the pane exiting cleanly). When the edge restores the
-    /// launcher, a `Some` value becomes the reopened Closeup's notice so the
-    /// user sees why the pane never came up instead of a silent bounce back.
+    /// rather than the pane exiting cleanly). When the last tab disappears, a
+    /// `Some` value becomes the empty Closeup's notice so the user sees why the
+    /// pane never came up instead of a silent bounce back.
     PaneTabAvailability {
         available: bool,
         error: Option<String>,
@@ -3052,18 +3051,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             if state.workspace_drawer_open() {
                 return Vec::new();
             }
-            if matches!(state.route, Route::Home(HomeMode::Closeup)) {
-                if has_live_pane {
-                    if !state.closeup_action_forced {
-                        state.overlay = None;
-                    }
-                } else if !state.has_pane_tab {
-                    // Losing the last *live* pane is not an empty Closeup: an
-                    // interrupted Agent history tab still owns the strip and
-                    // must keep its `Ctrl-O` pane controls. The runtime samples
-                    // the tab level before this one, so it is already current.
-                    state.overlay = Some(Overlay::Closeup);
-                }
+            if matches!(state.route, Route::Home(HomeMode::Closeup))
+                && has_live_pane
+                && !state.closeup_action_forced
+            {
+                state.overlay = None;
             }
             Vec::new()
         }
@@ -3088,10 +3080,9 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     state.overlay = None;
                 }
             } else if !state.has_live_pane && state.overlay.is_none() {
-                state.overlay = Some(Overlay::Closeup);
                 // A pane that failed to launch (rather than exiting cleanly)
-                // carries a safe reason; surface it so reopening the launcher
-                // is not indistinguishable from a no-op Enter.
+                // carries a safe reason; retain it on the empty Closeup so the
+                // failed shortcut is not indistinguishable from a no-op.
                 if let Some(message) = error {
                     state.notice = Some(Notice::new(message));
                 }
@@ -3269,13 +3260,8 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                     state.selected = Selection::Target(Target::Session(created));
                     state.active = Some(created);
                     state.route = Route::Home(HomeMode::Closeup);
-                    // Match the ordinary session-activation path: a newly
-                    // created session has no live pane yet, so its Closeup
-                    // action surface must own Ctrl-C. Without it, the bare
-                    // Closeup route treats Ctrl-C as a request to detach the
-                    // whole TUI.
                     state.closeup_action_forced = false;
-                    state.overlay = closeup_launcher_on_entry(state);
+                    state.overlay = None;
                 }
             } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
                 && state.overlay.is_none()
@@ -4260,6 +4246,23 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs | AppKey::Char('p') => open_prs(state),
         AppKey::OpenPreview | AppKey::Char('v') => open_preview(state),
+        AppKey::Char('a')
+            if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
+        {
+            submit_empty_closeup_shortcut(state, "agent")
+        }
+        AppKey::Char('t')
+            if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
+        {
+            submit_empty_closeup_shortcut(state, "terminal")
+        }
+        AppKey::Enter
+            if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
+        {
+            state.overlay = Some(Overlay::Closeup);
+            state.closeup_action_forced = false;
+            Vec::new()
+        }
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
         AppKey::CtrlN
         | AppKey::CtrlP
@@ -5014,6 +5017,15 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
     effect.into_iter().collect()
 }
 
+/// Dispatch one primary action from an empty Closeup without making the action
+/// modal its default surface. The existing command boundary remains the single
+/// owner of validation, notices, and effect construction.
+fn submit_empty_closeup_shortcut(state: &mut AppState, input: &str) -> Vec<Effect> {
+    state.overlay = Some(Overlay::Closeup);
+    state.closeup_action_forced = false;
+    submit_closeup(state, input)
+}
+
 /// Normalize the two supported terminal forms at the controller boundary.
 /// Empty input is intentionally `open`: it reuses an exact daemon-owned
 /// terminal when one exists and launches only when inventory is empty.
@@ -5161,21 +5173,6 @@ fn visit_session(state: &mut AppState, session: SessionId) -> Vec<Effect> {
     activate_selected(state)
 }
 
-/// Whether entering Closeup must open the action launcher.
-///
-/// The launcher is the *empty* Closeup surface, so it opens only for a target
-/// that owns no tab at all. A tab-owning target — including one whose only tabs
-/// are interrupted Agent history — lands on its tab strip so `Ctrl-O` pane
-/// controls stay reachable (see [`AppEvent::PaneTabAvailability`]).
-///
-/// Both levels belong to the target that was active before this activation. That
-/// is sound because they disagree with the newly activated target's own levels
-/// only when an edge exists, and the runtime's post-event sample then repairs the
-/// decision through the availability handlers.
-fn closeup_launcher_on_entry(state: &AppState) -> Option<Overlay> {
-    (!state.has_live_pane && !state.has_pane_tab).then_some(Overlay::Closeup)
-}
-
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     match state.selected {
         Selection::Target(Target::Session(session))
@@ -5202,7 +5199,7 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
             state.active = Some(session);
             state.route = Route::Home(HomeMode::Closeup);
             state.closeup_action_forced = false;
-            state.overlay = closeup_launcher_on_entry(state);
+            state.overlay = None;
             Vec::new()
         }
         // Root and stale session selections are not Home rows and cannot open a
@@ -5587,7 +5584,7 @@ mod tests {
         );
         assert_eq!(state.active(), Some(session));
         assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.overlay(), None);
     }
 
     #[test]
@@ -7115,7 +7112,7 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
         assert!(state.ctrl_c_grace());
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.overlay(), None);
         let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
         assert!(state.ctrl_c_grace());
     }
@@ -7162,11 +7159,13 @@ mod tests {
     fn closeup_action_modal_returns_to_closeup_on_escape_and_ctrl_c() {
         let (workspace, session, _) = ids();
         for exit_key in [AppKey::Escape, AppKey::CtrlC] {
-            // Enter Closeup on a session with no live pane: the action modal is
-            // the base surface.
+            // Enter Closeup on a session with no live pane, then explicitly
+            // open its action modal.
             let mut state = AppState::home(workspace, vec![session]);
             let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
             assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+            assert_eq!(state.overlay(), None);
+            let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
             assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
             // Ctrl-Q keeps the modal, matching the other overlays' swallow.
@@ -7182,6 +7181,43 @@ mod tests {
             );
             assert_eq!(state.overlay(), None, "{exit_key:?}");
         }
+    }
+
+    #[test]
+    fn empty_closeup_uses_primary_shortcuts_and_enter_opens_actions() {
+        let (workspace, session, _) = ids();
+        let closeup = || {
+            let mut state = AppState::home(workspace, vec![session]);
+            let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+            assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+            assert_eq!(state.overlay(), None);
+            state
+        };
+
+        let mut agent = closeup();
+        assert!(matches!(
+            update(&mut agent, AppEvent::Key(AppKey::Char('a'))).as_slice(),
+            [Effect::LaunchAgent {
+                session: Some(actual),
+                ..
+            }] if *actual == session
+        ));
+        assert_eq!(agent.overlay(), None);
+
+        let mut terminal = closeup();
+        assert!(matches!(
+            update(&mut terminal, AppEvent::Key(AppKey::Char('t'))).as_slice(),
+            [Effect::OpenTerminal {
+                target: Target::Session(actual),
+                arguments,
+                ..
+            }] if *actual == session && arguments == "open"
+        ));
+        assert_eq!(terminal.overlay(), None);
+
+        let mut actions = closeup();
+        assert!(update(&mut actions, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(actions.overlay(), Some(Overlay::Closeup));
     }
 
     /// Even when the action modal is forced over a live pane, Escape and Ctrl-C
@@ -7214,18 +7250,16 @@ mod tests {
         }
     }
 
-    /// A pane that never went live and loses its only (pending) tab restores
-    /// the Closeup launcher, matching a clean exit. Unlike a clean exit, a
-    /// failed launch carries a safe reason: it must surface as the reopened
-    /// launcher's notice instead of bouncing back silently.
+    /// A pane that never went live and loses its only (pending) tab restores the
+    /// empty Closeup. A failed launch also carries a safe reason there.
     #[test]
-    fn failed_pane_launch_restores_the_launcher_with_a_notice() {
+    fn failed_pane_launch_restores_empty_closeup_with_a_notice() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.overlay(), None);
 
-        // The pending tab appears: the launcher steps aside.
+        // The pending tab appears without changing overlay state.
         let _ = update(
             &mut state,
             AppEvent::PaneTabAvailability {
@@ -7244,17 +7278,16 @@ mod tests {
                 error: Some("that agent CLI is not installed".to_owned()),
             },
         );
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.overlay(), None);
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("that agent CLI is not installed")
         );
     }
 
-    /// A clean pane exit (no safe reason attached) restores the launcher
-    /// exactly as before: silently, with no synthesized notice.
+    /// A clean pane exit restores the empty Closeup without a synthesized notice.
     #[test]
-    fn clean_pane_exit_restores_the_launcher_without_a_notice() {
+    fn clean_pane_exit_restores_empty_closeup_without_a_notice() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
@@ -7275,7 +7308,7 @@ mod tests {
                 error: None,
             },
         );
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.overlay(), None);
         assert!(state.notice().is_none());
     }
 
@@ -7347,12 +7380,6 @@ mod tests {
             state.selected(),
             Selection::Target(Target::Session(created))
         );
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
-
-        // A just-created session has no live pane. Ctrl-C closes only its action
-        // modal and returns to Closeup, never detaching the entire TUI.
-        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
         assert_eq!(state.overlay(), None);
 
         let effects = update(
@@ -9211,9 +9238,8 @@ mod tests {
         assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
         assert_eq!(state.active(), Some(second));
         assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
-        // The garden is gone and the Closeup that opened is the ordinary one:
-        // a target owning no pane yet lands on its action launcher.
-        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        // The garden is gone and the tabless Closeup opens on its empty pane.
+        assert_eq!(state.overlay(), None);
     }
 
     /// Everything else in the garden is a wake-up: consume the press, restore

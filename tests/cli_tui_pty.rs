@@ -922,6 +922,8 @@ fn submit_closeup_command(
     command: &str,
 ) {
     send(master, b"\r");
+    wait_for_screen_since(output, baseline, "[Closeup] active pane");
+    send(master, b"\r");
     wait_for_screen_since(output, baseline, "Type a command:");
     send(master, format!("{command}\r").as_bytes());
     wait_for_screen_absent_since(output, baseline, "Type a command:");

@@ -454,15 +454,15 @@ scroll や daemon snapshot によって同じセルの session が入れ替わ�
 結合しない。modal と inline 作成中は背景の sidebar click を受け取らず、その前後の click も結合しない。daemon
 snapshot で session 一覧を置き換えた場合も、置換前後の click は同じ `SessionId` が残っていても結合しない。
 
-Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
-前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` がすべての入力を先に分類する。pending な `Ctrl-O`
+Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、空の pane を
+表示する。この状態では `a` が Agent、`t` が Terminal を直接起動し、`Enter` が action modal を開く。tab が 1 つ以上ある Closeup は `LiveInputClassifier` がすべての入力を先に分類する。pending な `Ctrl-O`
 prefix（leader）が次の入力を所有し、leader が無い場合は `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を control chord として解決する。
 それ以外の非 prefix 入力は、修飾キーを含めて live terminal への passthrough として扱う。leader の follow-up は下表のアクションに
 解決し、それ以外は消費する。tab 切替（`Ctrl-O` / `Ctrl-A` / `Ctrl-N` / `Ctrl-P`）は reducer が所有するが、scroll・tab close・copy は
 reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
 
-controller reducer path も同じ投影を使う。**tab を 1 枚も持たない** target の Closeup への遷移だけが action overlay を
-自動で開き、pane が到着すると通常の tab surface へ戻る。live PTY を持たない tab（interrupted Agent history）だけを
+controller reducer path も同じ投影を使う。**tab を 1 枚も持たない** target の Closeup への遷移は overlay を
+開かず、空の pane surface へ着地する。live PTY を持たない tab（interrupted Agent history）だけを
 持つ target も tab surface へ着地するので、`Ctrl-O` の pane control はそのまま届く。最後の live tab が exit しても
 tab が残っていれば action overlay へは戻らない。runtime は `PaneTabAvailability` を `LivePaneAvailability` より先に
 sample するため、live pane を失った時点の判定は現在の tab 有無を見る。adapter は prefix の next / previous 結果を
@@ -1331,15 +1331,15 @@ attach し、選択外または background target の tab は background のま�
 右ペインは session 名の右に tab を Chrome 風の chip として描き、その直下に active marker を置く。前面の Closeup では表示中の chip をクリックして tab を切り替えられる。click は描画と同じ表示幅・clipping で解決し、表示 index を pane reducer が所有する stable identity に変換して選択する。chip の表示順・label は表示専用であり、選択は pending / document の `OperationId` または terminal live の完全な `TerminalRef` から投影する。
 幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は固定幅のまま tab 名の文字ごとに
 低速の highlight wave を流す。
-tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. Enter starts one.` の案内を、それぞれ
+tab が無い target は、灰色の静的うさぎと `a: agent / t: terminal / Enter: actions` の案内を、それぞれ
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
-Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。ここでの
+Closeup action modal の表示と input owner は explicit overlay と forced action state から導く。ここでの
 「tab 有無」は pending・live・document のいずれの tab も 1 枚として数える（live pane の有無ではない）ため、起動待ちの
-pending tab がある間は action modal を自動表示せず、その wave を覆わない。Switch で
+pending tab がある間も action modal を自動表示せず、その wave を覆わない。Switch で
 `Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が 1 枚も無い
-Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
+Closeup は空の pane を表示し、`a` / `t` で直接起動し、`Enter` で action modal を開く。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
 を再び出すのは `Ctrl-O Ctrl-A` だけである。action modal が前面にある間の `Esc` / `Ctrl-C` は、tab の有無や forced
 表示か base surface かに依らず、modal だけを閉じて背面の Closeup へ戻る。Switch へ戻る操作は
@@ -1785,7 +1785,7 @@ runtime bridge を確認する手順である。profile の install 状態、認
 | Agent が stdout を出力する | 選択中 Agent tab の pane に出力が表示される |
 | 選択中 Agent tab で入力し、端末を resize する | 入力は一度だけ daemon に届き、geometry 変更時の resize は成功するまで再試行される |
 | daemon を切断して再接続する | process を作り直さず、inventory で検証済みの選択 tab だけが attach/resync される |
-| profile 未準備・daemon 不通・Agent exit を発生させる | pending tab は消え、Closeup の action launcher が再度開く。起動が失敗した場合（Agent の正常終了と異なり）は、その safe reason が再度開いた launcher の notice として表示される |
+| profile 未準備・daemon 不通・Agent exit を発生させる | pending tab は消え、Closeup の空 pane に戻る。起動が失敗した場合（Agent の正常終了と異なり）は、その safe reason を notice として表示する |
 
 ## workspace open 時の pane 復元
 
