@@ -1093,6 +1093,14 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `X`、Closeup の `close -f`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。`x` は送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
 | Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
 
+daemon 起動時は canonical な `.usagi/sessions/` 直下も走査し、lifecycle state に所有者がいない物理 entry を
+`Failed` / `Integrity` の recovery row として採用する。採用は attach authority を与えず、actual local branch、dirty、
+workspace root の現在の `HEAD` に未統合な commit 件数だけを safe failure summary に投影する（status の filename と Git stderr は
+投影しない）。actual branch が `usagi/` namespace の local branchで、worktree が clean、未統合 commit が 0 件の場合だけ
+通常の remove を受理し、actual branch と規約上の `usagi/<session-name>` branch を Git の安全な `-d` で回収する。
+dirty、未統合、detached、`usagi/` 外 branch、診断不能、linked worktree でない entry は remove のたびに再診断して拒否し、
+`force` でも保護を解除しない。利用者は変更を commit/stash し、branch を PR で基点へ統合してから再実行する。
+
 daemon 起動時にも session lifecycle の全 `SessionId` と Agent inventory を照合する。session record が既に無い
 Agent は旧 teardown が残した orphan として、terminal state の保存による capacity claim 解放を先行させてから durable
 inventory と retention ledger から回収する。したがって record 除去と daemon restart を繰り返しても削除済み session の
