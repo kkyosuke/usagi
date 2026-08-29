@@ -3446,11 +3446,16 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(runtime.state().director_drawer_open());
-        assert_eq!(runtime.focused_terminal(), Some(root_agent));
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(runtime.state().root_terminal_drawer_open());
         assert!(!runtime.state().director_drawer_open());
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(runtime.state().director_drawer_open());
+        assert!(!runtime.state().root_terminal_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_agent));
     }
 
     #[test]
