@@ -238,6 +238,7 @@ mod tests {
             modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
             pr_auto_open: crate::domain::settings::PrAutoOpen::Always,
             default_model: crate::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
