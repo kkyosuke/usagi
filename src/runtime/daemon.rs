@@ -18905,6 +18905,7 @@ instructions = "{instructions}"
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One Git authority contract, including every fail-closed edge.
     fn session_git_policy_anchors_authority_to_the_registered_worktree() {
         std::fs::create_dir_all("target").unwrap();
         let fixture = tempfile::tempdir_in("target").unwrap();
@@ -18976,6 +18977,52 @@ instructions = "{instructions}"
             session_git_policy(plain_workspace.path(), &plain_session)
                 .unwrap()
                 .is_none()
+        );
+
+        let missing_marker = fixture.path().join("repo/.usagi/sessions/missing");
+        std::fs::create_dir_all(&missing_marker).unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &missing_marker).is_err(),
+            "a Git workspace cannot silently admit a session without its marker"
+        );
+        let not_a_directory = fixture.path().join("repo/not-a-directory");
+        std::fs::write(&not_a_directory, "fixture").unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &not_a_directory).is_err(),
+            "metadata errors other than absence remain admission failures"
+        );
+
+        let indirect = common.join("indirect/session");
+        std::fs::create_dir_all(&indirect).unwrap();
+        std::fs::write(indirect.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            indirect.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", indirect.display()),
+        )
+        .unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &worktree).is_err(),
+            "the private admin directory must be a direct worktrees child"
+        );
+
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            git_dir.join("gitdir"),
+            format!("{}\n", standalone.path().join(".git").display()),
+        )
+        .unwrap();
+        assert!(
+            session_git_policy(&fixture.path().join("repo"), &worktree).is_err(),
+            "the private admin backlink must name the selected marker"
         );
 
         let foreign = fixture.path().join("foreign/.git/worktrees/session");
