@@ -1070,6 +1070,7 @@ impl SessionRuntime {
             .map(serde_json::from_value::<RoleId>)
             .transpose()
             .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+        let parent_session_id = parent_session_id(payload)?;
         // Re-read both catalog layers at the daemon admission boundary. The
         // registered repository root, never the target session worktree, is
         // authoritative for workspace policy.
@@ -1101,7 +1102,7 @@ impl SessionRuntime {
                 .resolve(requested_role.as_ref(), RoleScope::Session)
                 .map_err(|error| SessionRuntimeError::InvalidRole(error.to_string()))?
         };
-        let semantic_key = create_semantic_key(origin, &name, role_id.as_ref());
+        let semantic_key = create_semantic_key(origin, &name, role_id.as_ref(), parent_session_id);
         if let Some(existing) = before
             .operations
             .iter()
@@ -1150,6 +1151,7 @@ impl SessionRuntime {
                 LifecycleEvent::ReserveCreate {
                     name: name.clone(),
                     role_id,
+                    parent_session_id,
                     operation,
                 },
                 Utc::now(),
@@ -1657,6 +1659,16 @@ fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
     Ok(name.to_owned())
 }
 
+fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntimeError> {
+    payload
+        .get("parent_session_id")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)
+}
+
 fn validate_teardown_target(
     io: &dyn SessionWorktreeIo,
     teardown: &PendingTeardown,
@@ -1798,12 +1810,18 @@ fn semantic_key(action: SessionAction, name: &str) -> String {
 /// has to tell it from a plain `session_create` that is complete on its own.
 /// A direct create without a role keeps the `create:<name>` form earlier daemons
 /// wrote, so existing journals replay unchanged.
-fn create_semantic_key(origin: CreateOrigin, name: &str, role_id: Option<&RoleId>) -> String {
+fn create_semantic_key(
+    origin: CreateOrigin,
+    name: &str,
+    role_id: Option<&RoleId>,
+    parent_session_id: Option<SessionId>,
+) -> String {
     let action = semantic_key(origin.semantic_action(), name);
-    role_id.map_or_else(
+    let action = role_id.map_or_else(
         || action.clone(),
         |role_id| format!("{action}:{}", role_id.as_str()),
-    )
+    );
+    parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"))
 }
 
 /// The journaled identity of one removal: its origin, session name, and request
@@ -2939,6 +2957,38 @@ instructions = "code"
     }
 
     #[test]
+    fn existing_session_create_never_reparents_the_session() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        let original_parent = SessionId::new();
+        let different_parent = SessionId::new();
+        let created = runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "parent_session_id":original_parent}),
+            )
+            .unwrap();
+        assert_eq!(
+            created.body["sessions"][0]["parent_session_id"],
+            json!(original_parent)
+        );
+
+        let existing = runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({"name":"one", "parent_session_id":different_parent}),
+            )
+            .unwrap();
+
+        assert_eq!(existing.body["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            existing.body["sessions"][0]["parent_session_id"],
+            json!(original_parent)
+        );
+    }
+
+    #[test]
     fn catalog_default_assignment_is_stable_and_conflicting_role_is_rejected() {
         let (tmp, mut runtime) = runtime(FakeGit::ok());
         std::fs::write(
@@ -3364,6 +3414,7 @@ instructions = "direct"
                 LifecycleEvent::ReserveCreate {
                     name: "interrupted".into(),
                     role_id: None,
+                    parent_session_id: None,
                     operation: journal(
                         operation,
                         runtime.generation,

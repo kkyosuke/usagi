@@ -465,6 +465,15 @@ fn production_dispatch_uses_the_trusted_root_before_and_after_session_creation()
 
     let created = mcp.tool("session_create", &json!({"name":"root-policy-target"}));
     assert!(created.get("error").is_none(), "{created}");
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let created_by_agent = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "root-policy-target")
+        .unwrap();
+    assert_eq!(created_by_agent["parent_session_name"], "mcp-caller");
+    assert_eq!(created_by_agent["organization_depth"], 2);
     let dispatched = mcp.tool(
         "session_dispatch",
         &json!({
@@ -1614,6 +1623,51 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn production_dispatch_into_an_existing_session_does_not_reparent_it() {
+    let mut mcp = McpHarness::start();
+    write_session_role_catalog(&mcp, "coder", "Dispatch coder", "DISPATCH_ROLE_SECRET");
+    let created = mcp.tool(
+        "session_create",
+        &json!({"name":"existing-top-level", "role":"coder"}),
+    );
+    assert!(created.get("error").is_none(), "{created}");
+
+    let caller_credential = mcp.launch_caller();
+    mcp.restart_with_credential(&caller_credential);
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+exit 0
+"#,
+    );
+    let dispatched = mcp.tool(
+        "session_dispatch",
+        &json!({
+            "session":{"name":"existing-top-level", "role":"coder"},
+            "agent":{"runtime":"codex","model":"fixture-codex"},
+            "prompt":"work in an existing top-level session"
+        }),
+    );
+    assert!(dispatched.get("error").is_none(), "{dispatched}");
+
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let existing = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "existing-top-level")
+        .unwrap();
+    assert!(existing["parent_session_id"].is_null());
+    assert!(existing["parent_session_name"].is_null());
+    assert_eq!(existing["organization_depth"], 1);
+    assert_eq!(
+        existing["organization_path"],
+        json!(["Director", "existing-top-level"])
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One process-spanning dispatch keeps completion and argv assertions together.
 fn production_dispatch_worker_complete_reaches_the_caller_inbox() {
     let mut mcp = McpHarness::start();
@@ -1674,6 +1728,21 @@ printf '%s\n%s\n%s\n' \
         worker["organization_path"],
         json!(["Director", "mcp-caller", "mcp-worker"])
     );
+    let lifecycle: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap(),
+    )
+    .unwrap();
+    let durable_sessions = lifecycle["state"]["sessions"].as_array().unwrap();
+    let caller_id = durable_sessions
+        .iter()
+        .find(|session| session["name"] == "mcp-caller")
+        .unwrap()["session_id"]
+        .clone();
+    let durable_worker = durable_sessions
+        .iter()
+        .find(|session| session["name"] == "mcp-worker")
+        .unwrap();
+    assert_eq!(durable_worker["parent_session_id"], caller_id);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let message = loop {
