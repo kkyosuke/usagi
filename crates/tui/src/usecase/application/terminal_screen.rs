@@ -335,6 +335,12 @@ impl TerminalScreen {
         self.screen.cells_with_scrollback()
     }
 
+    /// Auto-wrap markers aligned with [`Self::cells_with_scrollback`].
+    #[must_use]
+    pub fn soft_wraps_with_scrollback(&self) -> Vec<bool> {
+        self.screen.soft_wraps_with_scrollback()
+    }
+
     fn retained_row_count(&self) -> usize {
         self.screen.scrollback_len() + self.screen.grid().len()
     }
@@ -378,12 +384,10 @@ fn row_has_content(row: &[Cell]) -> bool {
         .any(|cell| !cell.continuation() && cell.ch() != ' ')
 }
 
-// Keep the ambiguity of terminal_link's wrap reconstruction exactly aligned:
-// a wide glyph whose continuation occupies the last cell is treated as blank
-// in the expanded ANSI-free grid and therefore does not imply wrapping.
+// The parser records auto-wrap separately from cell contents, so a hard line
+// ending exactly at the terminal width is not mistaken for a continuation.
 fn row_wraps(row: &[Cell]) -> bool {
-    row.last()
-        .is_some_and(|cell| !cell.continuation() && cell.ch() != ' ')
+    row.iter().any(Cell::wrapped)
 }
 
 fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
@@ -572,7 +576,9 @@ mod tests {
         // The window renderer must scan back to the logical-line boundary so
         // underline cells and global row coordinates match the full reference.
         let start = 2;
-        let end = full.len().saturating_sub(1);
+        // Stop inside the wrapped URL too, so link scanning must expand both
+        // before and after the requested window.
+        let end = start + 1;
         assert_eq!(
             screen.rows_with_scrollback_window(start, end, true),
             full[start..end]
@@ -580,7 +586,7 @@ mod tests {
         let count = screen.rows_with_scrollback_count(true);
         let (scan_start, scan_end) = screen.logical_scan_range(start, end, count);
         assert!(scan_start < start, "wrapped predecessor was not scanned");
-        assert!(scan_end >= end);
+        assert!(scan_end > end, "wrapped successor was not scanned");
     }
 
     #[test]

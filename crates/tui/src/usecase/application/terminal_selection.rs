@@ -21,16 +21,29 @@ pub struct TerminalSelection {
     anchor: TerminalPoint,
     focus: TerminalPoint,
     viewport: Vec<String>,
+    soft_wraps: Vec<bool>,
 }
 
 impl TerminalSelection {
     /// Starts a selection from the current visible terminal grid.
     #[must_use]
     pub fn begin(viewport: Vec<String>, anchor: TerminalPoint) -> Self {
+        Self::begin_with_wraps(viewport, Vec::new(), anchor)
+    }
+
+    /// Starts a selection with one terminal auto-wrap marker per physical row.
+    /// Missing markers are treated as hard line boundaries.
+    #[must_use]
+    pub fn begin_with_wraps(
+        viewport: Vec<String>,
+        soft_wraps: Vec<bool>,
+        anchor: TerminalPoint,
+    ) -> Self {
         Self {
             anchor,
             focus: anchor,
             viewport,
+            soft_wraps,
         }
     }
 
@@ -56,7 +69,7 @@ impl TerminalSelection {
     #[must_use]
     pub fn text(&self) -> String {
         let (start, end) = ordered(self.anchor, self.focus);
-        (start.row..=end.row)
+        let rows = (start.row..=end.row)
             .filter_map(|row| self.viewport.get(row).map(|line| (row, line)))
             .map(|(row, line)| {
                 let first = if row == start.row { start.column } else { 0 };
@@ -67,8 +80,21 @@ impl TerminalSelection {
                 };
                 extract_columns(line, first, last)
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect::<Vec<_>>();
+        let mut text = String::new();
+        for (offset, row) in rows.iter().enumerate() {
+            if offset > 0
+                && !self
+                    .soft_wraps
+                    .get(start.row + offset - 1)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                text.push('\n');
+            }
+            text.push_str(row);
+        }
+        text
     }
 }
 
@@ -150,6 +176,17 @@ mod tests {
             TerminalSelection::begin(vec!["before".into()], TerminalPoint { row: 0, column: 0 });
         selection.extend(TerminalPoint { row: 0, column: 5 });
         assert_eq!(selection.text(), "before");
+    }
+
+    #[test]
+    fn omits_only_auto_wrap_boundaries_from_copied_text() {
+        let mut selection = TerminalSelection::begin_with_wraps(
+            vec!["wrapped ".into(), "text    ".into(), "next    ".into()],
+            vec![true, false, false],
+            TerminalPoint { row: 0, column: 0 },
+        );
+        selection.extend(TerminalPoint { row: 2, column: 3 });
+        assert_eq!(selection.text(), "wrapped text    \nnext");
     }
 
     #[test]
