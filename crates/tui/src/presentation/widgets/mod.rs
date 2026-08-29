@@ -12,6 +12,7 @@
 //! プリミティブである。
 
 pub mod agent_status;
+pub mod button;
 pub mod garden;
 pub mod icon;
 pub mod live_terminal;

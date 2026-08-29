@@ -25,7 +25,7 @@ use crate::presentation::widgets::{self, TextInput, modal::ConfirmationModal};
 const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
 const FOOTER: &str =
-    "↑↓ select / type filter / Ctrl-D unregister / Enter open / Esc back / Ctrl-C quit";
+    "↑↓ select / Tab mode / Space mark / Enter open / Ctrl-D unregister / Esc back";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
@@ -410,6 +410,11 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
 
     let mut lines = vec![
         indent(&Role::Success.style().bold().paint("Workspaces")),
+        indent(&Style::new().dim().paint(if open.is_unite() {
+            "Mode: Unite — Space marks project tabs"
+        } else {
+            "Mode: Single — Tab enables multiple project tabs"
+        })),
         String::new(),
     ];
 
@@ -770,11 +775,12 @@ mod tests {
     }
 
     #[test]
-    fn footer_advertises_unregister_without_stale_unite_or_cleanup_hints() {
+    fn footer_advertises_unregister_and_multi_project_selection() {
         let footer = rendered(&Open::new(vec![workspace("alpha", 1)]));
 
         assert!(footer.contains("Ctrl-D unregister"));
-        assert!(!footer.contains("Tab Unite"));
+        assert!(footer.contains("Tab mode"));
+        assert!(footer.contains("Space mark"));
         assert!(!footer.contains("C cleanup"));
     }
 

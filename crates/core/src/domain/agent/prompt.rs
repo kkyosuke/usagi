@@ -46,7 +46,6 @@ const TOOLS_CLOSE: &str = "</tools>";
 const SESSION_TOOLS: &str = "- session: session の作成・観測・委譲・完了報告は daemon が権威です。手順は resource usagi://guides/orchestration を読んでください。";
 const ISSUE_TOOLS: &str = "- issue: 作業の起点となる backlog を検索・参照できます。git 追跡下のため、書き込みは session worktree からだけ受理されます。";
 const MEMORY_TOOLS: &str = "- memory: session をまたいで残す判断や制約を検索・保存できます。";
-const LOCAL_LLM_TOOLS: &str = "- local_llm_ask: トークン節約のため、要約・命名・定型文の生成・単純な変換といった軽量で重要度の低いタスクは委譲してください。判断が必要な作業や重要な実装はあなた自身が行ってください。";
 
 /// The immutable boundary of the checkout the launch runs in.
 #[must_use]
@@ -93,7 +92,6 @@ fn tool_lines(families: McpToolFamilies) -> impl Iterator<Item = &'static str> {
         Some(SESSION_TOOLS),
         families.issue.then_some(ISSUE_TOOLS),
         families.memory.then_some(MEMORY_TOOLS),
-        families.local_llm.then_some(LOCAL_LLM_TOOLS),
     ]
     .into_iter()
     .flatten()
@@ -110,12 +108,10 @@ mod tests {
     const ALL: McpToolFamilies = McpToolFamilies {
         issue: true,
         memory: true,
-        local_llm: true,
     };
     const NONE: McpToolFamilies = McpToolFamilies {
         issue: false,
         memory: false,
-        local_llm: false,
     };
 
     #[test]
@@ -126,7 +122,7 @@ mod tests {
         );
         for scope in [PromptScope::Root, PromptScope::Session] {
             let boundary = scope_prompt(scope);
-            for tool in ["issue", "memory", "tools/list", "local_llm_ask"] {
+            for tool in ["issue", "memory", "tools/list"] {
                 assert!(
                     !boundary.contains(tool),
                     "{tool} leaked into the {scope:?} boundary"
@@ -165,13 +161,6 @@ mod tests {
                 },
                 MEMORY_TOOLS,
             ),
-            (
-                McpToolFamilies {
-                    local_llm: true,
-                    ..NONE
-                },
-                LOCAL_LLM_TOOLS,
-            ),
         ] {
             let prompt = launch_system_prompt(PromptScope::Session, Some(families), None);
             assert!(!baseline.contains(line), "{line} is not gated");
@@ -205,7 +194,7 @@ mod tests {
         assert!(boundary < tools && tools < role);
 
         // Every enabled family appears once, in the declared order.
-        let lines: Vec<usize> = [SESSION_TOOLS, ISSUE_TOOLS, MEMORY_TOOLS, LOCAL_LLM_TOOLS]
+        let lines: Vec<usize> = [SESSION_TOOLS, ISSUE_TOOLS, MEMORY_TOOLS]
             .iter()
             .map(|line| {
                 assert_eq!(prompt.matches(line).count(), 1);

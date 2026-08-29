@@ -22,41 +22,6 @@ pub use env::{
 
 use serde::{Deserialize, Serialize};
 
-/// Local models that may be exposed through the optional `usagi-llm` MCP
-/// server.
-///
-/// This closed vocabulary is the trust boundary for the model token eventually
-/// passed to `usagi llm-mcp --model`. A hand-edited settings file cannot add a
-/// new argv/config token.
-pub const LOCAL_LLM_MODELS: [&str; 4] = [
-    "qwen2.5-coder:7b",
-    "qwen2.5-coder:3b",
-    "qwen2.5-coder:1.5b",
-    "qwen2.5:7b",
-];
-
-/// The model used when the stored local-LLM model is absent or untrusted.
-pub const DEFAULT_LOCAL_LLM_MODEL: &str = LOCAL_LLM_MODELS[0];
-
-/// Trusted configuration for the optional local-LLM MCP server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LocalLlm {
-    /// Whether Claude and Codex launches receive the `usagi-llm` MCP server.
-    pub enabled: bool,
-    /// The allowlisted model served by `usagi llm-mcp`.
-    pub model: String,
-}
-
-impl Default for LocalLlm {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: DEFAULT_LOCAL_LLM_MODEL.to_owned(),
-        }
-    }
-}
-
 /// UI color theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -424,8 +389,6 @@ pub struct Settings {
     pub memory_enabled: bool,
     /// Built-in role catalog used for new and resumed Agent work.
     pub team_template: TeamTemplate,
-    /// Optional local LLM exposed only through daemon-owned Agent provisioning.
-    pub local_llm: LocalLlm,
     /// Environment bindings injected into every workspace's Agent and terminal
     /// children. The key is the variable name, the value a literal or a
     /// `op://…` secret reference; a workspace adds to or overrides them through
@@ -443,7 +406,6 @@ impl Default for Settings {
             issue_enabled: true,
             memory_enabled: true,
             team_template: TeamTemplate::default(),
-            local_llm: LocalLlm::default(),
             // No environment is injected unless it is configured explicitly.
             env: EnvBindings::new(),
         }
@@ -451,16 +413,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Coerce values loaded from the editable settings file into their trusted
-    /// vocabulary before they can reach daemon-owned process configuration.
-    #[must_use]
-    pub fn sanitized(mut self) -> Self {
-        if !LOCAL_LLM_MODELS.contains(&self.local_llm.model.as_str()) {
-            DEFAULT_LOCAL_LLM_MODEL.clone_into(&mut self.local_llm.model);
-        }
-        self
-    }
-
     /// Replace the fields owned by the Config surface, keeping settings owned
     /// by dedicated editors and runtime integrations.
     ///
@@ -504,19 +456,6 @@ impl Settings {
             self.env.insert(name.to_owned(), value.to_owned());
         }
         self
-    }
-
-    /// The trusted local-LLM model this configuration wires, or `None` when the
-    /// delegation server is not wired at all.
-    ///
-    /// Reading the flag and the model through one accessor keeps "the server is
-    /// wired" and "a model was chosen" from disagreeing. The value is already
-    /// sanitized to the closed allowlist by `Storage::load_settings`.
-    #[must_use]
-    pub fn wired_local_llm_model(&self) -> Option<&str> {
-        self.local_llm
-            .enabled
-            .then_some(self.local_llm.model.as_str())
     }
 
     /// The bindings usable for injection, with invalid names and blank values
@@ -601,11 +540,13 @@ where
 {
     let token = Option::<String>::deserialize(deserializer)?;
     Ok(match token.as_deref() {
-        Some("none") => Some(TeamTemplate::None),
         Some("hierarchical") => Some(TeamTemplate::Hierarchical),
         Some("flat") => Some(TeamTemplate::Flat),
         Some("pipeline") => Some(TeamTemplate::Pipeline),
-        _ => None,
+        // `none` and unknown future values both disable delegation instead of
+        // inheriting a potentially more permissive global template.
+        Some(_) => Some(TeamTemplate::None),
+        None => None,
     })
 }
 

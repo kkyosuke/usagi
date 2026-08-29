@@ -81,7 +81,18 @@ pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffSta
         return Ok(None);
     };
 
-    let stat = run(runner, repo, &["diff", "--numstat", "--merge-base", &base])?;
+    let stat = run(
+        runner,
+        repo,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "--merge-base",
+            &base,
+        ],
+    )?;
     if !stat.success {
         return Ok(None);
     }

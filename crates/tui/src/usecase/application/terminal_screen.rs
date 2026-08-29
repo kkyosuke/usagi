@@ -35,11 +35,21 @@ pub enum TerminalBuffer {
     Alternate,
 }
 
+/// How the focused program expects a paste payload to be encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteMode {
+    /// Send the original payload without terminal markers.
+    Plain,
+    /// Surround the payload with DECSET 2004 paste markers.
+    Bracketed,
+}
+
 /// Input modes requested by the program currently drawing the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalInputModes {
     pub alternate_screen: bool,
     pub application_cursor: bool,
+    pub paste: PasteMode,
     pub mouse_protocol: bool,
     pub mouse_encoding: MouseProtocolEncoding,
 }
@@ -69,6 +79,11 @@ impl TerminalScreen {
         TerminalInputModes {
             alternate_screen: self.screen.active_buffer() == ActiveBuffer::Alternate,
             application_cursor: self.screen.application_cursor(),
+            paste: if self.screen.bracketed_paste() {
+                PasteMode::Bracketed
+            } else {
+                PasteMode::Plain
+            },
             mouse_protocol: self.screen.mouse_protocol(),
             mouse_encoding: self.screen.mouse_encoding(),
         }

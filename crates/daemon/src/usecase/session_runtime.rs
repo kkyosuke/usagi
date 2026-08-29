@@ -604,6 +604,16 @@ impl SessionRuntime {
             .any(|operation| !operation.status.terminal()))
     }
 
+    /// Number of durable managed sessions retained by this workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::Storage`] when the lifecycle document
+    /// cannot be read.
+    pub fn session_count(&self) -> Result<usize, SessionRuntimeError> {
+        Ok(self.state()?.sessions.len())
+    }
+
     /// Returns the durable workspace identity this runtime bound.
     ///
     /// A daemon that owns several workspaces routes a fenced request to the
@@ -2098,8 +2108,30 @@ mod tests {
     }
 
     struct BranchExistsGit;
+    fn checkout_validation_output(args: &[&str]) -> Option<GitOutput> {
+        if matches!(
+            args,
+            ["rev-parse", "--verify", "--end-of-options", expression]
+                if expression.ends_with("^{commit}")
+        ) {
+            return Some(GitOutput {
+                success: true,
+                stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                stderr: String::new(),
+            });
+        }
+        (args.first() == Some(&"ls-tree")).then(|| GitOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
+    }
+
     impl GitRunner for BranchExistsGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
             Ok(GitOutput {
                 success: false,
                 stdout: String::new(),
@@ -2110,7 +2142,19 @@ mod tests {
 
     struct WorkspaceExistsGit;
     impl GitRunner for WorkspaceExistsGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
+            if matches!(args, ["branch", "--", ..] | ["branch", "-D", "--", ..])
+                || matches!(args, ["worktree", "list", "--porcelain"])
+            {
+                return Ok(GitOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
             Ok(GitOutput {
                 success: false,
                 stdout: String::new(),
@@ -2119,7 +2163,10 @@ mod tests {
         }
     }
     impl GitRunner for FakeGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
             Ok(GitOutput {
                 success: self.0,
                 stdout: String::new(),
@@ -2150,7 +2197,10 @@ mod tests {
     }
 
     impl GitRunner for ScriptedGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
             match self.results.lock().unwrap().pop_front().unwrap() {
                 ScriptedGitResult::Output {
                     success,
@@ -2194,16 +2244,19 @@ mod tests {
                 repo.into(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
-            Ok(GitOutput {
+            Ok(checkout_validation_output(args).unwrap_or(GitOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
-            })
+            }))
         }
     }
     impl GitRunner for CountingGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
             Ok(GitOutput {
                 success: true,
                 stdout: String::new(),
@@ -2212,8 +2265,11 @@ mod tests {
         }
     }
     impl GitRunner for OutcomeGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
             Ok(GitOutput {
                 success: self.succeeds,
                 stdout: String::new(),
@@ -2512,7 +2568,7 @@ mod tests {
                 .unwrap_err(),
             SessionRuntimeError::SessionWorkspaceCreationFailed {
                 name: "one".into(),
-                detail: "no".into(),
+                detail: "git worktree branch creation failed: no".into(),
             }
         );
         assert_eq!(
@@ -2706,6 +2762,21 @@ mod tests {
             &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             ScriptedGit::new([
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
+                ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "",
+                    stderr: "",
+                },
                 ScriptedGitResult::Output {
                     success: true,
                     stdout: "",
@@ -3076,7 +3147,9 @@ instructions = "direct"
         let created = first
             .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
             .unwrap();
-        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        // Resolve + attribute scan + branch + metadata + config + checkout. The
+        // replay below performs none of them.
+        assert_eq!(first_calls.load(Ordering::SeqCst), 6);
         drop(first);
 
         let replay_calls = Arc::new(AtomicUsize::new(0));
@@ -3131,7 +3204,9 @@ instructions = "direct"
                 .unwrap_err(),
             SessionRuntimeError::IdempotencyConflict
         );
-        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        // Resolve + attribute scan + failed branch creation. The replay above
+        // performs none of them.
+        assert_eq!(first_calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             first.state().unwrap().operations[0].status,
             OperationStatus::Failed
@@ -3496,22 +3571,24 @@ instructions = "direct"
             std::fs::read_to_string(destination.join("docs/guide.md")).unwrap(),
             "guide"
         );
+        let calls = git.calls.lock().unwrap();
+        assert_eq!(calls.len(), 6);
         assert_eq!(
-            git.calls.lock().unwrap().as_slice(),
-            &[(
+            calls.get(3),
+            Some(&(
                 nested_repo,
                 vec![
                     "worktree".into(),
                     "add".into(),
-                    "-b".into(),
-                    "usagi/feature".into(),
+                    "--no-checkout".into(),
                     "--".into(),
                     destination
                         .join("services/api")
                         .to_string_lossy()
                         .into_owned(),
+                    "usagi/feature".into(),
                 ],
-            )]
+            ))
         );
     }
 
@@ -3655,17 +3732,17 @@ instructions = "direct"
         observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
     }
     impl GitRunner for LockProbeGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
             let runtime = self.runtime.upgrade().expect("runtime remains alive");
             self.observed_unlocked.store(
                 runtime.try_lock().is_ok(),
                 std::sync::atomic::Ordering::SeqCst,
             );
-            Ok(GitOutput {
+            Ok(checkout_validation_output(args).unwrap_or(GitOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
-            })
+            }))
         }
     }
 
@@ -3675,7 +3752,10 @@ instructions = "direct"
         runtime: std::sync::Weak<Mutex<SessionRuntime>>,
     }
     impl GitRunner for PoisoningGit {
-        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+        fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if let Some(output) = checkout_validation_output(args) {
+                return Ok(output);
+            }
             if let Some(runtime) = self.runtime.upgrade() {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _guard = runtime.lock().unwrap();

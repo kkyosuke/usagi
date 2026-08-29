@@ -132,7 +132,16 @@ pub trait GenericPtySpawner {
         terminal: &TerminalRef,
         geometry: Geometry,
     ) -> Result<ProcessIdentity, SpawnFailure>;
+
+    /// Terminate and reap the exact daemon-owned PTY process.
+    fn terminate_reap(&mut self, _terminal: &TerminalRef) -> Result<(), GenericTerminateReapError> {
+        Err(GenericTerminateReapError)
+    }
 }
+
+/// Exact generic-terminal termination or reaping could not be completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericTerminateReapError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenericTerminalError {
@@ -627,6 +636,78 @@ impl GenericTerminalCoordinator {
         })
     }
 
+    /// Number of live generic terminal PTYs owned by one workspace.
+    #[must_use]
+    pub fn running_count_in_workspace(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> usize {
+        self.records
+            .values()
+            .filter(|record| {
+                record.terminal.workspace_id == workspace
+                    && matches!(record.state, TerminalRuntimeState::Running)
+            })
+            .count()
+    }
+
+    /// Number of PTY records that may still name a live process and therefore
+    /// must block an unforced workspace retirement.
+    #[must_use]
+    pub fn retirement_blocker_count_in_workspace(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> usize {
+        self.records
+            .values()
+            .filter(|record| {
+                record.terminal.workspace_id == workspace
+                    && terminal_state_blocks_retirement(record.state)
+            })
+            .count()
+    }
+
+    /// Terminates and forgets every generic terminal in one workspace.
+    pub fn close_workspace(
+        &mut self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+        store: &mut dyn TerminalStore,
+        spawner: &mut dyn GenericPtySpawner,
+    ) -> Result<usize, GenericTerminalError> {
+        let targets = self
+            .records
+            .values()
+            .filter(|record| record.terminal.workspace_id == workspace)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut terminate_failed = false;
+        for record in &targets {
+            if !terminal_state_requires_termination(record.state) {
+                continue;
+            }
+            if spawner.terminate_reap(&record.terminal).is_err() {
+                terminate_failed = true;
+                continue;
+            }
+            let retained = self.record_mut(&record.terminal)?;
+            retained.state = TerminalRuntimeState::Reclaimed;
+            retained.process = None;
+        }
+        if terminate_failed {
+            self.persist(store)?;
+            return Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::OrphanRunning,
+            ));
+        }
+        for record in &targets {
+            self.records.remove(&record.terminal.terminal_id.as_str());
+            self.terminals.forget(&record.terminal);
+            self.retention.forget(&record.terminal);
+        }
+        self.persist(store)?;
+        Ok(targets.len())
+    }
+
     /// Lists only terminals in the exact requested durable scope. Each entry is
     /// tagged `Terminal` and marked `live` only while the current daemon
     /// generation still owns a running PTY, so a restoring client attaches to
@@ -775,6 +856,22 @@ impl GenericTerminalCoordinator {
     }
 }
 
+fn terminal_state_requires_termination(state: TerminalRuntimeState) -> bool {
+    matches!(
+        state,
+        TerminalRuntimeState::Running
+            | TerminalRuntimeState::ReconcileRequired(
+                TerminalReconcileState::SpawnAmbiguous
+                    | TerminalReconcileState::PersistAfterSpawn
+                    | TerminalReconcileState::OrphanRunning
+            )
+    )
+}
+
+fn terminal_state_blocks_retirement(state: TerminalRuntimeState) -> bool {
+    terminal_state_requires_termination(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +953,26 @@ mod tests {
             self.0.clone()
         }
     }
+    #[derive(Default)]
+    struct RetiringSpawner(Vec<TerminalRef>);
+    impl GenericPtySpawner for RetiringSpawner {
+        fn spawn(
+            &mut self,
+            _: &ResolvedTerminalLaunch,
+            _: &TerminalRef,
+            _: Geometry,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            Ok(process())
+        }
+
+        fn terminate_reap(
+            &mut self,
+            terminal: &TerminalRef,
+        ) -> Result<(), GenericTerminateReapError> {
+            self.0.push(terminal.clone());
+            Ok(())
+        }
+    }
     fn request() -> TerminalLaunchRequest {
         TerminalLaunchRequest {
             profile_id: TerminalProfileId::new("login-shell").unwrap(),
@@ -891,6 +1008,140 @@ mod tests {
             pid: 7,
             start_identity: "start".into(),
             process_group: 7,
+        }
+    }
+
+    #[test]
+    fn workspace_close_terminates_and_forgets_only_that_workspaces_terminals() {
+        let first_request = request();
+        let mut exited_request = request();
+        exited_request.scope.workspace_id = first_request.scope.workspace_id;
+        let second_request = request();
+        let (first, first_fence) = refs(&first_request);
+        let (exited, exited_fence) = refs(&exited_request);
+        let (second, second_fence) = refs(&second_request);
+        let mut coordinator = GenericTerminalCoordinator::new(3, 64, 1);
+        let mut store = Store::default();
+        let mut spawner = RetiringSpawner::default();
+        for (request, terminal, fence) in [
+            (&first_request, first.clone(), first_fence),
+            (&exited_request, exited.clone(), exited_fence),
+            (&second_request, second.clone(), second_fence),
+        ] {
+            coordinator
+                .launch(
+                    request,
+                    terminal,
+                    fence,
+                    Geometry { cols: 80, rows: 24 },
+                    &mut Resolver,
+                    &mut store,
+                    &mut spawner,
+                )
+                .unwrap();
+        }
+        coordinator.exit(&exited, 0, &mut store).unwrap();
+
+        assert_eq!(
+            coordinator.running_count_in_workspace(first.workspace_id),
+            1
+        );
+        assert_eq!(
+            coordinator
+                .close_workspace(first.workspace_id, &mut store, &mut spawner)
+                .unwrap(),
+            2
+        );
+        assert_eq!(spawner.0, vec![first]);
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+        assert_eq!(coordinator.snapshot().records[0].terminal, second);
+    }
+
+    #[test]
+    fn workspace_close_keeps_a_live_terminal_when_termination_fails() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+
+        assert_eq!(
+            coordinator.close_workspace(
+                terminal.workspace_id,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            ),
+            Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::OrphanRunning
+            ))
+        );
+        assert_eq!(coordinator.snapshot().records[0].terminal, terminal);
+    }
+
+    #[test]
+    fn ambiguous_terminal_blocks_retirement_and_is_not_forgotten() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        coordinator
+            .records
+            .get_mut(&terminal.terminal_id.as_str())
+            .unwrap()
+            .state =
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn);
+
+        assert_eq!(
+            coordinator.retirement_blocker_count_in_workspace(terminal.workspace_id),
+            1
+        );
+        assert!(
+            coordinator
+                .close_workspace(
+                    terminal.workspace_id,
+                    &mut store,
+                    &mut Spawner(Ok(process())),
+                )
+                .is_err()
+        );
+        assert_eq!(coordinator.snapshot().records[0].terminal, terminal);
+
+        for state in [
+            TerminalRuntimeState::Running,
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::SpawnAmbiguous),
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn),
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
+        ] {
+            assert!(terminal_state_requires_termination(state));
+        }
+        for state in [
+            TerminalRuntimeState::Reserved,
+            TerminalRuntimeState::Exited,
+            TerminalRuntimeState::Reclaimed,
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+        ] {
+            assert!(!terminal_state_requires_termination(state));
         }
     }
     #[test]

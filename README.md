@@ -44,10 +44,12 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 最近使った workspace を **Recent** から直接開き、**New** で既存リポジトリの登録または clone、
 **Config** で全体設定の編集ができる。
 
-workspace を開くと Home へ移り、左側に session、右側に選択した session の Preview / Terminal /
-Diff / Notes と live pane を表示する。
+workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
+選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
+含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。
 
 ```text
+ 1 usagi   2 api   3 web   + Open
 ┌─ sessions ───────────┬─ Preview / Terminal / Diff / Notes ──────┐
 │   feature-login      │                                          │
 │   12m ago  #42  +18  │  Session info, terminal, and diff        │
@@ -62,13 +64,17 @@ Home の基本操作は次のとおり。
 | 操作 | 動作 |
 |---|---|
 | `↑` / `↓`、`j` / `k` | session を選ぶ |
-| `←` / `→`、`h` / `l` | Preview / Terminal / Diff / Notes を切り替える |
+| `←` / `→` | Switch で前 / 次の project tab へ移動する |
 | `Enter` / `t` | 選択した session の Closeup を開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
+| `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
+| `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
+| `Ctrl-O` → `0` | 全 project tab の switcher を開く（`x` は tab の detach） |
 | `:` | Overview のコマンドパレットを開く |
 | `p` / `v` / `d` / `n` | PR / preview / diff / notes を開く |
 | `Ctrl-Q` | workspace を離れるか、TUI を終了するか選ぶ |
 
+直接の `Ctrl+数字` / `Ctrl++` は terminal ごとに符号化が異なるため予約せず、上記の `Ctrl-O` prefix を使う。
 live terminal にフォーカスがある間は、`Ctrl-O` prefix 以外の入力を PTY へ渡す。TUI を離れる操作は
 daemon-owned process を停止せず、接続だけを外す。正確な入力所有権と終了時の挙動は
 [workspace の離脱と終了](document/03-tui.md#workspace-の離脱と終了)が正本である。
@@ -96,7 +102,8 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 ```
 
 `~/.usagi/bin` が `PATH` に無い場合は installer が追記方法を案内する。導入済みなら `usagi update` で
-最新版へ、`usagi update -v` で選んだ release へ更新できる（反映には再起動が必要）。
+最新版へ、`usagi update -v` で選んだ release へ更新できる。更新後の CLI は次回起動から使われる。
+起動中の TUI は終了して開き直し、稼働中 daemon の build が古い場合は `usagi doctor --fix` で入れ替える。
 
 対象は macOS（amd64 / arm64）と Linux（amd64）である。v2 の daemon IPC と PTY 管理は Unix transport を
 使うため Windows は対象外で、installer もこの 3 つ以外は失敗する。
@@ -174,6 +181,7 @@ agent -m claude
 agent -m codex
 agent -m sakana.ai
 terminal
+terminal new     # 外部ターミナルを開き、modal を閉じて Closeup へ戻る
 ```
 
 daemon 再起動などで Agent が中断した場合は、自動的に別の会話へ接続せず、保持された provider conversation を
@@ -184,12 +192,15 @@ daemon 再起動などで Agent が中断した場合は、自動的に別の会
 session の 2 行目には最終利用時刻、base branch との差分、右端に PR アイコンと件数を表示する。Switch の `p`、
 Closeup の `Ctrl-O Ctrl-P`、または右端の PR 表示のクリックは、PR がある場合だけ一覧を開き、`d` で diff、
 `n` で session の scratchpad を開く。起動後に新しい PR を検知すると、別のモーダルを操作中でなければ
-検知した PR を選択した一覧を自動で開く。PR を選んで Enter を押すと既定のブラウザで開く。
+検知した PR を選択した一覧を自動で開く。PR 一覧は repository 見出しの下へ番号・状態・title をまとめ、
+上部の All / Open / Closed / Merged を `←→`、PR を `↑↓` で選ぶ。枠外のクリックで閉じ、PR を選んで
+Enter を押すと既定のブラウザで開く。
 
 ## AI エージェントとの連携
 
 daemon から起動した Agent には usagi の stdio MCP server が組み込まれる。Agent は作業中の session から、
-次のような操作を行える。
+次のような操作を行える。MCP child の cwd が provider によって変わっても、issue / memory の保存先は
+daemon が認証したその session の worktree に固定される。
 
 | 系統 | 用途 |
 |---|---|
@@ -233,12 +244,17 @@ workspace の値だけを変更し、global の値は変更しない。同名の
 | `usagi doctor --fix` | client / daemon build と Agent の hook・MCP integration revision を診断し、daemon だけが古い場合は seamless restart する |
 | `usagi doctor --fix --restart-agents` | 古い integration の Agent を一覧化・停止し、provider session ID を使って現在の設定で再開する。Running の Agent は拒否する |
 | `usagi doctor --fix --restart-agents --force` | Running（tool / prompt 実行中）の Agent も明示的に中断して再開する |
+| `usagi clean [--dry-run\|--apply [--force]]` | 紐付いていない workspace・daemon data・worktree・branch を検出・削除する |
 | `usagi update` / `usagi update -v` | 最新版、または選択した公開 release のバイナリへ更新する |
 | `usagi completion <shell>` | shell 補完を生成する |
 | `usagi version` / `usagi --version` | version を表示する |
 | `usagi session ...` | daemon-owned session を作成・削除・resume する |
 | `usagi daemon start\|status\|stop\|restart` | daemon lifecycle を操作する |
 | `usagi daemon install-service` | daemon を OS の service として登録する（macOS は LaunchAgent、Linux は systemd user unit） |
+
+`usagi clean` は dry-run で候補だけを表示する。`--apply` は欠損 path の workspace 登録、欠損 workspace の
+daemon data、lifecycle に存在しない `usagi/*` branch と `.usagi/sessions/*` worktree を削除する。dirty worktree と
+未マージ branch は `--apply --force` を明示した場合だけ削除し、daemon が使用中の workspace はスキップする。
 
 `restart` は live runtime が無ければ cold transition、あれば通常は PTY を維持する seamless rollover を行い、
 安全な handoff の前提が欠ける場合だけ拒否する。`stop` は live Agent や terminal があると拒否する。

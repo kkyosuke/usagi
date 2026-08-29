@@ -130,7 +130,7 @@ if grep -Fqe 'L3' <<<"$out"; then
   exit 1
 fi
 
-# --- ケース7: Rust v0 mangled 名の demangle（c++filt がある環境のみ）---
+# --- ケース7: Rust v0 mangled 名の demangle ---
 cat > "$tmp/mangle.json" <<'JSON'
 {"data":[{
   "files":[{"filename":"/repo/d.rs","summary":{"functions":{"count":1,"covered":0,"percent":0},"lines":{"count":1,"covered":0,"percent":0}}}],
@@ -138,13 +138,21 @@ cat > "$tmp/mangle.json" <<'JSON'
   "totals":{"functions":{"count":1,"covered":0,"percent":0},"lines":{"count":1,"covered":0,"percent":0}}
 }]}
 JSON
-if command -v c++filt >/dev/null 2>&1; then
-  out=$(gen "$tmp/mangle.json")
-  grep -Fqe 'DurableLaunchSnapshot' <<<"$out"
-  if grep -Fqe '_RNvMs5_' <<<"$out"; then
-    echo "FAIL: mangled name must be demangled when c++filt is present" >&2
-    exit 1
-  fi
+cat > "$tmp/rust-v0-demangler" <<'SH'
+#!/bin/sh
+while IFS= read -r symbol; do
+  case "$symbol" in
+    _RNvMs5_*) printf '%s\n' 'usagi_core::domain::agent::DurableLaunchSnapshot::new' ;;
+    *) printf '%s\n' "$symbol" ;;
+  esac
+done
+SH
+chmod +x "$tmp/rust-v0-demangler"
+out=$(DEMANGLER="$tmp/rust-v0-demangler" gen "$tmp/mangle.json")
+grep -Fqe 'DurableLaunchSnapshot' <<<"$out"
+if grep -Fqe '_RNvMs5_' <<<"$out"; then
+  echo "FAIL: mangled name must be demangled by a capable demangler" >&2
+  exit 1
 fi
 # DEMANGLER 無効化時は素の名前のまま
 out=$(DEMANGLER= gen "$tmp/mangle.json")

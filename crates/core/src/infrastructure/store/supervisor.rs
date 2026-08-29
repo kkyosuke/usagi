@@ -6,7 +6,6 @@
 //! On restart, a torn final JSONL record is ignored because it was never a
 //! durable, complete event.
 
-#[cfg(test)]
 use std::cell::Cell;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -16,13 +15,26 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
 use crate::domain::supervisor::{
-    SupervisorEvent, SupervisorRun, SupervisorRunId, SupervisorRunQuery, reduce,
+    SupervisorEvent, SupervisorRun, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, reduce,
 };
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 const SNAPSHOT_SUFFIX: &str = ".snapshot.json";
 const JOURNAL_SUFFIX: &str = ".events.jsonl";
+const JOURNAL_INDEX_SUFFIX: &str = ".events.index.json";
 const CHECKPOINT_SUFFIX: &str = ".replay.json";
+const RUN_LIST_INDEX_FILE: &str = "runs.index.json";
+
+/// Compact at the high watermark and keep this many newest events. The gap
+/// avoids rewriting the journal for every subsequent append.
+#[cfg(not(test))]
+const JOURNAL_MAX_EVENTS: usize = 4_096;
+#[cfg(test)]
+const JOURNAL_MAX_EVENTS: usize = 64;
+#[cfg(not(test))]
+const JOURNAL_RETAIN_EVENTS: usize = 2_048;
+#[cfg(test)]
+const JOURNAL_RETAIN_EVENTS: usize = 32;
 
 /// How many finished supervisor runs are kept on disk.
 ///
@@ -32,11 +44,63 @@ const CHECKPOINT_SUFFIX: &str = ".replay.json";
 /// started and the state directory grows without limit. A finished run is
 /// history: this keeps the recent ones for inspection and drops the rest.
 const RUN_RETENTION: usize = 128;
+/// Keep list results comfortably below the 1 MiB daemon IPC frame after the
+/// response envelope and protocol metadata are added.
+pub const RUN_LIST_RESPONSE_MAX_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 struct ReplayCheckpoint {
     snapshot_revision: u64,
     journal_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+struct JournalIndexEntry {
+    sequence: u64,
+    offset: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+struct JournalIndex {
+    /// Exact current file length, including a crash-torn final record.
+    journal_len: u64,
+    /// End of the last complete indexed record.
+    valid_len: u64,
+    entries: Vec<JournalIndexEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct RunListIndexEntry {
+    supervisor_run_id: SupervisorRunId,
+    root_caller_ref: String,
+    created_at: DateTime<Utc>,
+    state: SupervisorRunState,
+    state_revision: u64,
+}
+
+impl From<&SupervisorRun> for RunListIndexEntry {
+    fn from(run: &SupervisorRun) -> Self {
+        Self {
+            supervisor_run_id: run.supervisor_run_id,
+            root_caller_ref: run.root_caller_ref.clone(),
+            created_at: run.created_at,
+            state: run.state,
+            state_revision: run.state_revision,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+struct RunListIndex {
+    entries: Vec<RunListIndexEntry>,
+}
+
+/// Bounded `supervisor_list` result. The cursor is an opaque position in the
+/// durable run index rather than an offset into a fully hydrated result set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SupervisorRunPage {
+    pub runs: Vec<SupervisorRunQuery>,
+    pub next_cursor: Option<String>,
 }
 
 /// Cursor used to page a run's event history without exposing payload bodies.
@@ -56,16 +120,22 @@ pub struct EventQuery {
 /// A daemon-owned durable supervisor store rooted at its state directory.
 pub struct SupervisorStore {
     dir: PathBuf,
+    run_list_index_trusted: Cell<bool>,
     #[cfg(test)]
     journal_bytes_read: Cell<u64>,
+    #[cfg(test)]
+    run_snapshots_read: Cell<u64>,
 }
 impl SupervisorStore {
     #[must_use]
     pub fn new(daemon_state_dir: &Path) -> Self {
         Self {
             dir: daemon_state_dir.join("supervisor-runs"),
+            run_list_index_trusted: Cell::new(false),
             #[cfg(test)]
             journal_bytes_read: Cell::new(0),
+            #[cfg(test)]
+            run_snapshots_read: Cell::new(0),
         }
     }
     #[must_use]
@@ -76,8 +146,14 @@ impl SupervisorStore {
     pub fn journal_path(&self, id: SupervisorRunId) -> PathBuf {
         self.dir.join(format!("{id}{JOURNAL_SUFFIX}"))
     }
+    fn journal_index_path(&self, id: SupervisorRunId) -> PathBuf {
+        self.dir.join(format!("{id}{JOURNAL_INDEX_SUFFIX}"))
+    }
     fn checkpoint_path(&self, id: SupervisorRunId) -> PathBuf {
         self.dir.join(format!("{id}{CHECKPOINT_SUFFIX}"))
+    }
+    fn run_list_index_path(&self) -> PathBuf {
+        self.dir.join(RUN_LIST_INDEX_FILE)
     }
     /// Creates the initial atomically-written snapshot.
     ///
@@ -87,6 +163,7 @@ impl SupervisorStore {
     pub fn initialize(&self, run: &SupervisorRun) -> Result<()> {
         json_file::write_atomic(&self.dir, &self.snapshot_path(run.supervisor_run_id), run)?;
         self.write_checkpoint(run.supervisor_run_id, run.state_revision, 0)?;
+        self.refresh_run_list_index(run);
         // Starting a run is the moment the directory grows, so it is also where
         // the bound is charged. Pruning is best effort: a run that failed to be
         // removed is retried at the next start, and refusing to start a new run
@@ -135,9 +212,11 @@ impl SupervisorStore {
         }
         finished.sort_by_key(|(finished_at, id)| (*finished_at, *id));
         let mut removed = 0;
+        let mut removed_ids = Vec::new();
         for (_, id) in finished.into_iter().take(over) {
             for path in [
                 self.journal_path(id),
+                self.journal_index_path(id),
                 self.checkpoint_path(id),
                 self.snapshot_path(id),
             ] {
@@ -150,7 +229,9 @@ impl SupervisorStore {
                 }
             }
             removed += 1;
+            removed_ids.push(id);
         }
+        self.remove_from_run_list_index(&removed_ids);
         Ok(removed)
     }
     /// How many run snapshots the state directory holds, without reading any of
@@ -181,10 +262,21 @@ impl SupervisorStore {
     ///
     /// Returns an error when a snapshot or a non-final journal record is corrupt.
     pub fn load(&self, id: SupervisorRunId) -> Result<Option<SupervisorRun>> {
+        #[cfg(test)]
+        self.run_snapshots_read
+            .set(self.run_snapshots_read.get() + 1);
         let Some(run) = json_file::read(&self.snapshot_path(id))? else {
             return Ok(None);
         };
+        Self::validate_snapshot(&run)?;
         self.replay_snapshot(run).map(Some)
+    }
+
+    fn validate_snapshot(run: &SupervisorRun) -> Result<()> {
+        if !run.compaction_state_is_valid() {
+            bail!("supervisor snapshot has an invalid compaction tombstone");
+        }
+        Ok(())
     }
     fn replay_snapshot(&self, mut run: SupervisorRun) -> Result<SupervisorRun> {
         let snapshot_revision = run.state_revision;
@@ -227,9 +319,15 @@ impl SupervisorStore {
         let mut run = self
             .load(id)?
             .ok_or_else(|| anyhow::anyhow!("supervisor run does not exist"))?;
-        if run.applied_events.contains(&event.event_id) {
-            self.checkpoint_current_journal(id, run.state_revision)?;
-            return Ok(run);
+        match run.event_id_status(event.event_id) {
+            crate::domain::supervisor::AppliedEventStatus::Recent => {
+                self.checkpoint_current_journal(id, run.state_revision)?;
+                return Ok(run);
+            }
+            crate::domain::supervisor::AppliedEventStatus::Expired => {
+                bail!("supervisor event id is outside the retained idempotency window");
+            }
+            crate::domain::supervisor::AppliedEventStatus::Fresh => {}
         }
         if run.state_revision != expected_revision {
             bail!(
@@ -240,7 +338,16 @@ impl SupervisorStore {
         reduce(&mut run, event).map_err(anyhow::Error::msg)?;
         self.append(id, event)?;
         json_file::write_atomic(&self.dir, &self.snapshot_path(id), &run)?;
+        if let Some(retained) = self.compact_journal(id, run.state_revision)? {
+            let retained_ids = retained
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            run.compact_applied_events(&retained_ids);
+            json_file::write_atomic(&self.dir, &self.snapshot_path(id), &run)?;
+        }
         self.checkpoint_current_journal(id, run.state_revision)?;
+        self.refresh_run_list_index(&run);
         Ok(run)
     }
     /// Returns the redaction-safe aggregate projection.
@@ -275,10 +382,212 @@ impl SupervisorStore {
             }
             let snapshot: SupervisorRun = json_file::read(&path)?
                 .ok_or_else(|| anyhow::anyhow!("supervisor snapshot disappeared"))?;
+            Self::validate_snapshot(&snapshot)?;
             runs.push(self.replay_snapshot(snapshot)?);
         }
         runs.sort_by_key(|run| (run.created_at, run.supervisor_run_id));
         Ok(runs)
+    }
+
+    /// Lists one owner/state-filtered page without hydrating aggregates outside
+    /// that page, and refuses a single response above the serialized budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid cursor, unreadable durable state, or a
+    /// run whose safe projection alone exceeds the response byte budget.
+    pub fn runs_page(
+        &self,
+        caller: &str,
+        state: Option<SupervisorRunState>,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<SupervisorRunPage> {
+        self.runs_page_with_budget(caller, state, cursor, limit, RUN_LIST_RESPONSE_MAX_BYTES)
+    }
+
+    fn runs_page_with_budget(
+        &self,
+        caller: &str,
+        state: Option<SupervisorRunState>,
+        cursor: usize,
+        limit: usize,
+        maximum_bytes: usize,
+    ) -> Result<SupervisorRunPage> {
+        if limit == 0 {
+            bail!("supervisor list page limit must be positive");
+        }
+        let index = self.run_list_index()?;
+        if cursor > index.entries.len() {
+            bail!("supervisor list cursor is outside the retained run range");
+        }
+        let matches = |entry: &RunListIndexEntry| {
+            entry.root_caller_ref == caller && state.is_none_or(|value| entry.state == value)
+        };
+        let mut page = SupervisorRunPage {
+            runs: Vec::new(),
+            next_cursor: None,
+        };
+        let mut positions = Vec::new();
+        for (position, entry) in index.entries.iter().enumerate().skip(cursor) {
+            if !matches(entry) {
+                continue;
+            }
+            let run = self
+                .load(entry.supervisor_run_id)?
+                .context("supervisor indexed snapshot disappeared")?;
+            if RunListIndexEntry::from(&run) != *entry {
+                // Another store instance may have advanced a snapshot. Rebuild
+                // the disposable index once from authoritative aggregates.
+                self.run_list_index_trusted.set(false);
+                return self.runs_page_with_budget(caller, state, cursor, limit, maximum_bytes);
+            }
+            page.runs.push(run.query());
+            positions.push(position);
+            let more = index.entries[position + 1..].iter().any(&matches);
+            page.next_cursor = more.then(|| (position + 1).to_string());
+            if serde_json::to_vec(&page)?.len() > maximum_bytes {
+                page.runs.pop();
+                positions.pop();
+                let mut resume_at = position;
+                loop {
+                    if page.runs.is_empty() {
+                        bail!("supervisor list response capacity is exhausted by one run");
+                    }
+                    page.next_cursor = Some(resume_at.to_string());
+                    if serde_json::to_vec(&page)?.len() <= maximum_bytes {
+                        return Ok(page);
+                    }
+                    page.runs.pop();
+                    resume_at = positions
+                        .pop()
+                        .context("supervisor list page position is missing")?;
+                }
+            }
+            if page.runs.len() == limit || !more {
+                return Ok(page);
+            }
+        }
+        Ok(page)
+    }
+
+    fn run_list_index(&self) -> Result<RunListIndex> {
+        if self.run_list_index_trusted.get()
+            && let Ok(Some(index)) = json_file::read::<RunListIndex>(&self.run_list_index_path())
+            && self.run_list_index_is_valid(&index)?
+        {
+            return Ok(index);
+        }
+        self.rebuild_run_list_index()
+    }
+
+    fn run_list_index_is_valid(&self, index: &RunListIndex) -> Result<bool> {
+        if index.entries.len() != self.snapshot_count()? {
+            return Ok(false);
+        }
+        let mut previous = None;
+        for entry in &index.entries {
+            let key = (entry.created_at, entry.supervisor_run_id);
+            if previous.is_some_and(|value| value >= key)
+                || !self.snapshot_path(entry.supervisor_run_id).is_file()
+            {
+                return Ok(false);
+            }
+            previous = Some(key);
+        }
+        Ok(true)
+    }
+
+    fn rebuild_run_list_index(&self) -> Result<RunListIndex> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RunListIndex::default());
+            }
+            Err(error) => return Err(error).context("failed to list supervisor runs"),
+        };
+        let mut index = RunListIndex::default();
+        for entry in entries {
+            let path = entry?.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(SNAPSHOT_SUFFIX))
+            {
+                continue;
+            }
+            #[cfg(test)]
+            self.run_snapshots_read
+                .set(self.run_snapshots_read.get() + 1);
+            let snapshot: SupervisorRun =
+                json_file::read(&path)?.context("supervisor snapshot disappeared")?;
+            Self::validate_snapshot(&snapshot)?;
+            index
+                .entries
+                .push(RunListIndexEntry::from(&self.replay_snapshot(snapshot)?));
+        }
+        index
+            .entries
+            .sort_by_key(|entry| (entry.created_at, entry.supervisor_run_id));
+        if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_ok() {
+            self.run_list_index_trusted.set(true);
+        } else {
+            self.run_list_index_trusted.set(false);
+        }
+        Ok(index)
+    }
+
+    fn refresh_run_list_index(&self, run: &SupervisorRun) {
+        if !self.run_list_index_trusted.get() {
+            if self.snapshot_count().ok() != Some(1) {
+                return;
+            }
+            let index = RunListIndex {
+                entries: vec![RunListIndexEntry::from(run)],
+            };
+            if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_ok() {
+                self.run_list_index_trusted.set(true);
+            }
+            return;
+        }
+        let Ok(Some(mut index)) = json_file::read::<RunListIndex>(&self.run_list_index_path())
+        else {
+            self.run_list_index_trusted.set(false);
+            return;
+        };
+        let replacement = RunListIndexEntry::from(run);
+        if let Some(entry) = index
+            .entries
+            .iter_mut()
+            .find(|entry| entry.supervisor_run_id == run.supervisor_run_id)
+        {
+            *entry = replacement;
+        } else {
+            index.entries.push(replacement);
+        }
+        index
+            .entries
+            .sort_by_key(|entry| (entry.created_at, entry.supervisor_run_id));
+        if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_err() {
+            self.run_list_index_trusted.set(false);
+        }
+    }
+
+    fn remove_from_run_list_index(&self, removed: &[SupervisorRunId]) {
+        if removed.is_empty() || !self.run_list_index_trusted.get() {
+            return;
+        }
+        let Ok(Some(mut index)) = json_file::read::<RunListIndex>(&self.run_list_index_path())
+        else {
+            self.run_list_index_trusted.set(false);
+            return;
+        };
+        index
+            .entries
+            .retain(|entry| !removed.contains(&entry.supervisor_run_id));
+        if json_file::write_atomic(&self.dir, &self.run_list_index_path(), &index).is_err() {
+            self.run_list_index_trusted.set(false);
+        }
     }
     /// Lists event metadata from `cursor`, and the next cursor if more history
     /// was returned. Event kinds and instruction bodies are intentionally absent.
@@ -292,11 +601,28 @@ impl SupervisorStore {
         cursor: EventCursor,
         limit: usize,
     ) -> Result<(Vec<EventQuery>, EventCursor)> {
-        let events = self.read_journal(id)?;
-        let selected: Vec<_> = events
+        if limit == 0 {
+            return Ok((Vec::new(), cursor));
+        }
+        let index = self.journal_index(id)?;
+        let Some(first) = index.entries.first() else {
+            return Ok((Vec::new(), cursor));
+        };
+        if cursor.next_sequence < first.sequence {
+            bail!(
+                "supervisor event cursor expired: earliest retained sequence is {}",
+                first.sequence
+            );
+        }
+        let start = index
+            .entries
+            .partition_point(|entry| entry.sequence < cursor.next_sequence);
+        let Some(entry) = index.entries.get(start) else {
+            return Ok((Vec::new(), cursor));
+        };
+        let selected: Vec<_> = self
+            .read_journal_page(id, entry.offset, limit)?
             .into_iter()
-            .filter(|event| event.sequence >= cursor.next_sequence)
-            .take(limit)
             .map(|event| EventQuery {
                 sequence: event.sequence,
                 event_id: event.event_id,
@@ -313,24 +639,182 @@ impl SupervisorStore {
         fs::create_dir_all(&self.dir).context("failed to create supervisor state directory")?;
         let mut bytes = serde_json::to_vec(event)?;
         bytes.push(b'\n');
+        let mut index = self.journal_index(id)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.journal_path(id))?;
+        let mut offset = file.metadata()?.len();
+        if index.valid_len < offset {
+            file.set_len(index.valid_len)?;
+            offset = index.valid_len;
+            index.journal_len = offset;
+        }
         file.write_all(&bytes)?;
         file.sync_all()?;
+        let journal_len = offset + u64::try_from(bytes.len())?;
+        index.entries.push(JournalIndexEntry {
+            sequence: event.sequence,
+            offset,
+        });
+        index.journal_len = journal_len;
+        index.valid_len = journal_len;
+        self.write_journal_index(id, &index)?;
         Ok(())
+    }
+
+    fn compact_journal(
+        &self,
+        id: SupervisorRunId,
+        snapshot_revision: u64,
+    ) -> Result<Option<Vec<SupervisorEvent>>> {
+        let index = self.journal_index(id)?;
+        if index.entries.len() <= JOURNAL_MAX_EVENTS {
+            return Ok(None);
+        }
+        let retained_start = index.entries.len() - JOURNAL_RETAIN_EVENTS;
+        let retained_offset = index.entries[retained_start].offset;
+        let retained = self.read_journal_page(id, retained_offset, JOURNAL_RETAIN_EVENTS)?;
+        let text = retained
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .join("\n")
+            + "\n";
+
+        // Publish a checkpoint valid both before and after the atomic journal
+        // replacement. A crash in this window replays duplicates from offset
+        // zero against the already-current snapshot, which is effect-free.
+        self.write_checkpoint(id, snapshot_revision, 0)?;
+        json_file::write_text_atomic(&self.journal_path(id), &text)?;
+        let compacted = Self::index_for_events(&retained)?;
+        self.write_journal_index(id, &compacted)?;
+        Ok(Some(retained))
+    }
+
+    fn index_for_events(events: &[SupervisorEvent]) -> Result<JournalIndex> {
+        let mut offset = 0_u64;
+        let mut entries = Vec::with_capacity(events.len());
+        for event in events {
+            entries.push(JournalIndexEntry {
+                sequence: event.sequence,
+                offset,
+            });
+            offset += u64::try_from(serde_json::to_vec(event)?.len() + 1)?;
+        }
+        Ok(JournalIndex {
+            journal_len: offset,
+            valid_len: offset,
+            entries,
+        })
+    }
+
+    fn journal_index(&self, id: SupervisorRunId) -> Result<JournalIndex> {
+        let journal_len = match fs::metadata(self.journal_path(id)) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(JournalIndex::default());
+            }
+            Err(error) => return Err(error).context("failed to inspect supervisor event journal"),
+        };
+        // The index is a derived cache. A stale or corrupt copy must never make
+        // the authoritative journal unreadable; rebuild it from the journal.
+        if let Ok(Some(index)) = json_file::read::<JournalIndex>(&self.journal_index_path(id))
+            && index.journal_len == journal_len
+            && index.valid_len <= index.journal_len
+            && index
+                .entries
+                .last()
+                .is_none_or(|entry| entry.offset < index.valid_len)
+            && index
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence && pair[0].offset < pair[1].offset)
+            && index.entries.first().is_none_or(|entry| entry.offset == 0)
+        {
+            return Ok(index);
+        }
+        self.rebuild_journal_index(id)
+    }
+
+    fn rebuild_journal_index(&self, id: SupervisorRunId) -> Result<JournalIndex> {
+        let file = fs::File::open(self.journal_path(id))?;
+        let journal_len = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
+        let mut index = JournalIndex {
+            journal_len,
+            ..JournalIndex::default()
+        };
+        loop {
+            let offset = index.valid_len;
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            #[cfg(test)]
+            self.journal_bytes_read
+                .set(self.journal_bytes_read.get() + bytes as u64);
+            if !line.ends_with('\n') {
+                break;
+            }
+            match serde_json::from_str::<SupervisorEvent>(line.trim_end_matches('\n')) {
+                Ok(event) => {
+                    index.entries.push(JournalIndexEntry {
+                        sequence: event.sequence,
+                        offset,
+                    });
+                    index.valid_len += u64::try_from(bytes)?;
+                }
+                Err(error) => return Err(error).context("corrupt supervisor event journal"),
+            }
+        }
+        self.write_journal_index(id, &index)?;
+        Ok(index)
+    }
+
+    fn write_journal_index(&self, id: SupervisorRunId, index: &JournalIndex) -> Result<()> {
+        json_file::write_atomic_cache(&self.dir, &self.journal_index_path(id), index)
+    }
+
+    fn read_journal_page(
+        &self,
+        id: SupervisorRunId,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<SupervisorEvent>> {
+        let mut file = fs::File::open(self.journal_path(id))?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut reader = BufReader::new(file);
+        let mut events = Vec::with_capacity(limit);
+        for _ in 0..limit {
+            let mut line = String::new();
+            let bytes = reader.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+            #[cfg(test)]
+            self.journal_bytes_read
+                .set(self.journal_bytes_read.get() + bytes as u64);
+            if !line.ends_with('\n') {
+                break;
+            }
+            match serde_json::from_str(line.trim_end_matches('\n')) {
+                Ok(event) => events.push(event),
+                Err(error) => return Err(error).context("corrupt supervisor event journal"),
+            }
+        }
+        Ok(events)
     }
     fn checkpoint_current_journal(
         &self,
         id: SupervisorRunId,
         snapshot_revision: u64,
     ) -> Result<()> {
-        let journal_offset = match fs::metadata(self.journal_path(id)) {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(error).context("failed to inspect supervisor event journal"),
-        };
+        // Only LF-terminated records are durable journal entries. The file can
+        // be longer after a crash-torn append, but publishing that raw length
+        // would place the replay cursor inside an incomplete record.
+        let journal_offset = self.journal_index(id)?.valid_len;
         self.write_checkpoint(id, snapshot_revision, journal_offset)
     }
     fn write_checkpoint(
@@ -348,9 +832,6 @@ impl SupervisorStore {
             },
         )
     }
-    fn read_journal(&self, id: SupervisorRunId) -> Result<Vec<SupervisorEvent>> {
-        self.read_journal_from(id, 0).map(|(events, _)| events)
-    }
     fn read_journal_from(
         &self,
         id: SupervisorRunId,
@@ -362,8 +843,8 @@ impl SupervisorStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((vec![], 0)),
             Err(error) => return Err(error).context("failed to open supervisor event journal"),
         };
-        let journal_end = file.metadata()?.len();
-        if offset > journal_end {
+        let file_end = file.metadata()?.len();
+        if offset > file_end {
             bail!("supervisor replay checkpoint is beyond the event journal");
         }
         if offset > 0 {
@@ -378,6 +859,7 @@ impl SupervisorStore {
         let mut result = vec![];
         let mut reader = BufReader::new(file);
         let mut lines = Vec::new();
+        let mut valid_end = offset;
         loop {
             let mut line = String::new();
             let bytes = reader.read_line(&mut line)?;
@@ -389,15 +871,19 @@ impl SupervisorStore {
                 .set(self.journal_bytes_read.get() + bytes as u64);
             lines.push(line);
         }
-        for (index, line) in lines.iter().enumerate() {
+        for line in &lines {
+            if !line.ends_with('\n') {
+                break;
+            }
             match serde_json::from_str(line.trim_end_matches('\n')) {
-                Ok(event) => result.push(event),
-                // A crash may leave only the final non-fsynced JSONL bytes.
-                Err(_) if index + 1 == lines.len() => break,
+                Ok(event) => {
+                    valid_end += u64::try_from(line.len())?;
+                    result.push(event);
+                }
                 Err(error) => return Err(error).context("corrupt supervisor event journal"),
             }
         }
-        Ok((result, journal_end))
+        Ok((result, valid_end))
     }
 }
 
@@ -459,6 +945,230 @@ mod tests {
         assert_eq!(
             store.load(id).unwrap().unwrap().query().state,
             SupervisorRunState::Running
+        );
+    }
+
+    #[test]
+    fn indexed_event_pages_read_only_the_requested_journal_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        fs::create_dir_all(&store.dir).unwrap();
+        let id = SupervisorRunId::new();
+        let mut writer = std::io::BufWriter::new(
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(store.journal_path(id))
+                .unwrap(),
+        );
+        let mut index = JournalIndex::default();
+        for sequence in 1..=100_000 {
+            let item = event(sequence);
+            index.entries.push(JournalIndexEntry {
+                sequence,
+                offset: index.journal_len,
+            });
+            let bytes = serde_json::to_vec(&item).unwrap();
+            writer.write_all(&bytes).unwrap();
+            writer.write_all(b"\n").unwrap();
+            index.journal_len += u64::try_from(bytes.len() + 1).unwrap();
+            index.valid_len = index.journal_len;
+        }
+        writer.flush().unwrap();
+        store.write_journal_index(id, &index).unwrap();
+
+        store.journal_bytes_read.set(0);
+        let (page, cursor) = store
+            .events(
+                id,
+                EventCursor {
+                    next_sequence: 99_901,
+                },
+                100,
+            )
+            .unwrap();
+        assert_eq!(page.len(), 100);
+        assert_eq!(page.first().unwrap().sequence, 99_901);
+        assert_eq!(page.last().unwrap().sequence, 100_000);
+        assert_eq!(cursor.next_sequence, 100_001);
+        assert!(
+            store.journal_bytes_read.get() * 500 < index.journal_len,
+            "page query read the journal prefix"
+        );
+
+        store.journal_bytes_read.set(0);
+        assert_eq!(
+            store
+                .events(
+                    id,
+                    EventCursor {
+                        next_sequence: 50_000,
+                    },
+                    1,
+                )
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert!(store.journal_bytes_read.get() < 1_024);
+    }
+
+    #[test]
+    fn event_query_edges_and_corrupt_derived_indexes_are_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let id = SupervisorRunId::new();
+
+        assert_eq!(
+            store
+                .events(id, EventCursor { next_sequence: 7 }, 0)
+                .unwrap(),
+            (Vec::new(), EventCursor { next_sequence: 7 })
+        );
+        assert_eq!(
+            store
+                .events(id, EventCursor { next_sequence: 1 }, 1)
+                .unwrap(),
+            (Vec::new(), EventCursor { next_sequence: 1 })
+        );
+
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        store.apply(id, 0, &event(1)).unwrap();
+        store.apply(id, 1, &event(2)).unwrap();
+        fs::write(store.journal_index_path(id), "{broken").unwrap();
+
+        let (events, cursor) = store
+            .events(id, EventCursor { next_sequence: 2 }, 1)
+            .unwrap();
+        assert_eq!(events[0].sequence, 2);
+        assert_eq!(cursor.next_sequence, 3);
+        assert_eq!(store.journal_index(id).unwrap().entries.len(), 2);
+        assert_eq!(
+            store
+                .events(id, EventCursor { next_sequence: 3 }, 1)
+                .unwrap(),
+            (Vec::new(), EventCursor { next_sequence: 3 })
+        );
+    }
+
+    #[test]
+    fn journal_rebuild_and_page_reads_fail_closed_on_corrupt_committed_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        fs::create_dir_all(&store.dir).unwrap();
+        let id = SupervisorRunId::new();
+
+        fs::write(store.journal_path(id), "{broken}\n").unwrap();
+        assert!(
+            store
+                .rebuild_journal_index(id)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt supervisor event journal")
+        );
+        assert!(
+            store
+                .read_journal_page(id, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt supervisor event journal")
+        );
+
+        fs::write(
+            store.journal_path(id),
+            serde_json::to_vec(&event(1)).unwrap(),
+        )
+        .unwrap();
+        assert!(store.read_journal_page(id, 0, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compaction_bounds_journal_and_exact_ids_without_reviving_old_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        let mut saved = run;
+        let mut applied = Vec::new();
+        for sequence in 1..=u64::try_from(JOURNAL_MAX_EVENTS + 1).unwrap() {
+            let item = event(sequence);
+            saved = store.apply(id, saved.state_revision, &item).unwrap();
+            applied.push(item);
+        }
+
+        let index = store.journal_index(id).unwrap();
+        assert_eq!(index.entries.len(), JOURNAL_RETAIN_EVENTS);
+        assert_eq!(saved.applied_events.len(), JOURNAL_RETAIN_EVENTS);
+        assert!(
+            store
+                .events(id, EventCursor { next_sequence: 1 }, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor expired")
+        );
+
+        let revision = saved.state_revision;
+        let mut replayed_as_fresh = applied[0].clone();
+        replayed_as_fresh.sequence = revision + 1;
+        assert!(
+            store
+                .apply(id, revision, &replayed_as_fresh)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the retained idempotency window")
+        );
+        assert_eq!(store.load(id).unwrap().unwrap().state_revision, revision);
+
+        let fresh = event(revision + 1);
+        assert_eq!(
+            store.apply(id, revision, &fresh).unwrap().state_revision,
+            revision + 1
+        );
+    }
+
+    #[test]
+    fn malformed_compaction_tombstones_fail_closed_on_snapshot_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let id = run.supervisor_run_id;
+        store.initialize(&run).unwrap();
+        let mut document = serde_json::to_value(run).unwrap();
+        document["compacted_event_tombstones"] = serde_json::json!([1]);
+        fs::write(
+            store.snapshot_path(id),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .load(id)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid compaction tombstone")
         );
     }
 
@@ -615,8 +1325,34 @@ mod tests {
                 .to_string()
                 .contains("corrupt supervisor event journal")
         );
-        fs::write(store.journal_path(id), "{final-torn\n").unwrap();
+        fs::write(store.journal_path(id), "{final-corrupt\n").unwrap();
+        assert!(
+            store
+                .load(id)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt supervisor event journal")
+        );
+
+        // A JSON value without its LF commit marker is still crash-torn even
+        // when the bytes happen to parse. It must not enter the index or a
+        // replay checkpoint, and the next append truncates it first.
+        let torn = event(1);
+        fs::write(store.journal_path(id), serde_json::to_vec(&torn).unwrap()).unwrap();
         assert_eq!(store.load(id).unwrap().unwrap().state_revision, 0);
+        let index = store.journal_index(id).unwrap();
+        assert_eq!(index.valid_len, 0);
+        assert!(index.entries.is_empty());
+        store
+            .checkpoint_current_journal(id, run.state_revision)
+            .unwrap();
+        let checkpoint: ReplayCheckpoint = json_file::read(&store.checkpoint_path(id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.journal_offset, 0);
+        let repaired = event(1);
+        store.append(id, &repaired).unwrap();
+        assert_eq!(store.load(id).unwrap().unwrap().state_revision, 1);
 
         fs::remove_file(store.journal_path(id)).unwrap();
         fs::create_dir(store.journal_path(id)).unwrap();
@@ -822,5 +1558,275 @@ mod tests {
             format!("{error:#}").contains("failed to list supervisor runs"),
             "{error:#}"
         );
+    }
+
+    fn indexed_run_fixture() -> (tempfile::TempDir, SupervisorStore, Vec<SupervisorRunId>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let mut caller_runs = Vec::new();
+        for index in 0..8 {
+            let caller = if index % 3 == 0 { "other" } else { "caller" };
+            let mut run = SupervisorRun::new(
+                caller.into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(index),
+            );
+            run.state = if index % 2 == 0 {
+                SupervisorRunState::Running
+            } else {
+                SupervisorRunState::WaitingForDecision
+            };
+            if caller == "caller" {
+                caller_runs.push(run.supervisor_run_id);
+            }
+            store.initialize(&run).unwrap();
+        }
+        (tmp, store, caller_runs)
+    }
+
+    #[test]
+    fn run_list_validates_arguments_and_its_derived_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = SupervisorStore::new(tmp.path());
+        assert!(
+            empty
+                .runs_page("caller", None, 0, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("limit must be positive")
+        );
+        assert!(
+            empty
+                .runs_page("caller", None, 0, 1)
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+        assert!(
+            empty
+                .runs_page("caller", None, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor is outside")
+        );
+
+        let (_tmp, store, caller_runs) = indexed_run_fixture();
+        let first = store.runs_page("caller", None, 0, 2).unwrap();
+        assert!(
+            first
+                .runs
+                .iter()
+                .all(|run| caller_runs.contains(&run.supervisor_run_id))
+        );
+
+        let valid_index = store.run_list_index().unwrap();
+        let mut wrong_count = valid_index.clone();
+        wrong_count.entries.pop();
+        assert!(!store.run_list_index_is_valid(&wrong_count).unwrap());
+        let mut duplicate = valid_index.clone();
+        duplicate.entries[1] = duplicate.entries[0].clone();
+        assert!(!store.run_list_index_is_valid(&duplicate).unwrap());
+        let mut missing = valid_index;
+        missing.entries.last_mut().unwrap().supervisor_run_id = SupervisorRunId::new();
+        assert!(!store.run_list_index_is_valid(&missing).unwrap());
+    }
+
+    #[test]
+    fn run_list_pages_hydrate_only_selected_aggregates_and_bound_serialized_bytes() {
+        let (_tmp, store, caller_runs) = indexed_run_fixture();
+        store.run_snapshots_read.set(0);
+        let first = store.runs_page("caller", None, 0, 2).unwrap();
+        assert_eq!(first.runs.len(), 2);
+        assert!(first.next_cursor.is_some());
+        assert_eq!(store.run_snapshots_read.get(), 2);
+        assert!(
+            store
+                .runs_page("nobody", None, 0, 2)
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+
+        store.run_snapshots_read.set(0);
+        let waiting = store
+            .runs_page("caller", Some(SupervisorRunState::WaitingForDecision), 0, 2)
+            .unwrap();
+        assert_eq!(waiting.runs.len(), 2);
+        assert!(
+            waiting
+                .runs
+                .iter()
+                .all(|run| run.state == SupervisorRunState::WaitingForDecision)
+        );
+        assert_eq!(store.run_snapshots_read.get(), 2);
+
+        let first_query = store.load(caller_runs[0]).unwrap().unwrap().query();
+        let one_run_budget = serde_json::to_vec(&SupervisorRunPage {
+            runs: vec![first_query],
+            next_cursor: Some("2".into()),
+        })
+        .unwrap()
+        .len();
+        let byte_page = store
+            .runs_page_with_budget("caller", None, 0, 100, one_run_budget)
+            .unwrap();
+        assert_eq!(byte_page.runs.len(), 1);
+        assert!(byte_page.next_cursor.is_some());
+        assert!(
+            store
+                .runs_page_with_budget("caller", None, 0, 100, one_run_budget - 1)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+    }
+
+    #[test]
+    fn run_list_rebuilds_once_and_falls_back_from_stale_or_unreadable_state() {
+        let (tmp, store, caller_runs) = indexed_run_fixture();
+        let reopened = SupervisorStore::new(tmp.path());
+        let snapshot_count = reopened.snapshot_count().unwrap();
+        reopened.run_snapshots_read.set(0);
+        assert_eq!(
+            reopened.runs_page("caller", None, 0, 1).unwrap().runs.len(),
+            1
+        );
+        assert_eq!(
+            reopened.run_snapshots_read.get(),
+            u64::try_from(snapshot_count + 1).unwrap()
+        );
+        reopened.run_snapshots_read.set(0);
+        assert_eq!(
+            reopened.runs_page("caller", None, 0, 1).unwrap().runs.len(),
+            1
+        );
+        assert_eq!(reopened.run_snapshots_read.get(), 1);
+
+        let mut advanced = store.load(caller_runs[0]).unwrap().unwrap();
+        advanced.state = SupervisorRunState::Failed;
+        advanced.state_revision += 1;
+        json_file::write_atomic(
+            &store.dir,
+            &store.snapshot_path(advanced.supervisor_run_id),
+            &advanced,
+        )
+        .unwrap();
+        assert_eq!(
+            store.runs_page("caller", None, 0, 1).unwrap().runs[0].state,
+            SupervisorRunState::Failed
+        );
+
+        let blocked = tempfile::tempdir().unwrap();
+        fs::write(blocked.path().join("supervisor-runs"), "not a directory").unwrap();
+        assert!(
+            SupervisorStore::new(blocked.path())
+                .runs_page("caller", None, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("failed to list supervisor runs")
+        );
+    }
+
+    #[test]
+    fn list_byte_budget_rechecks_a_cursor_that_grows_during_page_trim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SupervisorStore::new(tmp.path());
+        let mut first_query = None;
+        for index in 0..=100 {
+            let caller = if matches!(index, 98 | 100) {
+                "caller"
+            } else {
+                "other"
+            };
+            let run = SupervisorRun::new(
+                caller.into(),
+                format!("task-{index}"),
+                "input".into(),
+                "policy".into(),
+                now() + chrono::Duration::seconds(index),
+            );
+            if index == 98 {
+                first_query = Some(run.query());
+            }
+            store.initialize(&run).unwrap();
+        }
+        let budget = serde_json::to_vec(&SupervisorRunPage {
+            runs: vec![first_query.unwrap()],
+            next_cursor: Some("99".into()),
+        })
+        .unwrap()
+        .len();
+        assert!(
+            store
+                .runs_page_with_budget("caller", None, 0, 100, budget)
+                .unwrap_err()
+                .to_string()
+                .contains("capacity is exhausted")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn derived_run_index_failures_fall_back_without_hiding_authoritative_runs() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = SupervisorStore::new(tmp.path());
+        let run = SupervisorRun::new(
+            "caller".into(),
+            "task".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        owner.initialize(&run).unwrap();
+        let second = SupervisorRun::new(
+            "caller".into(),
+            "task-2".into(),
+            "input".into(),
+            "policy".into(),
+            now() + chrono::Duration::seconds(1),
+        );
+        owner.initialize(&second).unwrap();
+
+        let cold = SupervisorStore::new(tmp.path());
+        cold.refresh_run_list_index(&run);
+        assert!(!cold.run_list_index_trusted.get());
+        cold.remove_from_run_list_index(&[]);
+        cold.remove_from_run_list_index(&[run.supervisor_run_id]);
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        fs::remove_file(cold.run_list_index_path()).unwrap();
+        cold.refresh_run_list_index(&run);
+        assert!(!cold.run_list_index_trusted.get());
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        fs::remove_file(cold.run_list_index_path()).unwrap();
+        cold.remove_from_run_list_index(&[run.supervisor_run_id]);
+        assert!(!cold.run_list_index_trusted.get());
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        let mode = fs::metadata(&cold.dir).unwrap().permissions().mode();
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        cold.refresh_run_list_index(&run);
+        assert!(!cold.run_list_index_trusted.get());
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(mode)).unwrap();
+
+        assert_eq!(cold.runs_page("caller", None, 0, 1).unwrap().runs.len(), 1);
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        cold.remove_from_run_list_index(&[run.supervisor_run_id]);
+        assert!(!cold.run_list_index_trusted.get());
+        fs::set_permissions(&cold.dir, fs::Permissions::from_mode(mode)).unwrap();
+
+        let rebuild = SupervisorStore::new(tmp.path());
+        fs::set_permissions(&rebuild.dir, fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(
+            rebuild.runs_page("caller", None, 0, 1).unwrap().runs.len(),
+            1
+        );
+        assert!(!rebuild.run_list_index_trusted.get());
+        fs::set_permissions(&rebuild.dir, fs::Permissions::from_mode(mode)).unwrap();
     }
 }

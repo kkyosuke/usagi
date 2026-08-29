@@ -46,6 +46,16 @@ pub enum DaemonRequest {
     /// standby. The old active drives the process-local admission barrier;
     /// clients only supply the durable operation identity.
     Rollover { operation_id: String },
+    /// Observe or explicitly release one workspace held by the live daemon.
+    /// This control surface is unbound because neither operation reads a
+    /// caller-selected workspace resource.
+    Tenant {
+        action: TenantAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
     /// Revisioned daemon-owned PR inventory. Events are only hints; clients
     /// always converge by reading this snapshot.
     Pr {
@@ -167,6 +177,30 @@ pub enum DaemonRequest {
     },
 }
 
+/// Operations on the live daemon's in-memory tenant registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TenantAction {
+    Inventory,
+    Retire,
+}
+
+/// Safe, bounded status data for one workspace currently held by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantSummary {
+    pub root: String,
+    pub sessions: usize,
+    /// Runtime records which may still name a live process. Ownership-unknown
+    /// records are included so status never reports a false zero.
+    pub live_runtimes: usize,
+}
+
+/// The source-of-truth live tenant inventory, ordered by canonical root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantInventory {
+    pub tenants: Vec<TenantSummary>,
+}
+
 /// Opaque authentication presented by a daemon-provisioned MCP child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpCallerContext {
@@ -252,6 +286,7 @@ pub enum DispatchToolAction {
     AgentComplete,
     AgentFail,
     AgentInbox,
+    AgentInboxAck,
     UserDecisionRequest,
     UserDecisionGet,
     UserDecisionList,
@@ -1598,6 +1633,10 @@ impl RetryEligibility {
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::DiagnoseAgents { .. }
+            | DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                ..
+            }
             // Resolving a durable input operation only reads the daemon's
             // ledger, so a lost response is safely re-read on a fresh
             // connection. Every other terminal action stays fail-closed below.
@@ -1645,6 +1684,10 @@ impl RetryEligibility {
             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::PrDismiss { .. }
+            | DaemonRequest::Tenant {
+                action: TenantAction::Retire,
+                ..
+            }
             | DaemonRequest::RestartAgents { .. }
             | DaemonRequest::Terminal { .. }
             | DaemonRequest::CodexSessionCapture { .. }
@@ -2962,6 +3005,11 @@ mod deadline_and_retry_tests {
         use RetryEligibility::{DurableOperation, NoCrossConnectionEvidence, ReadOnly};
         let session_payload = || serde_json::json!({});
         let read_only = [
+            DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                root: None,
+                force: false,
+            },
             DaemonRequest::Pr {
                 action: PrAction::Snapshot,
                 payload: PrRequest {
@@ -2982,6 +3030,12 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentList,
+                operation_id: String::new(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::AgentInbox,
                 operation_id: String::new(),
                 payload: session_payload(),
                 caller_context: None,
@@ -3043,6 +3097,11 @@ mod deadline_and_retry_tests {
         }
 
         let ineligible = [
+            DaemonRequest::Tenant {
+                action: TenantAction::Retire,
+                root: Some("/workspace".into()),
+                force: true,
+            },
             DaemonRequest::Session {
                 action: SessionAction::Prompt,
                 operation_id: "op".into(),
@@ -3050,6 +3109,12 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentComplete,
+                operation_id: "op".into(),
+                payload: session_payload(),
+                caller_context: None,
+            },
+            DaemonRequest::DispatchTool {
+                action: DispatchToolAction::AgentInboxAck,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,

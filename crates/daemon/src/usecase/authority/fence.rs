@@ -112,6 +112,9 @@ pub fn classify_request(body: &Value, owned: OwnedRuntime) -> (RequestClass, Res
         Some("agent_inventory" | "diagnose_agents") => {
             (RequestClass::Inventory, ResourceOwner::Unscoped)
         }
+        Some("tenant") if body.get("action").and_then(Value::as_str) == Some("inventory") => {
+            (RequestClass::Inventory, ResourceOwner::Unscoped)
+        }
         Some("metrics" | "pr") => (RequestClass::Read, ResourceOwner::Unscoped),
         _ => (RequestClass::Control, ResourceOwner::Unscoped),
     }

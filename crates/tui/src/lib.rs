@@ -6,9 +6,10 @@
 //! usagi-core の IPC プロトコル型を介して行う）。
 //! 実 IO は行わず、入出力は呼び出し側（合成ルート）から注入する。
 //!
-//! クレート内はクリーンアーキテクチャの層で分ける（依存方向
-//! `presentation → usecase → domain ← infrastructure`。domain は共有のため
-//! usagi-core が持つ）。描画・入力・画面遷移・attach クライアントは TUI 面ローカルで、
+//! クレート内は presentation / usecase / infrastructure に分ける。presentation と
+//! infrastructure adapter は usecase が公開する port / state へ依存し、usecase は同じクレートの
+//! 外側 2 層へ依存しない。共有 domain と technical boundary は usagi-core が持つ。
+//! 描画・入力・画面遷移・attach クライアントは TUI 面ローカルで、
 //! core には移さない（core が持つのは共有 data・IPC プロトコル型・永続化のみ）。
 //! 各層の責務は document/02-architecture.md が正本。
 

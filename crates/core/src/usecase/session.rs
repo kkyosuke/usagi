@@ -320,11 +320,17 @@ mod tests {
         }
     }
 
+    const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn successful_add() -> Vec<crate::infrastructure::git::GitOutput> {
+        vec![ok(COMMIT), ok(""), ok(""), ok(""), ok(""), ok("")]
+    }
+
     #[test]
     fn create_adds_the_worktree_then_records_the_session() {
         let (tmp, store) = store();
         let repo = tmp.path();
-        let git = FakeGit::new(vec![ok("")]); // worktree add succeeds
+        let git = FakeGit::new(successful_add()); // validation + worktree add succeed
 
         let created = create(&git, &store, repo, spec("alpha"), ts(20)).unwrap();
 
@@ -332,14 +338,14 @@ mod tests {
         // <repo>/.usagi/sessions/<name>, branched from the current HEAD (no base).
         let dest = repo.join(".usagi/sessions/alpha");
         assert_eq!(
-            git.calls.borrow()[0],
+            git.calls.borrow()[3],
             vec![
                 "worktree",
                 "add",
-                "-b",
-                "usagi/alpha",
+                "--no-checkout",
                 "--",
                 dest.to_str().unwrap(),
+                "usagi/alpha",
             ]
         );
         assert_eq!(created.root, dest);
@@ -351,7 +357,14 @@ mod tests {
     #[test]
     fn create_propagates_a_worktree_add_failure_without_recording() {
         let (tmp, store) = store();
-        let git = FakeGit::new(vec![fail("fatal: branch 'usagi/alpha' already exists")]);
+        let git = FakeGit::new(vec![
+            ok(COMMIT),
+            ok(""),
+            ok(""),
+            fail("fatal: branch 'usagi/alpha' already exists"),
+            ok(""),
+            ok(""),
+        ]);
 
         let err = create(&git, &store, tmp.path(), spec("alpha"), ts(20))
             .unwrap_err()
@@ -363,23 +376,25 @@ mod tests {
 
     #[test]
     fn create_rolls_back_the_worktree_when_recording_fails() {
-        // Force the state record to fail by making `.usagi` a file, so the store's
-        // `create_dir_all` cannot make the directory.
+        // Occupy the state file path with a directory while leaving the session
+        // container available, so materialization succeeds before recording fails.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
-        fs::write(repo.join(".usagi"), "blocker").unwrap();
         let store = WorkspaceStateStore::new(repo);
+        fs::create_dir_all(store.state_path()).unwrap();
         // add succeeds, then the rollback remove is invoked.
-        let git = FakeGit::new(vec![ok(""), ok("")]);
+        let mut outputs = successful_add();
+        outputs.push(ok(""));
+        let git = FakeGit::new(outputs);
 
         assert!(create(&git, &store, repo, spec("alpha"), ts(20)).is_err());
 
-        // Two git calls: the add, then the rollback `worktree remove --force`.
+        // Validation, branch, metadata, checkout, then rollback remove.
         let calls = git.calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0][..2], ["worktree", "add"]);
+        assert_eq!(calls.len(), 7);
+        assert_eq!(calls[3][..2], ["worktree", "add"]);
         assert_eq!(
-            calls[1],
+            calls[6],
             vec![
                 "worktree",
                 "remove",
@@ -394,7 +409,7 @@ mod tests {
     fn remove_tears_down_the_worktree_then_forgets_the_record() {
         let (tmp, store) = store();
         let repo = tmp.path();
-        let git = FakeGit::new(vec![ok("")]); // worktree add
+        let git = FakeGit::new(successful_add()); // validated worktree add
         create(&git, &store, repo, spec("alpha"), ts(20)).unwrap();
 
         let git = FakeGit::new(vec![ok("")]); // worktree remove
@@ -416,7 +431,7 @@ mod tests {
         let (tmp, store) = store();
         let repo = tmp.path();
         create(
-            &FakeGit::new(vec![ok("")]),
+            &FakeGit::new(successful_add()),
             &store,
             repo,
             spec("alpha"),

@@ -1,13 +1,13 @@
 ---
 number: 679
 title: fix(daemon): PR refresh の gh child を bounded output / process group で回収する
-status: todo
+status: done
 priority: medium
 labels: [review, v2, daemon, pr, process, resource, resilience]
 dependson: []
 related: [346, 493, 606, 656, 661]
 created_at: 2026-08-13T22:45:35.398551+00:00
-updated_at: 2026-08-13T22:45:35.398551+00:00
+updated_at: 2026-08-26T00:00:00+00:00
 ---
 
 ## Finding（P2 process / resource）
@@ -41,3 +41,13 @@ PATH上の`gh`がwrapper、壊れた実装、または巨大JSON/診断を出す
 - `src/runtime/daemon.rs::GhProcess`
 - `crates/daemon/src/usecase/pr_inventory.rs::GhProcessPort`
 - `document/05-daemon.md#pr-refresh-scheduler`
+
+## 2026-08-26 対応
+
+- [x] `gh` を共通の bounded process primitive で起動し、stdout / stderr を並行 drain して
+      stream ごとに 256 KiB の hard cap を適用した。
+- [x] output overflow を reader から owner へ即時通知し、5秒の provider deadline を待たずに
+      owned process group を TERM → 100 ms grace → KILL → reap で回収する。
+- [x] exact / +1、invalid UTF-8、nonzero、timeout、parent exit 後に pipe を保持する descendant を
+      実プロセステストで固定し、全失敗を raw output を含まない safe error へ正規化した。
+- [x] 既存の固定 argv、inventory lock 外実行、publish / backoff 契約を維持した。

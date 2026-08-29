@@ -3,7 +3,8 @@
 > [ドキュメント目次](README.md) ｜ ← 前へ [1. プロジェクト概要](01-overview.md) ｜ 次へ → [3. TUI](03-tui.md)
 
 実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
-面（TUI / daemon / 入口）の境界をクレート境界に一致させ、依存方向を rustc で強制する。
+面（TUI / daemon / 入口）の境界をクレート境界に一致させ、面どうしの依存禁止を rustc で強制する。
+クレート内は古典的な4層をそのまま重ねたものではなく、後述する実装依存行列を検査で固定する。
 本書がディレクトリ構成・クレート責務・依存ルールの正本である。
 
 ## 目次
@@ -94,6 +95,7 @@
 │           ├── infrastructure/  # attach クライアント（daemon への IPC クライアント側）・端末バックエンド
 │           └── presentation/    # 画面描画・キー入力マッピング・起動バナー runner
 │               ├── frame            # ANSI/Unicode 幅をセル grid にする pure frame diff（端末 write は adapter 側）
+│               ├── workspace_deck   # process-level project tab membership / overlay reducer / bar projection
 │               ├── theme            # 色テーマ（意味的な役割→具体色の単一情報源。ANSI SGR を吐く）
 │               ├── views/            # 各画面の view（splash / welcome / open / new / config / home）
 │               │   ├── welcome            # トップメニュー（Open/New/Config/Quit ＋ recent 2 カラム。単体 workspace と unite を描き分け）の状態と描画
@@ -124,20 +126,21 @@
 |---|---|---|
 | `usagi-core` | `crates/core` | 各面が共有する domain / usecase / infrastructure（IPC プロトコル型・永続化・git） |
 | `usagi-daemon` | `crates/daemon` | 常駐プロセス（`usagi daemon`）のサーバ側。daemon lifecycle verb、IPC server protocol、daemon-owned terminal / runtime の usecase と Unix transport を持つ |
-| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを実装していく |
-| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を実装していく（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)） |
+| `usagi-tui` | `crates/tui` | TUI クライアント側。画面描画・キー入力・attach プロトコルのクライアントを持つ |
+| `usagi-cli` | `crates/cli` | 入口面（常駐しない headless presentation）。人間向け CLI サブコマンド（`cli/`）とエージェント向け MCP サーバ（`mcp/`）を持つ。配置の採用理由は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) に残す |
 | `usagi`（bin） | ルート | 合成ルート。実 IO（標準入出力・引数・端末）を束ね、各面へ dispatch する |
 
 ### usagi-tui の内部構成
 
-TUI 面はクレート内でクリーンアーキテクチャの層を切る（依存方向は
-`presentation → usecase → domain ← infrastructure`）。複数 surface が共有する domain 語彙は
+TUI 面はクレート内を presentation / usecase / infrastructure に分ける。presentation と
+infrastructure adapter は usecase が公開する port / state へ依存し、usecase は同じクレートの
+presentation / infrastructure へ依存しない。複数 surface が共有する domain 語彙と technical boundary は
 [usagi-core](#各クレートの責務) が持つ。一方、TUI の表示 intent のように一つの face だけが使う domain / port は
 その face の usecase 境界に閉じる。`AgentTabIntent` は TUI-local domain であり、core domain へ置かない。
 
 | 層（`crates/tui/src/`） | 置くもの |
 |---|---|
-| `presentation/` | 画面描画・キー入力マッピング。描画は自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分け、view が layout で領域を割りそこへ widget を配置する。色は `theme`（意味的な役割 accent / success / danger … を具体色へ写す単一情報源。ANSI SGR を直接吐き外部クレートに依存しない）で一元管理する。対話ループもここに置く（`run_with_settings` は `Terminal`、`WorkspaceLoader`、`SettingsPort` を注入し、Welcome ⇄ Open / New / Config、Open ⇄ Workspace の画面グラフを回す。Config は scope ごとの draft を持ち、保存失敗時も保持する。Workspace 内では Switch / Closeup の mode と Overview / PR の最前面 modal を状態機械で dispatch し、modal widget が組み立て済み workspace frame に枠を合成する。Recent は Welcome から Workspace へ直接進み、Esc で Welcome へ戻る） |
+| `presentation/` | 画面描画・キー入力マッピング。描画は自前の差分レンダリングで行い、UI フレームワークに依存しない。`frame` は ANSI/Unicode 幅を考慮して view の行を cell grid にし、row / column span の pure diff を返す。surface reset と geometry 変更は full clear と全行 repaint にし、実端末への cursor 移動・write は adapter に閉じる。内部は各画面の view（`views/`）・再利用 UI 部品（`widgets/`）・領域配置（`layouts/`）に分ける。process-level `workspace_deck` は ordered canonical path / active identity / Add・Switcher と project bar の identity-bearing hit geometry だけを所有し、workspace ごとの session / pane / modal state は共有しない。対話ループは active snapshot を先に prepare し、旧 composition を drop した後に次の factory を呼ぶため resident composition は常に 1 件である。 |
 | `usecase/` | TUI に閉じた application ロジック。起動画面の `EntryScreen`、それを具体的な描画・入力実装へ委譲する `ScreenRunner` 境界、管理画面用の端末ポート `Terminal` と入力語彙 `Key`、live pane 専用の端末非依存入力語彙・bytes encoder・`Ctrl-O` classifier、Welcome / Open / Recent の typed attach と Home の純粋 controller（state / event / effect reducer、TUI-local backend port と fake backend）。controller が返した全 `Effect` を daemon 所有のポート群（session command / agent / notes・environment store / workspace command / decision / PR・preview・browser）へ振り分ける本番 executor `daemon_backend`。実 IO ポートは合成ルートが 1 つの backend factory から注入し、`effect → 実行 → event → update()` の単方向ループを閉じる。Home は runtime ごとの phase を保持し、target ごとに `done > waiting > running > ready > absent` で集約する。progress・operation / terminal error・disconnect / reconnect / resync は safe message と error ID だけを TUI-local feedback として保持する。stable `TerminalRef` で tab / pending placeholder / attach policy を扱う Closeup pane reducer と、その reducer を daemon inventory / stream / resume / geometry dedupe へ結合する `pane_runtime`、Agent tab の order / selection を還元し legacy dismissal を移行する TUI-local `AgentTabIntent` domain と persistence port、Overview / Closeup コマンドの解釈・dispatch、画面グラフの遷移、イベント処理の状態機械 |
 | `infrastructure/` | daemon 端末へ attach する IPC クライアント側と端末バックエンド（raw mode・端末制御・キー/ホイール読み取り・クリップボード）。daemon push adapter は phase、safe error、connection feedback を TUI-local projection に変換し、wire の detail を越境させない |
 
@@ -382,7 +385,10 @@ parse 可能な exact-path source を同時に得て、query、ambiguity、done 
 snapshot を使う。snapshot 前には同じ lock のまま scheduled derived repair を試みるため、自己修復契約も保つ。
 全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
 error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
-決める。番号指定 delete は repair 手段に使わない。
+決める。番号指定 delete は repair 手段に使わない。`IssueStore::validate_source_set` は immutable な source
+snapshotをstrictにparseし、filename/frontmatter不一致・prefix欠落・重複番号をerrorにする。rootの
+`committed_issue_sources_are_parseable_and_unambiguous` testがcheckout済み `.usagi/issues/*.md` 全体へこの検査を適用し、
+壊れたsource setをCIで拒否する。
 
 ## Git subprocess の環境 confine
 
@@ -427,8 +433,12 @@ system / global config は**意図的に残す**。private repository の clone 
 必要とし、それは「repository が指定する任意コマンド」とは別物である。root Agent に渡す read-only git はこれに加えて
 system / global config も落とす（remote に到達する理由がないため）。
 
-`filter.<driver>.smudge` は driver 名を tracked `.gitattributes` が任意に選べるため、固定 key の上書きでは
-無効化できない。filter process を起動しない materialization は未実装で、issue #675 に残る。
+`filter.<driver>.smudge` / `filter.<driver>.process` は attribute が任意の driver 名を選べるため、固定 key の
+上書きでは無効化できない。session worktree 作成は base ref を先に commit object ID へ固定し、その tree 内の全
+`.gitattributes` を blob として検査する。tracked tree に filter attribute があれば checkout 前に拒否する。次に
+branch と `git worktree add --no-checkout` の metadata だけを作り、新worktreeの実効設定にある全 filter driverを
+command scope で無効化した `git read-tree -u` だけでmaterializeする。これによりGit local/global attributeも
+filter processを起動できず、途中失敗時はこの呼び出しが所有するworktreeとbranchだけを補償削除する。
 
 session の Git effect（create、mirror した tree の nested worktree、remove）は全て daemon の
 `GitRunner` 実装 1 か所を通るため、confine もそこで 1 回だけ適用する。
@@ -459,8 +469,8 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   だけであり、TUI / CLI / MCP は IPC command を通じて要求する。repository-local な `state.json` の session record は
   managed state として解釈・採用せず、daemon lifecycle store だけを権威にする。notes 等の UI metadata は lifecycle とは独立して扱う。
 - supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
-  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と append-only event journal を保持し、
-  lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
+  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と compacting event journal、
+  offset index、replay checkpoint を保持し、lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
   event producer であり、domain/store はそれらを解釈しない。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
@@ -472,18 +482,41 @@ session の Git effect（create、mirror した tree の nested worktree、remov
 
 ## クリーンアーキテクチャとの対応
 
-4 層（`presentation → usecase → domain ← infrastructure`）はクレート分割後も維持する。
+この構成が守る Clean Architecture の境界は、**domain の外部非依存**、**面クレートの相互非依存**、
+**面ローカル usecase の presentation / adapter 非依存**である。ディレクトリ名だけから
+`presentation → usecase → domain ← infrastructure` という古典的な4層を全クレートへ一律には適用しない。
 層とクレートの対応は次のとおり。
 
 | 層 | 置き場所 |
 |---|---|
 | domain | `usagi-core` の `domain/` |
 | usecase | 面をまたぐ共有は `usagi-core` の `usecase/`。片面専用のロジックは各面クレート内 |
-| infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末描画は tui）は各面クレート内 |
+| technical boundary / infrastructure | 面をまたぐ共有（IPC プロトコル型・永続化・git）は `usagi-core` の `infrastructure/`。片面専用（PTY は daemon、端末 adapter は tui）は各面クレート内 |
 | presentation | 各面クレート（TUI の画面 / daemon のサーバ端点 / cli のサブコマンド・MCP tool アダプタ）と、ルート `main.rs` の dispatch |
 
-依存方向は「クレート間」（tui / cli / daemon → core）と「core 内モジュール」（usecase → domain ← infrastructure）
-の両方のレベルで守る。実 IO は合成ルートで注入し、各クレートは依存注入によりユニットテスト可能に保つ。
+`usagi-core/infrastructure` は外部 IO adapter だけの置き場ではない。面をまたぐ wire contract、
+cross-process lock を含む transactional store、Git effect の共有実装をまとめた technical boundary である。
+core usecase は `IssueStore` / `WorkspaceStateStore` / `Storage` / `GitRunner` 等を引数として受け、
+その transaction / compensation contract を直接合成する。逆に core infrastructure の adapter は
+usecase が定義する port を実装できる。これらを実体のない同型 port で包み直さず common crate に閉じることを、
+本プロジェクトの明示的な設計判断とする。時計・process 実行等は引き続き注入し、ユニットテスト可能性を保つ。
+
+実装依存行列は次のとおり（`○` は参照可、`—` は同一領域、空欄は禁止）。`core` の technical boundary と
+usecase の相互参照は上記の共有 contract に限り、domain は常に内側に留まる。
+
+| 参照元 | core domain | core usecase | core technical boundary | 同じ面の usecase | 同じ面の infrastructure | 同じ面の presentation |
+|---|---:|---:|---:|---:|---:|---:|
+| core domain | — |  |  | - | - | - |
+| core usecase | ○ | — | ○ | - | - | - |
+| core technical boundary | ○ | ○ | — | - | - | - |
+| face usecase | ○ | ○ | ○ | — |  |  |
+| face infrastructure | ○ | ○ | ○ | ○ | — |  |
+| face presentation | ○ | ○ | ○ | ○ | ○ | — |
+
+クレート間は `tui / cli / daemon → core` だけを許し、面クレートどうしは依存しない。ルート package だけが
+全クレートへ依存して実 IO を合成する。この行列は [`tests/architecture.rs`](../tests/architecture.rs) が、
+全 manifest の usagi dependency と `domain` / `usecase` / `infrastructure` の production Rust AST を走査して強制する。
+コメントや `#[cfg(test)]` の fake は production 依存として数えない。
 
 ## 単一バイナリと合成ルート
 
@@ -582,12 +615,12 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | planned restart 中の client 側 request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | `crates/core/src/usecase/owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/core/src/usecase/daemon_health.rs`。sample 列と現在時刻だけの純関数で、実時計は引数として受ける。sample を畳む cache は `crates/tui/src/presentation/metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
-| local LLM の trusted model 語彙と optional MCP / delegation prompt 配線 | 設定語彙・sanitize は `crates/core/src/domain/settings/`、Claude / Codex の product encoding は `crates/daemon/src/usecase/{claude,codex}`、設定読出しと prompt bool の合成は `src/runtime/daemon.rs`（wire 契約の正本は [7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)） |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
+| live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
 | 画面をまたぐ再利用 UI 部品（widget） | `crates/tui/` の `presentation/widgets/` |
 | 色（意味的な役割→具体色）・色定数 | `crates/tui/` の `presentation/theme` |
@@ -635,9 +668,7 @@ Codex / Claude adapter は daemon の terminal launch 子層である `usecase::
 model の解釈、config / MCP / hook の payload はそれぞれの provisioner 内部だけが扱う。adapter は共通の
 `AgentAdapter` として reservation 前に durable snapshot と `SpawnProvision` を組み立て、runtime は snapshot を
 保存してから provision を PTY spawner へ一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal
-stream、error detail に残らない。optional local LLM の MCP server と delegation instruction も同じ
-ephemeral provision にだけ載せる（配線条件と順序は
-[7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線) が正本）。
+stream、error detail に残らない。
 
 Claude の実効 argv は次の順序に固定する。
 
@@ -864,10 +895,13 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   呼び出しを担う薄い adapter で、実 stdin は合成ルートが束ねる。`agent-phase <phase>` は phase を daemon へ報告する。引数の phase は
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
-  `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。報告は
-  daemon が発行して process environment に閉じ込めた credential で報告元 runtime に束縛され、caller は runtime /
-  session / path を名指しできない。未知 phase・malformed payload・配線外 event・credential 欠落は
-  fail-closed で拒否し、request は送らない（非 0 終了）。`transcript_path` は deserialize せず file も開かない。
+  `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。command hook は
+  `command` と `args` を分けた exec form で注入し、shell の quote / tokenization と中間 process に依存しない。報告は
+  kernel から得た hook PID・parent PID・process group を exact live runtime と照合して束縛し、caller は runtime /
+  session / path を名指しできない。provider の direct child は inherited / self-led process group の双方を受理し、
+  shell form との互換用に provider と同じ process group も受理する。未知 phase・malformed payload・配線外 event は
+  request 前に、runtime に束縛できない process は daemon 境界で fail-closed に拒否する（いずれも非 0 終了）。
+  `transcript_path` は deserialize せず file も開かない。
   daemon 側の反映（projection 優先順位と durable な写像）は [5. daemon](05-daemon.md#agent-phase-の投影) が正本。
   この報告は**すでに動いている daemon へ attach するだけ**で、bootstrap lock も daemon の cold start も
   一切行わない。報告元は当の daemon が起動した agent であり daemon は定義上生きている一方、その agent が
@@ -877,7 +911,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   遅延を払わないという意味でも、attach だけが正しい。
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
-  起動する。session の repository 書き込みは own worktree だけに閉じ込め、両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
+  起動する。session の repository content 書き込みは own worktree に閉じ込め、Git workspace では linked worktree が
+  checkout 外に持つ Git common directory も administrative state として許可する。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
   `/usr/bin/sandbox-exec`（書き込みを許可 subpath に絞る profile。firmlink される
@@ -922,9 +957,12 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
-- **起動固有 writable root**: session は own worktree だけであり、workspace の `.usagi`、Git common dir、
-  data home を追加しない。したがって sibling session、root の tracked issue source、daemon durable state は
-  path の表記や symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
+- **起動固有 writable root**: session は own worktree と、その repository の Git common directory を受け取る。
+  linked worktree の index・refs・logs・object database は checkout 外の common directory にあるため、後者が無いと
+  checkout 内の編集が可能でも `git add` / `git commit` は失敗する。workspace の `.usagi` と data home は追加しないため、
+  sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や symlink alias に
+  かかわらず read-only である。Git common directory は worktree 間で共有される administrative authority なので、
+  session 名・branch・worktree の対応と teardown は引き続き daemon lifecycle state が権威を持つ。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)と
@@ -938,7 +976,9 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   permission mode・onboarding・folder trust・MCP 承認が毎起動リセットされ、Keychain / MDS が無いと
   認証が 401 で失敗する。
 - **`--settings`**: `usagi_daemon::usecase::claude::scoped_settings_json` の hook JSON を inline で渡す
-  （host path をディスクへ materialize しない）。`PreToolUse` の phase 報告とライフサイクル event
+  （host path をディスクへ materialize しない）。各 command hook は `command: <usagi path>` と
+  `args: [...]` を分けた exec form であり、Claude は shell を介さず hook process を直接 spawn する。
+  `PreToolUse` の phase 報告とライフサイクル event
   （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
   も checkout と Git common dir の書き込みを拒否する。
@@ -987,11 +1027,15 @@ MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き�
   `~/.claude.json.tmp.<pid>.<random>` を書いて rename で本体に被せる。file 単位で許可すると temp と lock が
   `$HOME` 直下で拒否され、保存が丸ごと失敗する。設定は**読めるのに書けない**状態になるため、症状は
   「起動のたびに folder trust と初回フローを聞かれる」という形で出る（`~/.claude` の grant だけでは直らない）。
-- **`$HOME` 全体は writable にしない**。macOS の profile は prefix を regex（`(allow file-write* (regex
-  #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・temp・backup が
-  すべて覆われる。Linux の `bwrap` は mount 単位でしか許可できず prefix を表現できないため、
-  `--bind-try <prefix>` で config 本体だけを read-write に再 bind する（`$HOME` directory 自体は
-  read-only のままなので、Linux では lock / temp を要する保存経路は通らない）。
+- **既存の `$HOME` entry 全体は writable にしない**。macOS の profile は prefix を regex（`(allow
+  file-write* (regex #"^<prefix>"))`。path 中の regex メタ文字は escape する）で許可するため、本体・lock・
+  temp・backup がすべて覆われる。Linux の `bwrap` は mount 単位でしか prefix を表現できないため、launcher が
+  起動直前の `$HOME` 直下 entry を列挙し、`$HOME` を read-write bind してから config prefix family 以外の
+  各 entry を read-only bind に戻す。最後に agent state と起動固有 root を read-write で重ねる。このため lock / temp の
+  新規作成と rename は通る一方、起動時に存在した `.ssh` や repository の ancestor などは read-only のままになる。
+  entry 列挙に失敗した場合や直下 path でない結果は無保護に続行せず fail closed にする。mount policy は起動後に
+  作られる別名の直下 entry を config temp と区別できないため、Linux では新規 `$HOME` 直下 entry の作成も許可されるが、
+  起動時点に存在する entry の内容と subtree は上記の再 bind で保護する。
 - 判定は state root と同じく launcher が exec する program の basename だけを根拠にし、値の正本は
   `usagi-core` の `domain::settings::DefaultModel::global_config_prefix` である。daemon 側の policy gate も
   同じ program から prefix を決め、保護対象 workspace・Git common dir と重なる構成を拒否する。
@@ -1045,7 +1089,7 @@ terminal environment が guard の前提を差し替えない。
 ## 入口面 MCP の tool dispatch
 
 dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
-`agent_complete`、`agent_fail`、`agent_inbox` は tool schema と daemon IPC request 型を公開する。
+`agent_complete`、`agent_fail`、`agent_inbox`、`agent_inbox_ack` は tool schema と daemon IPC request 型を公開する。
 daemon は private caller credential を live runtime と照合し、session lifecycle、Agent runtime、dispatch
 store と caller inbox を一つの durable 経路として compose する。credential の無い呼び出しや current run と
 一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。

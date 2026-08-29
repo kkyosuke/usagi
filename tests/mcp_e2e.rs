@@ -4,19 +4,20 @@
 
 mod support;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use serde_json::json;
 use support::mcp::{FixtureArgv, McpHarness};
 use usagi_core::domain::{
     agent::{AgentProfileId, CallerRef, ModelSelector},
     id::{AgentId, OperationId, UserDecisionId, WorkspaceId},
     role::RoleId,
-    settings::DEFAULT_LOCAL_LLM_MODEL,
     user_decision::UserDecision,
 };
 use usagi_core::infrastructure::store::{
@@ -28,10 +29,83 @@ use usagi_core::usecase::client::{
 };
 
 #[test]
-fn production_tools_list_fixes_the_48_tool_schema_contract() {
+fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
+    let mcp = McpHarness::start();
+    let bootstrap_path = mcp.data_dir().join("daemon/bootstrap.lock");
+    let bootstrap = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&bootstrap_path)
+        .expect("the running daemon has a bootstrap lock node");
+    FileExt::lock_exclusive(&bootstrap).expect("the fixture holds bootstrap authority");
+
+    // `USAGI_WORKSPACE_ROOT` is the non-secret provision marker the daemon
+    // injects into its Agent and forwards to the MCP child. The child must
+    // attach to that already-running daemon: taking this held lock would spend
+    // the five-second bootstrap ceiling and then exit before stdio serve.
+    let started = Instant::now();
+    let mut child = support::daemon::usagi_command(
+        mcp.home(),
+        support::daemon::Channel::Local,
+        mcp.cwd(),
+        &["mcp".as_ref()],
+    )
+    .env(
+        usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
+        mcp.workspace(),
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("daemon-provisioned MCP child starts");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "clientInfo": {"name": "attached-regression", "version": "1"}
+            }
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut response = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut response)
+        .unwrap();
+
+    if response.is_empty() {
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        panic!("MCP child closed before initialize: {stderr}");
+    }
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["result"]["serverInfo"]["name"], "usagi");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "attached MCP waited on bootstrap.lock"
+    );
+
+    let _ = child.kill();
+    child.wait().unwrap();
+}
+
+#[test]
+fn production_tools_list_fixes_the_49_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 48);
+    assert_eq!(tools.len(), 49);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -52,7 +126,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 37);
+    assert_eq!(names.len(), 38);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -313,7 +387,7 @@ printf '%s\n%s\n%s\n' \
     assert!(dispatch.contains("investigate flaky startup"));
     assert!(!dispatch.contains("DELEGATE_ROLE_SECRET"));
     let argv = wait_for_fixture_argv(&mcp, "codex", None, "DELEGATE_ROLE_SECRET");
-    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None, false);
+    assert_shipping_role_argv(&argv, "reviewer", "DELEGATE_ROLE_SECRET", None);
     let sessions = tool_text(&mcp.tool("session_list", &json!({})));
     let delegated_session = sessions["sessions"]
         .as_array()
@@ -551,6 +625,22 @@ fn production_issue_writes_are_refused_at_the_workspace_root() {
             .as_str()
             .unwrap()
             .contains("workspace root")
+    );
+    assert!(!mcp.workspace().join(".usagi/issues").exists());
+}
+
+#[test]
+fn claimed_child_store_tools_stay_bound_to_the_authenticated_session() {
+    let mut mcp = McpHarness::start();
+    drop(mcp.launch_caller());
+
+    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Claimed child scope"})));
+
+    assert_eq!(created["number"], 1);
+    assert!(
+        mcp.workspace()
+            .join(".usagi/sessions/mcp-caller/.usagi/issues/001-claimed-child-scope.md")
+            .is_file()
     );
     assert!(!mcp.workspace().join(".usagi/issues").exists());
 }
@@ -1064,12 +1154,11 @@ fn assert_shipping_role_argv(
     role_id: &str,
     instructions: &str,
     user_prompt: Option<&str>,
-    local_llm: bool,
 ) {
     let role = RoleId::new(role_id).unwrap();
     let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
         usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(local_llm)),
+        Some(shipping_tool_families()),
         Some((&role, instructions)),
     );
     let system_prompt = shipping_system_prompt(capture);
@@ -1111,22 +1200,18 @@ fn assert_shipping_role_argv(
 }
 
 /// The families a shipping launch gets: this harness leaves Issue and Memory at
-/// their default (enabled) in both settings layers, so only the delegation server
-/// varies with the local-LLM setting.
-fn shipping_tool_families(
-    local_llm: bool,
-) -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
+/// their default (enabled) in both settings layers.
+fn shipping_tool_families() -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
     usagi_core::domain::agent::mcp_tools::McpToolFamilies {
         issue: true,
         memory: true,
-        local_llm,
     }
 }
 
 fn assert_shipping_legacy_argv(capture: &FixtureArgv) {
     let expected = usagi_core::domain::agent::prompt::launch_system_prompt(
         usagi_core::domain::agent::prompt::PromptScope::Session,
-        Some(shipping_tool_families(false)),
+        Some(shipping_tool_families()),
         None,
     );
     let assignments = capture
@@ -1147,10 +1232,19 @@ fn assert_secret_absent_from_durable_data(mcp: &McpHarness, secrets: &[&str]) {
         if path == fixture_argv {
             return;
         }
-        if path.is_dir() {
+        let Ok(metadata) = path.symlink_metadata() else {
+            return;
+        };
+        if metadata.is_dir() {
             for entry in fs::read_dir(path).unwrap() {
                 visit(&entry.unwrap().path(), fixture_argv, secrets);
             }
+            return;
+        }
+        // The production harness keeps its MCP transport FIFOs and daemon
+        // sockets live while this assertion runs. Reading a FIFO would block;
+        // only durable regular files belong to this scan.
+        if !metadata.is_file() {
             return;
         }
         let Ok(bytes) = fs::read(path) else {
@@ -1187,7 +1281,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         .expect("legacy caller argv was captured");
     assert_shipping_legacy_argv(&legacy);
     mcp.restart_with_credential(&caller_credential);
-    mcp.enable_local_llm();
+    mcp.write_legacy_local_llm_settings();
     write_session_role_catalog(
         &mcp,
         "shipping-reviewer",
@@ -1225,24 +1319,21 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         assert!(!response.to_string().contains(ROLE_SECRET));
         responses.push(response);
         let capture = wait_for_fixture_argv(&mcp, executable, Some(prompt), ROLE_SECRET);
-        assert_shipping_role_argv(
-            &capture,
-            "shipping-reviewer",
-            ROLE_SECRET,
-            Some(prompt),
-            true,
-        );
+        assert_shipping_role_argv(&capture, "shipping-reviewer", ROLE_SECRET, Some(prompt));
         captures.push(capture);
     }
 
     for capture in &captures {
-        assert!(
-            capture
-                .arguments
-                .iter()
-                .any(|argument| argument.contains(DEFAULT_LOCAL_LLM_MODEL)),
-            "local-LLM MCP configuration was not provisioned"
-        );
+        for removed_value in ["usagi-llm", "llm-mcp", "qwen2.5-coder:7b"] {
+            assert!(
+                capture
+                    .arguments
+                    .iter()
+                    .all(|argument| !argument.contains(removed_value)),
+                "legacy local-LLM setting entered shipping {runtime} argv",
+                runtime = capture.runtime
+            );
+        }
     }
 
     // Editing the catalog cannot rewrite the already-running process argv.
@@ -1565,7 +1656,6 @@ printf '%s\n%s\n%s\n' \
         "coder",
         "DISPATCH_ROLE_SECRET",
         Some("complete through MCP"),
-        false,
     );
 
     let session = tool_text(&mcp.tool("session_get", &json!({"name":"mcp-worker"})));
@@ -1604,6 +1694,17 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
     assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
+    let next_cursor = page["next_cursor"].as_u64().unwrap();
+    let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));
+    assert!(ack.get("error").is_none(), "{ack}");
+    assert_eq!(tool_text(&ack)["acked_cursor"], next_cursor);
+    assert!(
+        tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     for (tool, arguments) in [
         ("session_get", json!({"name":"mcp-worker"})),

@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use usagi_core::infrastructure::git::{GitOutput, GitRunner, list_worktrees};
+use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, list_worktrees};
 use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::usecase::session_runtime::SessionWorktreeIo;
 
@@ -30,6 +30,9 @@ fn a_hostile_git_environment_cannot_redirect_a_session_worktree_effect() {
     // The repository the daemon names, and the one the environment names.
     let target = init_repository(&root.join("target"));
     let decoy = init_repository(&root.join("decoy"));
+    let smudge_marker = root.join("smudge-filter-ran");
+    let process_marker = root.join("process-filter-ran");
+    install_checkout_filter_fixture(&target, &smudge_marker, &process_marker);
     // A workspace root that is not a repository itself: `build_session_tree`
     // mirrors it and adds a worktree for each repository it finds inside.
     let mirror_root = root.join("mirror");
@@ -72,6 +75,20 @@ fn a_hostile_git_environment_cannot_redirect_a_session_worktree_effect() {
         worktree_paths(&git, &target),
         vec![target.clone(), session_root.clone()]
     );
+    assert_eq!(
+        fs::read(session_root.join("smudged.txt")).expect("raw smudge fixture"),
+        b"smudge source\n"
+    );
+    assert_eq!(
+        fs::read(session_root.join("processed.txt")).expect("raw process fixture"),
+        b"process source\n"
+    );
+    assert!(
+        !smudge_marker.exists() && !process_marker.exists(),
+        "session materialization executed a checkout filter"
+    );
+
+    assert_failed_materialization_is_compensated(&root, &target, &session_root, &git);
 
     // create, nested: each repository inside a mirrored tree gets its own
     // worktree at the same relative path, and plain files are copied.
@@ -182,10 +199,120 @@ fn init_repository(path: &Path) -> PathBuf {
     path
 }
 
+/// Configure an untracked attributes source and hostile drivers only after the
+/// files are committed, so fixture setup itself never runs them. This exercises
+/// the local/global attributes path that an exact tracked-tree scan cannot see.
+fn install_checkout_filter_fixture(repo: &Path, smudge_marker: &Path, process_marker: &Path) {
+    fs::write(repo.join("smudged.txt"), b"smudge source\n").unwrap();
+    fs::write(repo.join("processed.txt"), b"process source\n").unwrap();
+    run_git(repo, &["add", "smudged.txt", "processed.txt"]);
+    run_git(repo, &["commit", "-q", "-m", "filter fixtures"]);
+
+    let attributes = repo.join("hostile.attributes");
+    fs::write(
+        &attributes,
+        b"smudged.txt filter=smudge-pwn\nprocessed.txt filter=process-pwn\n",
+    )
+    .unwrap();
+    run_git(
+        repo,
+        &[
+            "config",
+            "core.attributesFile",
+            attributes.to_str().unwrap(),
+        ],
+    );
+    run_git(
+        repo,
+        &[
+            "config",
+            "filter.smudge-pwn.smudge",
+            &format!("touch {}; cat", smudge_marker.display()),
+        ],
+    );
+    run_git(
+        repo,
+        &[
+            "config",
+            "filter.process-pwn.process",
+            &format!("touch {}; exit 1", process_marker.display()),
+        ],
+    );
+    run_git(repo, &["config", "filter.process-pwn.required", "true"]);
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn ok(git: &SystemGit, repo: &Path, args: &[&str]) -> GitOutput {
     let output = git.run(repo, args).expect("spawn git");
     assert!(output.success, "git {args:?} failed: {}", output.stderr);
     output
+}
+
+/// A failure after real `worktree add --no-checkout` has created both Git
+/// metadata and a branch compensates those exact effects. The injected seam
+/// fails only materialization; cleanup itself is driven by real Git.
+fn assert_failed_materialization_is_compensated(
+    root: &Path,
+    target: &Path,
+    successful_session: &Path,
+    git: &SystemGit,
+) {
+    let failed_session = root.join("sessions/failed");
+    let failure = add_worktree(
+        &MaterializationFailureGit,
+        target,
+        &failed_session,
+        "usagi/failed-materialization",
+        None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(failure.contains("injected materialization failure"));
+    assert!(!failed_session.exists());
+    assert_eq!(
+        worktree_paths(git, target),
+        vec![target.to_path_buf(), successful_session.to_path_buf()]
+    );
+    let branch = git
+        .run(
+            target,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/usagi/failed-materialization",
+            ],
+        )
+        .unwrap();
+    assert!(!branch.success, "compensation left its owned branch behind");
+}
+
+struct MaterializationFailureGit;
+
+impl GitRunner for MaterializationFailureGit {
+    fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        if args.contains(&"read-tree") {
+            return Ok(GitOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "injected materialization failure".into(),
+            });
+        }
+        SystemGit.run(repo, args)
+    }
 }
 
 /// The worktree paths git reports for `repo`, canonicalised so the fixture's own

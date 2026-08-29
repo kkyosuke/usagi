@@ -17,7 +17,7 @@ use usagi_core::domain::{
     },
     id::{
         AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, SessionId,
-        TerminalRef,
+        TerminalRef, WorkspaceId,
     },
     terminal_launch::TerminalKind,
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
@@ -1043,16 +1043,43 @@ impl RuntimeCoordinator {
         store: &mut dyn RuntimeStore,
         spawner: &mut dyn PtySpawner,
     ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
+        self.close_matching(
+            |record| record.runtime.session_id == Some(session),
+            store,
+            spawner,
+        )
+    }
+
+    /// Terminates and forgets every Agent runtime owned by one workspace.
+    pub fn close_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
+        self.close_matching(
+            |record| record.runtime.terminal.workspace_id == workspace,
+            store,
+            spawner,
+        )
+    }
+
+    fn close_matching(
+        &mut self,
+        selected: impl Fn(&DurableRuntimeRecord) -> bool,
+        store: &mut dyn RuntimeStore,
+        spawner: &mut dyn PtySpawner,
+    ) -> Result<Vec<AgentRuntimeRef>, RuntimeError> {
         let targets = self
             .records
             .iter()
-            .filter(|(_, record)| record.runtime.session_id == Some(session))
+            .filter(|(_, record)| selected(record))
             .map(|(key, record)| (key.clone(), record.clone()))
             .collect::<Vec<_>>();
         let mut terminate_failed = false;
 
         for (_, record) in &targets {
-            if record.state == RuntimeState::Running {
+            if runtime_state_requires_termination(record.state) {
                 if spawner.terminate_reap(&record.runtime.terminal).is_err() {
                     terminate_failed = true;
                     continue;
@@ -1072,11 +1099,37 @@ impl RuntimeCoordinator {
             ));
         }
 
-        let mut closed = Vec::new();
-        for (key, record) in targets {
+        // Session teardown is the explicit acknowledgement that resolves any
+        // retained orphan whose process was already unowned. Keep that fence in
+        // the generation snapshot and project the matching terminal record
+        // before either is forgotten.
+        for (_, record) in &targets {
             self.generation
                 .resolve_orphan(&record.runtime.terminal, ProcessObservation::Unknown, true)
                 .map_err(RuntimeError::Generation)?;
+            let retained = self.record_mut(&record.runtime)?;
+            retained.state = RuntimeState::Reclaimed;
+            retained.process = None;
+            if let Some(provider) = &mut retained.provider_resume {
+                provider.last_known_status = ProviderResumeStatus::Exited;
+                provider.last_known_phase = Some(ProviderResumePhase::Ended);
+            }
+        }
+
+        // Publish every target's terminal state before removing it from the
+        // snapshot. The sharded store releases global allocator claims from
+        // these terminal projections; persisting only the final empty snapshot
+        // would erase that evidence and leave the capacity claim behind.
+        //
+        // This first save is also the crash fence for session teardown. A retry
+        // after it sees only terminal records and can safely converge on the
+        // second, forgetting save without spawning or signalling anything.
+        if !targets.is_empty() {
+            self.persist(store)?;
+        }
+
+        let mut closed = Vec::new();
+        for (key, record) in targets {
             self.generation
                 .forget_terminal(&record.runtime.terminal)
                 .map_err(RuntimeError::Generation)?;
@@ -1602,6 +1655,18 @@ impl RuntimeCoordinator {
             )),
         }
     }
+}
+
+const fn runtime_state_requires_termination(state: RuntimeState) -> bool {
+    matches!(
+        state,
+        RuntimeState::Running
+            | RuntimeState::ReconcileRequired(
+                ReconcileState::SpawnAmbiguous
+                    | ReconcileState::PersistAfterSpawn
+                    | ReconcileState::OrphanRunning
+            )
+    )
 }
 
 fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
@@ -2554,6 +2619,23 @@ mod tests {
     }
 
     #[test]
+    fn closing_an_empty_session_converges_without_a_terminal_snapshot() {
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+
+        assert!(
+            coordinator
+                .close_session(SessionId::new(), &mut store, &mut spawner)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!spawner.terminated);
+        assert_eq!(store.0.len(), 1, "only the converging save is required");
+        assert!(store.0[0].records.is_empty());
+    }
+
+    #[test]
     fn closing_a_session_terminates_and_forgets_its_agent_runtime() {
         let request = request();
         let session = request.scope.session_id.unwrap();
@@ -2570,6 +2652,21 @@ mod tests {
             &mut store,
         )
         .unwrap();
+        coordinator
+            .record_provider_resume(
+                &runtime,
+                ProviderResumeRef {
+                    provider: ProviderKind::Claude,
+                    native_session_id: ProviderSessionId::new("closing-session").unwrap(),
+                    adapter_revision: 7,
+                    scope: request.scope.clone(),
+                    provenance: ProviderCaptureProvenance::DaemonIssued,
+                    last_known_status: ProviderResumeStatus::Active,
+                    last_known_phase: Some(ProviderResumePhase::Running),
+                },
+                &mut store,
+            )
+            .unwrap();
 
         let closed = coordinator
             .close_session(session, &mut store, &mut spawner)
@@ -2579,7 +2676,53 @@ mod tests {
         assert_eq!(closed, [runtime]);
         assert!(coordinator.snapshot().records.is_empty());
         coordinator.snapshot().validate_ownership().unwrap();
+        assert_eq!(
+            store.0[store.0.len() - 2].records[0].state,
+            RuntimeState::Reclaimed,
+            "the terminal state is durable before the record is forgotten"
+        );
+        let provider = store.0[store.0.len() - 2].records[0]
+            .provider_resume
+            .as_ref()
+            .unwrap();
+        assert_eq!(provider.last_known_status, ProviderResumeStatus::Exited);
+        assert_eq!(provider.last_known_phase, Some(ProviderResumePhase::Ended));
         assert!(store.0.last().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn closing_a_workspace_leaves_another_workspaces_live_agent_untouched() {
+        let first_request = request();
+        let second_request = request();
+        let (first, first_fence) = refs(&first_request);
+        let (second, second_fence) = refs(&second_request);
+        let mut coordinator = RuntimeCoordinator::new(2, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        for (request, runtime, fence) in [
+            (&first_request, first.clone(), first_fence),
+            (&second_request, second.clone(), second_fence),
+        ] {
+            launch(
+                &mut coordinator,
+                request,
+                runtime,
+                fence,
+                &mut spawner,
+                &mut store,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            coordinator
+                .close_workspace(first.terminal.workspace_id, &mut store, &mut spawner)
+                .unwrap(),
+            [first]
+        );
+        assert!(spawner.terminated);
+        assert_eq!(coordinator.snapshot().records.len(), 1);
+        assert_eq!(coordinator.snapshot().records[0].runtime, second);
     }
 
     #[test]
@@ -2609,6 +2752,46 @@ mod tests {
         );
         assert!(!spawner.terminated);
         assert!(coordinator.snapshot().records.is_empty());
+        assert_eq!(
+            store.0[store.0.len() - 2].records[0].state,
+            RuntimeState::Reclaimed,
+            "the acknowledged terminal state is durable before removal"
+        );
+        assert!(store.0.last().unwrap().records.is_empty());
+    }
+
+    #[test]
+    fn closing_a_reconciled_session_persists_termination_before_forgetting_it() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = CompensatingSpawner { terminated: false };
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        let (reconciled, interrupted) = coordinator.snapshot().reconcile_after_daemon_restart();
+        assert_eq!(interrupted, 1);
+        let mut coordinator = RuntimeCoordinator::hydrate(reconciled, 1, 1024, 2).unwrap();
+
+        let closed = coordinator
+            .close_session(session, &mut store, &mut spawner)
+            .unwrap();
+
+        assert_eq!(closed, [runtime]);
+        assert!(!spawner.terminated);
+        assert_eq!(
+            store.0[store.0.len() - 2].records[0].state,
+            RuntimeState::Reclaimed,
+            "startup reconciliation remains durable long enough to release a foreign claim"
+        );
         assert!(store.0.last().unwrap().records.is_empty());
     }
 
@@ -2637,6 +2820,37 @@ mod tests {
             ))
         );
         assert_eq!(coordinator.snapshot().records.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_session_does_not_forget_an_ambiguous_spawn() {
+        let request = request();
+        let session = request.scope.session_id.unwrap();
+        let (runtime, fence) = refs(&request);
+        let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        coordinator
+            .records
+            .get_mut(&runtime.agent_runtime_id.as_str())
+            .unwrap()
+            .state = RuntimeState::ReconcileRequired(ReconcileState::PersistAfterSpawn);
+
+        assert!(
+            coordinator
+                .close_session(session, &mut store, &mut spawner)
+                .is_err()
+        );
+        assert_eq!(coordinator.snapshot().records[0].runtime, runtime);
     }
 
     #[test]

@@ -49,7 +49,7 @@ use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use crate::usecase::application::terminal_selection::TerminalPoint;
-use usagi_core::domain::id::{AgentRuntimeId, SessionId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -73,6 +73,9 @@ const CPU_ICON: char = '\u{f2db}';
 const MEMORY_ICON: char = '\u{f233}';
 /// Nerd Font cogs: the Agent concurrency slots the daemon admits from.
 const AGENT_ICON: char = '\u{f085}';
+/// Nerd Font bell: pending user decisions. A font glyph keeps the Home chrome
+/// monochrome instead of asking terminals to render the coloured bell emoji.
+const DECISION_NOTICE_ICON: char = '\u{f0f3}';
 /// daemon が Agent concurrency を報告しない場合の表示。`0` と読み違えられない
 /// 1 文字にするため em dash を使う。
 const UNREPORTED: char = '—';
@@ -330,6 +333,14 @@ pub struct HomeProjection {
     /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
     /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
+    /// Header scope and stable project ownership for the process-level Garden.
+    /// A one-project Home uses its workspace name; the deck replaces both when
+    /// more open projects contribute cached plots.
+    garden_scope: String,
+    garden_workspaces: BTreeMap<SessionId, WorkspaceId>,
+    /// Renderer-independent horizontal column offset owned by the controller. The
+    /// Garden layout clamps it against the current terminal capacity and session count.
+    garden_scroll: usize,
     /// Composition root が一度だけ解決した Garden の motion preference。
     garden_motion: GardenMotion,
     /// Latest coherent daemon Agent inventory projected to safe display rows.
@@ -375,6 +386,32 @@ impl From<&CreateSessionForm> for CreateDraft {
 
 fn clone_notice_message(notice: &Notice) -> String {
     notice.message.clone()
+}
+
+fn project_garden_sessions(
+    state: &AppState,
+    sessions: &[ProjectedSession],
+    session_agents: &BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>>,
+) -> Option<Vec<widgets::garden::GardenSession>> {
+    (state.overlay() == Some(crate::usecase::application::controller::Overlay::Garden)).then(|| {
+        let names = sessions
+            .iter()
+            .map(|session| (session.id, session.label.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        sessions
+            .iter()
+            .map(|session| widgets::garden::GardenSession {
+                id: session.id,
+                label: garden_session_label(session, &names),
+                lifecycle: session.lifecycle,
+                selected: state.selected() == Selection::Target(Target::Session(session.id)),
+                failure_summary: session.failure_summary.clone(),
+                agents_observed: true,
+                pr_merged: state.celebrates_pr_merge(session.id),
+                agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
+            })
+            .collect()
+    })
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -483,26 +520,9 @@ impl HomeProjection {
         }
         // Garden が開いている frame だけ庭の projection を作る。閉じている間は素材を
         // 持たないので、通常の Home frame は Garden 導入前と同じ経路で描かれる。
-        let garden_sessions = (state.overlay()
-            == Some(crate::usecase::application::controller::Overlay::Garden))
-        .then(|| {
-            let names = sessions
-                .iter()
-                .map(|session| (session.id, session.label.as_str()))
-                .collect::<BTreeMap<_, _>>();
-            sessions
-                .iter()
-                .map(|session| widgets::garden::GardenSession {
-                    id: session.id,
-                    label: garden_session_label(session, &names),
-                    lifecycle: session.lifecycle,
-                    selected: state.selected() == Selection::Target(Target::Session(session.id)),
-                    failure_summary: session.failure_summary.clone(),
-                    pr_merged: state.celebrates_pr_merge(session.id),
-                    agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
-                })
-                .collect::<Vec<_>>()
-        });
+        let garden_sessions = project_garden_sessions(state, &sessions, &session_agents);
+        let garden_workspaces =
+            garden_workspace_index(state.workspace(), garden_sessions.as_deref());
         Self {
             workspace_name: workspace_name.to_owned(),
             sessions,
@@ -549,6 +569,9 @@ impl HomeProjection {
                 == Some(crate::usecase::application::controller::Overlay::Daemon),
             session_agents,
             garden_sessions,
+            garden_scope: workspace_name.to_owned(),
+            garden_workspaces,
+            garden_scroll: state.garden_scroll(),
             garden_motion: GardenMotion::Full,
             daemon_runtimes: None,
             closeup_modal: None,
@@ -576,6 +599,31 @@ impl HomeProjection {
         self
     }
 
+    /// Replace the active-only Garden with the process deck's ordered plots.
+    /// This is inert while Garden is closed, so ordinary Home material does not
+    /// retain inactive project rows.
+    #[must_use]
+    pub(crate) fn with_deck_garden(
+        mut self,
+        scope: String,
+        sessions: Vec<(WorkspaceId, widgets::garden::GardenSession)>,
+    ) -> Self {
+        if self.garden_sessions.is_none() {
+            return self;
+        }
+        self.garden_scope = scope;
+        self.garden_workspaces = sessions
+            .iter()
+            .map(|(workspace, session)| (session.id, *workspace))
+            .collect();
+        self.garden_sessions = Some(sessions.into_iter().map(|(_, session)| session).collect());
+        self
+    }
+
+    pub(crate) fn garden_sessions(&self) -> Option<&[widgets::garden::GardenSession]> {
+        self.garden_sessions.as_deref()
+    }
+
     pub(crate) fn canonical_garden_now(
         &self,
         raw_height: usize,
@@ -586,10 +634,11 @@ impl HomeProjection {
             return now;
         };
         let (height, width) = widgets::normalize_size(raw_height, raw_width);
-        let Some(tick) = widgets::garden::canonical_tick(
+        let Some(tick) = widgets::garden::canonical_tick_scrolled(
             height,
             width,
             sessions,
+            self.garden_scroll,
             garden_tick(now),
             self.garden_motion.is_reduced(),
         ) else {
@@ -915,6 +964,18 @@ impl HomeProjection {
             None => "No session selected",
         }
     }
+}
+
+fn garden_workspace_index(
+    workspace: WorkspaceId,
+    sessions: Option<&[widgets::garden::GardenSession]>,
+) -> BTreeMap<SessionId, WorkspaceId> {
+    sessions.map_or_else(BTreeMap::new, |sessions| {
+        sessions
+            .iter()
+            .map(|session| (session.id, workspace))
+            .collect()
+    })
 }
 
 /// The session the right pane previews.
@@ -1253,12 +1314,6 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
         HomeMode::Switch => Mode::Switch,
         HomeMode::Closeup => Mode::Closeup,
     };
-    let breadcrumb = format!(
-        " {}{}{}",
-        Role::Success.style().bold().paint("USAGI"),
-        Style::new().dim().paint(" > "),
-        Role::Success.style().bold().paint(&home.workspace_name),
-    );
     // The drawer button reads as one more entry in the same right-hand strip as
     // the mode toggle, so it follows the toggle's active/inactive contrast: the
     // accent belongs to whatever is currently in front. A closed drawer is dim
@@ -1275,13 +1330,18 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .dim()
             .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
-    let notice = (!home.unread_decision_ids.is_empty())
-        .then(|| format!("🔔 {} notice", home.unread_decision_ids.len()));
+    let notice = (!home.unread_decision_ids.is_empty()).then(|| {
+        format!(
+            "{DECISION_NOTICE_ICON} {} notice",
+            home.unread_decision_ids.len()
+        )
+    });
     let mode = mode_toggle(mode);
 
     // Preserve the drawer entry first, then the mode indicator, then the notice.
-    // Whole optional segments are admitted only when they fit; the breadcrumb
-    // receives the remaining cells and is the only normal-width clipped field.
+    // Whole optional segments are admitted only when they fit. Workspace
+    // identity already lives in the project bar directly above this row, so the
+    // remaining cells are quiet spacing rather than a duplicate breadcrumb.
     let mut right_segments = vec![(Some(HomeHeaderAction::Director), director)];
     let mut used = widgets::display_width(&right_segments[0].1);
     let mode_width = widgets::display_width(&mode);
@@ -1311,8 +1371,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
 
     let right_width = used;
     let left_width = width.saturating_sub(right_width);
-    let mut line =
-        widgets::pad_to_width(&widgets::clip_to_width(&breadcrumb, left_width), left_width);
+    let mut line = " ".repeat(left_width);
     let mut actions = Vec::new();
     let mut cursor = left_width;
     for (index, (action, segment)) in right_segments.into_iter().enumerate() {
@@ -1853,11 +1912,12 @@ fn garden_frame(
 ) -> Option<widgets::garden::GardenFrame> {
     let sessions = home.garden_sessions.as_ref()?;
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    widgets::garden::render(
+    widgets::garden::render_scrolled(
         height,
         width,
-        &home.workspace_name,
+        &home.garden_scope,
         sessions,
+        home.garden_scroll,
         garden_tick(now),
         home.garden_motion.is_reduced(),
     )
@@ -1894,16 +1954,49 @@ pub fn garden_click_at(
 ) -> Option<GardenClick> {
     let frame = garden_frame(raw_height, raw_width, home, now)?;
     let (column, row) = (usize::from(column), usize::from(row));
+    if let Some(hitbox) = frame
+        .scroll_hitboxes
+        .iter()
+        .find(|hitbox| hitbox.contains(column, row))
+    {
+        return Some(GardenClick::Scroll(hitbox.scroll));
+    }
     Some(
         frame
             .hitboxes
             .iter()
             .find(|hitbox| hitbox.contains(column, row))
-            .map_or(GardenClick::Dismiss, |hitbox| GardenClick::Visit {
-                session: hitbox.session_id,
-                agent: hitbox.agent,
-            }),
+            .and_then(|hitbox| {
+                home.garden_workspaces
+                    .get(&hitbox.session_id)
+                    .copied()
+                    .map(|workspace| GardenClick::Visit {
+                        workspace,
+                        session: hitbox.session_id,
+                        agent: hitbox.agent,
+                    })
+            })
+            .unwrap_or(GardenClick::Dismiss),
     )
+}
+
+/// Resolve a Garden scroll arrow against the same clamped viewport represented by
+/// the current frame. Boundary arrows target the current offset and remain consumed.
+#[must_use]
+pub fn garden_scroll_action(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    now: DateTime<Utc>,
+    forward: bool,
+) -> Option<GardenClick> {
+    let frame = garden_frame(raw_height, raw_width, home, now)?;
+    let scroll = if forward {
+        (frame.scroll + 1).min(frame.max_scroll)
+    } else {
+        frame.scroll.saturating_sub(1)
+    };
+    Some(GardenClick::Scroll(scroll))
 }
 
 /// controller projection の Home frame を描く。
@@ -2017,7 +2110,7 @@ fn render_pr_overlay(
         width,
         base,
         &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected())
-            .with_filter(overlay.filter().label()),
+            .with_filter(overlay.filter()),
     )
 }
 
@@ -2073,7 +2166,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
     };
     widgets::clip_to_width(
         &format!(
-            "  🔔 {}: {}  (click bell to review)",
+            "  {DECISION_NOTICE_ICON} {}: {}  (click bell to review)",
             decision
                 .owner
                 .session_id
@@ -2174,7 +2267,7 @@ fn home_left_pane(
         lines.push(String::new());
     }
     let footer = match home.mode {
-        HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
+        HomeMode::Switch => "[switch] ←→ project / ↑↓ select / Enter closeup",
         HomeMode::Closeup => {
             "[closeup] Ctrl-O: x/Ctrl-X close / o switch / a/Ctrl-A actions / n/p tabs"
         }
@@ -2404,10 +2497,11 @@ fn home_row_lines_at(
         let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
         let badge = role_badge(session);
         let label = widgets::shimmer_text_with(&organization_label(session), frame, wave);
+        let marker = home_row_marker(row, selected, false);
         return vec![
             widgets::pad_to_width(
                 &format!(
-                    "  {} {label}{badge}",
+                    "{marker} {} {label}{badge}",
                     Role::Danger.style().bold().paint("✂")
                 ),
                 width,
@@ -2831,16 +2925,16 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         AGENT_ICON, AgentConcurrency, CHROME_ROWS, CPU_ICON, CREATE_SKELETON_ROWS, CreateDraft,
-        DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction, HomeProjection,
-        LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession, SESSION_ROW_LINES,
-        SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_row_height,
-        home_row_lines_at, home_viewport_start, load_style, new_session_input_lines,
-        pane_tab_label, pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
-        right_pane_tab_at, role_identity, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap,
+        DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
+        HomeProjection, LEFT_WIDTH, MEBIBYTE, PR_ICON, PR_RESERVE_WIDTH, ProjectedSession,
+        SESSION_ROW_LINES, SIDECAR_GUTTER, SidebarDiffColumns, TerminalViewProjection, UNREPORTED,
+        Workspace, abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
+        garden_click_at, garden_fits, garden_frame, garden_scroll_action, garden_tick,
+        health_badge, health_reason_label, home_header_action_at, home_header_layout,
+        home_left_pane, home_row_height, home_row_lines_at, home_viewport_start, load_style,
+        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
+        render_home_at, resume_label, right_pane_tab_at, role_identity, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
@@ -2849,9 +2943,9 @@ mod tests {
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, Feedback, GardenClick, HomeMode, RoleChoice,
-        Route, SafeError, SafeMessage, Selection, SessionRoleCatalog, SessionRoleProjection,
-        Target, TargetPhase, update,
+        AppEvent, AppKey, AppState, BackendEvent, Feedback, GARDEN_IDLE_THRESHOLD, GardenClick,
+        HomeMode, RoleChoice, Route, SafeError, SafeMessage, Selection, SessionRoleCatalog,
+        SessionRoleProjection, Target, TargetPhase, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -3269,6 +3363,49 @@ mod tests {
     }
 
     #[test]
+    fn removing_session_row_keeps_the_switch_cursor_visible() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut removing = projected_session(session, "going", "/work/going");
+        removing.removing = true;
+        let state = AppState::home(workspace, vec![session]);
+        let selected = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            std::slice::from_ref(&removing),
+        );
+        let row = Selection::Target(Target::Session(session));
+        let selected_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &selected,
+            row,
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        assert!(strip(&selected_lines[0]).starts_with('\u{f0907}'));
+
+        let mut unselected_state = state;
+        let _ = update(&mut unselected_state, AppEvent::Key(AppKey::Down));
+        let unselected = HomeProjection::from_state(
+            &unselected_state,
+            "atlas",
+            Path::new("/work"),
+            std::slice::from_ref(&removing),
+        );
+        let unselected_lines = home_row_lines_at(
+            LEFT_WIDTH,
+            &unselected,
+            row,
+            SidebarDiffColumns::default(),
+            PR_RESERVE_WIDTH,
+            now(),
+        );
+        assert!(!strip(&unselected_lines[0]).starts_with('\u{f0907}'));
+    }
+
+    #[test]
     fn sidebar_and_garden_show_the_same_company_hierarchy_and_roles() {
         assert_eq!(role_identity("director"), "♛ Director");
         let workspace = WorkspaceId::new();
@@ -3662,7 +3799,7 @@ mod tests {
     }
 
     #[test]
-    fn home_header_layout_and_hit_test_share_cjk_notice_and_drawer_geometry() {
+    fn home_header_layout_and_hit_test_share_notice_and_drawer_geometry() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
         // A pending decision makes the notice badge unread; closing its
@@ -3708,7 +3845,11 @@ mod tests {
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
+        assert!(!strip(&layout.line).contains("USAGI"));
+        assert!(!strip(&layout.line).contains("日本語 workspace"));
         assert!(strip(&layout.line).contains(&format!("{DIRECTOR_ICON} Director")));
+        assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
+        assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains("notice"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -4391,7 +4532,8 @@ mod tests {
             .join("\n");
         assert_eq!(frame.len(), 24);
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
-        assert!(text.contains("Garden · click a usagi to visit · any key to return"));
+        assert!(text.contains("Garden · click a usagi"));
+        assert!(text.contains("any key · wake"));
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 run · 1 done"));
@@ -4621,6 +4763,34 @@ mod tests {
         assert!(garden_fits(0, 0));
     }
 
+    #[test]
+    fn a_closed_garden_ignores_process_deck_plot_material() {
+        let workspace = WorkspaceId::new();
+        let home = HomeProjection::from_state(
+            &AppState::home(workspace, Vec::new()),
+            "atlas",
+            Path::new("/work"),
+            &[],
+        );
+        let unchanged = home.clone().with_deck_garden(
+            "2 open projects".to_owned(),
+            vec![(
+                WorkspaceId::new(),
+                widgets::garden::GardenSession {
+                    id: SessionId::new(),
+                    label: "other / review".to_owned(),
+                    lifecycle: SessionLifecycle::Available,
+                    selected: false,
+                    failure_summary: None,
+                    agents_observed: false,
+                    agents: Vec::new(),
+                    pr_merged: false,
+                },
+            )],
+        );
+        assert_eq!(unchanged, home);
+    }
+
     /// click 解決は frame と同じ layout 呼び出しの hitbox に当てる。うさぎに当たれば
     /// その plot に束縛された stable `SessionId`、外れれば wake-up。
     #[test]
@@ -4650,6 +4820,7 @@ mod tests {
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
                 Some(GardenClick::Visit {
+                    workspace,
                     session: hitbox.session_id,
                     agent: None,
                 }),
@@ -4672,7 +4843,117 @@ mod tests {
             &projected,
         );
         assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
-        assert_eq!(garden_click_at(13, 100, &home, now(), 10, 10), None);
+        assert_eq!(garden_click_at(12, 100, &home, now(), 10, 10), None);
+        assert_eq!(garden_scroll_action(24, 100, &plain, now(), true), None);
+        assert_eq!(garden_scroll_action(12, 100, &home, now(), true), None);
+    }
+
+    #[test]
+    fn garden_horizontal_scroll_reaches_later_projects_with_keyboard_and_footer_buttons() {
+        let active_workspace = WorkspaceId::new();
+        let mut state = AppState::home(active_workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
+        let rows = (0..5)
+            .map(|index| {
+                let workspace = WorkspaceId::new();
+                let session = SessionId::new();
+                (
+                    workspace,
+                    widgets::garden::GardenSession {
+                        id: session,
+                        label: format!("project-{index} / session-{index}"),
+                        lifecycle: SessionLifecycle::Available,
+                        selected: false,
+                        failure_summary: None,
+                        agents_observed: false,
+                        agents: Vec::new(),
+                        pr_merged: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let later_workspace = rows[4].0;
+        let later_session = rows[4].1.id;
+        let project = |state: &AppState| {
+            HomeProjection::from_state(state, "active", Path::new("/work"), &[])
+                .with_deck_garden("5 open projects".to_owned(), rows.clone())
+        };
+        let first = project(&state);
+        let first_frame = garden_frame(23, 80, &first, now()).expect("first viewport fits");
+        assert_eq!(first_frame.scroll, 0);
+        assert_eq!(first_frame.max_scroll, 1);
+        assert_eq!(first_frame.hitboxes.len(), 4);
+        assert_eq!(
+            garden_scroll_action(23, 80, &first, now(), true),
+            Some(GardenClick::Scroll(1))
+        );
+
+        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(1)));
+        let second = project(&state);
+        let second_frame = garden_frame(23, 80, &second, now()).expect("shifted viewport fits");
+        assert_eq!(second_frame.scroll, 1);
+        assert_eq!(second_frame.hitboxes.len(), 3);
+        assert!(
+            second_frame
+                .hitboxes
+                .iter()
+                .any(|hitbox| hitbox.session_id == later_session)
+        );
+        assert_eq!(
+            garden_scroll_action(23, 80, &second, now(), false),
+            Some(GardenClick::Scroll(0))
+        );
+        assert_eq!(
+            garden_scroll_action(23, 80, &second, now(), true),
+            Some(GardenClick::Scroll(1))
+        );
+        let plot = *second_frame
+            .hitboxes
+            .iter()
+            .find(|hitbox| hitbox.session_id == later_session)
+            .expect("later project is visible after scrolling");
+        assert_eq!(
+            garden_click_at(
+                23,
+                80,
+                &second,
+                now(),
+                u16::try_from(plot.column).expect("fits u16"),
+                u16::try_from(plot.row).expect("fits u16"),
+            ),
+            Some(GardenClick::Visit {
+                workspace: later_workspace,
+                session: later_session,
+                agent: None,
+            })
+        );
+
+        let previous = second_frame.scroll_hitboxes[0];
+        let next = second_frame.scroll_hitboxes[1];
+        assert_eq!(
+            garden_click_at(
+                23,
+                80,
+                &second,
+                now(),
+                u16::try_from(previous.column).expect("fits u16"),
+                u16::try_from(previous.row).expect("fits u16"),
+            ),
+            Some(GardenClick::Scroll(0))
+        );
+        // The disabled boundary button remains a consumed no-op rather than
+        // dismissing the Garden through the generic background click.
+        assert_eq!(
+            garden_click_at(
+                23,
+                80,
+                &second,
+                now(),
+                u16::try_from(next.column).expect("fits u16"),
+                u16::try_from(next.row).expect("fits u16"),
+            ),
+            Some(GardenClick::Scroll(1))
+        );
     }
 
     /// うさぎ 1 羽は 1 Agent である。押されたうさぎの stable `AgentRuntimeId` を
@@ -4725,6 +5006,7 @@ mod tests {
             assert_eq!(
                 garden_click_at(24, 100, &home, now(), column, row),
                 Some(GardenClick::Visit {
+                    workspace,
                     session,
                     agent: rabbit.agent,
                 }),
@@ -4747,6 +5029,7 @@ mod tests {
                 u16::try_from(nameplate.row).expect("fits a u16"),
             ),
             Some(GardenClick::Visit {
+                workspace,
                 session,
                 agent: None,
             }),
@@ -5163,7 +5446,7 @@ mod tests {
         let switch_text = joined_home(&switch);
         assert!(!switch_text.contains("| 同じ名前"));
         assert!(switch_text.contains("\u{f0907} 同じ名前"));
-        assert!(switch_text.contains("[switch] ↑↓ select"));
+        assert!(switch_text.contains("[switch] ←→ project / ↑↓ select"));
 
         for line in render_home(8, 7, &switch) {
             assert!(display_width(&line) <= 7);

@@ -21,9 +21,17 @@ fn fixture_root() -> PathBuf {
 }
 
 fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
-    let protected = fixture_root()
-        .canonicalize()
-        .expect("canonical protected root");
+    run_in_session_with_roots(&fixture_root(), own, &[], script, arguments)
+}
+
+fn run_in_session_with_roots(
+    protected: &Path,
+    own: &Path,
+    additional_writable_roots: &[&Path],
+    script: &str,
+    arguments: &[&Path],
+) -> Output {
+    let protected = protected.canonicalize().expect("canonical protected root");
     let own = own.canonicalize().expect("canonical writable root");
     let mut command = Command::new(env!("CARGO_BIN_EXE_usagi"));
     command
@@ -31,6 +39,11 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .arg(protected)
         .arg("--writable-root")
         .arg(&own);
+    for root in additional_writable_roots {
+        command
+            .arg("--writable-root")
+            .arg(root.canonicalize().expect("canonical writable root"));
+    }
     #[cfg(target_os = "macos")]
     command.arg("--backend").arg(
         PathBuf::from("/usr/bin/sandbox-exec")
@@ -44,6 +57,79 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
         .current_dir(own)
         .output()
         .expect("shipping launcher starts")
+}
+
+#[test]
+fn session_scope_can_commit_its_linked_worktree_without_writing_sibling_content() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("agent-session-git-scope");
+    let _ = fs::remove_dir_all(&fixture);
+    let repository = fixture.join("repository");
+    let own = fixture.join("sessions/a");
+    let sibling = fixture.join("sessions/b/sentinel");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+    fs::write(&sibling, ORIGINAL).unwrap();
+
+    let git = |cwd: &Path, arguments: &[&str]| {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "fixture"]);
+    git(
+        &repository,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(repository.join("tracked"), "base\n").unwrap();
+    git(&repository, &["add", "tracked"]);
+    git(&repository, &["commit", "--quiet", "-m", "base"]);
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "usagi/a",
+            own.to_str().unwrap(),
+        ],
+    );
+    let common = repository.join(".git");
+    let output = run_in_session_with_roots(
+        &fixture,
+        &own,
+        &[&common],
+        "printf change >> tracked && git add tracked && git -c user.name=fixture -c user.email=fixture@example.invalid commit --quiet -m change",
+        &[],
+    );
+    if !output.status.success() && sandbox_backend_unavailable(&output) {
+        let _ = fs::remove_dir_all(&fixture);
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "linked-worktree commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_unchanged(&sibling);
+    let count = Command::new("git")
+        .args(["rev-list", "--count", "usagi/a"])
+        .current_dir(&repository)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(count.stdout).unwrap().trim(), "2");
+
+    let _ = fs::remove_dir_all(&fixture);
 }
 
 fn run_in_root(root: &Path, script: &str) -> Output {
@@ -343,6 +429,63 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
 }
 
 #[test]
+fn claude_global_config_atomic_save_preserves_other_existing_home_entries() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("claude-global-config-prefix");
+    let _ = fs::remove_dir_all(&fixture);
+    let repo = fixture.join("repo");
+    let home = fixture.join("home");
+    let bin = fixture.join("bin");
+    for path in [&repo, &home.join(".claude"), &bin] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let config = home.join(".claude.json");
+    let guard = home.join("existing-guard");
+    fs::write(&config, "old\n").unwrap();
+    fs::write(&guard, ORIGINAL).unwrap();
+    let program = bin.join("claude");
+    fs::write(
+        &program,
+        "#!/bin/sh\ncp \"$1/.claude.json\" \"$1/.claude.json.backup.1\" || exit 1\n: > \"$1/.claude.json.lock\" || exit 1\nprintf 'trusted\\n' > \"$1/.claude.json.tmp.$$\" || exit 1\nmv \"$1/.claude.json.tmp.$$\" \"$1/.claude.json\" || exit 1\nrm \"$1/.claude.json.lock\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+
+    let saved = run_agent_in_root(&repo, &home, &program);
+    if !saved.status.success() && sandbox_backend_unavailable(&saved) {
+        let _ = fs::remove_dir_all(&fixture);
+        return;
+    }
+    assert!(
+        saved.status.success(),
+        "atomic config save must succeed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    assert_eq!(fs::read(&config).unwrap(), b"trusted\n");
+    assert_eq!(
+        fs::read(home.join(".claude.json.backup.1")).unwrap(),
+        b"old\n"
+    );
+    assert!(!home.join(".claude.json.lock").exists());
+
+    fs::write(
+        &program,
+        "#!/bin/sh\nprintf attack > \"$1/existing-guard\"\n",
+    )
+    .unwrap();
+    let refused = run_agent_in_root(&repo, &home, &program);
+    assert!(!refused.status.success());
+    assert_unchanged(&guard);
+
+    let _ = fs::remove_dir_all(&fixture);
+}
+
+#[test]
 fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -430,6 +573,9 @@ fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
 
 #[test]
 fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
+    // Keep the Unix socket path below `SUN_LEN`. The sandbox always grants
+    // `/tmp` and `/var/tmp`, so putting the protected repository below either
+    // directory would make a universal writable root its ancestor.
     let fixture = PathBuf::from(std::env::var_os("HOME").expect("test HOME"))
         .join(".codex")
         .join(format!("ub{}", std::process::id()));

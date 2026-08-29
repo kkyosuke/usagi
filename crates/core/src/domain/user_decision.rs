@@ -10,6 +10,33 @@ use super::{
     id::{OperationId, SessionId, UserDecisionId, WorkspaceId},
 };
 
+pub const USER_DECISION_TITLE_MAX_BYTES: usize = 256;
+pub const USER_DECISION_PROMPT_MAX_BYTES: usize = 16 * 1024;
+pub const USER_DECISION_OPTION_MAX_COUNT: usize = 32;
+pub const USER_DECISION_OPTION_ID_MAX_BYTES: usize = 128;
+pub const USER_DECISION_OPTION_LABEL_MAX_BYTES: usize = 256;
+pub const USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES: usize = 2 * 1024;
+pub const USER_DECISION_FREEFORM_MAX_BYTES: usize = 16 * 1024;
+pub const USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
+pub const USER_DECISION_MAX_LIFETIME_HOURS: i64 = 7 * 24;
+
+/// Shared resource ceilings for caller-controlled decision data.
+///
+/// MCP schemas publish these same values, while the domain remains authoritative
+/// and measures UTF-8 bytes rather than Unicode scalar values.
+pub struct UserDecisionPolicy;
+
+impl UserDecisionPolicy {
+    pub const TITLE_MAX_BYTES: usize = USER_DECISION_TITLE_MAX_BYTES;
+    pub const PROMPT_MAX_BYTES: usize = USER_DECISION_PROMPT_MAX_BYTES;
+    pub const OPTION_COUNT_MAX: usize = USER_DECISION_OPTION_MAX_COUNT;
+    pub const OPTION_ID_MAX_BYTES: usize = USER_DECISION_OPTION_ID_MAX_BYTES;
+    pub const OPTION_LABEL_MAX_BYTES: usize = USER_DECISION_OPTION_LABEL_MAX_BYTES;
+    pub const OPTION_DESCRIPTION_MAX_BYTES: usize = USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES;
+    pub const IDEMPOTENCY_KEY_MAX_BYTES: usize = USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES;
+    pub const FREEFORM_ANSWER_MAX_BYTES: usize = USER_DECISION_FREEFORM_MAX_BYTES;
+}
+
 /// Immutable owner provenance captured from the authenticated execution context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionOwner {
@@ -66,11 +93,18 @@ pub struct UserDecision {
 /// Validation and compare-and-set failures that never mutate a decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserDecisionError {
+    InvalidRequest,
     InvalidOption,
     FreeformNotAllowed,
     Terminal,
     Expired,
     IdempotencyConflict,
+    /// The same owner already used this key, but its retained decision expired.
+    ///
+    /// The old result is no longer available, so replaying it as a fresh human
+    /// question would violate idempotency. Callers must issue a new key for a
+    /// genuinely new request.
+    IdempotencyExpired,
     /// This daemon already holds as many unanswered decisions as it will.
     ///
     /// Pending decisions are the one class this store may never evict — each is
@@ -79,15 +113,69 @@ pub enum UserDecisionError {
     /// which makes it safe for the caller to retry once a person has worked
     /// through the backlog.
     PendingLimitReached,
+    /// Protected pending or undelivered records fill the serialized store.
+    ///
+    /// The attempted mutation has no durable effect. Once pending work or an
+    /// outbox delivery is completed, the exact request may be retried safely.
+    CapacityReached,
 }
 
 impl UserDecision {
+    /// Validates the bounded, answerable request before it reaches durable
+    /// storage. This is the authority; transport schemas are only guidance.
+    pub fn validate_request(&self) -> Result<(), UserDecisionError> {
+        let bounded_nonempty = |value: &str, max: usize| {
+            !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
+        };
+        if !bounded_nonempty(&self.title, USER_DECISION_TITLE_MAX_BYTES)
+            || !bounded_nonempty(&self.prompt, USER_DECISION_PROMPT_MAX_BYTES)
+            || self.options.len() > USER_DECISION_OPTION_MAX_COUNT
+            || (self.options.is_empty() && !self.allow_freeform)
+            || self
+                .idempotency_key
+                .as_ref()
+                .is_some_and(|key| !bounded_nonempty(key, USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES))
+            || self.expires_at.is_some_and(|expires_at| {
+                expires_at <= self.created_at
+                    || expires_at
+                        > self.created_at
+                            + chrono::Duration::hours(USER_DECISION_MAX_LIFETIME_HOURS)
+            })
+        {
+            return Err(UserDecisionError::InvalidRequest);
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for option in &self.options {
+            if !bounded_nonempty(&option.id, USER_DECISION_OPTION_ID_MAX_BYTES)
+                || !bounded_nonempty(&option.label, USER_DECISION_OPTION_LABEL_MAX_BYTES)
+                || option.description.as_ref().is_some_and(|description| {
+                    description.len() > USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES
+                        || description.contains('\0')
+                })
+                || !ids.insert(option.id.as_str())
+            {
+                return Err(UserDecisionError::InvalidRequest);
+            }
+        }
+        Ok(())
+    }
+
+    /// Revalidates every caller-controlled field loaded from durable storage.
+    pub fn validate_resource_policy(&self) -> Result<(), UserDecisionError> {
+        self.validate_request()?;
+        if let Some(answer) = &self.answer {
+            answer.validate_resource_policy()?;
+        }
+        Ok(())
+    }
+
     /// Validates an answer without changing durable state.
     pub fn validate_answer(
         &self,
         answer: &UserDecisionAnswer,
         now: DateTime<Utc>,
     ) -> Result<(), UserDecisionError> {
+        answer.validate_resource_policy()?;
         if self.status != UserDecisionStatus::Pending {
             return Err(UserDecisionError::Terminal);
         }
@@ -101,11 +189,32 @@ impl UserDecision {
                 Ok(())
             }
             UserDecisionAnswer::Option { .. } => Err(UserDecisionError::InvalidOption),
-            UserDecisionAnswer::Freeform { text } if self.allow_freeform && !text.is_empty() => {
+            UserDecisionAnswer::Freeform { text }
+                if self.allow_freeform
+                    && !text.trim().is_empty()
+                    && text.len() <= USER_DECISION_FREEFORM_MAX_BYTES
+                    && !text.contains('\0') =>
+            {
                 Ok(())
             }
             UserDecisionAnswer::Freeform { .. } => Err(UserDecisionError::FreeformNotAllowed),
         }
+    }
+}
+
+impl UserDecisionAnswer {
+    /// Enforces the resource half of answer validation without mutating state.
+    pub fn validate_resource_policy(&self) -> Result<(), UserDecisionError> {
+        let bounded_nonempty = |value: &str, max: usize| {
+            !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
+        };
+        let valid = match self {
+            Self::Option { option_id } => {
+                bounded_nonempty(option_id, USER_DECISION_OPTION_ID_MAX_BYTES)
+            }
+            Self::Freeform { text } => bounded_nonempty(text, USER_DECISION_FREEFORM_MAX_BYTES),
+        };
+        valid.then_some(()).ok_or(UserDecisionError::InvalidRequest)
     }
 }
 
@@ -179,6 +288,72 @@ mod tests {
     }
 
     #[test]
+    fn request_validation_requires_a_bounded_answerable_question() {
+        let mut item = decision();
+        assert!(item.validate_request().is_ok());
+        item.options.clear();
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.allow_freeform = true;
+        assert!(item.validate_request().is_ok());
+        item.options = vec![
+            UserDecisionOption {
+                id: "same".into(),
+                label: "A".into(),
+                description: None,
+            },
+            UserDecisionOption {
+                id: "same".into(),
+                label: "B".into(),
+                description: None,
+            },
+        ];
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.options.truncate(1);
+        item.prompt = "x".repeat(USER_DECISION_PROMPT_MAX_BYTES + 1);
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.prompt = "question".into();
+        item.options[0].description =
+            Some("x".repeat(USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES + 1));
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.options[0].description = Some("unsafe\0description".into());
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn resource_policy_measures_utf8_bytes_for_requests_and_answers() {
+        let mut item = decision();
+        item.title = "界".repeat(UserDecisionPolicy::TITLE_MAX_BYTES / 3 + 1);
+        assert!(item.title.chars().count() < UserDecisionPolicy::TITLE_MAX_BYTES);
+        assert_eq!(
+            item.validate_resource_policy(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+
+        let answer = UserDecisionAnswer::Freeform {
+            text: "界".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES / 3 + 1),
+        };
+        assert_eq!(
+            answer.validate_resource_policy(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+    }
+
+    #[test]
     fn root_scoped_owner_round_trips_without_a_session() {
         let mut item = decision();
         item.owner.session_id = None;
@@ -210,7 +385,7 @@ mod tests {
                 },
                 now
             ),
-            Err(UserDecisionError::FreeformNotAllowed)
+            Err(UserDecisionError::InvalidRequest)
         );
         item.expires_at = Some(now);
         assert_eq!(

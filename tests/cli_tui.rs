@@ -21,6 +21,7 @@ use usagi_core::infrastructure::ipc::{
     BuildIdentity, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
     ResponseOutcome, read_json_frame, write_json_frame,
 };
+use usagi_core::infrastructure::paths::RuntimeMode;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
@@ -53,11 +54,19 @@ fn shipping_issue_adapters_cover_defensive_parsing_and_missing_projection() {
         &IssueDelete,
     ] {
         assert!(!tool.description().is_empty());
-        assert!(matches!(tool.call("{"), Err(ToolError::InvalidParams(_))));
+        assert!(matches!(
+            tool.call("{", Path::new(".")),
+            Err(ToolError::InvalidParams(_))
+        ));
     }
-    assert_eq!(IssueGet.call(r#"{"number":4294967295}"#).unwrap(), "null");
+    assert_eq!(
+        IssueGet
+            .call(r#"{"number":4294967295}"#, Path::new("."))
+            .unwrap(),
+        "null"
+    );
     assert!(matches!(
-        IssueToPrompt.call(r#"{"number":4294967295}"#),
+        IssueToPrompt.call(r#"{"number":4294967295}"#, Path::new(".")),
         Err(ToolError::Execution(_))
     ));
 }
@@ -134,7 +143,7 @@ fn linked_issue_session(name: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn channel_data_dir(home: &Path) -> PathBuf {
-    usagi_core::infrastructure::paths::channel_data_dir(home)
+    Channel::Local.data_dir(home)
 }
 
 fn shipping_build_identity() -> BuildIdentity {
@@ -535,6 +544,70 @@ fn daemon_lifecycle_recovers_a_crash_record_whose_pid_was_reused() {
     occupant.wait().unwrap();
     let stop = run_in_production(&[OsStr::new("daemon"), OsStr::new("stop")], &home);
     assert!(stop.status.success(), "{}", stderr(&stop));
+}
+
+#[test]
+fn fixture_reap_terminates_the_exact_bootstrap_broker_after_a_daemon_crash() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let daemon_dir = home.production_data_dir().join("daemon");
+    let mut daemon = home.spawn_serve();
+    let mut broker_record = None;
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            broker_record = std::fs::read_dir(&daemon_dir).ok().and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.file_name().is_some_and(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with("bootstrap-broker-")
+                            && path
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                    })
+                })
+            });
+            daemon_dir.join("daemon.json").is_file() && broker_record.is_some()
+        }),
+        "daemon and bootstrap broker did not publish exact process records"
+    );
+    let broker_record = broker_record.unwrap();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&broker_record).unwrap()).unwrap();
+    let broker_pid = u32::try_from(record["pid"].as_u64().unwrap()).unwrap();
+    assert_ne!(broker_pid, daemon.pid());
+    assert!(process_alive(broker_pid));
+
+    daemon.kill_and_reap();
+    assert!(
+        process_alive(broker_pid),
+        "broker must outlive a crashed daemon"
+    );
+
+    // Remove the graceful control pathname to exercise the exact-identity
+    // fallback rather than letting the ordinary broker STOP request succeed.
+    std::fs::remove_file(broker_record.with_extension("sock")).unwrap();
+    home.reap();
+    assert!(
+        wait_until(Duration::from_secs(5), || !process_alive(broker_pid)),
+        "fixture teardown left bootstrap broker {broker_pid} running"
+    );
+    let artifacts = std::fs::read_dir(&daemon_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.starts_with("bootstrap-broker-")
+                && !Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        artifacts.is_empty(),
+        "stale broker artifacts: {artifacts:?}"
+    );
 }
 
 #[test]
@@ -1265,6 +1338,56 @@ fn a_client_started_daemon_binds_the_fixture_workspace_root() {
     stop_daemon(&home);
 }
 
+#[test]
+fn bound_non_repository_is_refused_before_and_after_daemon_cold_start() {
+    let _guard = DAEMON_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = short_home();
+    let plain = daemon_fixture::short_dir("usagi-plain-cwd-");
+    let request = [
+        OsStr::new("session"),
+        OsStr::new("remove"),
+        OsStr::new("missing"),
+    ];
+
+    let cold = home.run_at(plain.path(), &request);
+    assert_eq!(cold.status.code(), Some(1), "{}", stderr(&cold));
+    assert!(
+        stderr(&cold).contains("workspace-mismatch"),
+        "{}",
+        stderr(&cold)
+    );
+    assert!(
+        stderr(&cold).contains("repository root"),
+        "{}",
+        stderr(&cold)
+    );
+    assert!(!plain.path().join(".usagi").exists());
+    assert!(!home.data_dir().join("daemon/daemon.json").exists());
+
+    // The fixture workspace is a repository, so the same bound request may
+    // cold-start the daemon there. Liveness must not change the plain cwd's
+    // typed refusal or create project-local state in it.
+    let started = run_with_home(&request, &home);
+    assert_eq!(started.status.code(), Some(1), "{}", stderr(&started));
+    assert_daemon_running(&home);
+    let live = home.run_at(plain.path(), &request);
+    assert_eq!(live.status.code(), Some(1), "{}", stderr(&live));
+    assert!(
+        stderr(&live).contains("workspace-mismatch"),
+        "{}",
+        stderr(&live)
+    );
+    assert!(
+        stderr(&live).contains("repository root"),
+        "{}",
+        stderr(&live)
+    );
+    assert!(!plain.path().join(".usagi").exists());
+    stop_daemon(&home);
+}
+
 /// `daemon replace` performs the replacement its trigger keys, on exactly the
 /// path `daemon restart` takes — there is no second, unguarded route to
 /// `stop` → fresh `start` (#507).
@@ -1724,12 +1847,12 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
     assert!(refusal.message.contains(&served_root), "{refusal:?}");
 
     // The daemon keeps serving its own workspace after the refusal.
-    assert!(
-        connect(daemon_fixture::client_workspace(
-            &home.production_data_dir()
-        ))
-        .is_ok()
-    );
+    let initial_connection = connect(daemon_fixture::client_workspace(
+        &home.production_data_dir(),
+    ));
+    if let Err(error) = initial_connection {
+        panic!("{error}");
+    }
 }
 
 /// One daemon holds several workspaces at once: selecting a workspace it has not
@@ -1777,6 +1900,26 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     let second = daemon_fixture::short_dir("usagi-second-");
     assert!(connect(selected(second.path())).is_ok());
 
+    // Status asks the live registry, rather than reconstructing ownership from
+    // state subtrees left on disk, and lists both canonical roots.
+    let status = home.run_in_production(&[OsStr::new("daemon"), OsStr::new("status")]);
+    assert!(status.status.success(), "{}", stderr(&status));
+    let status = stdout(&status);
+    let initial_root = usagi_core::infrastructure::paths::wire_workspace_root(
+        usagi_core::infrastructure::paths::canonical_workspace_root(home.workspace()).unwrap(),
+    );
+    let second_root = usagi_core::infrastructure::paths::wire_workspace_root(
+        usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap(),
+    );
+    assert!(
+        status.contains(&format!("tenant: {initial_root}")),
+        "{status}"
+    );
+    assert!(
+        status.contains(&format!("tenant: {second_root}")),
+        "{status}"
+    );
+
     // A workspace another process fences is refused alone: the refusal names it,
     // and the workspaces this daemon holds keep answering.
     let fenced = daemon_fixture::short_dir("usagi-fenced-");
@@ -1796,6 +1939,27 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     );
     drop(held);
     assert!(connect(selected(second.path())).is_ok());
+
+    // Explicit retirement gives back only the selected fence. The initial
+    // tenant keeps answering while another process immediately acquires the
+    // retired root, proving the daemon did not retain it.
+    let retired = home.run_in_production(&[
+        OsStr::new("daemon"),
+        OsStr::new("retire"),
+        second.path().as_os_str(),
+    ]);
+    assert!(retired.status.success(), "{}", stderr(&retired));
+    assert!(stdout(&retired).contains(&second_root));
+    let second_fence = hold_workspace_fence(
+        &usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap(),
+    );
+    let initial_connection = connect(ClientWorkspace::Bound {
+        root: initial_root.clone(),
+    });
+    if let Err(error) = initial_connection {
+        panic!("{error}");
+    }
+    drop(second_fence);
 
     // Each adopted workspace has its own state subtree, so neither is described
     // by the other's lifecycle document.
@@ -1865,13 +2029,13 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
         &[OsStr::new("open"), opened.path().as_os_str()],
     );
     assert!(output.status.success(), "{}", stderr(&output));
+    // The project tab owns the workspace label and clips long names. Its
+    // fixture-specific prefix still proves that the opened workspace, not the
+    // launch directory, was rendered.
     assert!(
-        stdout(&output).contains(
-            opened_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .expect("the fixture directory has a name")
-        )
+        stdout(&output).contains("usagi-opened-"),
+        "{}",
+        stdout(&output)
     );
     let recorded: serde_json::Value = serde_json::from_slice(
         &std::fs::read(daemon_fixture::lifecycle_state_path(&channel_data_dir(
@@ -1896,12 +2060,7 @@ fn opening_a_second_workspace_adopts_it_without_disturbing_the_first() {
     );
     assert!(second.status.success(), "{}", stderr(&second));
     assert!(
-        stdout(&second).contains(
-            elsewhere_root
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .expect("the fixture directory has a name")
-        ),
+        stdout(&second).contains("usagi-elsewhere-"),
         "{}",
         stdout(&second)
     );
@@ -1968,6 +2127,37 @@ fn start_daemon_for(home: &DaemonHome, workspace: &Path) {
         .output()
         .expect("usagi バイナリを起動できる");
     assert!(output.status.success(), "{}", stderr(&output));
+
+    // `daemon start` returns after the process record is published; selecting
+    // the workspace is a separate surface handshake. Wait for the endpoint and
+    // explicitly select this repository before a session-scoped MCP client asks
+    // to bind to it. Otherwise a loaded runner can reach the daemon while it
+    // still serves no workspace.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let stream = loop {
+        if let Ok(stream) = connect_current(&channel_data_dir(home.path())) {
+            break stream;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture daemon socket was not published"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    usagi_core::usecase::client::IpcClient::connect(
+        stream,
+        "cli-tui-mcp-workspace-opener".into(),
+        usagi_core::domain::id::OperationId::new().to_string(),
+        usagi_core::usecase::client::ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                usagi_core::infrastructure::paths::canonical_workspace_root(workspace)
+                    .expect("the fixture workspace resolves"),
+            ),
+        },
+    )
+    .expect("fixture explicitly opens its repository root");
 }
 
 #[test]
@@ -2210,7 +2400,9 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(!out.contains("workspace main"));
     assert!(!out.contains("workspace TUI ("));
     assert_eq!(
-        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        WorkspaceSettingsStore::new_for_mode(&explicit, RuntimeMode::Local)
+            .load()
+            .unwrap(),
         LocalSettings::from(&Settings::default())
     );
 
@@ -2227,7 +2419,9 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let reopened = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], &home);
     assert!(reopened.status.success());
     assert_eq!(
-        WorkspaceSettingsStore::new(&explicit).load().unwrap(),
+        WorkspaceSettingsStore::new_for_mode(&explicit, RuntimeMode::Local)
+            .load()
+            .unwrap(),
         LocalSettings::from(&Settings::default())
     );
 

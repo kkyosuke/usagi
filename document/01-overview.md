@@ -32,7 +32,8 @@ usagi は workspace の骨組み（[2. アーキテクチャ](02-architecture.md
 | `usagi open [path]` | `path` の workspace を登録・最終利用日時更新して Workspace 画面を開く。`path` 省略時はカレントディレクトリを使う |
 | `usagi config` | Config 画面を対話的に表示する（scope を Tab で切替、`↑↓` で項目を選び `←→` で変更、dirty 時だけ Save で保存。`Esc` で Welcome へ、`Ctrl-C` で終了） |
 | `usagi doctor` | Doctor TUI を起動画面に選ぶ |
-| `usagi update` | GitHub Releases の最新バイナリを download して `~/.usagi/bin/` へ導入する。`usagi update -v` は release 一覧を5行固定で表示し、`↑` / `↓` で選択して Enter で選んだ版を導入する。反映には再起動が必要 |
+| `usagi clean` | 登録 workspace、workspace ごとの daemon lifecycle data、Git worktree と `usagi/*` branch を照合し、紐付いていない resource を dry-run 表示する。`--apply` で安全な候補を削除し、dirty worktree と未マージ branch は `--force` も指定した場合だけ削除する。workspace fence を取得できない使用中 workspace は変更しない |
+| `usagi update` | GitHub Releases の最新バイナリを download して `~/.usagi/bin/` へ導入する。`usagi update -v` は release 一覧を5行固定で表示し、`↑` / `↓` で選択して Enter で選んだ版を導入する。更新後の CLI は次回起動から使われる。起動中の TUI は開き直し、古い daemon は `usagi doctor --fix` で入れ替える |
 | `usagi version` / `usagi --version` | 配布 version を表示する |
 | `usagi daemon start` | daemon をバックグラウンドで起動し、登録された pid を表示する。すでに稼働中ならその pid を表示する |
 | `usagi daemon stop` | 稼働中の daemon を終了する。live な Agent / generic terminal を持つ daemon は拒否し、`--force` で明示的に手放したときだけ停止する。stale な lifecycle record は回収する |
@@ -112,7 +113,8 @@ preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay とし�
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
 `q` は終了キーにならない。Closeup の `terminal` は空引数または `open` で選択 target の既存 terminal を
 完全な identity で再利用し、存在しない場合は daemon に launch を依頼する。`terminal new` は選択 target の
-worktree を cwd としてプラットフォーム標準の terminal を別ウィンドウで開き、Closeup を維持する。その他の引数は
+worktree を cwd としてプラットフォーム標準の terminal を別ウィンドウで開き、起動要求後は action modal だけを閉じて
+背面の Closeup へ戻る。その他の引数は
 安全な feedback で拒否する。terminal stream の IPC 境界は [daemon IPC](04-ipc.md#generic-terminal-request) が正本である。
 Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した

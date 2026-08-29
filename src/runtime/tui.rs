@@ -3658,12 +3658,17 @@ fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
             && !key.modifiers.hyper
             && !key.modifiers.meta
     };
+    // `adapt_key` canonicalizes a shifted ASCII letter to uppercase. Linux's
+    // native copy chord includes Shift, while terminals that already resolve
+    // the character can still supply lowercase. Keep the character spelling
+    // protocol-independent without relaxing the platform modifier contract.
+    let copy_character = matches!(key.code, KeyCode::Char('c' | 'C'));
     #[cfg(target_os = "macos")]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(false, false, true);
+    let matches_copy = copy_character && only(false, false, true);
     #[cfg(target_os = "windows")]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, false, false);
+    let matches_copy = copy_character && only(true, false, false);
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let matches_copy = matches!(key.code, KeyCode::Char('c')) && only(true, true, false);
+    let matches_copy = copy_character && only(true, true, false);
 
     #[cfg(target_os = "windows")]
     let fallback = vec![3];
@@ -3841,28 +3846,11 @@ impl FsWorkspaceLoader {
             .initialize(&LocalSettings::from(&defaults))
             .map_err(io_error)
     }
-}
 
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
-impl WorkspaceLoader for FsWorkspaceLoader {
-    fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
-        validate_workspace_directory(path)?;
-        // Declare the workspace being opened before anything else touches the
-        // daemon: a daemon that serves another workspace then refuses this
-        // connection instead of answering with its own sessions, and a cold start
-        // binds the workspace being opened rather than this process's directory.
-        // The refusal lands before any registry write or recent-list update, so a
-        // workspace that cannot be shown is not recorded as opened either.
-        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
-        let lifecycle =
-            request_lifecycle_snapshot().map_err(|error| workspace_open_error(error, &opened))?;
-        let workspace =
-            workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
-        // New workspaces copy Global's Agent / Issue / Memory defaults. For a
-        // pre-existing registration from before workspace settings existed,
-        // the first open performs the same one-time initialization. The store
-        // never overwrites an existing workspace file.
-        self.initialize_workspace_settings(&workspace.path)?;
+    fn runtime_snapshot(
+        workspace: Workspace,
+        lifecycle: LifecycleSnapshot,
+    ) -> std::io::Result<WorkspaceSnapshot> {
         let mut state = load_workspace_state(&workspace.path)?;
         let workspace_id = lifecycle.workspace_id;
         // Identities align with the listed rows (`project` lists the same set),
@@ -3881,6 +3869,76 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             lifecycle.agent_resumes,
             session_lifecycles,
         ))
+    }
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
+impl WorkspaceLoader for FsWorkspaceLoader {
+    fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
+        validate_workspace_directory(path)?;
+        let previous = crate::runtime::daemon::opened_workspace();
+        // Declare the workspace being opened before anything else touches the
+        // daemon: a running multi-tenant daemon selects or adopts this exact
+        // workspace instead of answering with another tenant's sessions, and a
+        // cold start binds the workspace being opened rather than this process's directory.
+        // The refusal lands before any registry write or recent-list update, so a
+        // workspace that cannot be shown is not recorded as opened either.
+        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
+        let result = (|| {
+            let lifecycle = request_lifecycle_snapshot()
+                .map_err(|error| workspace_open_error(error, &opened))?;
+            let workspace =
+                workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
+            // New workspaces copy Global's Agent / Issue / Memory defaults. For a
+            // pre-existing registration from before workspace settings existed,
+            // the first open performs the same one-time initialization. The store
+            // never overwrites an existing workspace file.
+            self.initialize_workspace_settings(&workspace.path)?;
+            Self::runtime_snapshot(workspace, lifecycle)
+        })();
+        if result.is_err()
+            && let Some(previous) = previous
+        {
+            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
+        }
+        result
+    }
+
+    fn refresh(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
+        validate_workspace_directory(path)?;
+        let previous = crate::runtime::daemon::opened_workspace();
+        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
+        let result = (|| {
+            let lifecycle = request_lifecycle_snapshot()
+                .map_err(|error| workspace_open_error(error, &opened))?;
+            let workspace = self
+                .storage
+                .load_workspaces()
+                .map_err(io_error)?
+                .into_iter()
+                .find(|workspace| workspace.path == path)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("workspace is no longer registered: {}", path.display()),
+                    )
+                })?;
+            Self::runtime_snapshot(workspace, lifecycle)
+        })();
+        // Refresh is observational: selecting an inactive Garden cache must not
+        // change which workspace subsequent production ports belong to.
+        if let Some(previous) = previous {
+            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
+        }
+        result
+    }
+
+    fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
+        workspace_usecase::touch_unite(&self.storage, paths, Utc::now()).map_err(io_error)
+    }
+
+    fn activate_prepared(&mut self, path: &Path) -> std::io::Result<()> {
+        crate::runtime::daemon::declare_opened_workspace(path).map(|_| ())
     }
 
     fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
@@ -4249,6 +4307,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
+    let registry = loader.storage.load_workspaces().map_err(io_error)?;
     let mut settings = PersistentSettingsPort::open()?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut backend_factory = ProductionBackendFactory::default();
@@ -4259,9 +4318,11 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             // The workspace's ports are already dropped by the time the
             // controller returns, so the switcher starts with no connection
             // to the workspace that was left.
-            match presentation::run_workspace_controller_with_backend_and_config(
+            match presentation::run_workspace_deck_with_backend_and_config(
                 terminal,
                 snapshot,
+                &registry,
+                &mut loader,
                 &mut backend_factory,
                 &mut settings,
                 available_models,
@@ -5039,14 +5100,9 @@ mod tests {
         assert_eq!(
             integrations
                 .iter()
-                .map(|integration| integration.profile_id.as_str())
+                .map(|integration| (integration.profile_id.as_str(), integration.revision))
                 .collect::<Vec<_>>(),
-            ["claude", "codex", "sakana-ai"]
-        );
-        assert!(
-            integrations
-                .iter()
-                .all(|integration| integration.revision > 1)
+            [("claude", 3), ("codex", 2), ("sakana-ai", 2)]
         );
         assert_eq!(
             doctor_reply_body(DaemonReply::Ok(serde_json::json!({"ok": true}))),
@@ -7525,6 +7581,40 @@ mod tests {
     }
 
     #[test]
+    fn shifted_lowercase_crossterm_x_reaches_forced_session_removal() {
+        use crossterm::event::{
+            KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
+        };
+
+        let input = LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+            CrosstermKeyCode::Char('x'),
+            KeyModifiers::SHIFT,
+        )));
+        let key = classify_terminal_input(
+            &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
+            Duration::ZERO,
+            &input,
+        )
+        .expect("Shift+x is a management key");
+        assert_eq!(key, Key::Char('X'));
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let event = usagi_tui::presentation::app_event_from_key(key)
+            .expect("the shifted key reaches the Home reducer");
+        assert_eq!(
+            update(&mut state, event),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+                force_delete_branch: true,
+            }]
+        );
+    }
+
+    #[test]
     fn terminal_adapter_maps_global_chords_after_classifier_resolution() {
         let cases = [
             (live_key(KeyCode::Char('c'), control()), Key::Quit),
@@ -7692,11 +7782,33 @@ mod tests {
             }
         };
 
-        assert_eq!(
-            terminal_copy_key(&live_key(KeyCode::Char('c'), modifiers)),
-            Some(Key::TerminalCopy { fallback })
-        );
+        for character in ['c', 'C'] {
+            assert_eq!(
+                terminal_copy_key(&live_key(KeyCode::Char(character), modifiers)),
+                Some(Key::TerminalCopy {
+                    fallback: fallback.clone(),
+                })
+            );
+        }
         assert_eq!(terminal_copy_key(&LiveInput::Text("c".into())), None);
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    #[test]
+    fn linux_terminal_copy_survives_crossterm_shifted_character_normalization() {
+        use crossterm::event::{
+            KeyCode as CrosstermKeyCode, KeyEvent as CrosstermKeyEvent, KeyModifiers,
+        };
+
+        let input = LiveInput::Key(crate::tui_input::adapt_key(CrosstermKeyEvent::new(
+            CrosstermKeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+
+        assert_eq!(
+            terminal_copy_key(&input),
+            Some(Key::TerminalCopy { fallback: vec![] })
+        );
     }
 
     #[test]
@@ -8221,10 +8333,6 @@ mod tests {
         let concurrent = Settings {
             theme: Theme::Light,
             default_model: usagi_core::domain::settings::DefaultModel::SakanaAi,
-            local_llm: usagi_core::domain::settings::LocalLlm {
-                enabled: true,
-                model: "qwen2.5-coder:3b".to_owned(),
-            },
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -8247,7 +8355,6 @@ mod tests {
             usagi_core::domain::settings::DefaultModel::Claude
         );
         assert!(!saved.issue_enabled);
-        assert_eq!(saved.local_llm, concurrent.local_llm);
         assert_eq!(saved.env, concurrent.env);
     }
 
@@ -8467,10 +8574,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
-            local_llm: usagi_core::domain::settings::LocalLlm {
-                enabled: true,
-                model: "qwen2.5-coder:3b".to_owned(),
-            },
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

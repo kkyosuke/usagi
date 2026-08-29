@@ -179,6 +179,39 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         self.coordinator.has_running_in_workspace(workspace)
     }
 
+    /// Number of live generic terminal PTYs owned by one workspace.
+    #[must_use]
+    pub fn running_count_in_workspace(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> usize {
+        self.coordinator.running_count_in_workspace(workspace)
+    }
+
+    /// Number of generic terminal records which may still own a process.
+    #[must_use]
+    pub fn retirement_blocker_count_in_workspace(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> usize {
+        self.coordinator
+            .retirement_blocker_count_in_workspace(workspace)
+    }
+
+    /// Closes every generic terminal belonging to one retiring workspace.
+    pub fn close_workspace(
+        &mut self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Result<usize, ProtocolError>
+    where
+        S: TerminalStore,
+        P: GenericPtySpawner,
+    {
+        self.coordinator
+            .close_workspace(workspace, &mut self.store, &mut self.pty)
+            .map_err(map_error)
+    }
+
     pub fn collect_retention_garbage(&mut self) -> usize
     where
         S: TerminalStore,
@@ -2046,6 +2079,9 @@ mod tests {
         // running child, another workspace does not.
         assert!(runtime.has_running_in_workspace(workspace));
         assert!(!runtime.has_running_in_workspace(WorkspaceId::new()));
+        assert_eq!(runtime.running_count_in_workspace(workspace), 1);
+        assert_eq!(runtime.running_count_in_workspace(WorkspaceId::new()), 0);
+        assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 1);
 
         // A different scope (foreign session) sees nothing.
         let foreign = TerminalLaunchScope {
@@ -2065,6 +2101,8 @@ mod tests {
         assert!(!exited[0].live);
         // An exited child no longer keeps its workspace.
         assert!(!runtime.has_running_in_workspace(workspace));
+        assert_eq!(runtime.running_count_in_workspace(workspace), 0);
+        assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 0);
 
         // The exited terminal now appears as a completed tombstone (#525) with
         // its exit status; a foreign scope still sees none.

@@ -202,6 +202,9 @@ pub struct ScreenCheckpoint {
     /// Whether the program requested application cursor-key sequences (DECCKM).
     #[serde(default)]
     pub application_cursor: bool,
+    /// Whether the program requested bracketed-paste input (DECSET 2004).
+    #[serde(default)]
+    pub bracketed_paste: bool,
     /// Concrete mouse tracking mode requested by the program.
     #[serde(default)]
     pub mouse_protocol_mode: MouseProtocolMode,

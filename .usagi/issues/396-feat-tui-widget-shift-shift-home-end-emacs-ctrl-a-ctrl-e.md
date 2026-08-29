@@ -7,7 +7,7 @@ labels: [tui, input, widget, ux]
 dependson: []
 related: []
 created_at: 2026-07-20T04:25:28.639907+00:00
-updated_at: 2026-07-20T06:46:29.158782+00:00
+updated_at: 2026-08-27T01:00:00+00:00
 ---
 
 ## 目的
@@ -69,7 +69,7 @@ TUI の 1 行入力欄（session 作成名・Open filter・Overview/Closeup pale
 
 ### 含めない
 
-- PTY / live terminal 出力側のドラッグ選択・コピー（`#390` 系。`TerminalSession` / shell が所有）。本 issue は**入力 widget のテキスト選択のみ**。
+- PTY / live terminal 出力側のドラッグ選択・コピー（`#723` 系。`TerminalSession` / shell が所有）。本 issue は**入力 widget のテキスト選択のみ**。
 - OS クリップボードへの選択コピー / 貼り付け（`copy_text` port の拡張）。将来別 issue。
 - 複数行入力・折り返し編集。`TextInput` は 1 行のまま。
 - profile/model UX・mouse による入力欄内選択。

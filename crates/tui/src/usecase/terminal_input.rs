@@ -167,6 +167,12 @@ pub enum RuntimeEvent<B> {
 /// A TUI-local action reserved from the live terminal stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveTerminalAction {
+    /// Open the process-level workspace add overlay (`Ctrl-O +`).
+    OpenWorkspace,
+    /// Open the process-level all-project switcher (`Ctrl-O 0`).
+    OpenWorkspaceSwitcher,
+    /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
+    ActivateWorkspace(u8),
     /// Return to Switch mode.
     Switch,
     /// Open the active target's Closeup modal.
@@ -177,6 +183,8 @@ pub enum LiveTerminalAction {
     PreviousTab,
     /// Open the active Closeup target's Pull Request modal.
     OpenPullRequests,
+    /// Open the workspace Garden (`Ctrl-O ,`).
+    OpenGarden,
     /// Move the selected tab one slot toward the next tab.
     MoveTabNext,
     /// Move the selected tab one slot toward the previous tab.
@@ -421,6 +429,18 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_g(key) {
         return Some(LiveTerminalAction::Director);
     }
+    // `+` is physically Shift+= on common layouts. Crossterm may retain that
+    // Shift bit even though the semantic character is already `+`.
+    if key.code == KeyCode::Char('+')
+        && (key.modifiers == Modifiers::default()
+            || key.modifiers
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                })
+    {
+        return Some(LiveTerminalAction::OpenWorkspace);
+    }
     // Plain follow-ups for the live-terminal view controls the Home reducer does
     // not own: scroll the PTY output and close the focused tab. A
     // modified variant (other than the control chords above) is not a prefix
@@ -429,6 +449,11 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         return None;
     }
     match key.code {
+        KeyCode::Char('0') => Some(LiveTerminalAction::OpenWorkspaceSwitcher),
+        KeyCode::Char(digit @ '1'..='9') => Some(LiveTerminalAction::ActivateWorkspace(
+            u8::try_from(digit.to_digit(10).unwrap_or(1)).unwrap_or(1),
+        )),
+        KeyCode::Char(',') => Some(LiveTerminalAction::OpenGarden),
         KeyCode::Char('n') => Some(LiveTerminalAction::DirectorNew),
         KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
@@ -552,16 +577,20 @@ const PASTE_START: &str = "\x1b[200~";
 /// Bracketed-paste end marker (DECSET 2004).
 const PASTE_END: &str = "\x1b[201~";
 
-/// Wrap a paste payload in bracketed-paste markers so a program that enabled
-/// bracketed paste (agent CLIs such as `claude` / `codex`) inserts the
-/// multi-line text as one block instead of submitting on every embedded newline.
+/// Encode a paste payload for the input mode requested by the focused program.
+/// A bracketed-paste consumer (agent CLIs such as `claude` / `codex`) receives
+/// one marked block; a program that did not opt in receives the original bytes,
+/// without visible `ESC[200~` / `ESC[201~` text being added.
 ///
-/// Any [`PASTE_END`] marker inside `text` is removed first: leaving it in would
-/// let pasted content close the paste early and have its tail run as live
-/// keystrokes (paste injection), so — like real terminals — the embedded
-/// terminator is neutralised.
+/// In bracketed mode, any [`PASTE_END`] marker inside `text` is removed first:
+/// leaving it in would let pasted content close the paste early and have its
+/// tail run as live keystrokes (paste injection), so — like real terminals —
+/// the embedded terminator is neutralised.
 #[must_use]
-pub fn encode_bracketed_paste(text: &str) -> Vec<u8> {
+pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
     let body = text.replace(PASTE_END, "");
     let mut out = Vec::with_capacity(PASTE_START.len() + body.len() + PASTE_END.len());
     out.extend_from_slice(PASTE_START.as_bytes());
@@ -577,9 +606,17 @@ mod tests {
     const T0: Duration = Duration::ZERO;
 
     #[test]
+    fn paste_without_program_opt_in_preserves_the_payload() {
+        assert_eq!(
+            encode_paste("line1\nline2\x1b[201~tail", false),
+            b"line1\nline2\x1b[201~tail".to_vec()
+        );
+    }
+
+    #[test]
     fn bracketed_paste_wraps_a_multi_line_payload_in_markers() {
         assert_eq!(
-            encode_bracketed_paste("line1\nline2"),
+            encode_paste("line1\nline2", true),
             b"\x1b[200~line1\nline2\x1b[201~".to_vec()
         );
     }
@@ -587,7 +624,7 @@ mod tests {
     #[test]
     fn bracketed_paste_strips_embedded_end_markers_to_block_injection() {
         assert_eq!(
-            encode_bracketed_paste("safe\x1b[201~rm -rf /\r"),
+            encode_paste("safe\x1b[201~rm -rf /\r", true),
             b"\x1b[200~saferm -rf /\r\x1b[201~".to_vec()
         );
     }
@@ -853,6 +890,69 @@ mod tests {
     }
 
     #[test]
+    fn project_deck_prefix_reserves_plus_switcher_and_digits() {
+        for plain in ['+', '0', '1', '2'] {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, key(KeyCode::Char(plain))),
+                LiveInputOutput::Passthrough(vec![plain as u8])
+            );
+        }
+        let cases = [
+            ('+', LiveTerminalAction::OpenWorkspace),
+            ('0', LiveTerminalAction::OpenWorkspaceSwitcher),
+            ('1', LiveTerminalAction::ActivateWorkspace(1)),
+            ('9', LiveTerminalAction::ActivateWorkspace(9)),
+        ];
+        for (follow_up, action) in cases {
+            let mut classifier = LiveInputClassifier::default();
+            assert_eq!(
+                classifier.classify(T0, ctrl('o')),
+                LiveInputOutput::Swallowed
+            );
+            assert_eq!(
+                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(follow_up))),
+                LiveInputOutput::Action(action)
+            );
+        }
+        let mut classifier = LiveInputClassifier::default();
+        let shifted_plus = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('+'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), shifted_plus),
+            LiveInputOutput::Action(LiveTerminalAction::OpenWorkspace)
+        );
+    }
+
+    #[test]
+    fn garden_is_reserved_only_after_the_leader() {
+        let comma = || key(KeyCode::Char(','));
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), comma()),
+            LiveInputOutput::Action(LiveTerminalAction::OpenGarden)
+        );
+        assert_eq!(
+            LiveInputClassifier::default().classify(T0, comma()),
+            LiveInputOutput::Passthrough(b",".to_vec())
+        );
+    }
+
+    #[test]
     fn director_chord_distinguishes_ctrl_g_from_plain_g() {
         for follow_up in [
             ctrl('g'),
@@ -885,7 +985,7 @@ mod tests {
     fn plain_view_control_keys_reach_the_pty_without_a_leader() {
         // The restored follow-ups are reserved only after a Ctrl-O leader; a bare
         // press still types into the terminal.
-        for character in ['c', 'x', 'u', 'd'] {
+        for character in [',', 'c', 'x', 'u', 'd'] {
             assert_eq!(
                 LiveInputClassifier::default().classify(T0, key(KeyCode::Char(character))),
                 LiveInputOutput::Passthrough(character.to_string().into_bytes())

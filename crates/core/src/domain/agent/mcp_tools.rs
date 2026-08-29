@@ -25,10 +25,6 @@ pub struct McpToolFamilies {
     pub issue: bool,
     /// The `memory_*` family is registered.
     pub memory: bool,
-    /// The trusted local-LLM server is wired next to the usagi server. It is a
-    /// separate server, so it adds a tool to the launch without adding one to
-    /// the usagi registry.
-    pub local_llm: bool,
 }
 
 impl McpToolFamilies {
@@ -42,7 +38,6 @@ impl McpToolFamilies {
         Self {
             issue: settings.issue_enabled,
             memory: settings.memory_enabled,
-            local_llm: settings.local_llm.enabled,
         }
     }
 
@@ -53,7 +48,6 @@ impl McpToolFamilies {
         Self {
             issue: true,
             memory: true,
-            local_llm: true,
         }
     }
 }
@@ -61,7 +55,7 @@ impl McpToolFamilies {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::settings::{LocalLlm, LocalSettings};
+    use crate::domain::settings::LocalSettings;
 
     #[test]
     fn the_effective_configuration_decides_every_family() {
@@ -70,16 +64,11 @@ mod tests {
             McpToolFamilies {
                 issue: true,
                 memory: true,
-                local_llm: false,
             }
         );
 
         let settings = Settings {
             memory_enabled: false,
-            local_llm: LocalLlm {
-                enabled: true,
-                ..LocalLlm::default()
-            },
             ..Settings::default()
         };
         assert_eq!(
@@ -87,7 +76,6 @@ mod tests {
             McpToolFamilies {
                 issue: true,
                 memory: false,
-                local_llm: true,
             }
         );
     }
@@ -113,7 +101,6 @@ mod tests {
             McpToolFamilies {
                 issue: true,
                 memory: true,
-                local_llm: true,
             }
         );
     }

@@ -87,16 +87,18 @@ build schema、profile、full target、source tree / compiler / feature / rustfl
 literal `"unknown"` を same build と扱わない。Git metadata の無い package build も package source set で
 識別し、identity read failure は unknown として fail safe にする。
 
-build mismatch の通常 bootstrap は artifact pair と channel から決まる stable operation ID の typed rollover trigger を
-生成する。production / local は old daemon を停止せず、trigger を返して old endpoint と live PTY をそのまま維持する。
-development は trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
+build mismatch の通常 bootstrap は、protocol handshake が互換なら到達可能な old daemon を effect 0 で再利用する。
+production / local は接続の副作用として replacement を起こさず、old endpoint と live PTY をそのまま維持する。このため
+binary の更新直後も TUI / CLI / MCP は停止中の Agent を巻き込まず接続でき、daemon artifact の更新は明示的な
+`usagi daemon restart` / `usagi daemon replace` が担う。development だけは artifact pair と channel から決まる stable
+operation ID の typed rollover trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
 daemon 自身の census が決め、何も live でなければ cold transition、live Agent / generic Terminal があれば PTY を維持する
 seamless rollover になる（[planned replacement](#planned-replacement)）。replacement 後は exact artifact を handshake で
 確認してから再接続する。これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動でき、かつ再 build が
 他の client の live Agent を巻き添えにしない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
-same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。trigger は
-effect-free であり、production / local は cross-process standby / admission consumer が未接続の間は cold stop/start や
-二重 spawn に進まない。
+same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。
+production / local の mismatch reuse は effect-free であり、cross-process standby / admission consumer が未接続の間も
+cold stop/start や二重 spawn に進まない。
 unknown identity、`build.artifact.v1` capability の無い old daemon、read / verification failure も old daemon を維持した
 typed refusal になる。
 
@@ -114,9 +116,12 @@ daemon-owned terminal や managed session をローカルに代替実行する�
 same build reconnect
   client -> current.json -> existing daemon process -> existing PTY master
 
-detected build mismatch / daemon replace
-  client -> stable rollover operation -> typed trigger, stop effect 0
-                                  -> old daemon process + PTY remain alive
+production / local build mismatch
+  client -> compatible handshake -> reuse old daemon, effect 0
+                                -> old daemon process + PTY remain alive
+
+explicit daemon restart / replace
+  client -> stable rollover operation -> typed trigger
 
 development build mismatch
   client -> stable rollover operation -> planned replacement (no --force)
@@ -161,7 +166,8 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | コマンド | 動作 |
 |---|---|
 | `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで待つ。すでに稼働中なら新しい process を起動しない |
-| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。stale は owner 消滅と PID 再利用を区別した文言で報告し、どちらも reclaimable であることを示す |
+| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
+| `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。`--force` は live runtime を明示的に破棄する cold transition |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
@@ -199,9 +205,14 @@ daemon が動いている間は、どれだけ request が無くても idle と�
 workspace は、もう使われていない。`usagi daemon stop` の直後は daemon も broker も残らないため、次の起動は通常の
 client bootstrap が broker を起動し直すところから始まる。
 
-通常 client は従来どおり `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によってその lock を開けない client だけが
-broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の build identity・workspace handshake を通して接続する。
-この fallback は data home、workspace、Git common dir を Agent の writable root へ追加しない。
+cold-start authority を持つ通常 client は `bootstrap.lock` で connect / recovery / start を直列化する。sandbox によって
+その lock を開けない client だけが broker へ start を要求し、broker が endpoint の readiness を確認した後、通常の
+build identity・workspace handshake を通して接続する。この fallback は data home、workspace、Git common dir を Agent の
+writable root へ追加しない。
+
+daemon が provision した MCP child と Agent lifecycle hook は broker を使わず、発行元の既存 daemon へ attach する。
+この child が claim する live Agent runtime は発行元 daemon の process memory にしか存在せず、cold start した別 daemon
+では復元できないためである。MCP の経路分岐は [7. MCP サーバ#起動と経路](07-mcp.md#起動と経路)を正本とする。
 
 active role の `serve` は process lifetime にわたって単一インスタンス lock を保持する。lock が意味するのは
 「この process がこの data directory の **active role** である」ことであり、「この data directory の process が
@@ -263,6 +274,12 @@ workspace root の解決は process ごとに 1 回だけ行い、fence と sess
 `sessions.json` に durable な `repository_root` があればそれが勝つ（[workspace state subtree](#workspace-state-subtree)、
 [session tree と ignore rules](#session-tree-と-ignore-rules)）。したがって subdirectory や session worktree から
 起動しても、runtime が所有しない workspace を fence することはない。
+
+client 起点の auto-start はこの process-side 解決より前に
+[workspace fence の cold-start preflight](04-ipc.md#workspace-fence)を通る。`bound` cwd は、既存の adopted root の
+最長一致か、その cwd 自身が repository root の場合だけ lifecycle child を起動できる。明示的な `selected` open は
+repository でない directory も許可する。この preflight は lifecycle child より前なので、拒否した cwd に fence や
+project-local `.usagi` を残さない。
 
 workspace fence の node には、取得した owner が自分の pid を 1 行書く。別の data directory の daemon は互いの
 `daemon.json` を読めないため、この hint が cross-mode の唯一の発見経路である（`daemon status` は自分の mode の
@@ -395,10 +412,20 @@ record の `pid` は 1 つの process を名指せる値でなければならな
 へ raw PID signal を送らない。
 
 running `stop` は SIGTERM を送っても先行消去せず、
-owner が retire 成功後に exact record を変更・消去するまで有界に poll する。PID が消えても同じ record が残る場合や
-shutdown window を超えた場合は cleanup failure として record を保持するため、stale locator のまま replacement を
-起動しない。locator が先に `NotFound` となる短い区間でも live record と `daemon.lock` が replacement 起動を抑止し、
-`stop` は最後の record clear まで成功を返さない。
+owner が retire 成功後に exact record を変更・消去するまで有界に poll する。PID が先に消えて同じ record が残る場合は、
+その同じ `stop` が signal-free の stale cleanup へ移り、`daemon.lock` の取得と exact record の再照合に成功した場合だけ
+endpoint と record を回収する。これにより owner の process exit と最後の record clear の間で `restart` が失敗したまま
+残らない。lock が busy、record が変化、cleanup が失敗、または shutdown window を超えた場合は record を保持するため、
+stale locator のまま replacement を起動しない。locator が先に `NotFound` となる短い区間でも live record と
+`daemon.lock` が replacement 起動を抑止し、`stop` は最後の record clear まで成功を返さない。
+
+seamless handoff 後は `daemon.json` が active successor を指す一方、predecessor は draining generation として
+自分の PTY と singleton lock を保持できる。したがって `stop` / `restart` は lifecycle record だけで live runtime の
+有無を決めず、generation registry で exact に生存する全 non-retired generation を観測する。通常の `stop` は draining
+generation に live runtime があれば従来どおり拒否する。live runtime が無い cold transition または明示 `--force` は、
+registry に記録された exact process identity を再検証して全 non-retired generation へ shutdown を要求し、その消滅を
+有界に待ってから stale endpoint / lifecycle record cleanup と replacement 起動へ進む。PID だけ、retired entry、identity
+不明な process は signal 対象にしない。
 
 stale `stop` は scoped `daemon.lock` を取得し、lock 下で最初の lifecycle record 全体がまだ exact current record であることを
 再確認する。その後 `current.lock` 下で current が指す socket と安全に検証できる orphan socket を先に回収し、exact locator、
@@ -442,9 +469,9 @@ hard crash では unique temporary が残り得るが、後続 save は別名を
 停止しない。shipping `serve` の active generation は [admission fence](#admission-fence) を通して全 connection を
 serve し、request ごとに role 付きの lease を発行し、client worker を shutdown 半分とともに保持する
 （[client worker の保持](#client-worker-の保持)）。したがって role が `draining` へ移れば control と spawn は
-次の request から拒否されるが、**この停止順序を駆動する collection そのもの**（internal producer の停止と
-retirement）はまだ無い。それを起動する rollover は
-[#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) の残りである。
+次の request から拒否される。rollover は internal producer を止め、lease を drain してから authority を渡し、
+draining generation の resource claim が 0 になった時点で endpoint と process を回収する。この順序の設計経緯は
+完了済みの [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) に残す。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
@@ -601,26 +628,36 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
-| `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership と workspace/session ごとの prompt queue。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
-| `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable atomic JSONL | caller agent 単位の完了報告 inbox。cross-process lock 下で更新するため、caller の停止中にも報告を保持する |
+| `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership、workspace/session ごとの prompt queue、run retention から独立した immutable session lineage、委譲 admission から child publish までの concurrency reservation。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
+| `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable sequence JSONL | caller agent 単位の完了報告 inbox。fsync append、derived offset index、atomic ACK watermark、cross-process lock で、caller の停止中と daemon restart 後にも未 ACK 報告を保持する |
 
 #### durable store の retention
 
-`dispatch.json`・`dispatch-workspaces.json`・inbox・`user-decisions.json` は **書き込みのたびに文書全体を read-modify-write** する。上限が無ければ
-N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続ける。したがって各 store は
+`dispatch.json`・`dispatch-workspaces.json`・`user-decisions.json` は書き込みのたびに bounded 文書を
+read-modify-write する。inbox は sequence journal へ追記し、ACK 済み履歴だけを bounded compaction する。上限が無ければ
+N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon では操作が永久に重くなり続けるため、各 store は
 書き込み経路そのものに上限を持ち、maintenance tick の実行有無に依存しない。
 
 | store | 上限 | 決して落とさないもの |
 |---|---|---|
-| `dispatch.json` の run | 終了済み 256 件（古い順に破棄） | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
-| inbox | 既読 256 件。総数の上限は 4096 | 未読の報告。未読が上限を超えたときだけ最古の未読を落とし、error log に記録する（silent loss にしない） |
+| dispatch registry | `dispatch.json` と `dispatch-workspaces.json` は各 2 MiB。終了済み run は 256 件、365 日を超えた履歴を古い順に破棄し、byte pressure でも最新 32 件を replay 用に残す | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
+| caller inbox | 1 caller あたり 4 MiB / 4096 件、ACK 済み 256 件、履歴 365 日。query page は最大 100 件 | 未 ACK の報告。count / byte 上限を保護対象だけで満たす append は既存報告を落とさず capacity error で拒否する |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
-| `supervisor-runs/` | 終了済み run 128 件（snapshot / journal / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run |
+| `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
 未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
 pending が 1 つの共有文書を無制限に増やすことを防ぐ。拒否は `resource_exhausted` で、durable state を一切変更しない
 ため、人が backlog を消化したあとの retry が安全である。
+
+dispatch registry と inbox は書き込み前に pretty JSON / JSONL の実 byte 数を検証する。count / age / byte の順で
+安全な終了済み・ACK 済み履歴だけを compact し、それでも上限を満たせない mutation は `resource_exhausted` として
+effect zero で拒否する。既存ファイルが byte 上限を超えている場合も全体を parse せず fail-closed にする。
+
+inbox の query は `sequence -> byte offset` index から `cursor` 位置へ seek し、`limit` 件だけを読む。query 自体は
+既読化せず、処理済み page の `next_cursor` を別の `agent_inbox_ack` effect で送る。ACK は atomic watermark の単調更新で、
+応答 loss 時に同じ page を再読しても未読を失わず、duplicate ACK と restart 後の retry は同じ状態へ収束する。retentionで
+消えた位置を明示 cursor が指す場合は expired として拒否し、先頭へ暗黙に読み替えない。
 
 ### tenant registry
 
@@ -641,7 +678,7 @@ daemon process（machine あたり 1 つ）
 | 起動 | 起動時 cwd の workspace を **initial tenant** として登録する。fence は `serve` が既に取得しているので取り直さない（同じ process が同じ node へ 2 本目の `flock` を試すと拒否される） |
 | adopt | client が `selected` で申告した workspace を、その handshake の中で adopt する。canonical 化 → workspace fence 取得 → state subtree 解決 → lifecycle document open → 登録の順で、`serve` の取得順と同じである |
 | 拒否 | fence を別 process が持つ、root が解決できない、tenant 上限（既定 32）に達した場合は **その workspace だけ**を typed refusal にする。保持中の tenant の接続は影響を受けない |
-| retire | 何もすることが無い状態が 10 分続いた workspace を返す（[遊休 workspace の retire](#遊休-workspace-の-retire)） |
+| retire | 何もすることが無い状態が 10 分続いた workspace を自動的に返す（[遊休 workspace の retire](#遊休-workspace-の-retire)）。または `daemon retire <path>` が参照中でない 1 tenant を即時に返す。live runtime は `--force` でその workspace のものだけを terminate / reap し、起動 workspace と未完了 lifecycle work は force でも返さない |
 | 停止 | shutdown は全 tenant を閉じ、fence を返す |
 
 adopt は client の handshake の中で走るため、fence の待ち時間は起動時（departing owner を待つ 2 秒）より短い
@@ -670,6 +707,11 @@ state subtree から root を引き当てて adopt し直すので、開き直�
 逆順（runtime の lock → scope 解決 → registry）で進むため、registry の lock を持ったまま観測すると 2 つの順序が
 交差して process 全体が停止する。sweep は「候補の選定（lock 内）→ 観測（lock 外）→ 確定（lock 内で再確認）」の
 3 相で行い、確定時に参照数と fence を読み直す。
+
+`daemon status` / `daemon retire` は workspace resource を選ばない unbound tenant IPC を共有する。inventory の正本は
+ディスクに残る `w/<digest>/root.json` ではなく、稼働中 process の registry である。明示 retire は registry 内で対象を
+`retiring` にして新しい resolution を止め、lock 外で lifecycle / runtime を確認・cleanup してから同じ entry と fence を
+落とす。cleanup が失敗した場合は entry を再び解決可能に戻すため、race した handshake が解放途中の runtime を掴まない。
 
 **daemon 全体で 1 つしかない registry の prune は、保持中の workspace ではなく「この data directory が知っている
 workspace すべて」で判定する**。PR inventory の記録は session を key にし、Agent / dispatch inventory は workspace
@@ -734,7 +776,7 @@ daemon が起動する Agent child には、mode を適用する**前**の base�
   broker は ping と daemon start だけを受理し、session sandbox と同様に data home の mutation は daemon IPC に閉じる。
   child は mode の子 directory を自分で作る必要があるため、root coordinator に selected directory だけを渡すことは
   できない。
-- daemon 所有の global settings（local LLM の有効/無効とモデル名など）は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
+- daemon 所有の global settings は **selected directory** から読む。`Storage::open_default` が書く場所と同じである。
 
 開発環境に [Task](https://taskfile.dev/) を導入している場合、リポジトリルートの `Taskfile.yml` から mode を選んで起動できる。`task run` は local mode、`task dev` は development mode、`task prd` は release build の production mode を使う。各 task は `USAGI_RUNTIME_MODE` を明示するため、呼び出し元の環境変数には影響されない。
 
@@ -896,7 +938,10 @@ PR refresh/freshness 契約の正本はこの節である。daemon は committed
 schedule を進める。
 同じ URL が複数 chunk または複数 session から登録されても scheduler は identity 単位で coalesce し、1 tick
 につき最大 2 identity を canonical URL 順に claim し、2 request を並行実行する。remote provider は shell を介さない固定 argv の
-`gh pr view <canonical-url> --json title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider 実行中は inventory lock
+`gh pr view <canonical-url> --json title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup` で、1 request を 5 秒で打ち切る。provider は request ごとの
+process group で起動し、stdout / stderr を並行して drain しながら各 256 KiB まで保持する。timeout、どちらかの stream の
+上限超過、観測失敗では TERM、100 ms の grace、KILL の順に group 全体を停止して parent を reap する。parent が先に終了して
+descendant が pipe を保持した場合も同じ回収を行い、raw output や実行環境を error へ載せない。provider 実行中は inventory lock
 を保持しないため、slow provider が terminal output の commit や IPC snapshot を停止させない。
 
 | 結果 | durable snapshot | 次回 schedule |
@@ -1012,11 +1057,12 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `X`、Closeup の `close -f`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。`x` は送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
-| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap し、終了済み・interrupted を含む Agent runtime record を durable inventory から除去してから worktree を撤去する。Agent の終了に失敗した場合は worktree を残して retry する |
+| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
 
 daemon 起動時にも session lifecycle の全 `SessionId` と Agent inventory を照合する。session record が既に無い
-Agent は旧 teardown が残した orphan として durable inventory と retention ledger から回収する。root Agent は
-`SessionId` を持たないため、この照合の対象外である。
+Agent は旧 teardown が残した orphan として、terminal state の保存による capacity claim 解放を先行させてから durable
+inventory と retention ledger から回収する。したがって record 除去と daemon restart を繰り返しても削除済み session の
+claim は Agent concurrency pool を占有し続けない。root Agent は `SessionId` を持たないため、この照合の対象外である。
 
 compensating teardown は、`session_delegate_brief` が作成したが dispatch に至らなかった session を巻き戻すために
 daemon 自身が admit する removal である。client が要求できる removal ではなく、force と branch 削除は payload で
@@ -1234,7 +1280,7 @@ resume では active owner が foreign shard を書き換えないため、repla
 
 各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Codex では [private structured capture request](04-ipc.md#codex-structured-capture-request) の入力だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は spawn 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
-Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook process group と exact live runtime の照合で structured capture 境界へ渡す。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
+Claude の新規 interactive launch は daemon が UUID を発行して spawn 時だけ `claude --session-id <uuid>` を追加し、再開時は検証済みの同一 ID を `claude --resume <id>` として一時 provision に追加する。Codex の新規 interactive launch は、adapter-private config に `SessionStart` の `startup` command hook と hidden `usagi codex-session-capture` command を注入する。Codex が documented hook JSON の stdin に渡す current `session_id` だけを、kernel 由来の hook PID・parent PID・process group と exact live runtime の照合で structured capture 境界へ渡す。provider と同じ process group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は MCP caller credential を継承せず、dispatch scope も取得しない。境界は `ProviderCaptureProvenance::ProviderStructured` で永続化し、再開時は検証済みの同一 ID を `codex resume <id>` の一時 provision に追加する。
 
 この Codex 経路の互換条件は、lifecycle hooks、`SessionStart` command event、その共通 input field `session_id`、および daemon が指定する hook trust bypass を CLI が提供することである。managed policy による hooks 無効化、非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。hook input の `transcript_path` は deserialize 対象にせず、provider state / transcript / state database / 設定 / 履歴 file の場所や形式を推測・走査・parse する capture 経路も持たない。native ID/name は先頭 `-` の option-like 値を拒否し、`--last` / `--continue` の暗黙選択へ CLI parse が切り替わる余地を持たない。
 
@@ -1270,6 +1316,8 @@ daemon restart reconciliation は unfinished record の provider status を `int
 daemon だけが古ければ planned replacement を使い、Agent PTY を破棄しない。古い Agent integration がある場合は一覧を表示し、
 `--restart-agents` が明示されるまで Agent process を停止しない。`--force` は `running` phase（tool / prompt の途中を含む）を
 破棄する追加 authority であり、通常の idle / waiting Agent 再起動や daemon rollover の force ではない。
+launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
+これにより Doctor は同じ build の runtime でも旧 launch 設定を識別し、current adapter での再開対象にできる。
 
 修復順序は old owner で exact Agent を停止、daemon build を rollover、current adapter で provider-native session ID を exact
 resume、再診断の順である。これにより old owner の PTY handle を successor が推測して signal することも、old adapter が新設定を
@@ -1318,10 +1366,9 @@ public launch plan、durable snapshot、IPC response に残らない。注入し
 呼べる。Codex は spawn 時に `mcp_servers.usagi.default_tools_approval_mode = "approve"` を渡し、注入した
 `usagi` server を事前許可する。子 server には daemon 接続に必要な環境だけを forward する。
 詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も
-`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Global local LLM 設定が有効なときだけ
-両 product は optional `usagi-llm` も追加して事前許可する（条件・順序・prompt 合成の正本は
-[7. MCP サーバ](07-mcp.md#daemon-agent-への-local-llm-配線)）。それ以外の MCP server・shell・ファイル編集・
-network の permission model は通常どおり維持され、無効化・緩和しない。
+`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Agent launch に配線するのはこの `usagi`
+server だけである。それ以外の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、
+無効化・緩和しない。
 
 daemon が provision した live Agent provider の直系 MCP child だけが、起動後の one-shot IPC claim で runtime に結び付く opaque な
 caller credential を受け取る。claim は kernel 由来の peer PID / 親 PID / process group、live runtime、generation と
@@ -1378,8 +1425,9 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 | `SpawnFailed` / その他の `ReconcileRequired` | `exited` | 2 |
 | `Exited` / `Reclaimed` | `ended` | 1 |
 
-報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、daemon が発行した
-credential で報告元 runtime に束縛される。反映は次の規則に従う。
+報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
+process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
+照合でき、従来の inherited process group も互換経路として受理する。反映は次の規則に従う。
 
 | 報告 phase | projection | 集約重み | durable `ProviderResumePhase` |
 |---|---|---|---|
@@ -1394,7 +1442,7 @@ credential で報告元 runtime に束縛される。反映は次の規則に従
 - session の phase は、その session に属する runtime のうち集約重みが最大のものを選ぶ。報告 phase の相対順序は
   Home の集約（`done > waiting > running > ready > absent`）と core usecase の共有順位を使うため、最も人の
   対応を要する runtime が session 全体の phase になる。
-- 報告 phase は in-memory であり、caller credential と同じく daemon restart で失効する（restart 後は観測 state
+- 報告 phase は in-memory であり、runtime の process binding と同じく daemon restart で失効する（restart 後は観測 state
   由来の phase に戻る）。
 - durable な写像は `ProviderResumeRef.last_known_phase` だけを更新し、`last_known_status`（liveness）は書かない。
   値が変わらない報告は snapshot を書き直さない。`exited` を durable に書かないのは、hook の言う `exited` が
@@ -1538,6 +1586,24 @@ safe completion summary、DAG state、decision generation を含む wake reserva
 parent wake effect を実行する。reservation は child run と parent generation で一意なので、duplicate event、
 ACK loss、daemon restart は同じ wake を二重に作らない。parent runtime の再解決・restart は wake adapter が
 保存済み provenance だけを使って行い、session 名から target を推測しない。
+
+`supervisor-scheduler.json` は start reservation を最大256件、wake reservation を最大512件に制限する。
+終了 run の start と配送済み wake は固定長 tombstone へ移して retry を `expired` として effect-zero にし、
+live run / 未配送 wake だけで上限へ達した場合はそれらを捨てず、新規 start / wake を capacity error で拒否する。
+`supervisor_start` は初期 task 128件、依存128件、Task ID 128 UTF-8 bytes、instruction / root task 16 KiB、
+artifact contract 4 KiB、idempotency key / policy selector 256 bytes を上限とし、永続化前に検証する。
+
+event journal は sequence→byte offset の derived index を持つ。`supervisor_events(after_sequence, limit)` は
+cursor の offset へ直接 seek し、最大100件の要求 page だけを read / parse する。index がない旧 journal は一度だけ
+走査して再構築し、以後は page size に比例する。compaction より古い cursor は、残存先頭へ黙って進めず
+`cursor expired` を返す。journal は4,096件で最新2,048件へ atomic compact し、replay checkpoint を先に offset 0へ
+置くことで、compact 中の crash でも current snapshot への duplicate replayだけに収束する。
+
+supervisor run list は owner / state / 作成順 / revision の derived index を使い、cursor から選んだ page の snapshot
+だけを hydrate する。index は mutation と同時に更新し、restart 後の初回 query では authoritative snapshot / journal
+から再構築する。page 全体が 512 KiB に達した場合は count limit より前でも cursor を返す。list / get / events の
+read-only response はすべて 512 KiB 以下とし、1 run の安全な projection だけで上限を超える場合は
+`resource_exhausted` として effect zero で拒否する。
 
 ## supervisor policy and verification
 

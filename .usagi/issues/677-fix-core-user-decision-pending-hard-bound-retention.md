@@ -7,7 +7,7 @@ labels: [review, v2, core, daemon, mcp, decision, resource, retention]
 dependson: []
 related: [329, 378, 406, 673]
 created_at: 2026-08-13T22:36:36.042890+00:00
-updated_at: 2026-08-23T23:22:34.965949+00:00
+updated_at: 2026-08-25T23:29:37+00:00
 ---
 
 ## Finding（P1 resource / durability）
@@ -29,7 +29,7 @@ updated_at: 2026-08-23T23:22:34.965949+00:00
 
 ## 受入条件
 
-- [ ] 各fieldとoption countのlimit超過はdecision/outbox/worker effect 0で拒否される。
+- [x] 各fieldとoption countのlimit超過はdecision/outbox/worker effect 0で拒否される。
 - [ ] small budget/fake clockで大量のresolved/cancelled/expired decision後もstore count/bytesがhard cap内に収まる。
 - [ ] pending / unacked / minimum window内のrecordはpressureでも保持される。
 - [ ] retained idempotency retryは同じID、expired retryはtyped expiredで、新しいdecisionを作らない。
@@ -49,7 +49,11 @@ updated_at: 2026-08-23T23:22:34.965949+00:00
 - [x] pending 数の hard cap（`PENDING_LIMIT` = 128、workspace ごと）。飽和時は既存を
       silent eviction せず `UserDecisionError::PendingLimitReached` で新規要求を
       effect zero に拒否し、IPC は `ResourceExhausted` として返す。
-- [ ] field byte / option count / serialized byte の hard cap — **未対応**
+- [x] title / prompt / option count と各 option field / idempotency key / freeform answer の
+      hard cap。MCP schema と domain constructor / store が同じ policy を使い、domain は
+      UTF-8 byte 数を検証する。limit 超過は typed effect zero、oversized durable state は
+      再起動後も fail closed にする。
+- [ ] serialized document byte の aggregate hard cap — **未対応**
 - [ ] idempotency key の expiry / tombstone contract — **未対応**
 - [ ] mutation / pending query / expiry sweep が毎回 rewrite/scan しない store layout
       — **未対応**（上限により cost は bounded になったが layout は変えていない）

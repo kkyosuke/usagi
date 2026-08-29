@@ -171,6 +171,16 @@ struct McpCaller {
     child_pid: Option<u32>,
 }
 
+/// Dispatch authority derived from one live daemon-minted MCP credential.
+/// Workspace, run, and caller identity are resolved together so a connection
+/// bound to another workspace cannot combine independently valid facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedDispatchCaller {
+    pub workspace_id: WorkspaceId,
+    pub run_id: OperationId,
+    pub caller: CallerRef,
+}
+
 /// Accepts both provider-inherited and provider-isolated MCP process groups.
 ///
 /// Codex starts each managed child as its own process-group leader. The direct
@@ -808,19 +818,34 @@ impl AgentRuntime {
         }
     }
 
-    /// Resolves a short-lived provider hook from its OS process group. Hooks
-    /// receive no bearer and cannot acquire the MCP child's dispatch scope.
+    /// Resolves a short-lived provider hook from authenticated OS process identity.
+    ///
+    /// Claude uses exec-form hooks, so the hook is a direct child of the live
+    /// provider and may either inherit its process group or lead its own.
+    /// The inherited-group case remains accepted for providers/configurations
+    /// which still use a shell-form hook. Hooks receive no bearer and cannot
+    /// acquire the MCP child's dispatch scope.
     #[must_use]
-    pub fn hook_credential(&self, process_group: u32) -> Option<&str> {
+    pub fn hook_credential(
+        &self,
+        hook_pid: u32,
+        parent_pid: u32,
+        process_group: u32,
+    ) -> Option<&str> {
         let mut matches = self.mcp_callers.iter().filter(|(_, caller)| {
             self.coordinator
                 .record_for(&caller.runtime)
                 .is_ok_and(|record| {
                     record.state == super::runtime::RuntimeState::Running
-                        && record
-                            .process
-                            .as_ref()
-                            .is_some_and(|process| process.process_group == process_group)
+                        && record.process.as_ref().is_some_and(|process| {
+                            process.process_group == process_group
+                                || (process.pid == parent_pid
+                                    && mcp_child_process_group_matches(
+                                        process.process_group,
+                                        hook_pid,
+                                        process_group,
+                                    ))
+                        })
                 })
         });
         let (credential, _) = matches.next()?;
@@ -832,12 +857,34 @@ impl AgentRuntime {
     /// agent or session name participates in this lookup.
     #[must_use]
     pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
-        let run_id = self.mcp_caller(credential)?;
+        self.mcp_dispatch_context(credential)
+            .map(|context| context.caller)
+    }
+
+    /// Resolves all dispatch provenance from the same live credential and
+    /// verifies the durable Agent ownership sidecar before returning it.
+    #[must_use]
+    pub fn mcp_dispatch_context(&self, credential: &str) -> Option<AuthenticatedDispatchCaller> {
+        let mcp = self.mcp_callers.get(credential)?;
+        let record = self
+            .coordinator
+            .record_for(&mcp.runtime)
+            .ok()
+            .filter(|record| record.state == super::runtime::RuntimeState::Running)?;
+        let workspace_id = record.runtime.terminal.workspace_id;
+        let run_id = mcp.operation;
         let binding = self.dispatch.binding(run_id).ok()??;
-        Some(CallerRef {
+        let caller = CallerRef {
             session_id: binding.worker.session_id,
             agent_id: binding.worker.agent_id,
-        })
+        };
+        (self.dispatch.workspace_for_agent(caller.agent_id).ok()?? == workspace_id).then_some(
+            AuthenticatedDispatchCaller {
+                workspace_id,
+                run_id,
+                caller,
+            },
+        )
     }
 }
 
@@ -1054,19 +1101,37 @@ impl AgentRuntime {
         outcome
     }
 
-    /// Whether this workspace still has an Agent runtime that is running.
+    /// Whether this workspace has an Agent runtime that is live or whose
+    /// process ownership has not been proved safe to release.
     ///
     /// A retirement asks this before giving the workspace back: its PTY children
     /// belong to that workspace's scopes, and releasing the workspace while one
     /// is alive would hand its worktrees to a second owner.
     #[must_use]
     pub fn has_running_agent(&self, workspace: WorkspaceId) -> bool {
-        use crate::usecase::terminal::TerminalRuntimeState;
+        self.retirement_blocker_count(workspace) != 0
+    }
 
-        self.coordinator.snapshot().records.iter().any(|record| {
-            record.runtime.terminal.workspace_id == workspace
-                && matches!(record.state, TerminalRuntimeState::Running)
-        })
+    /// Number of Agent records which may still own a PTY process.
+    #[must_use]
+    pub fn retirement_blocker_count(&self, workspace: WorkspaceId) -> usize {
+        self.coordinator
+            .snapshot()
+            .records
+            .iter()
+            .filter(|record| {
+                record.runtime.terminal.workspace_id == workspace
+                    && matches!(
+                        record.state,
+                        super::runtime::RuntimeState::Running
+                            | super::runtime::RuntimeState::ReconcileRequired(
+                                super::runtime::ReconcileState::OrphanRunning
+                                    | super::runtime::ReconcileState::SpawnAmbiguous
+                                    | super::runtime::ReconcileState::PersistAfterSpawn
+                            )
+                    )
+            })
+            .count()
     }
 
     /// Diagnoses launch-time hook/MCP integration revisions without exposing
@@ -2726,6 +2791,43 @@ impl AgentRuntime {
         Ok(closed.len())
     }
 
+    /// Closes every Agent runtime belonging to one retiring workspace.
+    pub fn close_workspace(&mut self, workspace: WorkspaceId) -> Result<usize, ProtocolError> {
+        let owned_operations = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .map(|record| {
+                (
+                    record.runtime.agent_runtime_id,
+                    record.operation.operation_id.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let closed = self
+            .coordinator
+            .close_workspace(workspace, &mut *self.store, &mut *self.pty)
+            .map_err(map_runtime_error)?;
+        let runtime_ids = closed
+            .iter()
+            .map(|runtime| runtime.agent_runtime_id)
+            .collect::<Vec<_>>();
+        let operation_ids = owned_operations
+            .into_iter()
+            .filter(|(runtime, _)| runtime_ids.contains(runtime))
+            .map(|(_, operation)| operation)
+            .collect::<Vec<_>>();
+        self.operations
+            .retain(|operation, _| !operation_ids.contains(operation));
+        self.mcp_callers
+            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id));
+        self.reported_phases
+            .retain(|runtime, _| !runtime_ids.contains(runtime));
+        Ok(closed.len())
+    }
+
     /// Managed-session identities currently retained by the Agent owner.
     #[must_use]
     pub fn managed_session_ids(&self) -> std::collections::BTreeSet<SessionId> {
@@ -3048,6 +3150,7 @@ fn holds_live_or_unknown_agent(state: super::runtime::RuntimeState) -> bool {
             | super::runtime::RuntimeState::ReconcileRequired(
                 super::runtime::ReconcileState::OrphanRunning
                     | super::runtime::ReconcileState::SpawnAmbiguous
+                    | super::runtime::ReconcileState::PersistAfterSpawn
                     | super::runtime::ReconcileState::PersistAfterExit
             )
     )
@@ -3133,11 +3236,21 @@ fn stale_terminal() -> ProtocolError {
     ProtocolError::new(ErrorCode::StaleTarget, "agent terminal reference is stale")
 }
 
-fn map_dispatch_storage_error(_: anyhow::Error) -> ProtocolError {
-    ProtocolError::new(
-        ErrorCode::Unavailable,
-        "daemon could not persist dispatch state",
-    )
+fn map_dispatch_storage_error(error: anyhow::Error) -> ProtocolError {
+    let detail = error.to_string();
+    let capacity = detail.starts_with("dispatch ") && detail.contains("capacity is exhausted");
+    drop(error);
+    if capacity {
+        ProtocolError::new(
+            ErrorCode::ResourceExhausted,
+            "daemon dispatch storage capacity is exhausted",
+        )
+    } else {
+        ProtocolError::new(
+            ErrorCode::Unavailable,
+            "daemon could not persist dispatch state",
+        )
+    }
 }
 
 fn dispatch_agent_not_found() -> ProtocolError {
@@ -3371,7 +3484,10 @@ mod tests {
     use crate::usecase::terminal::SnapshotWire;
     use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
     use serde_json::{Value, json};
-    use usagi_core::domain::id::{AgentId, AgentResumeSourceId, ClientId, RequestId};
+    use usagi_core::domain::{
+        agent::Agent,
+        id::{AgentId, AgentResumeSourceId, ClientId, RequestId},
+    };
     use usagi_core::usecase::client::TerminalAction;
 
     trait JsonAgentTerminalActor {
@@ -3774,15 +3890,16 @@ mod tests {
         agent
             .reported_phases
             .insert(runtime_id, AgentPhase::Waiting);
+        let current_revision = crate::usecase::claude::PROFILE_REVISION;
         let expected = [AgentIntegrationRevision {
             profile_id: AgentProfileId::new("claude").unwrap(),
-            revision: 2,
+            revision: current_revision,
         }];
 
         let diagnosis = agent.diagnose_integrations(workspace, &expected).unwrap();
         assert_eq!(diagnosis.outdated.len(), 1);
         assert_eq!(diagnosis.outdated[0].actual_revision, 1);
-        assert_eq!(diagnosis.outdated[0].expected_revision, 2);
+        assert_eq!(diagnosis.outdated[0].expected_revision, current_revision);
         assert_eq!(diagnosis.outdated[0].phase, AgentPhase::Waiting);
         assert!(diagnosis.outdated[0].resume_available);
         assert_eq!(diagnosis.outdated_mcp_children, 1);
@@ -3875,7 +3992,7 @@ mod tests {
                 .resume_with_current_integration(
                     &OperationId::new().to_string(),
                     &target,
-                    3,
+                    current_revision + 1,
                     &FakeScope(Ok(resolved.clone())),
                 )
                 .unwrap_err()
@@ -3887,13 +4004,17 @@ mod tests {
             .resume_with_current_integration(
                 &repair_operation,
                 &target,
-                2,
+                current_revision,
                 &FakeScope(Ok(resolved)),
             )
             .unwrap();
         assert!(
             agent
-                .prepare_current_integration_resume_readiness(&repair_operation, &target, 2)
+                .prepare_current_integration_resume_readiness(
+                    &repair_operation,
+                    &target,
+                    current_revision,
+                )
                 .unwrap()
                 .is_none()
         );
@@ -3902,7 +4023,7 @@ mod tests {
                 .resume_with_current_integration(
                     &repair_operation,
                     &target,
-                    2,
+                    current_revision,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap(),
@@ -3917,7 +4038,7 @@ mod tests {
                 .resume_with_current_integration(
                     &repair_operation,
                     &target,
-                    3,
+                    current_revision + 1,
                     &FakeScope(Ok(scope())),
                 )
                 .unwrap_err()
@@ -4210,6 +4331,77 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    fn daemon_dispatch_store_fails_closed_for_missing_ownership_and_reparenting() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worker = Agent {
+            agent_id: AgentId::new(),
+            session_id: Some(session),
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+            status: AgentStatus::Starting,
+            current_run: None,
+        };
+        let admission = |operation, parent| {
+            (
+                worker.clone(),
+                DispatchRun {
+                    run_id: operation,
+                    agent_id: worker.agent_id,
+                    prompt: "dispatch ownership".into(),
+                    started_at: Utc::now(),
+                    ended_at: None,
+                    status: RunStatus::Preparing,
+                },
+                DispatchBinding {
+                    run_id: operation,
+                    caller: CallerRef {
+                        session_id: Some(parent),
+                        agent_id: AgentId::new(),
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(session),
+                        agent_id: worker.agent_id,
+                    },
+                },
+                AgentAdmissionReservation {
+                    operation_id: operation,
+                    semantic_key: "dispatch-ownership".into(),
+                    credential_provenance: DispatchCredentialProvenance::DaemonMintedEphemeral,
+                },
+            )
+        };
+
+        let missing = OperationId::new();
+        let (agent, run, binding, reservation) = admission(missing, SessionId::new());
+        assert!(
+            store
+                .reserve_admission(agent, run, binding, reservation)
+                .is_err()
+        );
+        assert!(store.run(missing).unwrap().is_none());
+
+        store.upsert_agent(workspace, worker.clone()).unwrap();
+        let admitted = OperationId::new();
+        let (agent, run, binding, reservation) = admission(admitted, SessionId::new());
+        store
+            .reserve_admission(agent, run, binding, reservation)
+            .unwrap();
+
+        let conflicting = OperationId::new();
+        let (agent, run, binding, reservation) = admission(conflicting, SessionId::new());
+        assert!(
+            store
+                .reserve_admission(agent, run, binding, reservation)
+                .is_err()
+        );
+        assert!(store.run(conflicting).unwrap().is_none());
+        assert!(store.admission(conflicting).unwrap().is_none());
+    }
 
     /// The Agent runtime is the authority a metrics observer reads through: the
     /// level it publishes is `AGENT_RUNTIME_LIMIT` wide and moves with the
@@ -4589,6 +4781,86 @@ mod tests {
         assert_eq!(
             runtime.retained_resources(),
             std::iter::once(admission.terminal.terminal_id.as_str()).collect()
+        );
+    }
+
+    #[test]
+    fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
+        let mut runtime = AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let launch_intent = intent(None);
+        let workspace = launch_intent.workspace;
+        let admission = runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+
+        assert_eq!(runtime.retirement_blocker_count(workspace), 1);
+        let running_snapshot = runtime.coordinator.snapshot();
+        for (state, ownership_state, expected) in [
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::OrphanRunning,
+                ),
+                super::super::generation::TerminalState::OrphanRunning,
+                1,
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::SpawnAmbiguous,
+                ),
+                super::super::generation::TerminalState::IdentityUnknown,
+                1,
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::PersistAfterSpawn,
+                ),
+                super::super::generation::TerminalState::IdentityUnknown,
+                1,
+            ),
+            (
+                super::super::runtime::RuntimeState::ReconcileRequired(
+                    super::super::runtime::ReconcileState::IdentityUnknown,
+                ),
+                super::super::generation::TerminalState::IdentityUnknown,
+                0,
+            ),
+        ] {
+            let mut snapshot = running_snapshot.clone();
+            snapshot.records[0].state = state;
+            snapshot.generation.terminals[0].state = ownership_state;
+            runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+            assert_eq!(runtime.retirement_blocker_count(workspace), expected);
+        }
+        runtime.coordinator =
+            RuntimeCoordinator::hydrate(running_snapshot, 16, 64 * 1024, 64).unwrap();
+        runtime.reported_phases.insert(
+            runtime.coordinator.snapshot().records[0]
+                .runtime
+                .agent_runtime_id,
+            AgentPhase::Running,
+        );
+        assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
+        assert_eq!(runtime.retirement_blocker_count(workspace), 0);
+        assert!(runtime.reported_phases.is_empty());
+        assert!(
+            !runtime
+                .retained_resources()
+                .contains(&admission.terminal.terminal_id.as_str())
         );
     }
 
@@ -5571,6 +5843,7 @@ mod tests {
             RuntimeState::Running,
             RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning),
             RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous),
+            RuntimeState::ReconcileRequired(ReconcileState::PersistAfterSpawn),
             RuntimeState::ReconcileRequired(ReconcileState::PersistAfterExit),
         ] {
             assert!(holds_live_or_unknown_agent(state));
@@ -5761,7 +6034,7 @@ mod tests {
                 },
                 AgentProfileId::new("claude").unwrap(),
                 Geometry { cols: 80, rows: 24 },
-                DispatchStore::new(dispatch_dir.clone()),
+                DispatchStore::new(&dispatch_dir),
                 FixtureLocator(executable_dir.path().to_path_buf()),
             )
         };
@@ -5862,7 +6135,7 @@ mod tests {
             },
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
-            DispatchStore::new(dispatch_dir),
+            DispatchStore::new(&dispatch_dir),
             FixtureLocator(executable_dir.path().to_path_buf()),
             reconciled,
         )
@@ -6170,9 +6443,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let parent_session = SessionId::new();
+        let parent_agent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(parent_session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("parent").unwrap(),
+            )
+            .unwrap();
         let parent = CallerRef {
-            session_id: Some(SessionId::new()),
-            agent_id: AgentId::new(),
+            session_id: Some(parent_session),
+            agent_id: parent_agent.agent_id,
         };
         runtime
             .dispatch
@@ -6182,6 +6465,7 @@ mod tests {
                 "delegated work".into(),
                 Utc::now(),
                 parent.clone(),
+                OperationId::new(),
             )
             .unwrap();
 
@@ -6846,6 +7130,31 @@ mod tests {
     }
 
     #[test]
+    fn hook_identity_accepts_exec_form_direct_children_and_legacy_inherited_groups() {
+        let mut runtime = runtime();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session: Some(SessionId::new()),
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().unwrap().as_str();
+
+        // Shell-form hooks inherit the provider's process group.
+        assert_eq!(runtime.hook_credential(9000, 8999, 4321), Some(credential));
+        // Exec-form hooks are direct children and may be their own group leader.
+        assert_eq!(runtime.hook_credential(9001, 4321, 9001), Some(credential));
+        // Merely being self-led is insufficient without the direct-parent fence.
+        assert_eq!(runtime.hook_credential(9002, 8999, 9002), None);
+        assert_eq!(runtime.hook_credential(9003, 4321, 9999), None);
+    }
+
+    #[test]
     fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -6997,6 +7306,10 @@ mod tests {
             runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
             Some(session)
         );
+        let authenticated = runtime.mcp_dispatch_context(&credential).unwrap();
+        assert_eq!(authenticated.workspace_id, workspace);
+        assert_eq!(authenticated.run_id.to_string(), operation);
+        assert_eq!(authenticated.caller.session_id, Some(session));
         assert!(runtime.mcp_dispatch_caller("forged").is_none());
         let runtime_ref = runtime
             .coordinator
@@ -8524,6 +8837,20 @@ mod tests {
         assert_eq!(
             map_dispatch_storage_error(anyhow::anyhow!("store failpoint")).code,
             ErrorCode::Unavailable
+        );
+        assert_eq!(
+            map_dispatch_storage_error(anyhow::anyhow!(
+                "dispatch inbox capacity is exhausted by unacknowledged messages"
+            ))
+            .code,
+            ErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            map_dispatch_storage_error(anyhow::anyhow!(
+                "dispatch registry capacity is exhausted by protected records"
+            ))
+            .code,
+            ErrorCode::ResourceExhausted
         );
     }
 
