@@ -469,6 +469,24 @@ impl ResourceCensus for DurableResourceCensus {
     }
 }
 
+/// How long a forced cold transition lets SIGTERM drain a generation before it
+/// escalates.
+///
+/// A daemon that owns Agent runtimes and generic terminals closes and reaps
+/// every PTY child before it exits, which routinely outlasts a few hundred
+/// milliseconds. The window used to be five seconds of SIGTERM and nothing
+/// else, so a busy daemon was reported as "did not stop" while it was still
+/// draining normally — and the operator was left with no escape hatch at all.
+const FORCED_SHUTDOWN_TERM_GRACE: Duration = Duration::from_secs(30);
+/// How long the same transition waits after SIGKILL before reporting failure.
+///
+/// SIGKILL cannot be caught, so this only has to cover the kernel tearing the
+/// process down. Surviving it means the pid is wedged in the kernel, which is a
+/// host problem rather than something another retry can fix.
+const FORCED_SHUTDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
+/// How often a forced cold transition re-reads the registry while waiting.
+const FORCED_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+
 /// Exact process control for all non-retired generations in this data home.
 ///
 /// `daemon.json` follows the active generation across a handoff, but a draining
@@ -477,10 +495,24 @@ impl ResourceCensus for DurableResourceCensus {
 /// than assuming the lifecycle record names every process that must stop.
 struct RegistryGenerationControl {
     data_dir: PathBuf,
+    /// How long SIGTERM is given to drain a generation before the transition
+    /// escalates. Injected so a test can prove the escalation without waiting
+    /// out the production grace.
+    term_grace: Duration,
+    /// How long SIGKILL is given before the transition reports failure.
+    kill_grace: Duration,
 }
 
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup,a_forced_transition_escalates_to_sigkill_when_sigterm_is_ignored
 impl RegistryGenerationControl {
+    fn production(data_dir: PathBuf) -> Self {
+        Self {
+            data_dir,
+            term_grace: FORCED_SHUTDOWN_TERM_GRACE,
+            kill_grace: FORCED_SHUTDOWN_KILL_GRACE,
+        }
+    }
+
     fn retained(&self) -> std::io::Result<Vec<ProcessIdentity>> {
         Ok(read_registry_document(&self.data_dir)
             .map_err(std::io::Error::other)?
@@ -512,6 +544,44 @@ impl RegistryGenerationControl {
             started_at: chrono::Utc::now(),
         }
     }
+
+    /// Signal every live retained generation once with `signal`, then wait up to
+    /// `grace` for them to go away. Reports whether none is left.
+    ///
+    /// Running out of grace is not an error here: the caller decides whether it
+    /// escalates to a stronger signal or is the final failure. Only a *refused*
+    /// signal against a still-live process is an error, because that one says
+    /// the transition cannot proceed at all.
+    fn signal_until_gone(&self, signal: libc::c_int, grace: Duration) -> std::io::Result<bool> {
+        let deadline = Instant::now() + grace;
+        let mut signalled = BTreeSet::new();
+        loop {
+            let mut live = false;
+            // Re-read on every pass so a handoff that was already committing
+            // while shutdown began cannot leave its newly retained successor
+            // outside the fixed snapshot we signal.
+            for process in self.retained()? {
+                if !Self::exactly_alive(&process)? {
+                    continue;
+                }
+                live = true;
+                let identity = (process.pid, process.start_identity.clone());
+                if signalled.insert(identity)
+                    && let Err(error) = signal_exact_process(&Self::record(&process), signal)
+                    && Self::exactly_alive(&process)?
+                {
+                    return Err(error);
+                }
+            }
+            if !live {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(FORCED_SHUTDOWN_POLL);
+        }
+    }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=forced_transition_stops_a_live_draining_generation_before_stale_cleanup
@@ -526,33 +596,23 @@ impl RetainedGenerationControl for RegistryGenerationControl {
     }
 
     fn shutdown_all(&self) -> std::io::Result<()> {
-        let mut signalled = BTreeSet::new();
-        for _ in 0..=100 {
-            let mut live = false;
-            // Re-read on every pass so a handoff that was already committing
-            // while shutdown began cannot leave its newly retained successor
-            // outside the fixed snapshot we signal.
-            for process in self.retained()? {
-                if !Self::exactly_alive(&process)? {
-                    continue;
-                }
-                live = true;
-                let identity = (process.pid, process.start_identity.clone());
-                if signalled.insert(identity)
-                    && let Err(error) = signal_exact_process(&Self::record(&process), libc::SIGTERM)
-                    && Self::exactly_alive(&process)?
-                {
-                    return Err(error);
-                }
-            }
-            if !live {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        // SIGTERM asks, SIGKILL insists. `--force` is the operator's escape
+        // hatch, so it has to end with the generation actually gone: reporting
+        // a timeout while leaving the process running is the one outcome that
+        // strands the operator, because every later lifecycle command then
+        // refuses on that same still-live generation. Escalation keeps the
+        // exact process-identity fence, so a recycled pid is never what gets
+        // killed.
+        if self.signal_until_gone(libc::SIGTERM, self.term_grace)? {
+            return Ok(());
+        }
+        if self.signal_until_gone(libc::SIGKILL, self.kill_grace)? {
+            return Ok(());
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            "retained daemon generations did not stop within the shutdown window",
+            "retained daemon generations survived SIGKILL; a daemon pid is wedged \
+             in the kernel and the host has to be checked",
         ))
     }
 }
@@ -11166,6 +11226,19 @@ const fn broker_may_retire(idle_for: Duration, timeout: Duration, daemon_live: b
     !daemon_live && idle_for.as_secs() >= timeout.as_secs()
 }
 
+/// Whether a broker's published endpoint is still a socket on disk.
+///
+/// A broker whose endpoint was removed underneath it is *unreachable* rather
+/// than idle: no client can connect to it, and neither can the retirement
+/// request its own idle watch sends. Presence is enough to tell the two apart,
+/// because the per-address instance lock already keeps a second broker from
+/// publishing over this one.
+fn broker_endpoint_present(socket: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    std::fs::symlink_metadata(socket).is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
 /// How long a broker tolerates being unused before retiring itself.
 #[derive(Debug, Clone, Copy)]
 struct BrokerIdlePolicy {
@@ -11243,7 +11316,7 @@ impl BrokerActivity {
 /// than by killing the loop from outside: the accept loop stays blocked (so a
 /// cold start pays no polling latency), and the endpoint is torn down by the
 /// same path an operator's `usagi daemon stop` takes.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=an_idle_broker_retires_only_once_no_daemon_is_left_to_outlive,an_unreachable_broker_endpoint_is_not_mistaken_for_an_idle_one
 fn spawn_broker_idle_watch(
     activity: &Arc<BrokerActivity>,
     address: BootstrapBrokerAddress,
@@ -11257,12 +11330,28 @@ fn spawn_broker_idle_watch(
             let Some(idle_for) = activity.wait_for_poll(idle.poll) else {
                 return;
             };
+            // An endpoint that is gone can never be reached again — not by a
+            // client, and not by the retirement request below. Leaving the
+            // broker running then means blocking in `accept` forever on a
+            // socket nobody can connect to, which is how brokers outlived by
+            // weeks the temporary homes that owned them. Exiting is the whole
+            // cleanup: the directory that held the socket and the record file
+            // is already gone.
+            if !broker_endpoint_present(&address.socket) {
+                std::process::exit(0);
+            }
             let daemon_live =
                 usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir).is_ok();
-            if broker_may_retire(idle_for, idle.timeout, daemon_live) {
-                let _ = request_bootstrap_broker(&address, BROKER_STOP);
+            if broker_may_retire(idle_for, idle.timeout, daemon_live)
+                && request_bootstrap_broker(&address, BROKER_STOP).is_ok()
+            {
                 return;
             }
+            // Either the broker is still needed, or a daemon appeared between
+            // the probe and the request and vetoed the retirement. Keep
+            // watching. Returning on a *refused* retirement left a broker that
+            // could never retire afterwards, however long the daemon it exists
+            // to outlive had been gone.
         }
     })
 }
@@ -11940,9 +12029,7 @@ fn run_inner(
     let census = DurableResourceCensus {
         data_dir: data_dir.clone(),
     };
-    let generations = RegistryGenerationControl {
-        data_dir: data_dir.clone(),
-    };
+    let generations = RegistryGenerationControl::production(data_dir.clone());
     let authority = RegistryAuthority {
         data_dir: &data_dir,
         ready: &ready,
@@ -15346,9 +15433,7 @@ mod tests {
                 .compare_and_write(None, &serde_json::to_string(&document).unwrap())
                 .unwrap()
         );
-        let control = RegistryGenerationControl {
-            data_dir: data.to_path_buf(),
-        };
+        let control = RegistryGenerationControl::production(data.to_path_buf());
         assert!(control.has_live().unwrap());
 
         // Reap concurrently: an unreaped fixture child remains visible as a
@@ -15363,6 +15448,89 @@ mod tests {
         );
         retired.kill().unwrap();
         retired.wait().unwrap();
+    }
+
+    /// `--force` is the operator's escape hatch, so it has to end with the
+    /// generation actually gone. A daemon draining Agent runtimes and PTYs can
+    /// outlast any fixed SIGTERM window, and one that never exits outlasts every
+    /// window — so the transition escalates rather than reporting a timeout
+    /// while leaving the process running and every later command refusing on it.
+    #[test]
+    fn a_forced_transition_escalates_to_sigkill_when_sigterm_is_ignored() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use usagi_daemon::usecase::authority::registry::{GenerationEntry, RegistryFile};
+
+        let directory = tempfile::tempdir_in("/tmp").unwrap();
+        let data = directory.path();
+        let program = data.join("deaf-to-sigterm");
+        // The marker is written *after* the trap is installed, so the test can
+        // wait for the child to actually be deaf before signalling it. Spawning
+        // and signalling straight away races the shell's own startup, and the
+        // run where SIGTERM lands first would read as "escalation not needed".
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ntrap '' TERM\n: > \"$1\"\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let deaf_marker = data.join("deaf.ready");
+        let mut deaf = Command::new(&program).arg(&deaf_marker).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !deaf_marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the fixture child never installed its SIGTERM trap"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let process = ProcessIdentity {
+            pid: deaf.id(),
+            start_identity: process_start_identity(deaf.id()).unwrap(),
+            process_group: process_group(deaf.id()).unwrap(),
+        };
+        let document = RegistryDocument {
+            revision: 1,
+            generations: vec![GenerationEntry {
+                generation: DaemonGeneration::new(),
+                role: GenerationRole::Active,
+                endpoint: format!("generations/{}/daemon.sock", process.pid),
+                process,
+                expected_build: current_build(),
+                verified_build: Some(current_build()),
+                revision: 1,
+            }],
+            ..RegistryDocument::default()
+        };
+        assert!(
+            GenerationRegistryFile::new(data)
+                .unwrap()
+                .compare_and_write(None, &serde_json::to_string(&document).unwrap())
+                .unwrap()
+        );
+        let control = RegistryGenerationControl {
+            data_dir: data.to_path_buf(),
+            // The escalation is what is under test, not the length of the
+            // production grace, so this waits only long enough to prove SIGTERM
+            // was given its turn first.
+            term_grace: Duration::from_millis(300),
+            kill_grace: Duration::from_secs(5),
+        };
+        assert!(control.has_live().unwrap());
+
+        // Reap concurrently: a killed fixture child stays visible as a zombie
+        // until someone waits on it, and the exact-identity probe would keep
+        // reading that zombie as live.
+        let waiter = std::thread::spawn(move || deaf.wait().unwrap());
+        control.shutdown_all().unwrap();
+        let status = waiter.join().unwrap();
+        assert!(!status.success());
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "a generation that ignores SIGTERM has to be escalated, not reported as a timeout"
+        );
+        assert!(!control.has_live().unwrap());
     }
 
     #[test]
@@ -18493,6 +18661,37 @@ instructions = "{instructions}"
                 "a live daemon must keep its broker"
             );
         }
+    }
+
+    /// A broker whose endpoint was removed underneath it can never be reached
+    /// again — not by a client, and not by the retirement request its own idle
+    /// watch sends. That state has to be told apart from a broker that is merely
+    /// idle, because only the first one has to leave without being asked.
+    #[test]
+    fn an_unreachable_broker_endpoint_is_not_mistaken_for_an_idle_one() {
+        // `/tmp` keeps the path inside the platform limit for a socket name.
+        let fixture = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = fixture.path().join("broker.sock");
+        assert!(
+            !broker_endpoint_present(&socket),
+            "a path that was never bound is not an endpoint"
+        );
+
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert!(broker_endpoint_present(&socket));
+
+        // A regular file at the same path is not the endpoint either: only a
+        // socket can carry the retirement request.
+        drop(listener);
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::write(&socket, b"").unwrap();
+        assert!(!broker_endpoint_present(&socket));
+
+        std::fs::remove_file(&socket).unwrap();
+        assert!(
+            !broker_endpoint_present(&socket),
+            "a removed endpoint leaves the broker unreachable"
+        );
     }
 
     #[test]
