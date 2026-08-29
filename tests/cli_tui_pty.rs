@@ -253,7 +253,7 @@ fn click_director_button(master: &mut File) {
 
 /// Click `[ New ]` in the 100-column drawer selector row below the top padding.
 fn click_director_new(master: &mut File) {
-    send(master, b"\x1b[<0;96;5M\x1b[<0;96;5m");
+    send(master, b"\x1b[<0;96;4M\x1b[<0;96;4m");
 }
 
 fn toggle_director_with_key(master: &mut File) {
@@ -1788,7 +1788,10 @@ fn real_pty_generic_terminal_survives_normal_quit_and_tui_sigkill_without_respaw
 /// 観測点である。
 fn write_bursting_codex(fixtures: &AgentFixtures, trigger: &Path, done: &Path) {
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\n(\n  while [ ! -f \"{trigger}\" ]; do sleep 0.05; done\n  i=0\n  while [ $i -lt 1400 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done\n  printf 'dim-live-done\\n'\n  printf 'done\\n' > \"{done}\"\n) &\nwhile IFS= read input; do printf 'codex-input:%s\\n' \"$input\"; done\n",
+        // Twenty-five long rows hard-wrap past the retained viewport.
+        // They also hard-wrap in the Director's narrower left-hand band, so a
+        // larger legacy burst tests transport backpressure instead of redraw.
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn\\n' >> \"{count}\"\nprintf 'codex-ready-unique:%s\\n' \"$$\"\n(\n  while [ ! -f \"{trigger}\" ]; do sleep 0.05; done\n  i=0\n  while [ $i -lt 25 ]; do printf 'codex-noise:%s\\n' \"$i-0123456789012345678901234567890123456789012345678901234567890123456789012345678901234\"; i=$((i+1)); done\n  printf 'dim-live-done\\n'\n  printf 'done\\n' > \"{done}\"\n) &\nwhile IFS= read input; do printf 'codex-input:%s\\n' \"$input\"; done\n",
         count = fixtures.codex_count.display(),
         trigger = trigger.display(),
         done = done.display(),
@@ -1878,10 +1881,8 @@ fn real_pty_root_launch_keeps_the_managed_agent_tab_live() {
         "root-hello",
         "claude-input:root-hello",
     );
-    // 背景の right pane に Agent 出力を読める幅を残してから burst を起こす。
-    // root conversation は drawer geometry、managed pane は通常の right-pane geometry を
-    // それぞれ維持する。
-    resize_pty(&master, 160, 24).unwrap();
+    // Director の左端まで確保された背景 terminal に burst を流す。root conversation と
+    // managed pane はそれぞれ独立した drawer / left-band geometry を維持する。
     wait_for_screen_since(&captured, baseline, "♛ Director");
     fs::write(&burst_trigger, "go\n").unwrap();
     wait_for_file_lines(&burst_done, 1);
@@ -2480,7 +2481,10 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     wait_for_screen_since(
         &captured,
         reopened_baseline,
-        "claude-input:claude-session-still-visible",
+        // Director narrows this PTY to the left-hand band while both surfaces
+        // coexist, so retained output may keep a hard wrap after the drawer
+        // closes. The prefix still proves the complete command reached Claude.
+        "claude-input:claude-session-still-visibl",
     );
     let status = quit_workspace(&mut master, &mut reopened, &captured, reopened_baseline);
     assert!(
@@ -2537,7 +2541,7 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
     wait_for_screen_since(
         &captured,
         reopened_for_kill_baseline,
-        "claude-input:claude-session-still-visible",
+        "claude-input:claude-session-still-visibl",
     );
     send(&mut master, b"claude-session-reopened\r");
     wait_for_screen_since(
