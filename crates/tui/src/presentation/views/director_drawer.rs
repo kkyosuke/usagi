@@ -21,10 +21,10 @@ const MIN_BACKGROUND_WIDTH: usize = 24;
 /// Like the existing CPU/memory/mode glyphs, unsupported fonts may render a
 /// missing-glyph cell; Unicode-width clipping keeps layout and hit-testing safe.
 pub const DIRECTOR_ICON: char = '♛';
-/// Rows of drawer chrome the New picker's candidate rows never get: the Home
-/// header row above the drawer, the panel's two borders and two vertical padding
-/// rows, the conversation selector, its separator, and the footer hint.
-const PICKER_CHROME_ROWS: usize = 8;
+/// Rows of drawer chrome the New picker's candidate rows never get: the panel's
+/// two borders and two vertical padding rows, the conversation selector, its
+/// separator, and the footer hint.
+const PICKER_CHROME_ROWS: usize = 7;
 const _: () = assert!(
     PICKER_CHROME_ROWS == crate::usecase::application::controller::DIRECTOR_PICKER_CHROME_ROWS
 );
@@ -115,10 +115,9 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> DirectorDrawerGeometry {
     let drawer_width = if full_width { width } else { coexist_width };
     DirectorDrawerGeometry {
         left: width.saturating_sub(drawer_width),
-        // Home's top header remains visible and owns the drawer toggle button.
-        top: 1.min(height),
+        top: 0,
         width: drawer_width,
-        height: height.saturating_sub(1),
+        height,
         full_width,
     }
 }
@@ -407,9 +406,9 @@ mod tests {
             geometry(24, 100),
             DirectorDrawerGeometry {
                 left: 40,
-                top: 1,
+                top: 0,
                 width: 60,
-                height: 23,
+                height: 24,
                 full_width: false,
             }
         );
@@ -429,7 +428,7 @@ mod tests {
         assert_eq!(zero, geometry(24, 80));
         assert_eq!(
             terminal_viewport(0, 0),
-            DirectorTerminalViewport { rows: 16, cols: 52 }
+            DirectorTerminalViewport { rows: 17, cols: 52 }
         );
         assert_eq!(
             terminal_viewport(1, 1),
@@ -441,7 +440,7 @@ mod tests {
     fn terminal_viewport_is_independent_from_the_closeup_right_pane() {
         assert_eq!(
             terminal_viewport(24, 100),
-            DirectorTerminalViewport { rows: 16, cols: 56 }
+            DirectorTerminalViewport { rows: 17, cols: 56 }
         );
         assert_ne!(
             (
@@ -464,7 +463,7 @@ mod tests {
                 u16::try_from(drawer.left + 2).unwrap(),
                 u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 14, column: 0 })
+            Some(TerminalPoint { row: 13, column: 0 })
         );
         assert_eq!(terminal_point_at(24, 100, 30, 0, 0, 0), None);
         assert_eq!(
@@ -682,7 +681,7 @@ mod tests {
                 u16::try_from(drawer.left + 2).unwrap(),
                 u16::try_from(drawer.top + 4).unwrap(),
             ),
-            Some(TerminalPoint { row: 6, column: 0 })
+            Some(TerminalPoint { row: 5, column: 0 })
         );
     }
 
@@ -770,8 +769,8 @@ mod tests {
     #[test]
     fn picker_viewport_follows_the_selection_on_short_terminals() {
         let candidates = ["claude", "codex", "sakana.ai"];
-        // 10 rows leave two candidate rows, 9 leave one, 8 leave none.
-        for height in 8..=10 {
+        // 9 rows leave two candidate rows, 8 leave one, 7 leave none.
+        for height in 7..=9 {
             for selected in 0..candidates.len() {
                 let label = format!("height {height}, selected {selected}");
                 let frame = render_over(height, 80, &[], &picker_of(&candidates, selected));
@@ -788,7 +787,7 @@ mod tests {
                     .filter(|line| line.contains('›'))
                     .collect::<Vec<_>>();
 
-                if height == 8 {
+                if height == 7 {
                     // No content row survives the chrome, so nothing is
                     // highlighted and the footer stops offering Enter — the
                     // reducer refuses the same launch at this height.
