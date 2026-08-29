@@ -206,6 +206,14 @@ pub struct DeletePlan {
     /// Records written before this field existed preserve the branch.
     #[serde(default)]
     pub delete_branch: bool,
+    /// Exact local branch checked out by an adopted orphan worktree.
+    ///
+    /// Ordinary managed sessions omit this and derive `usagi/<name>`. An
+    /// orphan may have been left at the conventional session path while its
+    /// actual branch has another `usagi/` name, so recovery persists the
+    /// inspected branch instead of guessing from the directory name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
     /// Whether branch deletion may discard unmerged commits.
     ///
     /// Daemon-owned compensation and the explicitly confirmed failed-delete
@@ -319,6 +327,30 @@ impl ManagedSession {
             setup_plan: None,
             delete_plan: None,
             failure: None,
+        }
+    }
+
+    /// Adopts an unmanaged checkout as a non-attachable recovery row.
+    ///
+    /// The daemon uses this only after finding a physical entry below the
+    /// canonical session container which has no lifecycle owner. Keeping it
+    /// `Failed` makes the checkout visible and removable without ever granting
+    /// it an Agent scope merely because a directory exists.
+    #[must_use]
+    pub fn adopt_orphan(name: String, failure: Failure, created_at: DateTime<Utc>) -> Self {
+        Self {
+            session_id: SessionId::new(),
+            worktree_id: WorktreeId::new(),
+            name,
+            parent_session_id: None,
+            role_id: None,
+            lifecycle: SessionLifecycle::Failed,
+            attempt: 1,
+            operation_id: None,
+            changed_at: created_at,
+            setup_plan: None,
+            delete_plan: None,
+            failure: Some(failure),
         }
     }
 }
@@ -493,6 +525,11 @@ impl WorkspaceLifecycleState {
 /// Input to the pure reducer. Only the daemon's command handler may persist its result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleEvent {
+    /// Adopt a physical session entry which has no durable lifecycle owner.
+    AdoptOrphan {
+        name: String,
+        failure: Failure,
+    },
     ReserveCreate {
         name: String,
         role_id: Option<RoleId>,
@@ -537,6 +574,17 @@ pub fn reduce(
 ) -> Result<(), LifecycleError> {
     state.validate()?;
     match event {
+        LifecycleEvent::AdoptOrphan { name, failure } => {
+            validate_session_name(&name)?;
+            if state.sessions.iter().any(|session| session.name == name) {
+                return Err(LifecycleError::DuplicateSessionName);
+            }
+            state
+                .sessions
+                .push(ManagedSession::adopt_orphan(name, failure, now));
+            state.changed(now);
+            Ok(())
+        }
         LifecycleEvent::ReserveCreate {
             name,
             role_id,
@@ -937,6 +985,7 @@ mod tests {
                     targets: vec!["x".into()],
                     force: false,
                     delete_branch: false,
+                    branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
                 },
@@ -1043,6 +1092,48 @@ mod tests {
             .push(ManagedSession::adopt_available("same".into(), now()));
         assert_eq!(
             duplicate.validate(),
+            Err(LifecycleError::DuplicateSessionName)
+        );
+    }
+
+    #[test]
+    fn orphan_adoption_is_failed_removable_and_never_attachable_by_lifecycle() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        reduce(
+            &mut state,
+            LifecycleEvent::AdoptOrphan {
+                name: "review".into(),
+                failure: Failure {
+                    stage: FailureStage::Integrity,
+                    summary: "branch=usagi/review, dirty=false, unmerged_commits=0".into(),
+                },
+            },
+            now(),
+        )
+        .unwrap();
+
+        let orphan = &state.sessions[0];
+        assert_eq!(orphan.lifecycle, SessionLifecycle::Failed);
+        assert_eq!(
+            orphan.failure.as_ref().unwrap().stage,
+            FailureStage::Integrity
+        );
+        assert!(orphan.operation_id.is_none());
+        let capabilities = orphan.lifecycle.capabilities();
+        assert!(!capabilities.can_use);
+        assert!(capabilities.can_remove);
+        assert_eq!(
+            reduce(
+                &mut state,
+                LifecycleEvent::AdoptOrphan {
+                    name: "review".into(),
+                    failure: Failure {
+                        stage: FailureStage::Integrity,
+                        summary: "duplicate".into(),
+                    },
+                },
+                now(),
+            ),
             Err(LifecycleError::DuplicateSessionName)
         );
     }
@@ -1166,6 +1257,7 @@ mod tests {
                         targets: vec![],
                         force: false,
                         delete_branch: false,
+                        branch_name: None,
                         force_delete_branch: false,
                         merged_head_oid: None,
                     }
@@ -1184,6 +1276,7 @@ mod tests {
                         targets: vec![],
                         force: false,
                         delete_branch: false,
+                        branch_name: None,
                         force_delete_branch: false,
                         merged_head_oid: None,
                     }
@@ -1264,6 +1357,7 @@ mod tests {
                     targets: vec![],
                     force: true,
                     delete_branch: false,
+                    branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
                 },
@@ -1344,6 +1438,7 @@ mod tests {
                     targets: vec!["legacy".into()],
                     force: false,
                     delete_branch: false,
+                    branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
                 },

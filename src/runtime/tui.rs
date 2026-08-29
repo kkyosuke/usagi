@@ -7761,12 +7761,17 @@ mod tests {
     fn terminal_adapter_projects_resolved_live_and_pointer_inputs() {
         let cases = [
             (
-                LiveInput::WheelUp { column: 0, row: 0 },
+                LiveInput::WheelUp {
+                    column: 0,
+                    row: 0,
+                    notches: 1,
+                },
                 Key::Live(
                     usagi_tui::usecase::terminal_input::LiveTerminalAction::Wheel {
                         up: true,
                         column: 0,
                         row: 0,
+                        notches: 1,
                     },
                 ),
             ),
