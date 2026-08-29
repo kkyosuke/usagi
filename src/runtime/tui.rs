@@ -4376,8 +4376,17 @@ fn with_daemon_ready(
         if crate::runtime::daemon::declare_opened_workspace(path).is_ok()
             && let Err(error) = crate::runtime::daemon::ensure_ready()
         {
+            // An unready daemon is a degraded workspace, not a refused one.
+            // Every daemon-dependent surface in the deck connects lazily and
+            // renders its own "daemon unavailable" line, so the local views
+            // (Recent, settings, the session list) stay usable and the deck
+            // reconnects as soon as a daemon answers. Returning here instead
+            // left the user at the shell with no way back into the workspace,
+            // which is the one state a wedged daemon must not be able to cause.
+            // The declaration written above still binds a later cold start to
+            // this workspace, so the readiness probe is an optimisation.
+            ErrorLog::record(&format!("workspace opened without a ready daemon: {error}"));
             writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
-            return Ok(());
         }
     }
     launch_ready(out, info, entry)
