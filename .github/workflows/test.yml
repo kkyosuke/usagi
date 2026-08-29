@@ -123,6 +123,7 @@ jobs:
         BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         PR_BODY: ${{ github.event.pull_request.body || '' }}
+        PR_AUTHOR: ${{ github.event.pull_request.user.login || '' }}
       run: scripts/ci/internal-issue-status.sh "$BASE_SHA" "$HEAD_SHA"
 
     - name: Test internal issue completion checker
