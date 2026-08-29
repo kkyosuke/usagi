@@ -9682,9 +9682,8 @@ mod tests {
         visit_garden_agent(&mut ui, &mut runtime, GardenClick::Dismiss);
     }
 
-    /// tab strip がまだ無い session（Closeup が action launcher を開く）では、
-    /// うさぎの click は session の訪問までで止まる。launcher の裏の pane を
-    /// 勝手に選ばない。
+    /// tab strip がまだ無い session では、うさぎの click は空の Closeup への
+    /// 訪問までで止まり、pane を勝手に選ばない。
     #[test]
     fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
         let workspace = WorkspaceId::new();
@@ -9699,8 +9698,12 @@ mod tests {
             session,
             agent: Some(AgentRuntimeId::new()),
         };
+        // The Garden overlay owns input before the visit reaches Closeup, so a
+        // covered pane strip cannot receive the agent click.
+        visit_garden_agent(&mut ui, &mut runtime, click);
+        assert_eq!(runtime.focused_terminal(), None);
         let _ = runtime.apply_event(AppEvent::GardenClick(click));
-        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert_eq!(runtime.state().overlay(), None);
         visit_garden_agent(&mut ui, &mut runtime, click);
         assert_eq!(runtime.focused_terminal(), None);
     }
@@ -12236,6 +12239,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
         let _ = runtime.handle_key(Key::Enter);
         for _ in 0..3 {
             let _ = runtime.handle_key(Key::Down);
@@ -24585,7 +24589,7 @@ mod tests {
         assert!(term.frames.iter().any(|frame| {
             frame
                 .join("\n")
-                .contains("No tabs stirring yet. Enter starts one.")
+                .contains("a: agent / t: terminal / Enter: actions")
         }));
     }
 

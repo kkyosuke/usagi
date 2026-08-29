@@ -305,17 +305,9 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
-    /// Whether the Closeup action modal covers the right pane this frame. Its
-    /// final value is only known once [`Self::with_pane`] has seen the pane
-    /// strip: the modal is the launcher surface only while Closeup has no tab at
-    /// all (pending included). An explicit or forced [`Overlay::Closeup`] keeps
-    /// it visible regardless, so [`Self::from_state`] seeds that case here and
-    /// [`Self::with_pane`] adds the empty-pane launcher case.
+    /// Whether an explicit or forced Closeup action modal covers the right pane
+    /// this frame. Empty Closeup remains a plain pane until Enter opens it.
     closeup_action_visible: bool,
-    /// Whether the controller route is Closeup. [`Self::with_pane`] pairs this
-    /// with an empty pane strip to reveal the action launcher; it never widens
-    /// the explicit-overlay case seeded by [`Self::from_state`].
-    closeup_route: bool,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
     unread_decision_ids: std::collections::BTreeSet<usagi_core::domain::id::UserDecisionId>,
@@ -553,19 +545,12 @@ impl HomeProjection {
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
-            // Seed only the explicit/forced action modal here (an open
-            // `Overlay::Closeup`). The launcher-over-empty-pane case cannot be
-            // decided without the pane strip, so `with_pane` finalizes it; this
-            // keeps a pending launch from being covered every frame.
+            // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
                 state.route(),
                 crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
             ) && state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Closeup),
-            closeup_route: matches!(
-                state.route(),
-                crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
-            ),
             decision_overlay: state.decision_overlay().cloned(),
             decisions: state.decisions().to_vec(),
             unread_decision_ids: state.unread_decision_ids().clone(),
@@ -705,14 +690,6 @@ impl HomeProjection {
                 PaneTab::Interrupted(interrupted) => Some(interrupted_detail(interrupted)),
                 PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
             });
-        // In Closeup the action modal is the launcher shown only while the pane
-        // holds no tab at all — pending placeholders included. A pending launch
-        // therefore keeps the wave visible instead of being re-covered every
-        // frame; the explicit/forced overlay case is already seeded above and is
-        // never narrowed here.
-        if self.closeup_route && self.pane_tabs.is_empty() {
-            self.closeup_action_visible = true;
-        }
         self
     }
 
@@ -2334,9 +2311,7 @@ fn home_left_pane(
     }
     let footer = match home.mode {
         HomeMode::Switch => "[switch] ←→ project / ↑↓ select / Enter closeup",
-        HomeMode::Closeup => {
-            "[closeup] Ctrl-O: x/Ctrl-X close / o switch / a/Ctrl-A actions / n/p tabs"
-        }
+        HomeMode::Closeup => "[closeup] a agent / t terminal / Enter actions / Ctrl-O controls",
     };
     lines.push(
         Style::new()
@@ -2868,7 +2843,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         rows.extend(widgets::session_tab::empty_pane_with_detail(
             width,
             height.saturating_sub(3),
-            "No tabs stirring yet. Enter starts one.",
+            "a: agent / t: terminal / Enter: actions",
             feedback.as_deref(),
         ));
         return with_footer_gap(rows, height, footer);
@@ -4264,7 +4239,7 @@ mod tests {
         assert_eq!(text.matches("same label").count(), 3);
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
-        assert!(text.contains("No tabs stirring yet. Enter starts one."));
+        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
     }
 
     #[test]
@@ -5555,7 +5530,7 @@ mod tests {
         assert!(lines.iter().all(|line| !line.contains("| first")));
         assert!(lines.iter().any(|line| line.contains("\u{f0907} second")));
         let text = joined_home(&home);
-        assert!(text.contains("No tabs stirring yet. Enter starts one."));
+        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
     }
 
     #[test]
@@ -5582,7 +5557,7 @@ mod tests {
         // session は typed identity で検出され active なしへ縮退する。
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.active(), None);
-        assert!(joined_home(&refreshed).contains("No tabs stirring yet. Enter starts one."));
+        assert!(joined_home(&refreshed).contains("a: agent / t: terminal / Enter: actions"));
     }
 
     #[test]
@@ -5604,8 +5579,7 @@ mod tests {
         let closeup_text = joined_home(&closeup);
         assert!(closeup_text.contains("| 同じ名前"));
         assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
-        assert!(closeup_text.contains("[closeup] Ctrl-O:"));
-        assert!(closeup_text.contains("x/Ctrl-X close"));
+        assert!(closeup_text.contains("[closeup] a agent / t terminal"));
         let closeup_rendered = render_home(30, 100, &closeup).join("\n");
         assert!(closeup_rendered.contains("\u{1b}[1;36m同じ名前\u{1b}[0m"));
         assert!(closeup_rendered.contains("\u{1b}[36m同じ名前\u{1b}[0m"));
@@ -5876,7 +5850,7 @@ mod tests {
         let one_row_body = render_home(3, 20, &home);
         assert_eq!(zero_body.len(), 2);
         assert_eq!(one_row_body.len(), 3);
-        assert!(joined_home(&home).contains("No tabs stirring yet. Enter starts one."));
+        assert!(joined_home(&home).contains("a: agent / t: terminal / Enter: actions"));
 
         let session = SessionId::new();
         let state = AppState::home(workspace, vec![session]);
@@ -6426,7 +6400,7 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = joined_home(&home);
-        assert!(text.contains("No tabs stirring yet. Enter starts one."));
+        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
         assert!(text.contains("feedback: operation error: Session creation failed (err-safe-7)"));
         assert!(!text.contains("daemon internal detail: token=secret"));
 
@@ -6436,7 +6410,7 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
         let text = joined_home(&home);
-        assert!(text.contains("No tabs stirring yet. Enter starts one."));
+        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
         assert!(text.contains("feedback: disconnected; reconnect to continue"));
     }
 
@@ -6703,8 +6677,7 @@ mod tests {
 
         let mut state = state;
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-        // The pending tab steps the auto-opened action launcher aside, so the
-        // pane surface itself is what the frame draws.
+        // The pending tab owns the pane surface without an action modal.
         let _ = update(
             &mut state,
             AppEvent::PaneTabAvailability {
@@ -6842,7 +6815,7 @@ mod tests {
 
         let text = joined_home(&home);
         assert!(text.contains("feedback: agent launch is unavailable"));
-        assert!(text.contains("No tabs stirring yet. Enter starts one."));
+        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
     }
 
     #[test]
