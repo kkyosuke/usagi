@@ -957,12 +957,11 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   durable な launch snapshot は素の `claude` を保ち、launcher の host path は非 durable な `SpawnProvision`
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
-- **起動固有 writable root**: session は own worktree と、その repository の Git common directory を受け取る。
-  linked worktree の index・refs・logs・object database は checkout 外の common directory にあるため、後者が無いと
-  checkout 内の編集が可能でも `git add` / `git commit` は失敗する。workspace の `.usagi` と data home は追加しないため、
-  sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や symlink alias に
-  かかわらず read-only である。Git common directory は worktree 間で共有される administrative authority なので、
-  session 名・branch・worktree の対応と teardown は引き続き daemon lifecycle state が権威を持つ。root coordinator には起動固有 writable root を
+- **起動固有 writable root**: session は own worktree に加え、linked worktree が commit に使う自分専用の Git
+  管理 directory、共有 object store、`usagi/*` branch の ref / reflog namespace だけを受け取る。Git common dir
+  全体、`main` / remote ref、repository config、workspace のそのほかの `.usagi`、data home は追加しない。
+  したがって sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や
+  symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)と
@@ -1073,10 +1072,12 @@ Codex と Codex 互換の sakana.ai は同じ合成済み system prompt を TOML
 既存の MCP / hook override の後へ `-c developer_instructions="<prompt>"` として配線する。この override は
 resume subcommand と durable argv の `--` / initial prompt より前に置き、本文は `SpawnProvision` だけに保持する。
 root 起動は daemon-owned OS sandbox launcher で checkout を read-only にする。外側 launcher がある場合、Codex
-自身には `--sandbox danger-full-access --ask-for-approval never` を渡して、macOS Seatbelt / Linux namespace の
-入れ子を作らない。この `danger-full-access` は外側 hard boundary の内側だけで使い、launcher が無い構成では
-`--sandbox read-only` へ fail-closed する。session 起動は interactive の `workspace-write` と headless の session
-専用 bypass を使う。workspace 設定の `CODEX_HOME` は launcher control として拒否し、Codex process の state / arg0
+自身には scope にかかわらず `--sandbox danger-full-access --ask-for-approval never` を渡して、macOS Seatbelt /
+Linux namespace の入れ子を作らない。この `danger-full-access` は外側 hard boundary の内側だけで使い、session の
+filesystem 境界は launcher が維持するため、linked worktree の Git 管理領域と `git push` / `gh pr create` に必要な
+通信を内側 sandbox が遮断しない。launcher が無い構成では root を `--sandbox read-only`、session interactive を
+`workspace-write` へ fail-closed にし、session headless は専用 bypass を使う。workspace 設定の `CODEX_HOME` は
+launcher control として拒否し、Codex process の state / arg0
 書き込み先を checkout 内へ差し替えさせない。daemon bootstrap は所有者権限を失った stale arg0 directory の mode
 だけを有界に修復し、lock-aware cleanup と削除は Codex 自身へ委ねる。
 

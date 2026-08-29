@@ -658,47 +658,57 @@ impl CodexProvisioner for RootCodexProvisioner {
             ),
             arguments,
         );
-        if mode == SandboxMode::Root {
-            let sandbox_roots =
-                root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
-                    .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            validate_claude_sandbox_policy(&SandboxPolicyInputs {
-                mode,
-                program: self.program,
-                workspace_root: &workspace_root,
-                launch_roots: &sandbox_roots,
+        let mut sandbox_roots = if mode == SandboxMode::Root {
+            root_agent_writable_roots(self.sandbox_home.as_deref(), self.program)
+                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?
+        } else {
+            let mut roots = claude_writable_roots(mode, &working_directory);
+            roots.extend(
+                session_git_writable_roots(&working_directory)
+                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?,
+            );
+            roots
+        };
+        sandbox_roots.sort();
+        sandbox_roots.dedup();
+        validate_claude_sandbox_policy(&SandboxPolicyInputs {
+            mode,
+            program: self.program,
+            workspace_root: &workspace_root,
+            launch_roots: &sandbox_roots,
+            tmpdir: self.sandbox_tmpdir.as_deref(),
+            home: self.sandbox_home.as_deref(),
+            cache_dir: self.sandbox_cache_dir.as_deref(),
+            backend: self.sandbox_backend.as_deref(),
+            passthrough: self.sandbox_passthrough,
+        })
+        .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+        let protected_root = workspace_root
+            .canonicalize()
+            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+        let launcher = claude_sandbox_launcher(
+            &self.mcp_command,
+            mode,
+            &protected_root,
+            &SandboxLauncherPaths {
+                backend: self.sandbox_backend.as_deref(),
                 tmpdir: self.sandbox_tmpdir.as_deref(),
                 home: self.sandbox_home.as_deref(),
                 cache_dir: self.sandbox_cache_dir.as_deref(),
-                backend: self.sandbox_backend.as_deref(),
-                passthrough: self.sandbox_passthrough,
-            })
-            .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            let protected_root = workspace_root
-                .canonicalize()
-                .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
-            let launcher = claude_sandbox_launcher(
-                &self.mcp_command,
-                mode,
-                &protected_root,
-                &SandboxLauncherPaths {
-                    backend: self.sandbox_backend.as_deref(),
-                    tmpdir: self.sandbox_tmpdir.as_deref(),
-                    home: self.sandbox_home.as_deref(),
-                    cache_dir: self.sandbox_cache_dir.as_deref(),
-                },
-                &sandbox_roots,
-            )
-            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
-            spawn.set_sandbox_launcher(launcher);
+            },
+            &sandbox_roots,
+        )
+        .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        spawn.set_sandbox_launcher(launcher);
+        if mode == SandboxMode::Root {
             insert_root_git_environment(&mut spawn);
-            if self.sandbox_passthrough {
-                spawn.insert_daemon_environment(
-                    EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
-                        .expect("literal environment variable name is valid"),
-                    "1".to_owned(),
-                );
-            }
+        }
+        if self.sandbox_passthrough {
+            spawn.insert_daemon_environment(
+                EnvironmentVariableName::new(claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE)
+                    .expect("literal environment variable name is valid"),
+                "1".to_owned(),
+            );
         }
         Ok(CodexProvision {
             working_directory,
@@ -863,13 +873,13 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
         // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
         let mode = sandbox_mode(context);
-        let git_common = if mode == SandboxMode::Session {
-            session_git_common_dir(&workspace_root)
-                .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?
-        } else {
-            None
-        };
-        let launch_roots = claude_writable_roots(mode, &working_directory, git_common.as_deref());
+        let mut launch_roots = claude_writable_roots(mode, &working_directory);
+        if mode == SandboxMode::Session {
+            launch_roots.extend(
+                session_git_writable_roots(&working_directory)
+                    .map_err(|()| ClaudeProvisionFailure::InvalidSandboxPolicy)?,
+            );
+        }
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -964,21 +974,12 @@ fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
 ///
-/// A managed session receives its own checkout and, for a Git workspace, the
-/// repository's administrative common directory. A linked worktree keeps its
-/// index, refs, logs and object database outside the checkout, so withholding
-/// that directory makes `git add` / `git commit` fail even though file edits are
-/// correctly confined to the session. A root coordinator receives no
-/// repository-local writable root.
-fn claude_writable_roots(
-    mode: SandboxMode,
-    working_directory: &Path,
-    git_common_dir: Option<&Path>,
-) -> Vec<PathBuf> {
+/// A managed session receives its own checkout. The caller adds the narrow Git
+/// metadata roots resolved by [`session_git_writable_roots`]; a root coordinator
+/// receives no repository-local writable root.
+fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
-        let mut roots = vec![working_directory.to_path_buf()];
-        roots.extend(git_common_dir.map(Path::to_path_buf));
-        roots
+        vec![working_directory.to_path_buf()]
     } else {
         Vec::new()
     }
@@ -993,6 +994,67 @@ fn session_git_common_dir(workspace_root: &Path) -> Result<Option<PathBuf>, ()> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
     }
+}
+
+/// Resolve the narrow Git metadata set a linked session worktree needs for a
+/// normal `git add` / `git commit` transaction.
+///
+/// Linked worktrees keep their index, `HEAD`, commit message and `HEAD` reflog
+/// in a worktree-private administrative directory, but new objects and branch
+/// refs live in the repository's common directory. Granting only the checkout
+/// therefore makes file edits work while every commit fails with `EPERM`.
+/// Granting the whole common directory would also expose `main`, remotes and
+/// repository configuration, so the session receives only its private admin
+/// directory, the content-addressed object store, and the `usagi/*` branch ref
+/// and reflog namespaces.
+fn session_git_writable_roots(worktree: &Path) -> Result<Vec<PathBuf>, ()> {
+    let marker = worktree.join(".git");
+    let marker_metadata = std::fs::symlink_metadata(&marker).map_err(|_| ())?;
+    // Managed sessions are linked worktrees. Refuse a standalone repository:
+    // its `.git` directory is the whole authority and is too broad a grant.
+    if !marker_metadata.file_type().is_file() {
+        return Err(());
+    }
+    let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
+    let common = session_git_common_dir(worktree)?.ok_or(())?;
+    let roots = [
+        git_dir,
+        common.join("objects"),
+        common.join("refs/heads/usagi"),
+        common.join("logs/refs/heads/usagi"),
+    ];
+    for root in &roots {
+        validate_owned_directory(root).map_err(|_| ())?;
+    }
+    Ok(roots.into_iter().collect())
+}
+
+fn read_git_indirection(
+    path: &Path,
+    prefix: Option<&str>,
+    relative_to: &Path,
+) -> Result<PathBuf, ()> {
+    let metadata = std::fs::metadata(path).map_err(|_| ())?;
+    if metadata.len() > 16 * 1024 {
+        return Err(());
+    }
+    let value = std::fs::read_to_string(path).map_err(|_| ())?;
+    let value = value.trim();
+    let value = match prefix {
+        Some(prefix) => value
+            .strip_prefix(prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        None => (!value.is_empty()).then_some(value),
+    }
+    .ok_or(())?;
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        relative_to.join(path)
+    };
+    path.canonicalize().map_err(|_| ())
 }
 
 /// Root providers may run the small read-only Git allowlist accepted by
@@ -1079,42 +1141,18 @@ fn lexical_prefix_overlaps_path(prefix: &Path, path: &Path) -> bool {
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
 fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
-    fn read_path(path: &Path, prefix: Option<&str>) -> Result<PathBuf, ()> {
-        let metadata = std::fs::metadata(path).map_err(|_| ())?;
-        if metadata.len() > 16 * 1024 {
-            return Err(());
-        }
-        let value = std::fs::read_to_string(path).map_err(|_| ())?;
-        let value = prefix.map_or(value.trim(), |prefix| {
-            value.trim().strip_prefix(prefix).map_or("", str::trim)
-        });
-        (!value.is_empty()).then(|| PathBuf::from(value)).ok_or(())
-    }
-
     let marker = workspace_root.join(".git");
     let marker_path = marker.canonicalize().map_err(|_| ())?;
     let git_dir = if marker_path.is_dir() {
         marker_path
     } else {
-        let path = read_path(&marker_path, Some("gitdir:"))?;
-        let path = if path.is_absolute() {
-            path
-        } else {
-            workspace_root.join(path)
-        };
-        path.canonicalize().map_err(|_| ())?
+        read_git_indirection(&marker_path, Some("gitdir:"), workspace_root)?
     };
     let common_marker = git_dir.join("commondir");
     if !common_marker.exists() {
         return Ok(git_dir);
     }
-    let path = read_path(&common_marker, None)?;
-    let path = if path.is_absolute() {
-        path
-    } else {
-        git_dir.join(path)
-    };
-    path.canonicalize().map_err(|_| ())
+    read_git_indirection(&common_marker, None, &git_dir)
 }
 
 /// Policy paths are daemon-owned inputs.  Validate their identity before user
@@ -18257,11 +18295,8 @@ instructions = "{instructions}"
 
             // 3. Root sandbox scope: daemon bootstrap is brokered out of process,
             // so neither the selected directory nor its mode-neutral base is writable.
-            let roots = claude_writable_roots(
-                SandboxMode::Root,
-                Path::new("/repo/.usagi/sessions/work"),
-                None,
-            );
+            let roots =
+                claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
             assert!(roots.is_empty(), "{roots:?}");
         }
     }
@@ -18815,24 +18850,56 @@ instructions = "{instructions}"
     }
 
     #[test]
+    fn session_git_roots_include_commit_authority_without_main_or_config() {
+        std::fs::create_dir_all("target").unwrap();
+        let fixture = tempfile::tempdir_in("target").unwrap();
+        let common = fixture.path().join("repo/.git");
+        let git_dir = common.join("worktrees/session");
+        let worktree = fixture.path().join("repo/.usagi/sessions/session");
+        for path in [
+            &git_dir,
+            &common.join("objects"),
+            &common.join("refs/heads/usagi"),
+            &common.join("logs/refs/heads/usagi"),
+            &worktree,
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+
+        let roots = session_git_writable_roots(&worktree).unwrap();
+        assert_eq!(
+            roots,
+            [
+                git_dir.canonicalize().unwrap(),
+                common.join("objects").canonicalize().unwrap(),
+                common.join("refs/heads/usagi").canonicalize().unwrap(),
+                common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+            ]
+        );
+        assert!(!roots.contains(&common.canonicalize().unwrap()));
+        assert!(!roots.contains(&common.join("refs/heads/main")));
+        assert!(!roots.contains(&common.join("config")));
+
+        let standalone = tempfile::tempdir_in("target").unwrap();
+        std::fs::create_dir(standalone.path().join(".git")).unwrap();
+        assert!(session_git_writable_roots(standalone.path()).is_err());
+    }
+
+    #[test]
     fn a_session_claude_is_confined_to_its_worktree_and_gets_the_guard_hook() {
         let usagi = Path::new("/opt/usagi/bin/usagi");
         let context = provision_context(Some(SessionId::new()));
         let mode = sandbox_mode(&context);
         assert_eq!(mode, SandboxMode::Session);
 
-        let roots = claude_writable_roots(
-            mode,
-            Path::new("/repo/.usagi/sessions/work"),
-            Some(Path::new("/repo/.git")),
-        );
-        assert_eq!(
-            roots,
-            [
-                PathBuf::from("/repo/.usagi/sessions/work"),
-                PathBuf::from("/repo/.git")
-            ]
-        );
+        let roots = claude_writable_roots(mode, Path::new("/repo/.usagi/sessions/work"));
+        assert_eq!(roots, [PathBuf::from("/repo/.usagi/sessions/work")]);
 
         let launcher = claude_sandbox_launcher(
             usagi,
@@ -18853,8 +18920,6 @@ instructions = "{instructions}"
                 "/repo",
                 "--writable-root",
                 "/repo/.usagi/sessions/work",
-                "--writable-root",
-                "/repo/.git",
                 "--",
             ]
         );
@@ -19149,7 +19214,7 @@ instructions = "{instructions}"
         assert_eq!(mode, SandboxMode::Root);
 
         // A root launch's cwd and daemon data stay read-only; bootstrap uses the broker.
-        let roots = claude_writable_roots(mode, Path::new("/repo"), None);
+        let roots = claude_writable_roots(mode, Path::new("/repo"));
         assert!(roots.is_empty());
         let launcher = claude_sandbox_launcher(
             usagi,
