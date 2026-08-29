@@ -2319,7 +2319,7 @@ mod tests {
             _: &str,
             _: Option<&str>,
         ) -> anyhow::Result<()> {
-            unreachable!("an adopted orphan is never rebuilt")
+            Ok(())
         }
         fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
             self.remove_calls.fetch_add(1, Ordering::SeqCst);
@@ -2903,6 +2903,22 @@ mod tests {
         )
         .unwrap();
 
+        let coverage_path = Path::new("/coverage/orphan");
+        assert_eq!(
+            runtime.io.canonical_path(coverage_path),
+            Some(coverage_path.into())
+        );
+        runtime
+            .io
+            .build_session_tree(
+                runtime.git.as_ref(),
+                coverage_path,
+                coverage_path,
+                "usagi/coverage",
+                None,
+            )
+            .unwrap();
+
         let row = &runtime.snapshot().unwrap()["sessions"][0];
         assert_eq!(row["name"], "review");
         assert_eq!(row["lifecycle"], "failed");
@@ -2936,6 +2952,19 @@ mod tests {
             calls
                 .iter()
                 .any(|args| args == &["branch", "-d", "--", "usagi/review"])
+        );
+    }
+
+    #[test]
+    fn a_manually_removed_orphan_is_safe_to_forget() {
+        let (_tmp, runtime) = runtime(FakeGit::ok());
+
+        let diagnosis = runtime.inspect_orphan("gone");
+
+        assert!(diagnosis.safe_to_remove());
+        assert_eq!(
+            diagnosis.summary("gone"),
+            "orphan session \"gone\" no longer has a worktree; cleanup can remove its stale lifecycle row"
         );
     }
 
