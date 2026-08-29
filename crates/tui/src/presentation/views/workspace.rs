@@ -2509,12 +2509,13 @@ fn home_row_lines_at(
     }
     let target = match row {
         Selection::Target(target) => Some(target),
-        Selection::NewSession => None,
+        Selection::Idle | Selection::NewSession => None,
     };
     let (label, detail, session) = match row {
         // Root is not part of managed Home rows. Keep the branch total for
         // stale synthetic projections without rendering a hidden root action.
-        Selection::Target(Target::Root(_)) => ("", "", None),
+        // Idle is likewise not a row, but remains total for defensive callers.
+        Selection::Idle | Selection::Target(Target::Root(_)) => ("", "", None),
         Selection::Target(Target::Session(id)) => home
             .sessions
             .iter()
@@ -2791,7 +2792,9 @@ fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
             Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("\u{f0907}"),
-            Selection::Target(Target::Root(_)) | Selection::NewSession => " ".to_string(),
+            Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
+                " ".to_string()
+            }
         };
     }
     if current {
@@ -5825,8 +5828,14 @@ mod tests {
     #[test]
     fn switch_paints_the_selected_new_session_row_success_not_accent() {
         let workspace = WorkspaceId::new();
-        let state = AppState::home(workspace, Vec::new());
-        // An empty Home rests the Switch cursor on `+ new session`.
+        let mut state = AppState::home(workspace, Vec::new());
+        // An empty Home leaves the action unfocused until navigation selects it.
+        assert_eq!(state.selected(), Selection::Idle);
+        let idle = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
+        let idle_rendered = render_home(30, 100, &idle).join("\n");
+        assert!(!idle_rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);

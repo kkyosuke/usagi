@@ -321,7 +321,9 @@ alternate screen を復元する。
 
 Home の navigation target は managed `Session(SessionId)` である。表示名と配列 index は identity に
 使わない。selected は cursor、active は command と Closeup の managed session であり、cursor の移動だけでは
-active を変更しない。session が 0 件なら selected は `+ new session`、active は `None` となる。
+active を変更しない。session が 0 件なら selected / active はともに `None` 相当の中立状態となり、
+`+ new session` action を暗黙には選択しない。矢印で action row を明示選択して `Enter` / `t` を入力するか、
+`Ctrl-A` を入力した場合だけ作成フォームを開く。
 
 Closeup の `agent` / `terminal` action は active managed session の `SessionId` から scope を導出する。
 managed session が無い Home は Closeup を開かず、これらの effect を発行しない。`Target::Root` と
@@ -329,8 +331,8 @@ managed session が無い Home は Closeup を開かず、これらの effect �
 生成しない。
 
 daemon snapshot または lifecycle refresh で selected / active session が消えたか使用不能になった場合、
-表示順上の surviving session へ決定的に着地する。surviving session が無ければ selected は
-`+ new session`、active は `None` となり、削除済み session を target にした古い local state を実行に使わない。
+表示順上の surviving session へ決定的に着地する。surviving session が無ければ selected / active は中立状態となり、
+削除済み session を target にした古い local state を実行に使わず、`+ new session` action も暗黙には選択しない。
 削除要求を受理した後も `deleting` 行が snapshot に残る間は selected cursor をその stable identity に保持し、
 行が消えた refresh で初めて surviving session へ移す。
 
