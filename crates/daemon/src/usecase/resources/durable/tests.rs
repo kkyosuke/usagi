@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use usagi_core::domain::agent::{
     AgentProfileId, DurableLaunchSnapshot, LaunchMode, LaunchPlan, LaunchRequest, LaunchScope,
 };
-use usagi_core::domain::id::{AgentRuntimeId, AgentRuntimeRef, CompletionFence, OperationId};
+use usagi_core::domain::id::{
+    AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef, CompletionFence,
+    OperationId, TerminalId,
+};
 use usagi_core::domain::terminal_launch::{
     DurableTerminalLaunchSnapshot, TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
@@ -20,7 +23,7 @@ use crate::usecase::resources::fixture::{
 };
 use crate::usecase::resources::migration::AdoptionRefusal;
 use crate::usecase::resources::shard::{CollectionBlocker, ResourceState};
-use crate::usecase::runtime::{DurableOperationOutcome, RuntimeState};
+use crate::usecase::runtime::{DurableOperationOutcome, RuntimeCoordinator, RuntimeState};
 use crate::usecase::terminal::TerminalReconcileState;
 
 /// One data directory: the shared allocator bytes plus the shard archive.
@@ -898,6 +901,71 @@ fn hydrate_returns_the_records_every_retained_shard_holds() {
     assert!(hydrated.terminals.records.iter().all(|record| record.state
         == TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown)));
     assert!(hydrated.migration.is_none());
+}
+
+#[test]
+fn hydrate_rebuilds_only_the_cross_shard_resume_back_reference() {
+    let world = World::new();
+    let source_owner = DaemonGeneration::new();
+    let replacement_owner = DaemonGeneration::new();
+    let active_owner = DaemonGeneration::new();
+    let source_terminal = terminal(source_owner);
+    let mut replacement_terminal = source_terminal.clone();
+    replacement_terminal.daemon_generation = replacement_owner;
+    replacement_terminal.terminal_id = TerminalId::new();
+
+    let continuation = AgentContinuationRef::new();
+    let source_id = AgentResumeSourceId::new();
+    let mut source = agent_record(
+        &source_terminal,
+        OperationId::new(),
+        RuntimeState::Exited,
+        None,
+    );
+    source.continuation = Some(continuation);
+    source.resume_source = Some(source_id);
+    let mut replacement = agent_record(
+        &replacement_terminal,
+        OperationId::new(),
+        RuntimeState::Exited,
+        None,
+    );
+    replacement.continuation = Some(continuation);
+    replacement.resume_source = Some(AgentResumeSourceId::new());
+    replacement.resumed_from = Some(source_id);
+
+    ShardedAgentStore::new(world.state(source_owner, ObservedChildren::new()))
+        .save(agent_snapshot(vec![source]))
+        .unwrap();
+    ShardedAgentStore::new(world.state(replacement_owner, ObservedChildren::new()))
+        .save(agent_snapshot(vec![replacement.clone()]))
+        .unwrap();
+
+    let persisted_source = world
+        .shard(source_owner)
+        .resources
+        .into_iter()
+        .find(|entry| entry.resource == source_terminal)
+        .and_then(|entry| entry.payload)
+        .map(|payload| serde_json::from_str::<DurableRuntimeRecord>(&payload).unwrap())
+        .unwrap();
+    assert_eq!(persisted_source.superseded_by, None);
+
+    let hydrated = world
+        .state(active_owner, ObservedChildren::new())
+        .hydrate()
+        .unwrap();
+    let coordinator = RuntimeCoordinator::hydrate(hydrated.agents, 8, 64, 1).unwrap();
+    let repaired_source = coordinator
+        .snapshot()
+        .records
+        .into_iter()
+        .find(|record| record.resume_source == Some(source_id))
+        .unwrap();
+    assert_eq!(
+        repaired_source.superseded_by,
+        Some(replacement.runtime.agent_runtime_id)
+    );
 }
 
 #[test]
