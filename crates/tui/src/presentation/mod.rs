@@ -53,6 +53,7 @@ use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::pr_modal;
 use crate::presentation::views::quit_modal;
+use crate::presentation::views::root_terminal_drawer;
 use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
@@ -3665,6 +3666,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::Agent => Some(AppKey::CtrlA),
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
+        LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
@@ -3690,7 +3692,12 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
     }
 }
 
-fn foreground_terminal_geometry(height: usize, width: usize, director_open: bool) -> Geometry {
+fn foreground_terminal_geometry(
+    height: usize,
+    width: usize,
+    director_open: bool,
+    root_terminal_open: bool,
+) -> Geometry {
     if director_open {
         let viewport = director_drawer::terminal_viewport(height, width);
         Geometry {
@@ -3698,6 +3705,14 @@ fn foreground_terminal_geometry(height: usize, width: usize, director_open: bool
                 .expect("clamped drawer terminal width fits u16"),
             rows: u16::try_from(viewport.rows.min(usize::from(u16::MAX)))
                 .expect("clamped drawer terminal height fits u16"),
+        }
+    } else if root_terminal_open {
+        let viewport = root_terminal_drawer::terminal_viewport(height, width);
+        Geometry {
+            cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
+                .expect("clamped root-terminal drawer width fits u16"),
+            rows: u16::try_from(viewport.rows.min(usize::from(u16::MAX)))
+                .expect("clamped root-terminal drawer height fits u16"),
         }
     } else {
         terminal_geometry(height, width)
@@ -4547,9 +4562,8 @@ fn pane_restore_targets(
         .iter()
         .filter(|entry| entry.live && entry.kind == TerminalKind::Terminal)
         .filter(|entry| entry.terminal.workspace_id == workspace)
-        // Workspace root belongs exclusively to the Agent drawer. Generic
-        // terminals remain managed-session Closeup panes.
-        .filter(|entry| entry.terminal.session_id.is_some())
+        // Root generic terminals are projected only by the dedicated bottom
+        // drawer; managed-session terminals remain Closeup panes.
         .filter(|entry| {
             entry
                 .terminal
@@ -4886,6 +4900,8 @@ fn handle_terminal_pointer(
     let point_at = |column, row| {
         if runtime.state().director_drawer_open() {
             director_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
+        } else if runtime.state().root_terminal_drawer_open() {
+            root_terminal_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
         } else {
             terminal_point_at(height, width, rows_len, scroll, column, row)
         }
@@ -4966,7 +4982,7 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
         }
         _ => return false,
     };
-    let Some(selection) = runtime.selection_after_select(direction) else {
+    let Some(selection) = runtime.agent_selection_after_select(direction) else {
         return true;
     };
     let continuation = match &selection {
@@ -5136,6 +5152,8 @@ fn intercept_live_terminal_control(
             Key::Live(LiveTerminalAction::Wheel { up, column, row }) => {
                 let point = if runtime.state().director_drawer_open() {
                     director_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
+                } else if runtime.state().root_terminal_drawer_open() {
+                    root_terminal_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
                 } else {
                     terminal_point_at(height, width, 0, 0, *column, *row)
                 };
@@ -5183,6 +5201,9 @@ fn intercept_live_terminal_control(
             Key::Live(
                 action @ (LiveTerminalAction::MoveTabNext | LiveTerminalAction::MoveTabPrevious),
             ) => {
+                if runtime.state().root_terminal_drawer_open() {
+                    return true;
+                }
                 let direction = if *action == LiveTerminalAction::MoveTabNext {
                     crate::usecase::application::controller::TabDirection::Next
                 } else {
@@ -5404,6 +5425,12 @@ fn home_frame_material_shared(
                     .find(|session| session.id == target)
                     .map(|session| (session.label.clone(), confirm))
             });
+    let root_terminal_projection = runtime.root_terminal_projection(terminal_view.as_deref());
+    let home_terminal_view = if runtime.state().root_terminal_drawer_open() {
+        None
+    } else {
+        terminal_view
+    };
     let projection = HomeProjection::from_ordered_state(runtime.state(), workspace_name, sessions)
         .with_pane(runtime.preview_pane())
         .with_metrics(metrics)
@@ -5411,8 +5438,9 @@ fn home_frame_material_shared(
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
         .with_shared_git_diffs(git_diffs)
-        .with_shared_terminal_view(terminal_view)
+        .with_shared_terminal_view(home_terminal_view)
         .with_director_drawer(runtime.director_projection().clone())
+        .with_root_terminal_drawer(root_terminal_projection)
         .with_create_pending(create_pending.map(str::to_owned))
         .with_overlay_modals(
             runtime.overview_modal().cloned(),
@@ -5656,18 +5684,6 @@ fn drain_controller_host_actions(
                 }
             }
             ControllerHostAction::OpenTerminal(request) => {
-                // The workspace root pane is the Agent-only drawer. Refuse a
-                // generic terminal before recording a placeholder or issuing
-                // daemon work; managed-session Closeup remains unchanged.
-                if matches!(request.target, Target::Root(_)) {
-                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                        Notice::new(format!(
-                            "{} Director accepts Agent conversations only",
-                            director_drawer::DIRECTOR_ICON
-                        )),
-                    )));
-                    continue;
-                }
                 if let Some(agent) = ui.agent.as_ref() {
                     let workspace = agent.workspace;
                     pending_targets.insert(request.operation_id, request.target);
@@ -6337,8 +6353,12 @@ fn drive_workspace_controller(
             let _ = runtime.apply_event(AppEvent::GardenUnavailable);
         }
         let _ = runtime.apply_event(AppEvent::GardenAvailability(garden_available));
-        let director_open = runtime.state().director_drawer_open();
-        let geometry = foreground_terminal_geometry(height, width, director_open);
+        let geometry = foreground_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            runtime.state().root_terminal_drawer_open(),
+        );
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
         // Ordinarily the right pane's preview is the only visible attachment.
         // Director adds a second, read-only attachment for the managed terminal
@@ -6888,6 +6908,9 @@ fn drive_workspace_controller(
                 match (header_action, pane_tab) {
                     (Some(HomeHeaderAction::Director), _) => {
                         runtime.apply_event(AppEvent::Key(AppKey::ToggleDirectorDrawer))
+                    }
+                    (Some(HomeHeaderAction::RootTerminal), _) => {
+                        runtime.apply_event(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
                     }
                     (Some(HomeHeaderAction::Decisions), _) => {
                         runtime.apply_event(AppEvent::Key(AppKey::OpenDecisions))
@@ -8423,6 +8446,10 @@ mod tests {
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
             Some(AppEvent::Key(AppKey::OpenDirectorNew))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
+            Some(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
         );
         assert_eq!(
             app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
@@ -13239,11 +13266,36 @@ mod tests {
             None,
             health(),
             &no_diffs,
-            Some(view),
+            Some(view.clone()),
             None,
             clock,
         );
         assert_ne!(terminal_output, base, "terminal output did not redraw");
+
+        let mut root_drawer = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = root_drawer.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let root_output = home_frame_material(
+            20,
+            80,
+            &root_drawer,
+            "demo",
+            &root,
+            &sessions,
+            None,
+            health(),
+            &no_diffs,
+            Some(view.clone()),
+            None,
+            clock,
+        );
+        assert!(root_output.projection.terminal_view().is_none());
+        assert_eq!(
+            render_home_material(&root_output)
+                .join("\n")
+                .matches("output")
+                .count(),
+            1
+        );
 
         // The pending create skeleton.
         let pending = home_frame_material(
@@ -16254,6 +16306,23 @@ mod tests {
                 .any(|conversation| conversation.label == "Agent (starting)"
                     && conversation.selected)
         );
+        runtime.inject_pane_event_for_test(
+            Target::Root(workspace),
+            crate::usecase::application::pane::PaneEvent::Select(
+                crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Interrupted(
+                    interrupted_continuation,
+                )),
+            ),
+        );
+        assert!(super::select_director_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut ui,
+            &mut runtime,
+        ));
+        assert_eq!(
+            runtime.active_pane().selected(),
+            &crate::usecase::application::pane::PaneSelection::Tab(TabSelection::Pending(pending))
+        );
 
         // Bypass runtime admission to prove the projection independently drops
         // every generic/diff shape if an impossible state reaches it.
@@ -16507,7 +16576,7 @@ mod tests {
             }],
         ));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        ui.start_terminal_session(terminal, foreground_terminal_geometry(20, 80, true));
+        ui.start_terminal_session(terminal, foreground_terminal_geometry(20, 80, true, false));
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
@@ -16531,7 +16600,73 @@ mod tests {
     }
 
     #[test]
-    fn root_generic_host_request_and_untracked_resume_completion_are_inert() {
+    fn root_terminal_pointer_and_wheel_use_the_bottom_drawer_viewport() {
+        let workspace = WorkspaceId::new();
+        let terminal = scoped_terminal_ref(workspace, None);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
+        let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort));
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Terminal);
+        let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal);
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = RecordingBrowser::default();
+        let mut pending = std::collections::HashMap::new();
+        let drawer = crate::presentation::views::root_terminal_drawer::geometry(20, 80);
+        let row = u16::try_from(drawer.top + 2).unwrap();
+
+        assert!(!handle_terminal_pointer(
+            &ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            20,
+            80,
+            1,
+            0,
+            PointerEvent {
+                kind: PointerKind::Down,
+                column: 2,
+                row,
+            },
+        ));
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::Wheel {
+                up: true,
+                column: 2,
+                row,
+            }),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            0,
+            0,
+        ));
+        assert!(intercept_live_terminal_control(
+            &Key::Live(LiveTerminalAction::MoveTabNext),
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending,
+            20,
+            80,
+            0,
+            0,
+        ));
+    }
+
+    #[test]
+    fn root_generic_host_request_is_admitted_and_untracked_resume_completion_is_inert() {
         let workspace = WorkspaceId::new();
         let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), Vec::new());
         let mut ui = WorkspaceUi::new(view, Box::new(UnavailableSessionCommandPort))
@@ -16539,23 +16674,26 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let mut pending = std::collections::HashMap::new();
         let (mut host, actions) = ControllerHost::channel();
+        let operation = OperationId::new();
         super::BackendAgentPort::open_terminal(
             &mut host,
             crate::usecase::application::daemon_backend::OpenTerminalRequest {
                 target: Target::Root(workspace),
-                operation_id: OperationId::new(),
+                operation_id: operation,
                 arguments: "new".to_owned(),
             },
         );
         drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
-        assert!(pending.is_empty());
-        assert!(ui.pane_launches.is_empty());
-        assert_eq!(
+        assert_eq!(pending.get(&operation), Some(&Target::Root(workspace)));
+        assert_eq!(ui.pane_launches.len(), 1);
+        assert!(
             runtime
-                .state()
-                .notice()
-                .map(|notice| notice.message.as_str()),
-            Some("♛ Director accepts Agent conversations only")
+                .panes()
+                .pane(Target::Root(workspace))
+                .unwrap()
+                .tabs()
+                .iter()
+                .any(|tab| matches!(tab, PaneTab::Pending(pending) if pending.operation == operation && pending.kind == PaneKind::Terminal))
         );
 
         ui.pane_completion_sender
@@ -16574,7 +16712,17 @@ mod tests {
             &mut pending,
             terminal_geometry(20, 80),
         );
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert!(
+            runtime
+                .panes()
+                .pane(Target::Root(workspace))
+                .unwrap()
+                .tabs()
+                .iter()
+                .any(
+                    |tab| matches!(tab, PaneTab::Pending(pending) if pending.operation == operation)
+                )
+        );
     }
 
     #[test]
@@ -18792,12 +18940,11 @@ mod tests {
         assert_eq!(root.selected, Some(first_terminal));
         assert_eq!(root.panes[0].terminal, second_terminal);
         assert_eq!(root.panes[1].kind, PaneKind::Agent);
-        assert_eq!(root.panes.len(), 2);
-        assert!(root.panes.iter().all(|pane| pane.kind == PaneKind::Agent));
+        assert_eq!(root.panes.len(), 3);
         assert!(
             root.panes
                 .iter()
-                .all(|pane| !pane.terminal.fences(&root_generic))
+                .any(|pane| pane.kind == PaneKind::Terminal && pane.terminal.fences(&root_generic))
         );
         let managed = targets
             .iter()
@@ -18997,7 +19144,7 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
-        let drawer_geometry = foreground_terminal_geometry(24, 100, true);
+        let drawer_geometry = foreground_terminal_geometry(24, 100, true, false);
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
@@ -19065,7 +19212,7 @@ mod tests {
         ui.sync_visible_terminals(&[
             (
                 root.clone(),
-                foreground_terminal_geometry(height, width, true),
+                foreground_terminal_geometry(height, width, true, false),
             ),
             (managed.clone(), terminal_geometry(height, width)),
         ]);
@@ -19122,7 +19269,7 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
-        let drawer_geometry = foreground_terminal_geometry(24, 100, true);
+        let drawer_geometry = foreground_terminal_geometry(24, 100, true, false);
         let mut controls = LiveTerminalControls::default();
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
@@ -24150,11 +24297,15 @@ mod tests {
             }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, true),
+            foreground_terminal_geometry(24, 100, true, false),
             Geometry { cols: 56, rows: 16 }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, false),
+            foreground_terminal_geometry(24, 100, false, true),
+            Geometry { cols: 96, rows: 8 }
+        );
+        assert_eq!(
+            foreground_terminal_geometry(24, 100, false, false),
             terminal_geometry(24, 100)
         );
     }
