@@ -107,6 +107,10 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 - 本文には「目的 / 変更内容 / テスト・確認方法」を含める。
 - 本文の `Internal-Issue` は、内部 issue を実装する変更では `#<number>`、内部 issue が無い変更では `none` とする。
   番号を記した PR は対応する `.usagi/issues/<number>-*.md` を同じ差分で `done` にし、CI がこの同期を検証する。
+- **自動生成 PR も本文の SSoT はこのマーカーである**。本文を自分で組み立てられる生成元
+  （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
+  Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
+  issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
 - ベースブランチは `main`。[CI](#cigithub-actions) が強制する。
 - **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 

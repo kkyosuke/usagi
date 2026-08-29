@@ -145,10 +145,10 @@ pub trait WorkspaceLoader {
     /// workspace の解決・登録・更新・state 読み込みに失敗した場合、そのエラーを返す。
     ///
     /// [`io::ErrorKind::PermissionDenied`] は「daemon がこの workspace tenant を
-    /// adopt / serve できない」という 1 つの意味に固定する。別 workspace の snapshot を
-    /// 返す代わりにこれを返す。entry 画面はこのエラーだけは
-    /// 画面を保ったまま理由を表示し（[`open_refusal_notice`]）、他のエラーは従来どおり
-    /// 呼び出し元へ伝播する。
+    /// adopt / serve できない」、[`io::ErrorKind::NotConnected`] は「daemon へ到達できない」
+    /// という 1 つずつの意味に固定する。別 workspace の snapshot を返す代わりにこれらを返す。
+    /// entry 画面はこの 2 つだけは画面を保ったまま理由を表示し
+    /// （[`open_failure_notice`]）、他のエラーは従来どおり呼び出し元へ伝播する。
     fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
 
     /// Refresh an already-open workspace without changing registry/Recent
@@ -256,14 +256,24 @@ pub struct WorkspaceCreateCompletion {
 
 /// entry 画面が [`WorkspaceLoader::open`] の失敗をその場で提示できるか判定する。
 ///
-/// [`io::ErrorKind::PermissionDenied`] は「daemon がその workspace を serve していない」という
-/// port の宣言なので、workspace 切り替え画面（Welcome の Recent・Open 一覧）はその画面に留まり、
-/// 理由と復帰手順を notice として出す。開けない workspace のために TUI 全体を畳む必要はなく、
-/// 利用者は同じ画面で serve されている workspace を選び直せる。ほかの失敗は画面を保っても
+/// 提示できるのは次の 2 つで、どちらも「この workspace は今開けないが、画面に留まれば
+/// 利用者が次の手を打てる」失敗である。
+///
+/// | kind | 意味 | 利用者の次の手 |
+/// |---|---|---|
+/// | [`io::ErrorKind::PermissionDenied`] | daemon がその workspace を serve していない | serve されている別の workspace を選び直す |
+/// | [`io::ErrorKind::NotConnected`] | daemon へ到達できない | 復帰を待って同じ workspace を開き直す |
+///
+/// 開けない workspace のために TUI 全体を畳む必要はない。とくに daemon 不達で畳むと、
+/// wedge した daemon が利用者を shell へ締め出すことになる。ほかの失敗は画面を保っても
 /// 解決しないため、呼び出し元へ伝播させる。
 #[must_use]
-pub fn open_refusal_notice(error: &io::Error) -> Option<String> {
-    (error.kind() == io::ErrorKind::PermissionDenied).then(|| error.to_string())
+pub fn open_failure_notice(error: &io::Error) -> Option<String> {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::NotConnected
+    )
+    .then(|| error.to_string())
 }
 
 /// TUI をどの画面から開始するかを表す。
@@ -479,7 +489,7 @@ pub fn run(entry: &EntryScreen, runner: &mut dyn ScreenRunner) -> io::Result<()>
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_refusal_notice, run,
+        EntryScreen, Key, ScreenRunner, Terminal, WorkspaceSnapshot, open_failure_notice, run,
     };
     use std::io;
     use std::path::{Path, PathBuf};
@@ -695,16 +705,28 @@ mod tests {
     }
 
     #[test]
-    fn only_a_permission_denied_open_is_presentable_on_the_entry_screen() {
-        // The one refusal an entry screen can act on: this daemon serves another
+    fn only_a_refusal_or_an_unreachable_daemon_is_presentable_on_the_entry_screen() {
+        // The refusal an entry screen can act on: this daemon serves another
         // workspace, so the switcher shows the reason and stays open.
         let refusal = io::Error::new(
             io::ErrorKind::PermissionDenied,
             "cannot open /tmp/other: this daemon serves the workspace /tmp/served.",
         );
         assert_eq!(
-            open_refusal_notice(&refusal).as_deref(),
+            open_failure_notice(&refusal).as_deref(),
             Some("cannot open /tmp/other: this daemon serves the workspace /tmp/served.")
+        );
+
+        // An unreachable daemon is the same shape of failure: the workspace is
+        // not openable *now*. Tearing the TUI down for it would let a wedged
+        // daemon lock the user out to the shell.
+        let unreachable = io::Error::new(
+            io::ErrorKind::NotConnected,
+            "daemon unavailable: the daemon did not answer within this connection's deadline",
+        );
+        assert_eq!(
+            open_failure_notice(&unreachable).as_deref(),
+            Some("daemon unavailable: the daemon did not answer within this connection's deadline")
         );
 
         // Anything else is a failure the screen cannot resolve, so it propagates.
@@ -716,7 +738,7 @@ mod tests {
                 "workspace path is not a directory",
             ),
         ] {
-            assert_eq!(open_refusal_notice(&other), None, "{other}");
+            assert_eq!(open_failure_notice(&other), None, "{other}");
         }
     }
 

@@ -2067,11 +2067,29 @@ pub fn render_home_at(
     if let Some(frame) = garden_frame(raw_height, raw_width, home, now) {
         return frame.rows;
     }
-    let split = panes::split(width, LEFT_WIDTH);
     let body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
+    if let Some(drawer) = &home.director_drawer {
+        // Director owns the right side. Give the concurrently visible managed
+        // terminal the complete band to its left instead of retaining Home's
+        // sidebar split and wrapping output underneath the drawer.
+        let terminal_width = director_drawer::geometry(height, width).left;
+        let right =
+            dim_inactive_right_pane(true, home_right_pane(body_height, terminal_width, home));
+        frame.extend(right.into_iter().map(|line| {
+            let prefix = widgets::modal::columns(&line, 0, terminal_width);
+            format!(
+                "{prefix}{}",
+                " ".repeat(width.saturating_sub(terminal_width))
+            )
+        }));
+        frame.truncate(height);
+        let frame = director_drawer::render_over(height, width, &frame, drawer);
+        return render_home_modals(height, width, home, frame, now);
+    }
+    let split = panes::split(width, LEFT_WIDTH);
     let right = dim_inactive_right_pane(
         !home.right_pane_focused(),
         home_right_pane(body_height, split.right, home),
@@ -2083,13 +2101,21 @@ pub fn render_home_at(
         split,
     ));
     frame.truncate(height);
-    let frame = if let Some(drawer) = &home.director_drawer {
-        director_drawer::render_over(height, width, &frame, drawer)
-    } else if let Some(drawer) = &home.root_terminal_drawer {
+    let frame = if let Some(drawer) = &home.root_terminal_drawer {
         root_terminal_drawer::render_over(height, width, &frame, drawer)
     } else {
         frame
     };
+    render_home_modals(height, width, home, frame, now)
+}
+
+fn render_home_modals(
+    height: usize,
+    width: usize,
+    home: &HomeProjection,
+    frame: Vec<String>,
+    now: DateTime<Utc>,
+) -> Vec<String> {
     if let Some(modal) = &home.overview_modal {
         overview_modal::render_over(height, width, &frame, modal)
     } else if home.daemon_overlay {

@@ -161,7 +161,7 @@ production fallback stub は持たない。
 ## workspace の離脱と終了
 
 **離脱（Welcome へ戻る）と終了（プロセスを終える）は別の答えである**。どちらも Home の
-[exit prompt](#feedback-と終了)（`Ctrl-Q`、live pane 上の `Ctrl-C`）から選ぶが、選択肢・キー・
+[exit prompt](#feedback-と終了)（`Ctrl-Q`）から選ぶが、選択肢・キー・
 効果が分かれているため、片方のキーを打ち間違えてもう片方に落ちることはない。
 
 | 答え | キー | 効果 |
@@ -261,7 +261,14 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 |---|---|
 | Welcome の Recent、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
 | New の作成成功後の open | draft を保ったまま同画面の notice に出す |
-| `usagi open <path>` / `usagi <path>` | TUI を開かず stderr へ 1 行で出す |
+| `usagi open <path>` / `usagi <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
+
+**daemon へ到達できないことは、この表の拒否と同じ扱いにする**。workspace が今開けない理由が
+「この daemon は別 workspace を serve している」でも「daemon へ到達できない」でも、利用者に必要なのは
+*画面に留まったまま理由を知り、別の workspace を選ぶか同じものを開き直すこと*である。したがって
+どちらも entry 画面の notice になり、TUI を畳まない。とくに後者で畳むと、wedge した daemon が
+利用者を shell へ締め出してしまう。daemon が応答した上での失敗（decode 失敗など）は待っても変わらないので
+従来どおり伝播する。
 
 entry 画面（Welcome・Open・New・Config）は **daemon を必要としない**。表示に使うのは registry と Recent という
 local store だけであり、workspace 切り替え画面はどの directory からでも開ける必要がある。ここで daemon の readiness を
@@ -368,7 +375,7 @@ active を変えないのは [Home と target](#home-と-target) のとおりで
 未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
 追従するため、通常は同時に attach する live terminal は 1 つである。Director drawer が開いている間だけは、
 背景の右ペインが Switch の cursor に追従したまま、foreground input を drawer で選択中の root conversation が
-所有する。このとき可視の managed terminal も 2 本目の read-only attachment として通常の右ペイン geometry を維持し、
+所有する。このとき可視の managed terminal も 2 本目の read-only attachment として Director の左端までの可視 geometry へ resize し、
 出力を取得し続ける。したがって Agent content は dim のまま更新され、drawer を開いたことでは静止しない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
@@ -431,11 +438,11 @@ TUI の force は削除全体に効き、未コミットの変更を持つ workt
 マージされていない session ブランチも破棄する（`git branch -d` ではなく `-D`）。したがって `X` は、
 worktree の撤去だけが済んでブランチ削除で `failed` に落ちた session も 1 回で片付けられる。`x` は
 両方とも安全側で、未マージのブランチが残っていれば削除は `failed` になる。`Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
-[workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の live pane でも、leader が
-待機していない `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
+[workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の generic terminal では、leader が
+待機していない `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。Agent pane の `Ctrl-C` は Agent CLI へ通常の SIGINT として渡す。`Ctrl-Q` / `Ctrl-D` は global shortcut として management transition に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
 `Ctrl-C` は modal だけを閉じて背面の Closeup へ戻る（live pane の有無に依らない）。overlay を開いて
-いない Closeup の live pane 上の `Ctrl-C` が exit prompt を開く契約はそのままである。前面 overlay は共通入力境界で
+いない Closeup の generic terminal 上の `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、次の `terminal open` は終了済み terminal を再利用せず新しい prompt から始まる。前面 overlay は共通入力境界で
 `Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で背面へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
 
@@ -449,7 +456,7 @@ snapshot で session 一覧を置き換えた場合も、置換前後の click �
 
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` がすべての入力を先に分類する。pending な `Ctrl-O`
-prefix（leader）が次の入力を所有し、leader が無い場合だけ `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を global shortcut として解決する。
+prefix（leader）が次の入力を所有し、leader が無い場合は `Ctrl-C` / `Ctrl-Q` / `Ctrl-D` を control chord として解決する。
 それ以外の非 prefix 入力は、修飾キーを含めて live terminal への passthrough として扱う。leader の follow-up は下表のアクションに
 解決し、それ以外は消費する。tab 切替（`Ctrl-O` / `Ctrl-A` / `Ctrl-N` / `Ctrl-P`）は reducer が所有するが、scroll・tab close・copy は
 reducer に持ち込まず shell と `TerminalSession` が所有する（scroll offset・選択・feedback は shell 側の状態）。
@@ -479,7 +486,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
 | macOS: Command+C / Linux: Ctrl+Shift+C / Windows: Ctrl+C | Copy selected output | 保持中の terminal 出力選択を OS clipboard へ再コピーする |
-| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる。live Agent には `Ctrl-D` と同じ EOT を送り、generic live tab は subscription を detach、pending は起動待ちを取消す |
+| `Ctrl-O` `x` / `Ctrl-O` `Ctrl-X` | CloseTab | 選択中の tab を閉じる。live Agent には `Ctrl-D` と同じ EOT、generic live tab には割込み後に `exit` を送り、pending は起動待ちを取消す |
 | `Ctrl-O` `r` | ResumeTab | 選択中の [interrupted tab](#interrupted-agent-の-tab-投影と明示-resume) を明示 resume する（他の tab は変更しない） |
 | `Ctrl-O` `u` / `↑` | ScrollUp | 右ペインの scrollback を 1 行古い方向へ |
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
@@ -522,7 +529,7 @@ provider 固有 ID、prompt、inbox 本文は表示しない。
 
 root scope（`session_id: None`）の Agent へ指示を出し、session を作らせる面を**指示モード**（英語 / identifier は
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
-（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
+（[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home の高さ一杯を使って右端へ重なる drawer として現れる。
 
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
@@ -539,8 +546,7 @@ clip する場合も、この対比は変わらない。
 button または `Ctrl-O Ctrl-G` は、Switch、managed-session Closeup、live pane のいずれからも同じ
 指示モードの open/closed state を toggle する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
-同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は ANSI span ごと dim にし、
-header は表示したままにする。
+同時に保てない幅では全幅へ縮退し、完全に隠れる managed terminal は detach する。背景 Home は ANSI span ごと dim にする。
 drawer 内の terminal viewport は drawer の border、conversation selector、spacer、footer を除いて計算し、
 managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
 その right pane viewport の attachment と出力 poll を維持し、dim 表示中も live output を描く。
@@ -1321,10 +1327,10 @@ document tab として完了し、安全な document 本文を tab の content a
 pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O p` は tab を巡回し、`Ctrl-O [` / `Ctrl-O ]` は
 選択 tab を前後へ並べ替える。`Ctrl-O x` / `Ctrl-O Ctrl-X` は generic Terminal / document tab と、daemon へ未送信の
 client-owned pending launch を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を
-閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は client subscription を
-detach するだけで daemon-owned terminal を停止しない。同じ workspace UI の生存中は閉じた exact terminal を後続の
-inventory 復元から除外し、`terminal open` を明示したときだけ再表示する。workspace UI を開き直した場合は local な close
-状態を引き継がず、live terminal を inventory から復元する。pending launch は送信済み operation を推測して再送・cancel しない。
+閉じたときだけ target selection と Closeup action の空状態へ戻る。generic Terminal の close は foreground command を
+割り込んだ後に shell へ `exit` を送り、tab を閉じて終了観測まで同じ terminal の復元を fence する。このため後続の
+`terminal open` は終了済み terminal を inventory から再利用せず、新しい shell を起動する。終了観測より先に open が同じ
+terminal を返した場合は `terminal is still closing; try again` として拒否し、古い scrollback を再表示しない。pending launch は送信済み operation を推測して再送・cancel しない。
 
 `terminal new` は embedded pane を作らず、選択 session の worktree を cwd とするプラットフォーム標準の terminal を
 別ウィンドウで開く。起動要求を発行した時点で Closeup action modal だけを閉じ、背面の Closeup へ戻る。
@@ -1995,7 +2001,7 @@ phase、operation / terminal error、disconnect、reconnect、resync は safe me
 TUI-local feedback として表示する。transport の内部 detail や secret は表示しない。orphan state では
 terminal input を送らない。
 
-`Ctrl-Q`（と live pane 上の `Ctrl-C`）は **exit prompt** を開く。この modal だけが workspace を出る唯一の
+`Ctrl-Q` は **exit prompt** を開く。この modal だけが workspace を出る唯一の
 経路であり、`welcome`（Welcome へ戻る）／`quit`（TUI を閉じる）／`stay`（留まる）の 3 択を提示する。
 どちらの答えでも daemon-owned の terminal や operation は停止しない。3 択の意味・キー・teardown は
 [workspace の離脱と終了](#workspace-の離脱と終了)を正本とする。
