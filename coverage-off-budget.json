@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 494,
+  "total": 496,
   "owners": {
     "core": 9,
     "daemon": 333,
     "root-cli": 33,
-    "tui": 119
+    "tui": 121
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -60,7 +60,7 @@
     "src/runtime/platform_child_reaper.rs": 3,
     "src/runtime/systemd.rs": 1,
     "src/runtime/terminal_pump.rs": 1,
-    "src/runtime/tui.rs": 70,
+    "src/runtime/tui.rs": 72,
     "src/tui_input.rs": 4
   }
 }

@@ -1165,6 +1165,10 @@ pub struct ControllerBackendComposition {
     /// controller drains this channel; it never probes daemon inventory from a
     /// frame tick.
     pub restore_connection: Box<dyn RestoreConnectionPort>,
+    /// Dedicated port moved into the off-thread Garden observation job. It
+    /// observes the *other* open projects' Agent inventory, so it never shares
+    /// a connection with this workspace's own lanes.
+    pub garden_inventory: Box<dyn GardenInventoryPort>,
     pub agent_tab_intents: Box<dyn AgentTabIntentPort>,
     pub external_terminal: Box<dyn ExternalTerminalPort>,
     pub metrics: Box<dyn MetricsPort>,
@@ -1173,6 +1177,34 @@ pub struct ControllerBackendComposition {
     /// is a port so the frame loop's filesystem IO is countable in a test and
     /// stays out of the frame budget (#554).
     pub session_worktrees: Box<dyn SessionWorktreeScanPort>,
+}
+
+/// Read-only daemon lane behind the Garden's other open projects.
+///
+/// The Garden draws every open project, but only one of them has a resident
+/// workspace controller in this process. This port is how the shell observes
+/// the Agent membership of the others: it names a workspace and reads back that
+/// workspace's inventory, which the daemon answers from its own records for
+/// whichever workspace the request names (a daemon holds every open project as
+/// a tenant). It is observation only — it starts nothing, changes nothing, and
+/// never cold-starts a daemon, so a project whose daemon is gone simply keeps
+/// its read-only plot.
+pub trait GardenInventoryPort: Send {
+    /// The daemon's safe Agent inventory for one open project.
+    ///
+    /// # Errors
+    ///
+    /// Returns safe feedback when the daemon is unavailable or refuses the
+    /// workspace. The Garden keeps the plot it has.
+    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String>;
+}
+
+struct UnavailableGardenInventoryPort;
+
+impl GardenInventoryPort for UnavailableGardenInventoryPort {
+    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentInventory, String> {
+        Err("Agent inventory is unavailable".to_owned())
+    }
 }
 
 /// Dedicated restore-client connection lifecycle observed by the composition
@@ -1824,6 +1856,102 @@ struct RestoreCompletion {
 struct RestoreApply {
     port: Box<dyn AgentCommandPort>,
     outcome: RestoreJobOutcome,
+}
+
+/// Steady cadence of the Garden's cross-project observation while the screen
+/// saver is up. It bounds how stale another project's rabbits can be: cadence
+/// plus one round of requests.
+const GARDEN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_000);
+
+/// Cadence after a round that observed nothing (no daemon, refused workspace).
+/// A Garden left open in front of a dead daemon must not retry every second.
+const GARDEN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5_000);
+
+/// Most open projects observed in one round. Beyond this the extra tabs keep
+/// their read-only plots rather than letting one round's request count follow an
+/// unbounded tab list.
+const MAX_OBSERVED_PROJECTS: usize = 16;
+
+/// One completed round of the Garden's cross-project observation.
+struct GardenObservationCompletion {
+    port: Box<dyn GardenInventoryPort>,
+    /// Inventories the daemon answered, each already checked to be the
+    /// workspace it was asked for.
+    inventories: Vec<AgentInventory>,
+}
+
+/// Admission for the Garden's cross-project observation lane.
+///
+/// The lane exists only while the Garden is on screen: nothing else in Home
+/// draws another project's Agents, so observing them behind a closed Garden
+/// would be daemon traffic nobody can see. Closing the Garden re-arms the lane,
+/// so re-opening it observes immediately instead of waiting out a cadence.
+#[derive(Debug, PartialEq, Eq)]
+struct GardenObservation {
+    in_flight: bool,
+    next_due: Option<std::time::Duration>,
+}
+
+impl GardenObservation {
+    const fn new() -> Self {
+        Self {
+            in_flight: false,
+            next_due: Some(std::time::Duration::ZERO),
+        }
+    }
+
+    /// Admit one round. `open` is whether the Garden owns the frame.
+    fn begin_if_due(&mut self, open: bool, now: std::time::Duration) -> bool {
+        if !open {
+            // Re-arm for the next opening, but never cancel a round already on
+            // its way: its port has to come back before another can start.
+            if !self.in_flight {
+                self.next_due = Some(std::time::Duration::ZERO);
+            }
+            return false;
+        }
+        if self.in_flight || self.next_due.is_none_or(|due| now < due) {
+            return false;
+        }
+        self.in_flight = true;
+        self.next_due = None;
+        true
+    }
+
+    /// Complete one round. `observed` is whether the daemon answered at all.
+    fn complete(&mut self, now: std::time::Duration, observed: bool) {
+        self.in_flight = false;
+        self.next_due = Some(
+            now + if observed {
+                GARDEN_OBSERVATION_INTERVAL
+            } else {
+                GARDEN_OBSERVATION_BACKOFF
+            },
+        );
+    }
+}
+
+/// Observe the other open projects' Agent inventory off the frame thread.
+///
+/// A workspace whose daemon does not answer, or answers with another
+/// workspace's inventory, is skipped: the Garden keeps that project's read-only
+/// plot rather than drawing a foreign project's rabbits in it.
+fn spawn_garden_observation_job(
+    mut port: Box<dyn GardenInventoryPort>,
+    workspaces: Vec<WorkspaceId>,
+    sender: Sender<GardenObservationCompletion>,
+) {
+    std::thread::spawn(move || {
+        let mut inventories = Vec::new();
+        for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
+            if let Ok(inventory) = port.inventory(workspace)
+                && inventory.workspace_id == workspace
+            {
+                inventories.push(inventory);
+            }
+        }
+        let _ = sender.send(GardenObservationCompletion { port, inventories });
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5367,6 +5495,10 @@ struct FrameMaterialKey {
     terminal: (u64, u64),
     animation: u64,
     create_pending: Option<String>,
+    /// Rounds of the Garden's cross-project observation that changed a plot.
+    /// The other projects' rabbits are draw material this loop owns, so their
+    /// change has to reach the key that admits a rebuild.
+    garden_observations: u64,
     now: DateTime<Utc>,
 }
 
@@ -5384,6 +5516,7 @@ impl FrameMaterialKey {
             && self.terminal == other.terminal
             && self.animation == other.animation
             && self.create_pending == other.create_pending
+            && self.garden_observations == other.garden_observations
             && self.now == other.now
     }
 }
@@ -6215,6 +6348,9 @@ fn drive_workspace_controller(
     let mut browser = composition.browser;
     let mut restore_commands = Some(composition.restore_commands);
     let mut restore_connection = composition.restore_connection;
+    // Cross-project Garden observation. Its dedicated port is parked here while
+    // no round is in flight, exactly like the restore lane's.
+    let mut garden_inventory = Some(composition.garden_inventory);
     // Resident session-inventory lane. The frame loop only wakes and drains it;
     // the observation itself never runs here (#551).
     let mut session_refresh = composition.session_refresh;
@@ -6225,6 +6361,7 @@ fn drive_workspace_controller(
     // the newest is keeping all of them.
     let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
+    let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -6288,6 +6425,8 @@ fn drive_workspace_controller(
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
     let mut restore_retry = RestoreRetryState::new();
+    let mut garden_observation = GardenObservation::new();
+    let mut garden_observations = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
     let mut worktree_hint = SessionWorktreeHint::new(composition.session_worktrees);
@@ -6372,6 +6511,18 @@ fn drive_workspace_controller(
             if let RestoreJobOutcome::IntentFailed(error) = outcome {
                 surface_agent_tab_intent_error(&mut runtime, error);
             }
+        }
+        while let Ok(completion) = garden_completions.try_recv() {
+            let observed = !completion.inventories.is_empty();
+            let mut changed = false;
+            for inventory in &completion.inventories {
+                changed |= deck.apply_garden_inventory(inventory);
+            }
+            if changed {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            garden_inventory = Some(completion.port);
+            garden_observation.complete(restore_clock.elapsed(), observed);
         }
         let (terminal_height, width) = term.size()?;
         let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
@@ -6528,6 +6679,7 @@ fn drive_workspace_controller(
                 .creating_session
                 .as_ref()
                 .map(|create| create.name.clone()),
+            garden_observations,
             now,
         };
         if frame_material_key.as_ref() != Some(&next_frame_key) {
@@ -6568,6 +6720,23 @@ fn drive_workspace_controller(
                 drawn_material = Some(material);
             }
             frame_material_key = Some(next_frame_key);
+        }
+        // The other open projects' Agents, observed only while the Garden is the
+        // frame. The active project keeps its own controller's richer phases.
+        let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
+        if garden_inventory.is_some()
+            && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
+        {
+            let targets = deck.observable_workspaces();
+            if targets.is_empty() {
+                // The only open project is the one this loop already draws.
+                garden_observation.complete(restore_clock.elapsed(), true);
+            } else {
+                let port = garden_inventory
+                    .take()
+                    .expect("the Garden observation port was checked above");
+                spawn_garden_observation_job(port, targets, garden_sender.clone());
+            }
         }
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
@@ -7237,6 +7406,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .take()
                 .unwrap_or_else(|| Box::new(UnavailableAgentCommandPort)),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
+            garden_inventory: Box::new(UnavailableGardenInventoryPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics: self
@@ -7629,6 +7799,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
                 AgentCommandPortFactory::create,
             ),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
+            garden_inventory: Box::new(UnavailableGardenInventoryPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,
@@ -8231,22 +8402,22 @@ mod tests {
         AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
         ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
         DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
-        FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, Geometry, GitDiff,
-        IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, NewStep,
-        NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep, PROJECT_BAR_ROWS,
-        PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+        FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
+        Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
+        MetricsPortFactory, NewStep, NoDesktopNotifications, NoMetrics, NoMetricsFactory, OpenStep,
+        PROJECT_BAR_ROWS, PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
         SerializedPaneLaunchPort, SessionCommandPort, SessionCommandPortFactory,
         SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
         SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
         TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
         TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
         UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
-        UnavailableExternalTerminalPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
-        UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, WelcomeStep,
-        WorkspaceConfigContext, WorkspaceCreateCompletion, WorkspaceCreateEffect,
-        WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
-        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
-        adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
+        UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
+        UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigContext,
+        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
+        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
+        WorkspaceView, adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
         controller_terminal_view, copy_terminal_selection, director_organization,
         dismiss_pr_modal_on_project_bar_click, drain_session_completions,
         foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
@@ -8313,6 +8484,7 @@ mod tests {
         SessionId, TerminalId, TerminalRef, UserDecisionId, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session_lifecycle::AgentPhase;
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, Settings};
     use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
     use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -8970,7 +9142,7 @@ mod tests {
     fn garden_frame_material_uses_every_open_projects_projection() {
         let alpha = snapshot("alpha");
         let beta = snapshot("beta");
-        let deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta]).unwrap();
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
         let session = alpha.session_ids[0];
         let sessions = vec![ProjectedSession::from_record(
             session,
@@ -8979,21 +9151,26 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(alpha.workspace_id, vec![session]);
         let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
 
-        let material = home_frame_material(
-            24,
-            100,
-            &runtime,
-            "alpha",
-            &alpha.workspace.path,
-            &sessions,
-            None,
-            health(),
-            &BTreeMap::new(),
-            None,
-            None,
-            now(),
-        )
-        .with_workspace_deck_garden(&deck);
+        // One material build per frame, exactly as the loop does it: the deck
+        // projection replaces the active-only Garden rather than folding twice.
+        let build = |deck: &WorkspaceDeck| {
+            home_frame_material(
+                24,
+                100,
+                &runtime,
+                "alpha",
+                &alpha.workspace.path,
+                &sessions,
+                None,
+                health(),
+                &BTreeMap::new(),
+                None,
+                None,
+                now(),
+            )
+            .with_workspace_deck_garden(deck)
+        };
+        let material = build(&deck);
         let plots = material
             .projection
             .garden_sessions()
@@ -9002,6 +9179,51 @@ mod tests {
         assert_eq!(plots.len(), 2);
         assert_eq!(plots[0].label, "alpha / alpha-session");
         assert_eq!(plots[1].label, "beta / beta-session");
+        // Until the observation lane reaches it, the other project is drawn
+        // read-only: no rabbit is invented for a membership nobody observed.
+        assert!(!plots[1].agents_observed);
+        let read_only = render_home_material(&material);
+        assert!(read_only.iter().any(|row| row.contains("project inactive")));
+
+        // The daemon answers for whichever workspace the request names, so the
+        // other project's Agents reach its plot without a resident controller.
+        let runtime_id = AgentRuntimeId::new();
+        assert!(deck.apply_garden_inventory(&AgentInventory {
+            workspace_id: beta.workspace_id,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef {
+                    agent_runtime_id: runtime_id,
+                    terminal: TerminalRef {
+                        daemon_generation: DaemonGeneration::new(),
+                        terminal_id: TerminalId::new(),
+                        workspace_id: beta.workspace_id,
+                        session_id: Some(beta.session_ids[0]),
+                        worktree_id: WorktreeId::new(),
+                    },
+                    session_id: Some(beta.session_ids[0]),
+                },
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        }));
+        let material = build(&deck);
+        let plots = material
+            .projection
+            .garden_sessions()
+            .expect("the idle Home frame is the Garden");
+        assert_eq!(
+            plots[1]
+                .agents
+                .iter()
+                .map(|agent| (agent.runtime_id, agent.phase))
+                .collect::<Vec<_>>(),
+            vec![(runtime_id, AgentPhase::Running)]
+        );
+        let observed = render_home_material(&material);
+        assert!(!observed.iter().any(|row| row.contains("project inactive")));
+        assert!(observed.iter().any(|row| row.contains("1 run")));
     }
 
     #[test]
@@ -18125,6 +18347,117 @@ mod tests {
         );
     }
 
+    /// The Garden's cross-project lane observes only while the screen saver is
+    /// on screen, keeps one round in flight at a time, and backs off when the
+    /// daemon answers nothing. Closing the Garden re-arms it, so the next
+    /// opening shows the other projects' Agents without waiting out a cadence.
+    #[test]
+    fn garden_observation_runs_only_while_the_garden_is_open_and_backs_off_unanswered() {
+        let mut lane = super::GardenObservation::new();
+        let mut now = std::time::Duration::ZERO;
+        for _ in 0..1_000 {
+            assert!(
+                !lane.begin_if_due(false, now),
+                "a closed Garden observes nothing"
+            );
+            now += std::time::Duration::from_millis(16);
+        }
+
+        assert!(lane.begin_if_due(true, now), "opening observes immediately");
+        assert!(
+            !lane.begin_if_due(true, now),
+            "one round holds the only port"
+        );
+        lane.complete(now, true);
+        assert!(!lane.begin_if_due(true, now));
+        let just_before = (now + super::GARDEN_OBSERVATION_INTERVAL)
+            .checked_sub(std::time::Duration::from_millis(1))
+            .expect("the cadence is longer than a millisecond");
+        assert!(!lane.begin_if_due(true, just_before));
+        assert!(lane.begin_if_due(true, now + super::GARDEN_OBSERVATION_INTERVAL));
+
+        // Nothing answered: the same open Garden waits out the longer backoff.
+        lane.complete(now, false);
+        assert!(!lane.begin_if_due(true, now + super::GARDEN_OBSERVATION_INTERVAL * 4));
+        assert!(lane.begin_if_due(true, now + super::GARDEN_OBSERVATION_BACKOFF));
+
+        // A round dispatched before the Garden closed still owns the port, so
+        // closing does not admit a second one; once it lands, re-opening
+        // observes at once.
+        assert!(!lane.begin_if_due(false, now));
+        lane.complete(now, true);
+        assert!(!lane.begin_if_due(false, now));
+        assert!(lane.begin_if_due(true, now));
+    }
+
+    /// One round asks each *other* open project for its own inventory. An
+    /// answer that names a different workspace is dropped rather than drawn in
+    /// the plot that was asked about, and the port comes back either way.
+    #[test]
+    fn a_garden_round_observes_every_other_project_and_drops_a_mismatched_answer() {
+        struct FakeGardenInventory {
+            answers: BTreeMap<WorkspaceId, Result<AgentInventory, String>>,
+            asked: Arc<Mutex<Vec<WorkspaceId>>>,
+        }
+
+        impl super::GardenInventoryPort for FakeGardenInventory {
+            fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String> {
+                self.asked.lock().unwrap().push(workspace);
+                self.answers
+                    .remove(&workspace)
+                    .unwrap_or_else(|| Err("daemon unavailable".to_owned()))
+            }
+        }
+
+        // An embedder that supplies no Garden lane keeps every other project's
+        // plot read-only instead of failing the frame.
+        assert!(
+            UnavailableGardenInventoryPort
+                .inventory(WorkspaceId::new())
+                .is_err()
+        );
+
+        let observed = WorkspaceId::new();
+        let mismatched = WorkspaceId::new();
+        let unavailable = WorkspaceId::new();
+        let empty_inventory = |workspace| AgentInventory {
+            workspace_id: workspace,
+            runtimes: Vec::new(),
+            resumable: Vec::new(),
+        };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let port = FakeGardenInventory {
+            answers: [
+                (observed, Ok(empty_inventory(observed))),
+                // The daemon answered about someone else: that is not evidence
+                // about the project this round asked for.
+                (mismatched, Ok(empty_inventory(WorkspaceId::new()))),
+            ]
+            .into_iter()
+            .collect(),
+            asked: Arc::clone(&asked),
+        };
+        let (sender, completions) = std::sync::mpsc::channel();
+        // More projects than one round observes, so the bound is exercised too.
+        let mut targets = vec![observed, mismatched, unavailable];
+        targets.extend((0..super::MAX_OBSERVED_PROJECTS).map(|_| WorkspaceId::new()));
+
+        super::spawn_garden_observation_job(Box::new(port), targets, sender);
+        let completion = completions
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the round returns its port");
+
+        assert_eq!(
+            completion
+                .inventories
+                .iter()
+                .map(|inventory| inventory.workspace_id)
+                .collect::<Vec<_>>(),
+            vec![observed]
+        );
+        assert_eq!(asked.lock().unwrap().len(), super::MAX_OBSERVED_PROJECTS);
+    }
+
     #[test]
     fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
         let mut retry = super::RestoreRetryState::new();
@@ -25543,6 +25876,12 @@ mod tests {
         }
     }
 
+    impl super::GardenInventoryPort for CountedPort {
+        fn inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentInventory, String> {
+            Err("Agent inventory is unavailable".to_owned())
+        }
+    }
+
     impl BackendDecisionPort for CountedPort {
         fn refresh(&mut self, _workspace: WorkspaceId, _completions: Completions) {}
 
@@ -25565,7 +25904,7 @@ mod tests {
     /// `blocked_restore_inventory_never_blocks_render_or_quit`). Its drop
     /// therefore happens on that worker and is not ordered against the next
     /// workspace's composition.
-    const RESIDENT_PORTS_PER_COMPOSITION: usize = 11;
+    const RESIDENT_PORTS_PER_COMPOSITION: usize = 12;
 
     /// A production-shaped factory whose every port counts its own drop, and
     /// which records how many ports had been dropped when each workspace's
@@ -25613,6 +25952,9 @@ mod tests {
                 restore_commands: Box::new(UnavailableAgentCommandPort),
                 session_worktrees: Box::new(self.port()),
                 restore_connection: Box::new(self.port()),
+                // Owned by the loop unless a Garden round is in flight, which
+                // needs the screen saver to be up: these entries never open it.
+                garden_inventory: Box::new(self.port()),
                 agent_tab_intents: Box::new(self.port()),
                 external_terminal: Box::new(self.port()),
                 metrics: Box::new(self.port()),
