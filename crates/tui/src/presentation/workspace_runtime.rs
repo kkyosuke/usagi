@@ -1929,6 +1929,9 @@ mod tests {
             runtime.state().route(),
             Route::Home(HomeMode::Closeup)
         ));
+        // Modal-focused tests opt in explicitly; entering Closeup itself leaves
+        // the empty pane visible.
+        let _ = runtime.handle_key(Key::Enter);
         runtime
     }
 
@@ -4124,10 +4127,10 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
-        // Entering Closeup with an empty pane shows the action launcher.
+        // The helper explicitly opens the action modal over the empty Closeup.
         assert!(
             joined_frame(&runtime).contains("Closeup:"),
-            "the launcher is shown while the pane is empty"
+            "the explicitly opened modal is shown while the pane is empty"
         );
 
         let _ = submit_agent(&mut runtime);
@@ -4144,23 +4147,20 @@ mod tests {
     }
 
     #[test]
-    fn failed_launch_restores_the_action_launcher() {
+    fn failed_launch_restores_the_empty_closeup() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
         let operation = submit_agent(&mut runtime);
         assert!(!joined_frame(&runtime).contains("Closeup:"));
-        // A failed launch drops the pending tab, so the launcher returns for the
-        // now-empty pane.
+        // A failed launch drops the pending tab and reveals the empty pane.
         let _ = runtime.fail_pane(Target::Session(session), operation, "boom".to_owned());
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(
-            joined_frame(&runtime).contains("Closeup:"),
-            "the launcher returns once the pane is empty again"
+            joined_frame(&runtime).contains("a: agent / t: terminal / Enter: actions"),
+            "the empty Closeup returns once the pane is empty again"
         );
-        // The safe failure reason travels with the reopened launcher instead of
-        // being silently dropped: a bare bounce back to Closeup is
-        // indistinguishable from Enter doing nothing.
+        // The safe failure reason remains visible on the empty Closeup.
         assert_eq!(
             runtime
                 .state()
