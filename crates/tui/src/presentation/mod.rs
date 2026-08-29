@@ -6293,7 +6293,7 @@ fn run_workspace_loading<T: Send>(
         let worker = scope.spawn(operation);
         let mut frame = 0_usize;
         let mut cancelled = false;
-        while !worker.is_finished() {
+        loop {
             let (height, width) = term.size()?;
             let status = if cancelled { "Cancelling…" } else { label };
             term.draw(&widgets::loading::loading_screen(
@@ -6303,6 +6303,12 @@ fn run_workspace_loading<T: Send>(
                 frame / 3,
                 status,
             ))?;
+            // Even an immediately completed operation gets one visible frame.
+            // Without this fence, fast settings writes skipped feedback
+            // entirely and made the Enter key appear to do nothing.
+            if worker.is_finished() {
+                break;
+            }
             if cancellable
                 && matches!(
                     term.wait_for_key(std::time::Duration::from_millis(80))?,
@@ -24118,6 +24124,9 @@ mod tests {
         assert_eq!(settings.saves, 1);
         assert_eq!(settings.environment_saves, 1);
         assert_eq!(environment.settings().env["A"], "1");
+        let painted = term.frames.iter().flatten().cloned().collect::<String>();
+        assert!(painted.contains("Saving settings…"));
+        assert!(painted.contains("Saving environment…"));
     }
 
     #[test]
