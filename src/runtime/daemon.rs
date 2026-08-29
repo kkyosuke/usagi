@@ -7132,7 +7132,8 @@ fn session_response_envelope(
             if let Some(kind) = match action {
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
-                SessionAction::List
+                SessionAction::Clean
+                | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
                 | SessionAction::Setup
@@ -7235,6 +7236,161 @@ fn best_effort_merged_pr_head(
         .ok()
         .and_then(|mut inventory| inventory.snapshot(session_id).ok());
     exact_merged_pr_head(snapshot, branch_head)
+}
+
+/// Reconcile the daemon-owned lifecycle set with Git's managed namespace.
+///
+/// This runs inside the daemon that already owns the workspace fence. Every
+/// deletion re-reads lifecycle state immediately before touching Git, so a
+/// resource that became linked after inventory cannot be removed.
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
+#[allow(clippy::too_many_lines)]
+fn clean_orphan_session_resources(
+    bound: &ConnectionWorkspace,
+    apply: bool,
+    force: bool,
+) -> Result<serde_json::Value, SessionRuntimeError> {
+    use usagi_core::infrastructure::git::{delete_branch, remove_worktree};
+    use usagi_core::usecase::clean::{
+        CleanCandidate, CleanInventory, DaemonWorkspaceData, observe_repository, plan,
+    };
+
+    let lifecycle = || -> Result<(PathBuf, BTreeSet<String>), SessionRuntimeError> {
+        let sessions = bound
+            .sessions()
+            .lock()
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        let root = sessions.repository_root().to_path_buf();
+        let snapshot = sessions
+            .snapshot()
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        let items = snapshot
+            .get("sessions")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(SessionRuntimeError::Storage)?;
+        let names = items
+            .iter()
+            .map(|item| {
+                item.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or(SessionRuntimeError::Storage)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((root, names))
+    };
+    let (root, names) = lifecycle()?;
+    let repository = observe_repository(&SystemGit, &root)
+        .map_err(|error| {
+            SessionRuntimeError::DurableFailure(format!(
+                "could not inspect orphan session resources: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            SessionRuntimeError::DurableFailure(
+                "could not inspect orphan session resources: workspace is not a Git repository"
+                    .into(),
+            )
+        })?;
+    let candidates = plan(&CleanInventory {
+        daemon_data: vec![DaemonWorkspaceData {
+            root: root.clone(),
+            dir: PathBuf::new(),
+            root_exists: true,
+            sessions: Some(names),
+        }],
+        repositories: vec![repository],
+        ..CleanInventory::default()
+    });
+    let git_candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            matches!(
+                candidate,
+                CleanCandidate::Worktree { .. } | CleanCandidate::Branch { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let described = git_candidates
+        .iter()
+        .map(|candidate| match candidate {
+            CleanCandidate::Worktree {
+                path,
+                requires_force,
+                ..
+            } => serde_json::json!({
+                "kind": "worktree",
+                "name": path.file_name().and_then(|name| name.to_str()),
+                "path": path,
+                "protected": requires_force,
+            }),
+            CleanCandidate::Branch {
+                name,
+                requires_force,
+                ..
+            } => serde_json::json!({
+                "kind": "branch",
+                "name": name,
+                "protected": requires_force,
+            }),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>();
+    if !apply {
+        return Ok(serde_json::json!({
+            "mode": "dry_run",
+            "candidates": described,
+            "removed": 0,
+            "protected": git_candidates.iter().filter(|item| item.requires_force()).count(),
+        }));
+    }
+
+    let mut removed = 0usize;
+    let mut protected = 0usize;
+    for candidate in &git_candidates {
+        if candidate.requires_force() && !force {
+            protected += 1;
+            continue;
+        }
+        let name = match candidate {
+            CleanCandidate::Worktree { path, .. } => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(SessionRuntimeError::InvalidRequest)?,
+            CleanCandidate::Branch { name, .. } => name
+                .strip_prefix("usagi/")
+                .ok_or(SessionRuntimeError::InvalidRequest)?,
+            _ => unreachable!(),
+        };
+        let (_, current) = lifecycle()?;
+        if current.contains(name) {
+            return Err(SessionRuntimeError::DurableFailure(format!(
+                "orphan cleanup stopped because session \"{name}\" became active"
+            )));
+        }
+        let result = match candidate {
+            CleanCandidate::Worktree { path, .. } => {
+                remove_worktree(&SystemGit, &root, path, candidate.requires_force() && force)
+            }
+            CleanCandidate::Branch { name, .. } => {
+                delete_branch(&SystemGit, &root, name, candidate.requires_force() && force)
+            }
+            _ => unreachable!(),
+        };
+        result.map_err(|error| {
+            SessionRuntimeError::DurableFailure(format!(
+                "could not clean orphan session resource \"{name}\": {error}"
+            ))
+        })?;
+        removed += 1;
+    }
+    Ok(serde_json::json!({
+        "mode": "apply",
+        "candidates": described,
+        "removed": removed,
+        "protected": protected,
+    }))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -7710,6 +7866,19 @@ fn dispatch_session_action(
                 payload,
                 merged_head_oid,
             )
+        }
+        SessionAction::Clean => {
+            let flag = |name| match payload.get(name) {
+                None => Ok(false),
+                Some(serde_json::Value::Bool(value)) => Ok(*value),
+                Some(_) => Err(SessionRuntimeError::InvalidRequest),
+            };
+            let apply = flag("apply")?;
+            let force = flag("force")?;
+            if force && !apply {
+                return Err(SessionRuntimeError::InvalidRequest);
+            }
+            reply(clean_orphan_session_resources(bound, apply, force)?)
         }
         SessionAction::Setup => bound
             .sessions()
@@ -12660,10 +12829,37 @@ fn connect_deadline_client(
 /// write, response read) and `reconnect_attempts` bounds retries gated by the
 /// request's retry eligibility. CLI, MCP, and the TUI's per-request calls use
 /// this so a hung daemon cannot block a surface indefinitely.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=mcp_e2e
 pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+    policy_client_for(policy, client_workspace())
+}
+
+/// Connects a resilient client that declares the workspace selected by a TUI
+/// surface, independently of the process-wide opened workspace.
+///
+/// # Errors
+///
+/// Returns an error when `root` cannot be resolved to a canonical workspace or
+/// when the daemon cannot be bootstrapped and connected within `policy`.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
+pub(crate) fn policy_client_for_selected_workspace(
+    policy: ClientPolicy,
+    root: &Path,
+) -> Result<impl DaemonClient, ClientError> {
+    let root = paths::canonical_workspace_root(root)
+        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    policy_client_for(
+        policy,
+        ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(root),
+        },
+    )
+}
+
+fn policy_client_for(
+    policy: ClientPolicy,
+    workspace: ClientWorkspace,
+) -> Result<impl DaemonClient, ClientError> {
     let clock = SystemClock::new();
-    let workspace = client_workspace();
     let initial = bootstrap_client(&workspace, |data_dir, build| {
         connect_deadline_client(
             data_dir,

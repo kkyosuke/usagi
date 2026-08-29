@@ -119,6 +119,7 @@ worktree を cwd としてプラットフォーム標準の terminal を別ウ�
 Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した
 session 名だけに作用し、現在選択中の row や root を暗黙の対象にしない。
+Overview の `clean [--apply [--force]]` は daemon lifecycle に存在しない managed worktree / branch を daemon 内で照合する。引数なしは dry-run、`--apply` は安全な候補の削除、`--force` は dirty / unmerged 候補の明示的な削除許可である。
 Overview の `daemon` は daemon health、process metrics、session 状態別件数、Agent concurrency をまとめた
 読み取り専用 modal を開く。daemon の Agent runtime 一覧も scope、状態、短縮 ID とともに表示し、live Agent は対象 tab の
 `Ctrl-D` で終了する。表示内容と未報告時の縮退は [TUI の Overview と modal](03-tui.md#overview-と-modal) を正本とする。

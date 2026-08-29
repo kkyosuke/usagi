@@ -838,6 +838,7 @@ command の subcommand picker を開き、`←` は閉じる。`Prompt` は入�
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
+`clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch を dry-run で数え、`clean --apply` は merged branch と clean worktree だけを削除する。dirty worktree と unmerged branch は `clean --apply --force` の二重の明示がある場合だけ削除する。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった resource には作用しない。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
