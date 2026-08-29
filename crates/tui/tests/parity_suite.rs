@@ -324,7 +324,7 @@ fn quit_phase_error_redaction() {
     let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
     assert!(state.ctrl_c_grace());
     assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-    assert!(state.ctrl_c_grace());
+    assert!(!state.ctrl_c_grace());
 
     let safe = SafeError {
         message: SafeMessage::new("terminal unavailable"),
@@ -434,7 +434,7 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     let session = SessionId::new();
     let mut state = AppState::home(workspace, vec![session]);
 
-    // 1/3: Enter reaches Closeup and a tab-less Closeup owns the action modal.
+    // 1/3: Enter reaches an empty Closeup without opening the action modal.
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(
         state.route(),
@@ -442,30 +442,19 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
             usagi_tui::usecase::application::controller::HomeMode::Closeup
         )
     );
-    assert_eq!(state.overlay(), Some(Overlay::Closeup));
+    assert_eq!(state.overlay(), None);
     let projection = HomeProjection::from_state(
         &state,
         "fixture",
         Path::new("/work/root"),
         &[session_projection(session, "alpha")],
     );
-    assert!(
-        render_home(24, 80, &projection)
-            .join("\n")
-            .contains("Closeup: alpha")
-    );
-    // Escape closes only the tab-less action modal and reveals Closeup.
-    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-    assert_eq!(
-        state.route(),
-        usagi_tui::usecase::application::controller::Route::Home(
-            usagi_tui::usecase::application::controller::HomeMode::Closeup
-        )
-    );
-    assert_eq!(state.overlay(), None);
+    let frame = render_home(24, 80, &projection).join("\n");
+    assert!(!frame.contains("Closeup: alpha"));
+    assert!(frame.contains("a: agent / t: terminal / Enter: actions"));
 
-    // Re-open the action modal to exercise the live pane surface.
-    let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+    // Enter explicitly opens the tab-less action modal.
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
     // 4: once a pane is available the tab surface is frontmost. The runtime
