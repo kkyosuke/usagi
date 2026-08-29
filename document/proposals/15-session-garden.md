@@ -226,6 +226,36 @@ phase と最新 coherent Agent inventory を結合して各 agent の phase を�
 tab が無いうさぎを押せてしまう。tab strip と同じ observation を権威にすることで、庭の羽数と開ける tab が
 一致する（正本は [3. TUI#区画とうさぎ](../03-tui.md#区画とうさぎ)）。
 
+## inactive project のうさぎを daemon から観測する
+
+複数 project を開いたときの Garden は、当初 active project にしかうさぎを描かなかった。inactive project は
+session / lifecycle の cache だけを持ち、Agent membership は「観測していないので描かない」としていたためである。
+これは安全側の判断としては正しいが、Garden の目的（実行状態を一覧表より速く把握する）を開いている project の
+数だけ薄めてしまう。庭の半分が常に空区画なら、庭を見る理由が無い。
+
+観測を足す方法は 2 つあった。
+
+| 案 | 内容 | 採否 |
+|---|---|---|
+| inactive controller を resident にする | project ごとに workspace controller と lane 一式を常駐させる | **不採用**。tab の数だけ terminal 購読・pane 復元・PR 観測が増え、Garden という screen saver のために process の常時コストを倍以上にする |
+| workspace を名指しした read-only 観測 | Garden が前面の間だけ `AgentInventory { workspace }` を project ごとに読む | **採用** |
+
+採用案が成立するのは、`AgentInventory` が **connection の bound tenant ではなく request が名指しした
+`WorkspaceId`** を daemon 全体の Agent record から filter して答えるからである。daemon は開いている project を
+tenant として保持するので、既存の client から他 project の membership をそのまま読める。IPC protocol も
+daemon 側の record も増やさない。
+
+観測を Garden の表示中に限るのは、他の面が他 project の Agent を描かないからである。閉じた Garden の裏で
+読み続ける daemon traffic は誰も見ない。cold start もしない: 観測 lane が daemon を起こせるようにすると、
+screen saver が bootstrap lock と lifecycle subprocess を握ることになる。daemon が居なければ、その project は
+`project inactive` のままでよい。
+
+**lifecycle は cache のままにする**。inventory は Agent の membership であって session の一覧ではないので、
+これを lifecycle の live 性の証拠として使うと、cache が `creating` のまま止まった区画を「今まさに作成中」の
+姿で animation させてしまう。そこで `Available` の cached lifecycle だけをうさぎの土台にし、遷移中・失敗の
+cached lifecycle は従来どおり静止した `cached · …` に留める（正本は
+[3. TUI#inactive project の Agent 観測](../03-tui.md#inactive-project-の-agent-観測)）。
+
 ## 実装履歴と受け入れ条件
 
 1. 固定 snapshot から ANSI-safe / width-safe な Garden frame と hitbox を返す widget / unit test を追加する。
@@ -242,7 +272,10 @@ tab が無いうさぎを押せてしまう。tab strip と同じ observation �
 8. `Failed` の safe failure summary を追加する。session の選択状態は Garden では装飾しない。
 9. 複数 project の session を tab 順に束ね、容量超過は Garden 内の横スクロールで全件へ到達可能にする。
 
-1〜9 はすべて実装済みで、うさぎは agent 単位である。
+10. inactive project の Agent membership を Garden 表示中だけ daemon から観測し、cached lifecycle が
+    `Available` の区画へうさぎを描く。
+
+1〜10 はすべて実装済みで、うさぎは agent 単位である。
 
 受け入れ条件は次のとおりである。
 
@@ -259,7 +292,9 @@ tab が無いうさぎを押せてしまう。tab strip と同じ observation �
 - 5 分未満では Garden を開かず、5 分到達時に eligible な Home だけで開く。
 - backend event と terminal output は idle deadline を延長せず、user input と resize は延長する。
 - wake-up の最初の入力は背面へ伝播せず、うさぎ click だけが対応する既存 Closeup へ遷移する。
-- Garden から daemon command を直接発行しない。
+- Garden から daemon command を直接発行しない。observation lane は read-only で、daemon を起動しない。
+- 開いているどの project の session も、その project の Agent を観測できていればうさぎになり、観測できて
+  いなければ推測されない。
 - selected session が snapshot 更新で消えた場合は、既存 reconciliation と同じ surviving session へ着地する。
 
 ## 採用しない案

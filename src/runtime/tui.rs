@@ -956,6 +956,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                     .with_restore_connection(restore_publisher),
             ),
             restore_connection: Box::new(restore_connection),
+            garden_inventory: Box::new(DaemonGardenInventoryPort),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort {
                 reaper: self.helper_reaper.clone(),
@@ -1893,6 +1894,45 @@ fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
     DaemonRequest::AgentInventory { workspace }
 }
 
+/// Read one workspace's safe Agent inventory over a per-request daemon client.
+///
+/// The workspace is the request's own argument rather than the connection's
+/// binding: a daemon answers it from the records of whichever workspace was
+/// named, which is what lets the Garden observe the *other* open projects
+/// without a resident controller for each of them.
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
+fn fetch_agent_inventory(
+    workspace: WorkspaceId,
+) -> Result<usagi_core::domain::agent::AgentInventory, String> {
+    let mut client =
+        crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+    match client
+        .request(agent_inventory_request(workspace))
+        .map_err(|_| "Agent resume inventory is unavailable".to_owned())?
+    {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => serde_json::from_value(body)
+            .map_err(|_| "daemon returned an invalid Agent inventory".to_owned()),
+    }
+}
+
+/// The Garden's read-only lane over the other open projects.
+///
+/// It holds no connection of its own between rounds: one round is a handful of
+/// per-request clients, which is why an observation that finds no daemon costs
+/// nothing but the failed connect it already backs off from.
+struct DaemonGardenInventoryPort;
+
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=cli_tui_pty
+impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
+    fn inventory(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
+        fetch_agent_inventory(workspace)
+    }
+}
+
 fn exact_agent_resume_request(
     operation_id: usagi_core::domain::id::OperationId,
     target: usagi_core::domain::agent::AgentResumeTarget,
@@ -2093,18 +2133,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-        let mut client =
-            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
-                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        match client
-            .request(agent_inventory_request(workspace))
-            .map_err(|_| "Agent resume inventory is unavailable".to_owned())?
-        {
-            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                serde_json::from_value(body)
-                    .map_err(|_| "daemon returned an invalid Agent inventory".to_owned())
-            }
-        }
+        fetch_agent_inventory(workspace)
     }
 
     fn resume_exact(
