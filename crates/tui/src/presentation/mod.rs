@@ -6687,16 +6687,20 @@ fn drive_workspace_controller(
         }
         // The other open projects' Agents, observed only while the Garden is the
         // frame. The active project keeps its own controller's richer phases.
-        let garden_targets = deck.observable_workspaces();
         let garden_open = runtime.state().overlay() == Some(Overlay::Garden);
         if garden_inventory.is_some()
-            && !garden_targets.is_empty()
             && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
         {
-            let port = garden_inventory
-                .take()
-                .expect("the Garden observation port was checked above");
-            spawn_garden_observation_job(port, garden_targets, garden_sender.clone());
+            let targets = deck.observable_workspaces();
+            if targets.is_empty() {
+                // The only open project is the one this loop already draws.
+                garden_observation.complete(restore_clock.elapsed(), true);
+            } else {
+                let port = garden_inventory
+                    .take()
+                    .expect("the Garden observation port was checked above");
+                spawn_garden_observation_job(port, targets, garden_sender.clone());
+            }
         }
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands

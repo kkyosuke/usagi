@@ -1,7 +1,7 @@
 ---
 number: 725
 title: fix(tui): Garden で inactive project のうさぎも描く
-status: todo
+status: done
 priority: medium
 labels: [v2, tui, garden]
 dependson: []
