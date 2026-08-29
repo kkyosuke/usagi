@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use usagi_core::domain::settings::{
-    DefaultModel, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
+    DefaultModel, EnvBindings, ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, Theme,
     format_env_bindings,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -551,18 +551,34 @@ impl Config {
 
     /// Persist only the environment owned by the modal's scope.
     pub fn save_environment(&mut self, port: &mut dyn SettingsPort) -> bool {
-        let Some(editor) = self.environment_editor.as_ref() else {
+        let Some((scope, bindings)) = self.environment_save_request() else {
             return false;
         };
+        let result = port.save_environment(scope, &bindings);
+        self.finish_environment_save(bindings, result)
+    }
+
+    /// Validate and snapshot the environment draft for an off-thread write.
+    pub fn environment_save_request(&mut self) -> Option<(SettingsScope, EnvBindings)> {
+        let editor = self.environment_editor.as_ref()?;
         let scope = self.scope;
         let bindings = match editor.parse() {
             Ok(bindings) => bindings,
             Err(error) => {
                 self.environment_error = Some(error);
-                return false;
+                return None;
             }
         };
-        match port.save_environment(scope, &bindings) {
+        Some((scope, bindings))
+    }
+
+    /// Settle an environment write performed by the caller.
+    pub fn finish_environment_save(
+        &mut self,
+        bindings: EnvBindings,
+        result: std::io::Result<()>,
+    ) -> bool {
+        match result {
             Ok(()) => {
                 self.settings.saved.env.clone_from(&bindings);
                 self.settings.draft.env = bindings;
@@ -614,13 +630,25 @@ impl Config {
     /// back to `Idle`, keeps the draft dirty, and surfaces a safe error so the
     /// user can retry. Returns false without touching the port when not dirty.
     pub fn commit_save(&mut self, port: &mut dyn SettingsPort) -> bool {
-        if !self.is_dirty() {
+        let Some((scope, draft)) = self.save_request() else {
             self.save_phase = SavePhase::Idle;
             return false;
-        }
-        let scope = self.scope;
-        let draft = self.current().draft.clone();
-        match port.save(scope, &draft) {
+        };
+        let result = port.save(scope, &draft);
+        self.finish_save(draft, result)
+    }
+
+    /// Snapshot the pending settings write so the caller may persist it on a
+    /// worker without borrowing this render model.
+    #[must_use]
+    pub fn save_request(&self) -> Option<(SettingsScope, Settings)> {
+        self.is_dirty()
+            .then(|| (self.scope, self.current().draft.clone()))
+    }
+
+    /// Settle a settings write performed by the caller.
+    pub fn finish_save(&mut self, draft: Settings, result: std::io::Result<()>) -> bool {
+        match result {
             Ok(()) => {
                 self.current_mut().saved = draft;
                 self.save_phase = SavePhase::Done;

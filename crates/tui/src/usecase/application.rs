@@ -137,7 +137,14 @@ impl WorkspaceSnapshot {
 ///
 /// path の検証・登録・最終利用時刻の更新・state 読み込みは実 IO を持つ合成側が実装する。
 /// Open 一覧と Recent はともにこの 1 つの port を経由する。
-pub trait WorkspaceLoader {
+pub trait WorkspaceLoader: Send {
+    /// Whether potentially slow open/refresh calls should be moved to a worker
+    /// while the terminal keeps painting. In-memory test adapters may retain the
+    /// synchronous default.
+    fn background_operations(&self) -> bool {
+        false
+    }
+
     /// `path` の workspace を開き、画面描画用 snapshot を返す。
     ///
     /// # Errors

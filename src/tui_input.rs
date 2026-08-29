@@ -111,6 +111,13 @@ pub struct EventPump<S, R> {
     backend: R,
     tick_interval: Duration,
     next_tick_at: Duration,
+    pending_source: Option<Event>,
+}
+
+enum TerminalPoll<B> {
+    Empty,
+    Ignored,
+    Event(RuntimeEvent<B>),
 }
 
 impl<S, R> EventPump<S, R>
@@ -126,6 +133,7 @@ where
             backend,
             tick_interval,
             next_tick_at: now.saturating_add(tick_interval),
+            pending_source: None,
         }
     }
 
@@ -136,9 +144,11 @@ where
     /// して terminal event のみを返す。backend はこの待機後の次 cycle で観測する。
     #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=source_poll_and_read_errors_are_projected_from_each_pump_phase
     pub fn next(&mut self, now: Duration) -> io::Result<RuntimeEvent<R::Event>> {
-        while let Some(event) = poll_source(&mut self.source, Duration::ZERO)? {
-            if let Some(event) = adapt_event(event) {
-                return Ok(event);
+        loop {
+            match self.poll_terminal(Duration::ZERO)? {
+                TerminalPoll::Event(event) => return Ok(event),
+                TerminalPoll::Ignored => {}
+                TerminalPoll::Empty => break,
             }
         }
         if let Some(event) = self.backend.try_recv() {
@@ -151,11 +161,10 @@ where
 
         let timeout = self.next_tick_at.saturating_sub(now);
         loop {
-            if let Some(event) = poll_source(&mut self.source, timeout)? {
-                if let Some(event) = adapt_event(event) {
-                    return Ok(event);
-                }
-                continue;
+            match self.poll_terminal(timeout)? {
+                TerminalPoll::Event(event) => return Ok(event),
+                TerminalPoll::Ignored => continue,
+                TerminalPoll::Empty => {}
             }
             advance_tick(
                 &mut self.next_tick_at,
@@ -164,6 +173,52 @@ where
             );
             return Ok(RuntimeEvent::Tick);
         }
+    }
+
+    /// Coalesce a ready burst of same-direction wheel events at the same cell
+    /// into one semantic input. A different event is retained for the next call,
+    /// preserving FIFO ordering while allowing one repaint per burst.
+    fn poll_terminal(&mut self, timeout: Duration) -> io::Result<TerminalPoll<R::Event>> {
+        let first = if let Some(event) = self.pending_source.take() {
+            Some(event)
+        } else {
+            poll_source(&mut self.source, timeout)?
+        };
+        let Some(first) = first else {
+            return Ok(TerminalPoll::Empty);
+        };
+        let (up, column, row) = match &first {
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+                (true, mouse.column, mouse.row)
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
+                (false, mouse.column, mouse.row)
+            }
+            _ => {
+                return Ok(adapt_event(first).map_or(TerminalPoll::Ignored, TerminalPoll::Event));
+            }
+        };
+        let mut steps = 1_u16;
+        while let Some(event) = poll_source(&mut self.source, Duration::ZERO)? {
+            let same = matches!(
+                &event,
+                Event::Mouse(mouse)
+                    if (up && mouse.kind == MouseEventKind::ScrollUp)
+                        || (!up && mouse.kind == MouseEventKind::ScrollDown)
+            ) && matches!(&event, Event::Mouse(mouse) if mouse.column == column && mouse.row == row);
+            if same {
+                steps = steps.saturating_add(1);
+            } else {
+                self.pending_source = Some(event);
+                break;
+            }
+        }
+        let input = if up {
+            LiveInput::WheelUp { column, row, steps }
+        } else {
+            LiveInput::WheelDown { column, row, steps }
+        };
+        Ok(TerminalPoll::Event(RuntimeEvent::Input(input)))
     }
 }
 
@@ -201,10 +256,12 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
             MouseEventKind::ScrollUp => Some(RuntimeEvent::Input(LiveInput::WheelUp {
                 column: mouse.column,
                 row: mouse.row,
+                steps: 1,
             })),
             MouseEventKind::ScrollDown => Some(RuntimeEvent::Input(LiveInput::WheelDown {
                 column: mouse.column,
                 row: mouse.row,
+                steps: 1,
             })),
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
@@ -459,16 +516,51 @@ mod tests {
             adapt_event::<()>(Event::Mouse(mouse(MouseEventKind::ScrollUp))),
             Some(RuntimeEvent::Input(LiveInput::WheelUp {
                 column: 41,
-                row: 12
+                row: 12,
+                steps: 1,
             }))
         );
         assert_eq!(
             adapt_event::<()>(Event::Mouse(mouse(MouseEventKind::ScrollDown))),
             Some(RuntimeEvent::Input(LiveInput::WheelDown {
                 column: 41,
-                row: 12
+                row: 12,
+                steps: 1,
             }))
         );
+    }
+
+    #[test]
+    fn event_pump_coalesces_a_ready_wheel_burst_and_preserves_the_next_input() {
+        let wheel = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 7,
+                row: 9,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let source = FakeSource::with([
+            wheel(MouseEventKind::ScrollUp),
+            wheel(MouseEventKind::ScrollUp),
+            wheel(MouseEventKind::ScrollUp),
+            key,
+        ]);
+        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelUp {
+                column: 7,
+                row: 9,
+                steps: 3,
+            })
+        );
+        assert!(matches!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Key(_))
+        ));
     }
 
     #[test]

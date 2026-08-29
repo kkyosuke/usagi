@@ -18,7 +18,13 @@ pub enum SettingsScope {
 ///
 /// Implementations own scope-to-storage resolution. Callers retain their draft
 /// when [`save`](Self::save) fails so an error remains safe to retry.
-pub trait SettingsPort {
+pub trait SettingsPort: Send {
+    /// Whether writes should be moved to a worker while an interactive client
+    /// keeps painting. In-memory adapters retain the synchronous default.
+    fn background_operations(&self) -> bool {
+        false
+    }
+
     /// Select the workspace identity used for subsequent workspace-scope reads
     /// and writes. Stateless embedders may keep the default no-op.
     ///
