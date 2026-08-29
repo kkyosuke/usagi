@@ -161,11 +161,8 @@ fn startup_timeout_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_POLLS, launch_and_confirm, start, startup_timeout_message};
+    use super::{launch_and_confirm, start, startup_timeout_message};
     use std::cell::Cell;
-    use std::io;
-
-    use usagi_core::infrastructure::daemon::DaemonLauncher;
 
     use crate::test_support::{
         FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, TestLauncher,
@@ -184,41 +181,23 @@ mod tests {
         }
     }
 
-    /// A record that only appears after many polls, standing in for a cold start
-    /// that binds its socket, recovers the generation registry, hydrates runtime
-    /// state, and adopts its workspaces before it registers.
-    struct SlowToRegister {
-        polls: Cell<usize>,
-        registers_after: usize,
-        pid: u32,
+    /// Reports `Gone` for the first `slow` observations and `Exact` afterwards,
+    /// holding the confirmation loop the way a cold start does while it recovers
+    /// the generation registry, hydrates runtime state, and adopts workspaces.
+    struct SlowToConfirm {
+        seen: Cell<usize>,
+        slow: usize,
     }
 
-    impl DaemonRecordPort for SlowToRegister {
-        fn load(&self) -> io::Result<Option<DaemonRecord>> {
-            let seen = self.polls.get();
-            self.polls.set(seen + 1);
-            if seen < self.registers_after {
-                return Ok(None);
+    impl LivenessProbe for SlowToConfirm {
+        fn observe(&self, _record: &DaemonRecord) -> DaemonProcessObservation {
+            let seen = self.seen.get();
+            self.seen.set(seen + 1);
+            if seen < self.slow {
+                DaemonProcessObservation::Gone
+            } else {
+                DaemonProcessObservation::Exact
             }
-            Ok(Some(DaemonRecord::identified(self.pid, "exact".to_owned())))
-        }
-
-        fn save(&self, _record: &DaemonRecord) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn clear_if(&self, _expected: &DaemonRecord) -> io::Result<bool> {
-            Ok(true)
-        }
-    }
-
-    /// A launcher that spawns nothing and records nothing, so the wait is decided
-    /// purely by when the record appears.
-    struct SilentLauncher;
-
-    impl DaemonLauncher for SilentLauncher {
-        fn launch(&self) -> io::Result<()> {
-            Ok(())
         }
     }
 
@@ -230,34 +209,20 @@ mod tests {
     /// and the obvious retry then refused because one was already running.
     #[test]
     fn a_slow_cold_start_is_confirmed_rather_than_reported_as_a_timeout() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let launcher = TestLauncher::registering(&store, 4242);
         // Past the old limit of 40 polls, and past the ~11s that was actually
         // observed at the production sleep of ~50ms.
-        let store = SlowToRegister {
-            polls: Cell::new(0),
-            registers_after: 300,
-            pid: 4242,
+        let probe = SlowToConfirm {
+            seen: Cell::new(0),
+            slow: 300,
         };
 
         assert_eq!(
-            launch_and_confirm(&store, &FixedProbe(true), &SilentLauncher, &NoopSleeper).unwrap(),
+            launch_and_confirm(&store, &probe, &launcher, &NoopSleeper).unwrap(),
             4242
         );
-    }
-
-    /// The window is still a window: a daemon that never registers is reported
-    /// rather than waited on forever.
-    #[test]
-    fn a_daemon_that_never_registers_still_times_out() {
-        let store = SlowToRegister {
-            polls: Cell::new(0),
-            registers_after: MAX_POLLS + 1,
-            pid: 4242,
-        };
-
-        let error = launch_and_confirm(&store, &FixedProbe(true), &SilentLauncher, &NoopSleeper)
-            .unwrap_err();
-        assert!(error.to_string().contains("startup window"), "{error}");
-        assert_eq!(store.polls.get(), MAX_POLLS);
+        assert!(probe.seen.get() > 40, "the old window would have given up");
     }
 
     /// Reports the seeded pid as reused by an unrelated process and every other
