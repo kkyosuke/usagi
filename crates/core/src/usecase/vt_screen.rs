@@ -342,6 +342,34 @@ impl VtScreen {
         }
     }
 
+    /// Clears the primary screen and its retained history for an explicit
+    /// user-facing terminal reset, placing the cursor at the first cell.
+    /// Full-screen alternate buffers are left to the application that owns
+    /// them.
+    pub fn clear_primary_for_user(&mut self) -> bool {
+        if self.primary_screen.is_some() {
+            return false;
+        }
+        let dropped = self.scrollback.len();
+        self.scrollback.clear();
+        self.scrollback_origin = self
+            .scrollback_origin
+            .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
+        for row in &mut self.grid {
+            row.fill(Cell::blank());
+        }
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.phase = Phase::Ground;
+        self.params.clear();
+        self.utf8_pending.clear();
+        self.utf8_needed = 0;
+        self.saved_cursor = None;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows - 1;
+        true
+    }
+
     /// Changes the visible width without replaying historical control bytes.
     ///
     /// Historical PTY output can contain cursor moves addressed to a prior
@@ -1899,6 +1927,27 @@ mod tests {
         let mut screen = VtScreen::new(3, 4);
         screen.advance(b"aa\r\nbb\r\ncc\x1b[2;1H\x1b[1J");
         assert_eq!(rows(&screen), vec!["", " b", "cc"]);
+    }
+
+    #[test]
+    fn explicit_user_clear_drops_primary_history_and_homes_the_cursor() {
+        let mut screen = VtScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo\r\nthree");
+        assert_eq!(screen.scrollback_len(), 1);
+        assert!(screen.clear_primary_for_user());
+        assert_eq!(screen.scrollback_len(), 0);
+        assert_eq!(screen.scrollback_origin(), 1);
+        assert_eq!(screen.cursor(), (0, 0));
+        assert_eq!(rows(&screen), vec!["", ""]);
+
+        screen.advance(b"\x1b[31");
+        assert!(screen.clear_primary_for_user());
+        screen.advance(b"X");
+        assert_eq!(rows(&screen)[0], "X");
+
+        screen.advance(b"prompt\x1b[?1049hfull");
+        assert!(!screen.clear_primary_for_user());
+        assert_eq!(rows(&screen)[0], "full");
     }
 
     #[test]

@@ -481,7 +481,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-P` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
-| `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
+| `Ctrl-O` `Ctrl-T` / `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する。IME 中も届く `Ctrl-T` を標準操作とする |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する（[指示モード](#指示モードdirector-mode)が開いている間は NextTab） |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
@@ -492,7 +492,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `,` / `n` / `p` / `t` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `,` / `n` / `p` / `t` / `Ctrl-G` / `Ctrl-T` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
 **指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
 NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は
@@ -508,8 +508,18 @@ Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択�
 
 root scope（`session_id: None`）の generic Terminal は、managed session の Closeup や Agent-only の
 [指示モード](#指示モードdirector-mode)には混ぜず、Home 全幅の下端から重なる workspace terminal drawer に表示する。
-Home header の `[ ⌂ Shell ]` button または `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
+Home header の `[ ⌂ Shell ]` button、`Ctrl-O Ctrl-T`、または互換操作の `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
 `OpenTerminal` を発行する。daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
+
+drawer は root generic Terminal ごとに `Terminal 1`、`Terminal 2` …のタブを表示する。drawer 内の `Ctrl-O n` は
+`OpenTerminal(new)` で新しいタブを追加し、`Ctrl-O Ctrl-N` / `Ctrl-O p` は root Agent を混ぜず terminal タブだけを
+次 / 前へ循環する。tab の click も表示中の terminal-only index を stable tab identity へ解決して選択する。
+`Ctrl-O x` は選択中の shell を終了してタブを閉じ、最後の terminal タブが無くなれば drawer も閉じる。
+shell 自身が終了した場合も同じように最後のタブで drawer を閉じる。
+
+generic shell の `Ctrl-L` は primary screen の retained scrollback、選択、scroll 位置を破棄し、入力行を viewport の
+先頭へ戻す。その後も同じ control byte を PTY へ渡すため、readline は編集中の入力を先頭行へ再描画する。alternate screen は
+アプリケーションが所有するため、TUI 側では消去しない。generic shell の `Ctrl-C` reset も割込み後に同じ clear を適用する。
 
 drawer の通常高は Home の 55% とし、10 rows 以上 32 rows 以下へ clamp する。背景に必要な高さを残せない短い端末では
 header の直下から下端までを使う。terminal viewport は border、title、footer を除いた drawer 専用 geometry で計算し、
@@ -517,7 +527,7 @@ header の直下から下端までを使う。terminal viewport は border、tit
 2 つの drawer は排他的に開く。一方を開くと他方を閉じるが、managed Closeup と root Agent/Terminal の各選択状態は保持する。
 
 drawer が開いている間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
-`Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O t` または header button に限定する。
+`Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O Ctrl-T` / `Ctrl-O t` または header button に限定する。
 workspace open / daemon reconnect では live root generic Terminal を inventory から復元するが、drawer は自動で開かず、
 明示的に開くまで背景で detached のまま保持する。root Diff は引き続き admission しない。
 

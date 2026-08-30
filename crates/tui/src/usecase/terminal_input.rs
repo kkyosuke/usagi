@@ -199,8 +199,11 @@ pub enum LiveTerminalAction {
     /// (`Ctrl-O n`). Plain `n` is intentionally distinct from `Ctrl-N`, which
     /// remains [`LiveTerminalAction::NextTab`].
     DirectorNew,
-    /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O t`).
+    /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O Ctrl-T`,
+    /// with `Ctrl-O t` retained for compatibility).
     RootTerminal,
+    /// Open a new terminal tab in the workspace-root drawer (`Ctrl-O n`).
+    NewRootTerminal,
     /// Close the active tab.
     CloseTab,
     /// Explicitly resume the selected interrupted Agent tab (#510). Nothing else
@@ -316,6 +319,9 @@ impl LiveInputClassifier {
             if bytes == [7] {
                 return LiveInputOutput::Action(LiveTerminalAction::Director);
             }
+            if bytes == [20] {
+                return LiveInputOutput::Action(LiveTerminalAction::RootTerminal);
+            }
             return LiveInputOutput::Swallowed;
         }
         global_control_bytes(&bytes).map_or(
@@ -412,6 +418,11 @@ fn is_ctrl_g(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('g')) && is_only_control(key.modifiers))
 }
 
+fn is_ctrl_t(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{14}'))
+        || (matches!(key.code, KeyCode::Char('t')) && is_only_control(key.modifiers))
+}
+
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     if is_ctrl_o(key) {
         return Some(LiveTerminalAction::Switch);
@@ -430,6 +441,9 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     }
     if is_ctrl_g(key) {
         return Some(LiveTerminalAction::Director);
+    }
+    if is_ctrl_t(key) {
+        return Some(LiveTerminalAction::RootTerminal);
     }
     // `+` is physically Shift+= on common layouts. Crossterm may retain that
     // Shift bit even though the semantic character is already `+`.
@@ -815,6 +829,18 @@ mod tests {
             },
             Case {
                 follow_up: key(KeyCode::Char('t')),
+                action: LiveTerminalAction::RootTerminal,
+            },
+            Case {
+                follow_up: ctrl('t'),
+                action: LiveTerminalAction::RootTerminal,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('\u{14}')),
+                action: LiveTerminalAction::RootTerminal,
+            },
+            Case {
+                follow_up: LiveInput::Raw(vec![20]),
                 action: LiveTerminalAction::RootTerminal,
             },
             Case {

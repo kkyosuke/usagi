@@ -109,6 +109,11 @@ impl TerminalScreen {
         self.screen.advance(bytes);
     }
 
+    /// Drops primary-screen history and starts a fresh viewport at the top.
+    pub fn clear_for_user(&mut self) -> bool {
+        self.screen.clear_primary_for_user()
+    }
+
     /// Changes the visible geometry without replaying historical control bytes.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.screen.resize(rows, cols);

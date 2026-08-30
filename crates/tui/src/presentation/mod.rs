@@ -748,8 +748,19 @@ fn forward_live_terminal_input(
     }
     // The stream port is resident, so a launch in flight never drops a
     // keystroke; a genuine stream failure is surfaced instead of swallowed.
-    if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
-        controls.set_feedback(message);
+    match ui.send_terminal_bytes(&terminal, &bytes) {
+        Ok(()) => {
+            // Generic shells treat Ctrl-L (and the Ctrl-C reset sequence above)
+            // as a user-facing clear. Mutate the local view only after the
+            // durable input was accepted, matching the daemon authority.
+            if matches!(bytes.as_slice(), [12] | [3, 12])
+                && !runtime.is_agent_terminal(&terminal)
+                && ui.clear_terminal_for_user(&terminal)
+            {
+                controls.reset_after_clear();
+            }
+        }
+        Err(message) => controls.set_feedback(message),
     }
     true
 }
@@ -815,15 +826,19 @@ fn drawer_agent_owns_escape(runtime: &WorkspaceRuntime) -> bool {
     runtime.wants_live_input() && runtime.focused_terminal().is_some()
 }
 
-/// Retarget the two `Ctrl-O` follow-ups whose meaning differs in Director mode.
+/// Retarget `Ctrl-O` follow-ups whose meaning differs in an open drawer.
 ///
-/// In the drawer, New is the operation a control chord should reach — `Ctrl-O`
-/// `Ctrl-N` opens the CLI picker — and conversation cycling takes the plain
-/// follow-up `Ctrl-O` `n` in its place. Outside the drawer both chords keep
-/// their managed-pane meaning (`Ctrl-O Ctrl-N` cycles tabs, `Ctrl-O n` opens the
-/// drawer's New picker), so this swap is scoped to an open drawer and applied
-/// once, before any consumer of the key observes it.
-fn retarget_director_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
+/// A root terminal drawer maps plain `Ctrl-O n` to a new terminal tab. In the
+/// Director drawer, `Ctrl-O Ctrl-N` opens the CLI picker and conversation
+/// cycling takes plain `Ctrl-O n` in its place. Outside those drawers both
+/// chords keep their managed-pane meaning, so the retargeting is applied once,
+/// before any consumer of the key observes it.
+fn retarget_drawer_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
+    if runtime.state().root_terminal_drawer_open()
+        && matches!(key, Key::Live(LiveTerminalAction::DirectorNew))
+    {
+        return Key::Live(LiveTerminalAction::NewRootTerminal);
+    }
     if !runtime.state().director_drawer_open() {
         return key;
     }
@@ -2507,6 +2522,13 @@ impl WorkspaceUi {
         }
     }
 
+    fn clear_terminal_for_user(&mut self, terminal: &TerminalRef) -> bool {
+        self.terminals
+            .iter_mut()
+            .find(|session| session.terminal().fences(terminal))
+            .is_some_and(TerminalSession::clear_for_user)
+    }
+
     /// Poll every attached terminal once and return the refs of those the daemon
     /// reports as exited. Polling all of them (not just the focused pane) is what
     /// lets a background tab whose shell ran `exit` be detected and closed.
@@ -3805,6 +3827,7 @@ fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
         LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
+        LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
         LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
         LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
@@ -5173,6 +5196,25 @@ fn select_director_tab(key: &Key, ui: &mut WorkspaceUi, runtime: &mut WorkspaceR
     true
 }
 
+fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
+    if !runtime.state().root_terminal_drawer_open() {
+        return false;
+    }
+    let direction = match key {
+        Key::Live(LiveTerminalAction::NextTab) => {
+            crate::usecase::application::controller::TabDirection::Next
+        }
+        Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::OpenPullRequests) => {
+            crate::usecase::application::controller::TabDirection::Previous
+        }
+        _ => return false,
+    };
+    if let Some(selection) = runtime.root_terminal_selection_after_select(direction) {
+        let _ = runtime.select_tab_selection(selection);
+    }
+    true
+}
+
 /// Select one visible managed-session tab after the frame's hit test resolved
 /// its display index. Agent selection is committed before registry mutation,
 /// matching keyboard tab cycling's durability fence.
@@ -5282,6 +5324,19 @@ fn intercept_live_terminal_control(
     rows_len: usize,
     scroll: usize,
 ) -> bool {
+    if runtime.state().root_terminal_drawer_open()
+        && let Key::Click { column, row } = key
+    {
+        let projection = runtime.root_terminal_projection(None);
+        if let Some(index) =
+            root_terminal_drawer::tab_at(height, width, &projection.tabs, *column, *row)
+        {
+            if let Some(selection) = runtime.root_terminal_selection_at(index) {
+                let _ = runtime.select_tab_selection(selection);
+            }
+            return true;
+        }
+    }
     if is_director_new_click(key, runtime, height, width) {
         // Let the frame-loop action branch return the resulting launch effect
         // to the normal backend dispatcher.
@@ -5315,7 +5370,7 @@ fn intercept_live_terminal_control(
     if !runtime.wants_pane_control_input() && pane_only_control {
         return true;
     }
-    if !select_director_tab(key, ui, runtime) {
+    if !select_director_tab(key, ui, runtime) && !select_root_terminal_tab(key, runtime) {
         match key {
             Key::Live(LiveTerminalAction::ScrollUp) => controls.scroll_up(),
             Key::Live(LiveTerminalAction::ScrollDown) => controls.scroll_down(),
@@ -6761,7 +6816,7 @@ fn drive_workspace_controller(
         drain_pane_launches(&mut ui, geometry);
         // Director mode owns `Ctrl-O Ctrl-N` as New; the swap happens once here
         // so PTY forwarding, pane controls, and the reducer all see one key.
-        let raw_key = retarget_director_chords(&runtime, term.read_key()?);
+        let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
         if dismiss_pr_modal_on_project_bar_click(&mut runtime, &raw_key) {
             continue;
         }
@@ -8501,7 +8556,7 @@ mod tests {
         prepare_deck_workspace, prepare_workspace_deck, projection_build_counts, recent_paths,
         registry_contains_path, remove_registry_paths, render_controller_frame,
         render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_garden_input, route_pr_modal_click,
+        restore_open_panes, retarget_drawer_chords, route_garden_input, route_pr_modal_click,
         route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
         run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
@@ -15949,7 +16004,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_terminal_ctrl_c_resets_the_shell_and_close_requests_exit() {
+    fn generic_terminal_ctrl_l_and_ctrl_c_clear_the_shell_and_close_requests_exit() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal = live_terminal_ref(workspace, session);
@@ -15961,13 +16016,26 @@ mod tests {
             PaneKind::Terminal,
             Box::new(WheelRecordingPort {
                 terminal: terminal.clone(),
-                replay: Vec::new(),
+                replay: b"one\r\ntwo\r\nthree".to_vec(),
                 inputs: Arc::clone(&inputs),
                 input_error: false,
             }),
         );
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
+        assert!(forward_live_terminal_input(
+            &mut ui,
+            &runtime,
+            &mut controls,
+            &mut term,
+            &Key::Passthrough(vec![12]),
+        ));
+        assert!(
+            !ui.terminal_rows(&terminal, None)
+                .expect("focused terminal remains attached")
+                .join("\n")
+                .contains("one")
+        );
         assert!(forward_live_terminal_input(
             &mut ui,
             &runtime,
@@ -15994,7 +16062,11 @@ mod tests {
 
         assert_eq!(
             *inputs.lock().unwrap(),
-            vec![b"\x03\x0c".to_vec(), b"\x03exit\r".to_vec()]
+            vec![
+                b"\x0c".to_vec(),
+                b"\x03\x0c".to_vec(),
+                b"\x03exit\r".to_vec()
+            ]
         );
         assert!(runtime.active_pane().tabs().is_empty());
         assert!(ui.closed_generic_terminals.contains(&terminal));
@@ -21503,7 +21575,7 @@ mod tests {
             Key::Live(LiveTerminalAction::PreviousTab),
             Key::Escape,
         ] {
-            assert_eq!(retarget_director_chords(&runtime, key.clone()), key);
+            assert_eq!(retarget_drawer_chords(&runtime, key.clone()), key);
         }
 
         assert!(
@@ -21515,11 +21587,11 @@ mod tests {
 
         // Open drawer: the two chords swap, and nothing else moves.
         assert_eq!(
-            retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
             Key::Live(LiveTerminalAction::DirectorNew)
         );
         assert_eq!(
-            retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
             Key::Live(LiveTerminalAction::NextTab)
         );
         for key in [
@@ -21528,17 +21600,33 @@ mod tests {
             Key::Escape,
             Key::Char('n'),
         ] {
-            assert_eq!(retarget_director_chords(&runtime, key.clone()), key);
+            assert_eq!(retarget_drawer_chords(&runtime, key.clone()), key);
         }
 
         // The retargeted chord reaches the reducer as New, exactly as the frame
         // loop dispatches it.
-        let retargeted = retarget_director_chords(&runtime, Key::Live(LiveTerminalAction::NextTab));
+        let retargeted = retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab));
         assert!(runtime.handle_key(retargeted).is_empty());
         assert!(matches!(
             runtime.state().director_new(),
             DirectorNew::Choosing(DefaultModel::Claude)
         ));
+    }
+
+    #[test]
+    fn root_terminal_drawer_retargets_plain_new_to_a_terminal_tab() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            Key::Live(LiveTerminalAction::NewRootTerminal)
+        );
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            Key::Live(LiveTerminalAction::NextTab)
+        );
     }
 
     #[test]
