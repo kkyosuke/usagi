@@ -23,8 +23,8 @@ use super::runtime::{
 };
 
 /// Bump whenever Claude's launch-time hooks, sandbox, argv, or config changes.
-/// Revision 3 introduces exec-form hooks and the session Git common-dir grant.
-pub const PROFILE_REVISION: u32 = 3;
+/// Revision 4 adds permission-waiting phase reporting.
+pub const PROFILE_REVISION: u32 = 4;
 
 /// Claude's product-private provisioning result.
 ///
@@ -706,12 +706,12 @@ mod tests {
 
     #[test]
     fn exposes_its_profile_and_validates_its_own_durable_snapshot() {
-        let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 3);
+        let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 4);
         assert_eq!(
             adapter.profile().id.as_str(),
             DefaultModel::Claude.profile_id()
         );
-        assert_eq!(adapter.profile().revision, 3);
+        assert_eq!(adapter.profile().revision, 4);
         assert!(
             adapter
                 .profile()

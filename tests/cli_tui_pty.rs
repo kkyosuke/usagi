@@ -2295,6 +2295,21 @@ fn real_pty_mixed_agents_keep_every_runtime_visible_across_reopen_without_respaw
         !root_codex_argv.contains("--dangerously-bypass-approvals-and-sandbox"),
         "{root_codex_argv}"
     );
+    for hook in [
+        "hooks.SessionStart",
+        "hooks.UserPromptSubmit",
+        "hooks.PreToolUse",
+        "hooks.PostToolUse",
+        "hooks.PermissionRequest",
+        "hooks.Stop",
+        "hooks.SessionEnd",
+    ] {
+        assert!(root_codex_argv.contains(hook), "{hook}: {root_codex_argv}");
+    }
+    assert!(
+        root_codex_argv.contains("agent-phase waiting"),
+        "{root_codex_argv}"
+    );
     toggle_director_with_key(&mut master);
     wait_for_screen_since(&captured, first_baseline, "[switch]");
     let status = quit_from_switch(&mut master, &mut first, &captured, first_baseline);

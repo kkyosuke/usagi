@@ -24,7 +24,8 @@ use super::runtime::{
 #[cfg(test)]
 mod fixture;
 
-pub const PROFILE_REVISION: u32 = 2;
+/// Revision 3 adds lifecycle phase hooks to the structured Codex integration.
+pub const PROFILE_REVISION: u32 = 3;
 
 /// The non-secret outcome that the renderer may use to build a durable plan.
 pub struct CodexProvision {
