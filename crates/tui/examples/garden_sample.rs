@@ -24,7 +24,7 @@ fn main() {
             "02000000-0000-4000-8000-000000000003",
             "coder",
             SessionLifecycle::Available,
-            AgentPhase::Absent,
+            AgentPhase::Ended,
         ),
         sample(
             "03000000-0000-4000-8000-000000000004",

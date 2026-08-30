@@ -4866,13 +4866,14 @@ mod tests {
             .join("\n");
         assert_eq!(frame.len(), 24);
         // Garden が Home を置き換えている（sidebar ではなく庭の footer が出る）。
-        assert!(text.contains("Garden · click a usagi"));
-        assert!(text.contains("any key · wake"));
+        assert!(text.contains("Garden · ←/→ scroll · click"));
+        assert!(text.contains("Esc · return"));
+        assert!(text.contains("Notifications"));
         assert!(text.contains("running"));
         assert!(text.contains("waiting"));
         assert!(text.contains("1 run · 1 done"));
         assert!(!text.contains("> s0"));
-        assert!(text.contains("failed · worktree missing"));
+        assert!(text.contains("1-4 / 5"));
         assert!(text.contains("s0"));
 
         // 最小サイズに満たない端末では Garden を開かず Home を保つ。操作できる一覧を
@@ -5216,8 +5217,8 @@ mod tests {
         let first = project(&state);
         let first_frame = garden_frame(23, 80, &first, now()).expect("first viewport fits");
         assert_eq!(first_frame.scroll, 0);
-        assert_eq!(first_frame.max_scroll, 1);
-        assert_eq!(first_frame.hitboxes.len(), 4);
+        assert_eq!(first_frame.max_scroll, 2);
+        assert_eq!(first_frame.hitboxes.len(), 2);
         assert_eq!(
             garden_scroll_action(23, 80, &first, now(), true),
             Some(GardenClick::Scroll(1))
@@ -5226,22 +5227,21 @@ mod tests {
         let second = project(&state);
         let second_frame = garden_frame(23, 80, &second, now()).expect("shifted viewport fits");
         assert_eq!(second_frame.scroll, 1);
-        assert_eq!(second_frame.hitboxes.len(), 3);
-        assert!(
-            second_frame
-                .hitboxes
-                .iter()
-                .any(|hitbox| hitbox.session_id == later_session)
-        );
+        assert_eq!(second_frame.hitboxes.len(), 2);
         assert_eq!(
             garden_scroll_action(23, 80, &second, now(), false),
             Some(GardenClick::Scroll(0))
         );
         assert_eq!(
             garden_scroll_action(23, 80, &second, now(), true),
-            Some(GardenClick::Scroll(1))
+            Some(GardenClick::Scroll(2))
         );
-        let plot = *second_frame
+        let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(2)));
+        let last = project(&state);
+        let last_frame = garden_frame(23, 80, &last, now()).expect("last viewport fits");
+        assert_eq!(last_frame.scroll, 2);
+        assert_eq!(last_frame.hitboxes.len(), 1);
+        let plot = *last_frame
             .hitboxes
             .iter()
             .find(|hitbox| hitbox.session_id == later_session)
@@ -5250,7 +5250,7 @@ mod tests {
             garden_click_at(
                 23,
                 80,
-                &second,
+                &last,
                 now(),
                 u16::try_from(plot.column).expect("fits u16"),
                 u16::try_from(plot.row).expect("fits u16"),
@@ -5262,18 +5262,18 @@ mod tests {
             })
         );
 
-        let previous = second_frame.scroll_hitboxes[0];
-        let next = second_frame.scroll_hitboxes[1];
+        let previous = last_frame.scroll_hitboxes[0];
+        let next = last_frame.scroll_hitboxes[1];
         assert_eq!(
             garden_click_at(
                 23,
                 80,
-                &second,
+                &last,
                 now(),
                 u16::try_from(previous.column).expect("fits u16"),
                 u16::try_from(previous.row).expect("fits u16"),
             ),
-            Some(GardenClick::Scroll(0))
+            Some(GardenClick::Scroll(1))
         );
         // The disabled boundary button remains a consumed no-op rather than
         // dismissing the Garden through the generic background click.
@@ -5281,12 +5281,12 @@ mod tests {
             garden_click_at(
                 23,
                 80,
-                &second,
+                &last,
                 now(),
                 u16::try_from(next.column).expect("fits u16"),
                 u16::try_from(next.row).expect("fits u16"),
             ),
-            Some(GardenClick::Scroll(1))
+            Some(GardenClick::Scroll(2))
         );
     }
 
