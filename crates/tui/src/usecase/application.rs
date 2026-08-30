@@ -167,14 +167,12 @@ pub trait WorkspaceLoader: Send {
     /// Make an already prepared workspace the declaration used by subsequently
     /// created daemon ports. Batch preparation may have inspected another
     /// member last, so activation reasserts the chosen target without loading
-    /// it twice. Storage-free adapters may keep the default no-op.
+    /// it twice.
     ///
     /// # Errors
     ///
     /// Returns an error when the workspace declaration cannot be installed.
-    fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
-        Ok(())
-    }
+    fn activate_prepared(&mut self, path: &Path) -> io::Result<()>;
 
     /// Persist the ordered set of project tabs as one Unite recent. The
     /// default keeps compatibility adapters storage-free.
