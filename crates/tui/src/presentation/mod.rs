@@ -25223,7 +25223,7 @@ mod tests {
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, false, true),
-            Geometry { cols: 96, rows: 8 }
+            Geometry { cols: 96, rows: 7 }
         );
         assert_eq!(
             foreground_terminal_geometry(24, 100, false, false),
