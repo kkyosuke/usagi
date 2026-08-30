@@ -1037,15 +1037,16 @@ Garden は開いている project 全件を描くが、workspace controller が 
 
 | 性質 | 内容 |
 |---|---|
-| 何を読むか | project ごとの `AgentInventory`。request が名指しした `WorkspaceId` を daemon が自分の Agent record から filter して答えるので、その project の tenant へ接続し直す必要も IPC の追加も無い |
+| 何を読むか | project ごとの `AgentWorkspaceObservation`。`AgentInventory` の runtime detail と、session ごとの daemon-authoritative な dispatch status を同じ応答で読む。request が名指しした `WorkspaceId` を daemon が自分の record から filter して答えるので、その project の tenant へ接続し直さない |
 | いつ読むか | Garden が前面にある間だけ。1 round ずつ直列で、成功後は 1 秒、daemon が 1 件も答えなかった round のあとは 5 秒あけて次の round に入る。Garden を閉じると次に開いた瞬間へ再武装する |
 | 何をしないか | daemon の cold start、session の変更、terminal の attach。observation 専用の port を使い、active project の lane とは接続を共有しない |
 | 上限 | 1 round で観測する project は 16 件まで。超えた分は `project inactive` のまま残る |
 
 観測が届いた区画は active project と同じ規則（[区画とうさぎ](#区画とうさぎ)）でうさぎを描く。届く前・daemon が
-居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。phase は inventory の粗い state
-（`reserved → ready`、`live → running`、`interrupted → interrupted`）で、runtime-local phase を持つのは
-controller が resident な active project だけである。
+居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。runtime phase は inventory の粗い state
+（`reserved → ready`、`live → running`、`interrupted → interrupted`）だが、session の `starting` / `idle` / `exited` /
+`failed` は同じ observation の dispatch status を優先し、粗い `live` を running と数えない。runtime-local phase を
+持つのは controller が resident な active project だけである。
 
 **session と lifecycle は cache のままである**。inactive project の session 一覧・lifecycle・failure summary は、
 その tab が最後に active だったときの daemon snapshot で、そこで新しく生まれた session は tab を開くまで区画にならない。

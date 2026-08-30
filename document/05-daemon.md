@@ -1331,6 +1331,10 @@ deterministic に返す。resumable projection は availability と非機密な 
 history を provider 単位で表示できる closed vocabulary（`ProviderKind` と safe な `ProviderResumePhase`）だけを返す。
 これらは code-defined enum であり、provider-native ID / argv / cwd / transcript は返さない。metadata を保存していない
 record では両 field を省略し、名前・path・profile ID から provider を推測しない。
+cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch store から読んだ
+managed session ごとの `AgentStatus` を添える。同じ session に複数 Agent がある場合は current run を持つ Agent を
+`session list` と同じ規則で選び、root Agent は session status map へ載せない。これにより PTY record の粗い `Live` と
+dispatch の terminal state（`Idle` / `Exited` / `Failed`）を混同しない。
 `AgentResumeTarget` は continuation、source、workspace、optional session、worktree、source runtime incarnation、
 adapter revision だけを持つ。旧 schema record は continuation / source を合成せず、target 無しの unavailable item
 として起動可能なまま読む。

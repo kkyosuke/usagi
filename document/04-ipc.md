@@ -602,6 +602,12 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 [#526](../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) の責務であり、この request は
 削除 authority を返さない。
 
+`agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
+`WorkspaceId` の `AgentInventory` と `session_statuses` を同じ応答で返す。status map は managed session の
+`SessionId` だけを key とし、値は dispatch store の closed `AgentStatus` である。同じ session に複数 Agent がある場合は
+current run を持つ Agent を優先し、`session list` と同じ選択になる。root Agent、provider-native identity、prompt、path は
+map に含めない。この request は mutation を持たないため、fresh connection で安全に retry できる。
+
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
 構成する。
