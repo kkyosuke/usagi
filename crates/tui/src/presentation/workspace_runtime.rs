@@ -30,14 +30,16 @@ const AGENT_CAPACITY_RECOVERY: &str = "Agent slots full; exit one with Ctrl-D, r
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::views::director_drawer::DirectorDrawerProjection;
 use crate::presentation::views::overview_modal::OverviewModal;
-use crate::presentation::views::root_terminal_drawer::RootTerminalDrawerProjection;
+use crate::presentation::views::root_terminal_drawer::{
+    RootTerminalDrawerProjection, RootTerminalTabProjection,
+};
 use crate::presentation::views::workspace::{
     GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
 };
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, DirectorNew, Effect, HomeMode, Overlay, Route, Selection,
-    TabDirection, Target, update,
+    TabDirection, Target, WorkspaceDrawerFocus, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -223,10 +225,8 @@ impl WorkspaceRuntime {
     /// terminal the shell attaches to for output.
     #[must_use]
     pub fn preview_terminal(&self) -> Option<TerminalRef> {
-        // Director's selected root conversation remains the foreground terminal
-        // even though the dimmed Switch pane behind the drawer follows its
-        // sidebar cursor. The caller suppresses this viewport from the Home pane
-        // and passes it to the drawer projection instead.
+        // The focused workspace drawer remains the foreground terminal even
+        // though the dimmed managed pane behind it follows the sidebar cursor.
         if self.state.workspace_drawer_open() {
             return self.focused_terminal();
         }
@@ -243,12 +243,12 @@ impl WorkspaceRuntime {
         }
     }
 
-    /// The selected managed-session terminal drawn behind an open Director
-    /// drawer. It remains attached for live output but read-only while the root
-    /// conversation owns foreground input.
+    /// The selected managed-session terminal drawn behind either workspace
+    /// drawer. It remains attached for live output but read-only while a root
+    /// surface owns foreground input.
     #[must_use]
     pub fn director_background_terminal(&self) -> Option<TerminalRef> {
-        if !self.state.director_drawer_open() {
+        if !self.state.workspace_drawer_open() {
             return None;
         }
         match self.preview_pane().selected() {
@@ -259,6 +259,35 @@ impl WorkspaceRuntime {
             | PaneSelection::Target(_)
             | PaneSelection::None => None,
         }
+    }
+
+    /// Selected live root Agent shown by Director, whether or not Director is
+    /// the frontmost of the two concurrently open workspace drawers.
+    #[must_use]
+    pub fn director_terminal(&self) -> Option<TerminalRef> {
+        self.state
+            .director_drawer_open()
+            .then(|| self.root_surface_terminal(PaneKind::Agent))
+            .flatten()
+    }
+
+    /// Stable root Agent selection projected in Director's conversation strip.
+    #[must_use]
+    pub fn director_selection(&self) -> Option<TabSelection> {
+        self.state
+            .director_drawer_open()
+            .then(|| self.root_surface_selection(PaneKind::Agent))
+            .flatten()
+    }
+
+    /// Selected live root generic terminal shown by the bottom drawer, whether
+    /// or not that drawer currently owns input.
+    #[must_use]
+    pub fn root_terminal(&self) -> Option<TerminalRef> {
+        self.state
+            .root_terminal_drawer_open()
+            .then(|| self.root_surface_terminal(PaneKind::Terminal))
+            .flatten()
     }
 
     /// Bypass runtime admission in tests so presentation tests can prove their
@@ -447,7 +476,7 @@ impl WorkspaceRuntime {
         // Its local New picker accepts only selection/confirmation/cancel keys;
         // everything else is consumed without reaching sidebar, pane, or
         // globals.
-        if self.state.director_drawer_open() {
+        if self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director) {
             return match (self.state.director_new(), key) {
                 (DirectorNew::Choosing(_) | DirectorNew::Empty, Key::Up) => {
                     self.apply_event(AppEvent::Key(AppKey::Up))
@@ -697,8 +726,7 @@ impl WorkspaceRuntime {
     /// live-pane flag in sync with the resulting controller state.
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
-        let director_was_open = self.state.director_drawer_open();
-        let terminal_was_open = self.state.root_terminal_drawer_open();
+        let previous_drawer_focus = self.state.workspace_drawer_focus();
         let advances_material = match &event {
             AppEvent::Tick => false,
             AppEvent::Resize { width, height } => {
@@ -713,17 +741,13 @@ impl WorkspaceRuntime {
             self.material_revision = self.material_revision.saturating_add(1);
         }
         let effects = update(&mut self.state, event);
-        self.remember_root_surface_selection(director_was_open, terminal_was_open);
+        self.remember_root_surface_selection(previous_drawer_focus);
         self.follow_active_target();
         self.sync_overlay_modals();
         effects
     }
 
-    fn remember_root_surface_selection(
-        &mut self,
-        director_was_open: bool,
-        terminal_was_open: bool,
-    ) {
+    fn remember_root_surface_selection(&mut self, previous: Option<WorkspaceDrawerFocus>) {
         let selection = self
             .panes
             .pane(Target::Root(self.state.workspace()))
@@ -731,16 +755,17 @@ impl WorkspaceRuntime {
                 PaneSelection::Tab(selection) => Some(selection.clone()),
                 PaneSelection::Target(_) | PaneSelection::None => None,
             });
-        if ((director_was_open && !self.state.director_drawer_open())
-            || (!terminal_was_open && self.state.root_terminal_drawer_open()))
+        let next = self.state.workspace_drawer_focus();
+        if (previous == Some(WorkspaceDrawerFocus::Director)
+            || next == Some(WorkspaceDrawerFocus::Terminal))
             && selection
                 .as_ref()
                 .is_some_and(|selection| self.selection_has_kind(selection, PaneKind::Agent))
         {
             self.root_agent_selection.clone_from(&selection);
         }
-        if ((terminal_was_open && !self.state.root_terminal_drawer_open())
-            || (!director_was_open && self.state.director_drawer_open()))
+        if (previous == Some(WorkspaceDrawerFocus::Terminal)
+            || next == Some(WorkspaceDrawerFocus::Director))
             && selection
                 .as_ref()
                 .is_some_and(|selection| self.selection_has_kind(selection, PaneKind::Terminal))
@@ -767,12 +792,41 @@ impl WorkspaceRuntime {
     }
 
     fn open_root_surface_kind(&self) -> Option<PaneKind> {
-        if self.state.director_drawer_open() {
-            Some(PaneKind::Agent)
-        } else if self.state.root_terminal_drawer_open() {
-            Some(PaneKind::Terminal)
-        } else {
-            None
+        match self.state.workspace_drawer_focus() {
+            Some(WorkspaceDrawerFocus::Director) => Some(PaneKind::Agent),
+            Some(WorkspaceDrawerFocus::Terminal) => Some(PaneKind::Terminal),
+            None => None,
+        }
+    }
+
+    fn root_surface_selection(&self, kind: PaneKind) -> Option<TabSelection> {
+        let selected = self
+            .panes
+            .pane(Target::Root(self.state.workspace()))
+            .and_then(|pane| match pane.selected() {
+                PaneSelection::Tab(selection) if self.selection_has_kind(selection, kind) => {
+                    Some(selection.clone())
+                }
+                PaneSelection::Tab(_) | PaneSelection::Target(_) | PaneSelection::None => None,
+            });
+        selected
+            .or_else(|| {
+                let remembered = if kind == PaneKind::Agent {
+                    self.root_agent_selection.clone()
+                } else {
+                    self.root_terminal_selection.clone()
+                };
+                remembered.filter(|selection| self.selection_has_kind(selection, kind))
+            })
+            .or_else(|| self.first_selection_of_kind(kind))
+    }
+
+    fn root_surface_terminal(&self, kind: PaneKind) -> Option<TerminalRef> {
+        match self.root_surface_selection(kind)? {
+            TabSelection::Live(terminal) => Some(terminal),
+            TabSelection::Pending(_) | TabSelection::Ready(_) | TabSelection::Interrupted(_) => {
+                None
+            }
         }
     }
 
@@ -1133,6 +1187,7 @@ impl WorkspaceRuntime {
             },
         );
         self.sync_live_pane();
+        self.close_empty_root_terminal_drawer();
         effects
     }
 
@@ -1171,7 +1226,20 @@ impl WorkspaceRuntime {
         }
         let _ = route_tab_command(&mut self.panes, PaneTabCommand::Close);
         self.sync_live_pane();
+        self.close_empty_root_terminal_drawer();
         outcome
+    }
+
+    fn close_empty_root_terminal_drawer(&mut self) {
+        if self.state.root_terminal_drawer_open() && !self.has_root_terminal_tabs() {
+            let _ = self.apply_event(AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        }
+    }
+
+    fn has_root_terminal_tabs(&self) -> bool {
+        self.panes
+            .pane(Target::Root(self.state.workspace()))
+            .is_some_and(|pane| pane.tabs().iter().any(root_tab_is_terminal))
     }
 
     /// The interrupted conversation the active pane's selected tab shows, if the
@@ -1179,7 +1247,7 @@ impl WorkspaceRuntime {
     /// and to label the explicit Resume action.
     #[must_use]
     pub fn focused_interrupted(&self) -> Option<&InterruptedTab> {
-        if self.state.root_terminal_drawer_open() {
+        if self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal) {
             return None;
         }
         let PaneSelection::Tab(TabSelection::Interrupted(selected)) =
@@ -1519,6 +1587,27 @@ impl WorkspaceRuntime {
         self.adjacent_tab_of_kind(direction, PaneKind::Agent)
     }
 
+    /// Preview a workspace-terminal tab cycle without admitting root Agents.
+    #[must_use]
+    pub fn root_terminal_selection_after_select(
+        &self,
+        direction: TabDirection,
+    ) -> Option<TabSelection> {
+        self.adjacent_tab_of_kind(direction, PaneKind::Terminal)
+    }
+
+    /// Stable selection for one displayed root-terminal tab index.
+    #[must_use]
+    pub fn root_terminal_selection_at(&self, index: usize) -> Option<TabSelection> {
+        self.panes
+            .pane(Target::Root(self.state.workspace()))?
+            .tabs()
+            .iter()
+            .filter(|tab| root_tab_is_terminal(tab))
+            .nth(index)
+            .map(tab_selection)
+    }
+
     /// Index of the active pane's tab owning one exact Agent runtime, for the
     /// Garden's rabbit click.
     ///
@@ -1819,8 +1908,25 @@ impl WorkspaceRuntime {
             return RootTerminalDrawerProjection::default();
         }
         let pane = self.panes.pane(Target::Root(self.state.workspace()));
+        let mut number = 0usize;
+        let tabs = pane
+            .into_iter()
+            .flat_map(PaneState::tabs)
+            .filter(|tab| root_tab_is_terminal(tab))
+            .map(|tab| {
+                number += 1;
+                RootTerminalTabProjection {
+                    label: format!("Terminal {number}"),
+                    selected: pane.is_some_and(|pane| {
+                        matches!(pane.selected(), PaneSelection::Tab(selected) if tab_selection(tab) == *selected)
+                    }),
+                    pending: matches!(tab, PaneTab::Pending(_)),
+                }
+            })
+            .collect();
         RootTerminalDrawerProjection {
             terminal_view: terminal_view.cloned(),
+            tabs,
             pending: pane.is_some_and(|pane| {
                 pane.tabs().iter().any(|tab| {
                     matches!(tab, PaneTab::Pending(pending) if pending.kind == PaneKind::Terminal)
@@ -1828,6 +1934,14 @@ impl WorkspaceRuntime {
             }),
             feedback: pane.and_then(PaneState::error).map(str::to_owned),
         }
+    }
+}
+
+fn root_tab_is_terminal(tab: &PaneTab) -> bool {
+    match tab {
+        PaneTab::Pending(pending) | PaneTab::Ready(pending) => pending.kind == PaneKind::Terminal,
+        PaneTab::Live(live) => live.kind == PaneKind::Terminal,
+        PaneTab::Interrupted(_) => false,
     }
 }
 
@@ -1852,8 +1966,9 @@ fn tab_selection(tab: &PaneTab) -> TabSelection {
 mod tests {
     use super::{
         AgentResumeRelation, CloseOutcome, InterruptedTab, PaneEvent, PaneKind, PaneRegistryEffect,
-        PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection, TabSelection,
-        WorkspaceRuntime, tab_selection,
+        PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection,
+        RootTerminalTabProjection, TabSelection, WorkspaceRuntime, root_tab_is_terminal,
+        tab_selection,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
@@ -1862,8 +1977,8 @@ mod tests {
         Target,
     };
     use crate::usecase::application::pane::{
-        LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane,
-        reduce_registry,
+        InterruptedPane, LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection,
+        PendingPane, reduce_registry,
     };
     use crate::usecase::terminal_input::LiveTerminalAction;
     use chrono::Utc;
@@ -3413,11 +3528,12 @@ mod tests {
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(runtime.state().root_terminal_drawer_open());
-        assert!(!runtime.state().director_drawer_open());
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_terminal));
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(runtime.state().director_drawer_open());
-        assert!(!runtime.state().root_terminal_drawer_open());
+        assert!(runtime.state().root_terminal_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
     }
 
@@ -3443,10 +3559,30 @@ mod tests {
         assert_eq!(
             runtime.root_terminal_projection(Some(&terminal_view)),
             RootTerminalDrawerProjection {
-                terminal_view: Some(terminal_view),
+                terminal_view: Some(terminal_view.clone()),
+                tabs: vec![RootTerminalTabProjection {
+                    label: "Terminal 1".to_owned(),
+                    selected: true,
+                    pending: true,
+                }],
                 pending: true,
                 feedback: None,
             }
+        );
+        let rendered = runtime.render(
+            24,
+            100,
+            "demo",
+            ".",
+            &[],
+            None,
+            &BTreeMap::new(),
+            Some(terminal_view),
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|row| row.contains("Workspace Terminal"))
         );
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
@@ -3455,6 +3591,73 @@ mod tests {
             runtime.active_pane().selected(),
             &PaneSelection::Tab(TabSelection::Pending(operation))
         );
+    }
+
+    #[test]
+    fn bottom_terminal_drawer_opens_new_tabs_cycles_terminals_and_closes_when_empty() {
+        let workspace = WorkspaceId::new();
+        assert!(!root_tab_is_terminal(&PaneTab::Interrupted(
+            InterruptedPane {
+                tab: interrupted_tab(workspace, SessionId::new(), true),
+                resuming: None,
+            }
+        )));
+        let first = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: None,
+            worktree_id: WorktreeId::new(),
+        };
+        let second = TerminalRef {
+            terminal_id: TerminalId::new(),
+            ..first.clone()
+        };
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![PaneRestoreTarget {
+                target: Target::Root(workspace),
+                panes: vec![
+                    LivePane {
+                        terminal: first.clone(),
+                        kind: PaneKind::Terminal,
+                    },
+                    LivePane {
+                        terminal: second.clone(),
+                        kind: PaneKind::Terminal,
+                    },
+                ],
+                selected: Some(first.clone()),
+                selected_interrupted: None,
+                interrupted: Vec::new(),
+            }],
+        ));
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let effects = runtime.handle_key(Key::Live(LiveTerminalAction::NewRootTerminal));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::OpenTerminal { target: Target::Root(actual), arguments, .. }]
+                if *actual == workspace && arguments == "new"
+        ));
+        assert_eq!(
+            runtime.root_terminal_selection_after_select(TabDirection::Next),
+            Some(TabSelection::Live(second.clone()))
+        );
+        assert_eq!(
+            runtime.root_terminal_selection_at(1),
+            Some(TabSelection::Live(second.clone()))
+        );
+        let _ = runtime.select_tab_selection(TabSelection::Live(second.clone()));
+        assert_eq!(runtime.focused_terminal(), Some(second.clone()));
+
+        assert_eq!(runtime.close_focused_pane().detach, Some(second));
+        assert!(runtime.state().root_terminal_drawer_open());
+        assert_eq!(runtime.close_focused_pane().detach, Some(first));
+        assert!(!runtime.state().root_terminal_drawer_open());
     }
 
     #[test]
@@ -3510,15 +3713,23 @@ mod tests {
         let _ = runtime.exit_pane(Target::Root(workspace), second_terminal);
 
         assert_eq!(runtime.focused_terminal(), None);
+        assert!(!runtime.state().root_terminal_drawer_open());
         assert!(!runtime.wants_live_input());
         assert_eq!(runtime.close_focused_pane(), CloseOutcome::default());
-        assert!(runtime.active_pane().tabs().iter().any(
+        assert!(runtime
+            .panes()
+            .pane(Target::Root(workspace))
+            .expect("root Agent remains retained")
+            .tabs()
+            .iter()
+            .any(
             |tab| matches!(tab, PaneTab::Live(live) if live.kind == PaneKind::Agent && live.terminal == root_agent)
         ));
         assert_eq!(
             runtime.root_terminal_projection(None),
             RootTerminalDrawerProjection {
                 terminal_view: None,
+                tabs: Vec::new(),
                 pending: false,
                 feedback: None,
             }
@@ -3539,7 +3750,7 @@ mod tests {
                 feedback: None,
             }),
         );
-        assert_eq!(rendered.join("\n").matches("shell-only output").count(), 1);
+        assert_eq!(rendered.join("\n").matches("shell-only output").count(), 0);
     }
 
     #[test]
@@ -3832,6 +4043,17 @@ mod tests {
             Some(continuation)
         );
         assert!(runtime.focused_terminal().is_none());
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert!(runtime.state().director_drawer_open());
+        assert!(runtime.focused_interrupted().is_none());
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(runtime.state().root_terminal_drawer_open());
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(continuation)
+        );
     }
 
     #[test]

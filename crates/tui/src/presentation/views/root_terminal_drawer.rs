@@ -23,8 +23,16 @@ const MIN_BACKGROUND_HEIGHT: usize = 6;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RootTerminalDrawerProjection {
     pub terminal_view: Option<TerminalViewProjection>,
+    pub tabs: Vec<RootTerminalTabProjection>,
     pub pending: bool,
     pub feedback: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootTerminalTabProjection {
+    pub label: String,
+    pub selected: bool,
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +53,19 @@ pub struct RootTerminalViewport {
 /// Compute a full-width drawer that rises from the bottom edge.
 #[must_use]
 pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeometry {
+    geometry_for(raw_height, raw_width, usize::MAX)
+}
+
+/// Compute the bottom drawer inside a bounded horizontal band. Director uses
+/// its left background band here so both drawers remain fully visible.
+#[must_use]
+pub fn geometry_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+) -> RootTerminalDrawerGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let width = width.min(available_width);
     let available = height.saturating_sub(1);
     let desired = height.saturating_mul(11) / 20;
     let coexist_height = desired
@@ -69,10 +89,19 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeomet
 /// Terminal rows/columns inside the drawer's border, padding, and footer.
 #[must_use]
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> RootTerminalViewport {
-    let drawer = geometry(raw_height, raw_width);
+    terminal_viewport_for(raw_height, raw_width, usize::MAX)
+}
+
+#[must_use]
+pub fn terminal_viewport_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+) -> RootTerminalViewport {
+    let drawer = geometry_for(raw_height, raw_width, available_width);
     RootTerminalViewport {
-        // modal::boxed: borders + two padding rows; body: footer row.
-        rows: drawer.height.saturating_sub(5),
+        // modal::boxed: borders + two padding rows; body: tab strip + footer.
+        rows: drawer.height.saturating_sub(6),
         cols: drawer.width.saturating_sub(4),
     }
 }
@@ -86,10 +115,31 @@ pub fn terminal_point_at(
     column: u16,
     row: u16,
 ) -> Option<TerminalPoint> {
-    let drawer = geometry(raw_height, raw_width);
-    let viewport = terminal_viewport(raw_height, raw_width);
+    terminal_point_at_for(
+        raw_height,
+        raw_width,
+        usize::MAX,
+        rows_len,
+        scroll,
+        column,
+        row,
+    )
+}
+
+#[must_use]
+pub fn terminal_point_at_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let drawer = geometry_for(raw_height, raw_width, available_width);
+    let viewport = terminal_viewport_for(raw_height, raw_width, available_width);
     let column = usize::from(column).checked_sub(2)?;
-    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(2))?;
+    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(3))?;
     if column >= viewport.cols || content_row >= viewport.rows {
         return None;
     }
@@ -100,6 +150,34 @@ pub fn terminal_point_at(
     })
 }
 
+/// Resolve a click on the visible terminal-only tab strip.
+#[must_use]
+pub fn tab_at(
+    raw_height: usize,
+    raw_width: usize,
+    tabs: &[RootTerminalTabProjection],
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let drawer = geometry(raw_height, raw_width);
+    if usize::from(row) != drawer.top.saturating_add(2) {
+        return None;
+    }
+    let mut column = usize::from(column).checked_sub(2)?;
+    for (index, tab) in tabs.iter().enumerate() {
+        let width = widgets::display_width(&format!(
+            " {}{} ",
+            tab.label,
+            if tab.pending { "…" } else { "" }
+        ));
+        if column < width {
+            return Some(index);
+        }
+        column = column.checked_sub(width.saturating_add(1))?;
+    }
+    None
+}
+
 /// Render the terminal drawer above a dimmed Home background.
 #[must_use]
 pub fn render_over(
@@ -108,15 +186,28 @@ pub fn render_over(
     base: &[String],
     projection: &RootTerminalDrawerProjection,
 ) -> Vec<String> {
+    render_over_for(raw_height, raw_width, usize::MAX, base, projection)
+}
+
+#[must_use]
+pub fn render_over_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    base: &[String],
+    projection: &RootTerminalDrawerProjection,
+) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let drawer = geometry(raw_height, raw_width);
+    let drawer = geometry_for(raw_height, raw_width, available_width);
     let mut frame = (0..height)
         .map(|row| {
             let line = modal::columns(base.get(row).map_or("", String::as_str), 0, width);
-            if row == 0 {
+            if row == 0 || drawer.width == 0 {
                 line
             } else {
-                widgets::dim_ansi(&line)
+                let left = modal::columns(&line, 0, drawer.width);
+                let right = modal::columns(&line, drawer.width, width - drawer.width);
+                format!("{}{right}", widgets::dim_ansi(&left))
             }
         })
         .collect::<Vec<_>>();
@@ -129,18 +220,31 @@ pub fn render_over(
     let footer = projection
         .feedback
         .as_deref()
-        .unwrap_or("Ctrl-O t: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal");
+        .unwrap_or("Ctrl-O Ctrl-T: close  ·  Ctrl-O u/d/b: scroll  ·  Ctrl-O x: close terminal");
+    let terminal_height = body_height.saturating_sub(1);
+    let tab_strip = render_tab_strip(&projection.tabs, inner_width);
     let body = if let Some(view) = &projection.terminal_view {
-        widgets::live_terminal::render(view, inner_width, body_height, body_height, footer)
+        let mut body = vec![tab_strip];
+        body.extend(widgets::live_terminal::render(
+            view,
+            inner_width,
+            terminal_height,
+            terminal_height,
+            footer,
+        ));
+        body
     } else {
         let mut rows = vec![String::new(); body_height];
-        if body_height > 0 {
+        if !rows.is_empty() {
+            rows[0] = tab_strip;
+        }
+        if body_height > 1 {
             let message = if projection.pending {
                 "Opening workspace terminal…"
             } else {
                 "Workspace terminal is unavailable"
             };
-            rows[body_height / 2] = Role::Accent.style().bold().paint(message);
+            rows[(body_height / 2).max(1)] = Role::Accent.style().bold().paint(message);
             rows[body_height - 1] = Style::new().dim().paint(footer);
         }
         rows
@@ -153,10 +257,31 @@ pub fn render_over(
     for (offset, panel_line) in panel.iter().take(drawer.height).enumerate() {
         let row = drawer.top + offset;
         if row < frame.len() {
-            frame[row] = format!("{panel_line}\u{1b}[0m");
+            let suffix = modal::columns(
+                &frame[row],
+                drawer.width,
+                width.saturating_sub(drawer.width),
+            );
+            frame[row] = format!("{panel_line}\u{1b}[0m{suffix}");
         }
     }
     frame
+}
+
+fn render_tab_strip(tabs: &[RootTerminalTabProjection], width: usize) -> String {
+    let mut line = String::new();
+    for tab in tabs {
+        let label = format!(" {}{} ", tab.label, if tab.pending { "…" } else { "" });
+        let style = if tab.selected {
+            Role::Accent.style().bold().reverse()
+        } else {
+            Style::new().dim()
+        };
+        line.push_str(&style.paint(&label));
+        line.push(' ');
+    }
+    line.push_str(&Style::new().dim().paint("Ctrl-O n: new"));
+    modal::columns(&line, 0, width)
 }
 
 #[cfg(test)]
@@ -176,13 +301,17 @@ mod tests {
         assert_eq!(short.height, 11);
         assert!(short.full_height);
         assert_eq!(geometry(0, 0), geometry(24, 80));
+
+        let bounded = geometry_for(30, 100, 40);
+        assert_eq!(bounded.width, 40);
+        assert_eq!(bounded.left, 0);
     }
 
     #[test]
     fn viewport_and_pointer_follow_bottom_drawer_content() {
         assert_eq!(
             terminal_viewport(30, 100),
-            RootTerminalViewport { rows: 11, cols: 96 }
+            RootTerminalViewport { rows: 10, cols: 96 }
         );
         let drawer = geometry(30, 100);
         assert_eq!(
@@ -192,12 +321,37 @@ mod tests {
                 20,
                 0,
                 2,
-                u16::try_from(drawer.top + 2).expect("test geometry fits u16"),
+                u16::try_from(drawer.top + 3).expect("test geometry fits u16"),
             ),
-            Some(TerminalPoint { row: 9, column: 0 })
+            Some(TerminalPoint { row: 10, column: 0 })
         );
         assert_eq!(terminal_point_at(30, 100, 20, 0, 1, 0), None);
         assert_eq!(terminal_point_at(30, 100, 20, 0, 98, 29), None);
+        assert_eq!(terminal_viewport_for(30, 100, 40).cols, 36);
+        assert_eq!(terminal_point_at_for(30, 100, 40, 20, 0, 41, 29), None);
+    }
+
+    #[test]
+    fn tab_hit_test_matches_the_rendered_terminal_strip() {
+        let tabs = vec![
+            RootTerminalTabProjection {
+                label: "Terminal 1".to_owned(),
+                selected: true,
+                pending: false,
+            },
+            RootTerminalTabProjection {
+                label: "Terminal 2".to_owned(),
+                selected: false,
+                pending: true,
+            },
+        ];
+        let top = geometry(30, 100).top;
+        let tab_row = u16::try_from(top + 2).unwrap();
+        let body_row = u16::try_from(top + 3).unwrap();
+        assert_eq!(tab_at(30, 100, &tabs, 2, tab_row), Some(0));
+        assert_eq!(tab_at(30, 100, &tabs, 15, tab_row), Some(1));
+        assert_eq!(tab_at(30, 100, &tabs, 29, tab_row), None);
+        assert_eq!(tab_at(30, 100, &tabs, 2, body_row), None);
     }
 
     #[test]
@@ -213,6 +367,18 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
+            tabs: vec![
+                RootTerminalTabProjection {
+                    label: "Terminal 1".to_owned(),
+                    selected: true,
+                    pending: false,
+                },
+                RootTerminalTabProjection {
+                    label: "Terminal 2".to_owned(),
+                    selected: false,
+                    pending: false,
+                },
+            ],
             pending: false,
             feedback: None,
         };
@@ -226,6 +392,13 @@ mod tests {
                 .any(|line| strip_ansi(line).contains("root output"))
         );
         assert!(frame.iter().all(|line| display_width(line) == 100));
+
+        let bounded_base = (0..30)
+            .map(|row| format!("{}right background {row}", " ".repeat(50)))
+            .collect::<Vec<_>>();
+        let bounded = render_over_for(30, 100, 40, &bounded_base, &projection);
+        assert!(strip_ansi(&bounded[geometry_for(30, 100, 40).top]).contains("Workspace Terminal"));
+        assert!(strip_ansi(&bounded[29]).contains("right background 29"));
     }
 
     #[test]
@@ -252,6 +425,7 @@ mod tests {
                 &[],
                 &RootTerminalDrawerProjection {
                     terminal_view: None,
+                    tabs: Vec::new(),
                     pending,
                     feedback: Some("terminal feedback".to_owned()),
                 },

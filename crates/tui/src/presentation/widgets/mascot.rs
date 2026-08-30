@@ -132,16 +132,20 @@ pub fn sidebar_block_with_sidecar(
     Some(MascotBlock { rows })
 }
 
-/// Smallest animation tick that draws the same rabbit as `tick`.
+/// Representative animation tick for the deliberately slowed rabbit.
 ///
 /// The rabbit cycles over six ticks but only has three distinct appearances:
 /// the blink at phase 4, the ear flop at phase 5, and the resting face for
-/// every other phase. Folding the clock onto that representative lets the shell
-/// compare two frames' material for equality instead of redrawing at the 16ms
-/// tick cadence, without changing when the rabbit visibly moves (#554).
+/// every other phase. Each source-clock phase is held across eight runtime
+/// ticks; the four visually identical resting phases still collapse together.
+/// This keeps the decorative animation near 4 fps and lets the shell skip
+/// otherwise identical whole-Home redraws (#554).
 #[must_use]
 pub const fn canonical_tick(tick: u64) -> u64 {
-    match tick % 6 {
+    // The runtime clock advances every 16 ms. Holding each six-phase clock step
+    // for eight ticks keeps the decorative mascot near 4 fps instead of forcing
+    // a whole-Home redraw at roughly 30 fps while the user is idle.
+    match (tick / 8) % 6 {
         phase @ (4 | 5) => phase,
         _ => 0,
     }
@@ -205,31 +209,21 @@ mod tests {
         rows.join("\n")
     }
 
-    /// #554. The shell skips a redraw when the collapsed animation clock is
-    /// unchanged, so the collapse must never merge two ticks that draw a
-    /// different rabbit — otherwise the blink would visibly stall.
+    /// #554. The decorative rabbit intentionally holds a pose across eight
+    /// runtime ticks, so an idle Home does not repaint at the 16ms clock rate.
     #[test]
-    fn collapsed_animation_ticks_draw_the_same_rabbit_as_the_raw_tick() {
-        for tick in 0..24u64 {
-            let collapsed = canonical_tick(tick);
-            assert!(collapsed <= tick, "collapse never moves the clock forward");
-            assert_eq!(
-                plain(sidebar_block(20, tick, None).expect("mascot fits").rows()),
-                plain(
-                    sidebar_block(20, collapsed, None)
-                        .expect("mascot fits")
-                        .rows()
-                ),
-                "tick {tick} collapsed to {collapsed} but draws a different rabbit"
-            );
-        }
+    fn collapsed_animation_ticks_hold_each_source_phase_for_eight_runtime_ticks() {
+        assert!((0..32).all(|tick| canonical_tick(tick) == 0));
+        assert!((32..40).all(|tick| canonical_tick(tick) == 4));
+        assert!((40..48).all(|tick| canonical_tick(tick) == 5));
+        assert_eq!(canonical_tick(48), 0);
     }
 
     /// The three appearances stay distinct: collapsing must not flatten the
     /// blink and the ear flop into the resting face.
     #[test]
     fn the_rabbit_still_blinks_and_flops_an_ear_once_per_cycle() {
-        let frames = (0..6u64)
+        let frames = (0..48u64)
             .map(canonical_tick)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(frames, std::collections::BTreeSet::from([0, 4, 5]));

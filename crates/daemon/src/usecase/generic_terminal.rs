@@ -500,9 +500,16 @@ impl GenericTerminalCoordinator {
         // already recorded operation is the read-only `input_outcome` path, which
         // is deliberately not gated this way.
         self.running(terminal)?;
-        self.terminals
+        let ack = self
+            .terminals
             .write_input(terminal, input, bytes, self.retention.now_ms(), writer)
-            .map_err(GenericTerminalError::Terminal)
+            .map_err(GenericTerminalError::Terminal)?;
+        if ack == InputAck::Written && matches!(bytes, [12] | [3, 12]) {
+            self.terminals
+                .clear_primary_for_user(terminal)
+                .map_err(GenericTerminalError::Terminal)?;
+        }
+        Ok(ack)
     }
 
     /// Reads the recorded final of one durable input operation. `Ok(None)` is a
@@ -875,7 +882,7 @@ fn terminal_state_blocks_retirement(state: TerminalRuntimeState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{collections::BTreeMap, fmt::Write as _, path::PathBuf};
     use usagi_core::domain::{
         agent::EnvironmentVariableName,
         id::{
@@ -1804,6 +1811,19 @@ mod tests {
             )
             .unwrap();
         let connection = ConnectionId::new();
+        let mut history = String::new();
+        for line in 0..30 {
+            writeln!(history, "line {line}\r").unwrap();
+        }
+        let history = history.into_bytes();
+        coordinator.output(&terminal, history).unwrap();
+        let before = coordinator.terminal_snapshot(&terminal).unwrap();
+        assert!(
+            usagi_core::usecase::vt_screen::VtScreen::from_checkpoint(&before.screen)
+                .unwrap()
+                .scrollback_len()
+                > 0
+        );
         let attached = coordinator.attach(&terminal, connection).unwrap();
         // A live attachment can write, and the bytes reach the PTY writer.
         let mut pty = Writer::default();
@@ -1818,12 +1838,24 @@ mod tests {
                     input_seq: 0,
                     operation: None,
                 },
-                b"echo ok\n",
+                b"\x0c",
                 &mut pty,
             ),
             Ok(InputAck::Written)
         );
-        assert_eq!(pty.0, b"echo ok\n");
+        assert_eq!(pty.0, b"\x0c");
+        let cleared = coordinator.terminal_snapshot(&terminal).unwrap();
+        assert_eq!(cleared.base_offset, cleared.output_offset);
+        let cleared_screen =
+            usagi_core::usecase::vt_screen::VtScreen::from_checkpoint(&cleared.screen).unwrap();
+        assert_eq!(cleared_screen.scrollback_len(), 0);
+        assert_eq!(cleared_screen.cursor(), (0, 0));
+        assert!(
+            cleared_screen
+                .cells()
+                .iter()
+                .all(|row| row.trim().is_empty())
+        );
         coordinator.exit(&terminal, 0, &mut store).unwrap();
         clock.advance(1000);
         retention.collect();
