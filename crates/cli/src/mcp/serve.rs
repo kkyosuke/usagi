@@ -2096,6 +2096,14 @@ mod tests {
         serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
             .unwrap();
         assert!(String::from_utf8(out).unwrap().contains("not allowed"));
+
+        let input = initialized_input(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"agent_opinion\",\"arguments\":{\"reviewer\":{\"target\":\"claude\",\"model\":\"opus\"},\"question\":\"review this\"}}}\n",
+        );
+        let mut out = Vec::new();
+        serve_with_client_and_snapshot(input.as_bytes(), &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("not allowed"));
     }
 
     /// A composite operation that failed part-way must reach the caller with the
