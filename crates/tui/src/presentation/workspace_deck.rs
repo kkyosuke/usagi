@@ -1122,6 +1122,7 @@ mod tests {
             OverlayIntent::Stay
         );
         assert_eq!(deck.handle_overlay_key(&Key::Up), OverlayIntent::Stay);
+        assert_eq!(deck.handle_overlay_key(&Key::Other), OverlayIntent::Stay);
         assert_eq!(deck.handle_overlay_key(&Key::Tab), OverlayIntent::Stay);
         assert_eq!(deck.handle_overlay_key(&Key::Escape), OverlayIntent::Cancel);
         assert_eq!(deck.paths(), vec![PathBuf::from("/alpha")]);
