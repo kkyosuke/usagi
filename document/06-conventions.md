@@ -391,7 +391,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy と full test（`--workspace`）を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
+| `.github/workflows/test.yml` | `main` への push / PR | Rust gate 対象差分では fmt / clippy、Linux full test（`--workspace`）、Intel / Arm macOS の shipping Agent IPC E2E を独立 job で並列実行し、全差分で `test` / `full-test` aggregate を報告 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 現行パッケージの実 PTY TUI E2E。PR / merge queue ではルート `Cargo.toml` の `[package].version` が base と異なる場合だけ実行する |
 | `.github/workflows/release-build-check.yml` | ルート `Cargo.toml` / `Cargo.lock`、またはリリース経路の workflow / `rust-toolchain.toml` を変更する PR | リリースと同じ 3 プラットフォーム・同じ `--features production` で `cargo build --release` し、リリースビルドが成功することをマージ前に検証する。host target では installer の version 出力契約も検証する。workflow 自身も trigger に含めるのは、リリース経路を変更する PR では version が動かず、version だけを trigger にすると経路の変更が無検証でマージされるためである |
@@ -460,3 +460,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
+
+`create-release-pr.yml` は dispatch input を `run:` へ式展開せず環境変数で渡し、
+`scripts/ci/release-version.sh` の SemVer vocabulary を通過した値だけを manifest・PR title・branch に使う。
+生成する title と branch もそれぞれ Conventional Commits と `<type>/<説明>` の規約に従う。
