@@ -978,6 +978,17 @@ pub enum Feedback {
     ResyncRequired,
 }
 
+/// Workspace-global drawer that currently owns root-pane input.
+///
+/// Director and the workspace terminal may both be visible. This focus is
+/// therefore independent from either drawer's open flag and follows the most
+/// recently opened surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceDrawerFocus {
+    Director,
+    Terminal,
+}
+
 /// controller が所有する application state。
 // These bools are independent runtime flags (live-pane availability, forced
 // action modal, Ctrl-C grace, quit-confirmation focus), not a combinable state
@@ -987,15 +998,15 @@ pub enum Feedback {
 pub struct AppState {
     route: Route,
     overlay: Option<Overlay>,
-    /// Home's right-anchored Director mode drawer. It is deliberately not an
-    /// [`Overlay`] variant: existing modal overlays retain entry precedence,
-    /// while an already-open drawer is the frontmost input owner and swallows
-    /// every background action until Escape or its toggle closes it.
+    /// Home's right-anchored Director mode drawer.
     director_drawer_open: bool,
     /// Home's bottom-anchored workspace-root generic terminal drawer. It is
-    /// mutually exclusive with Director and preserves the managed Home state
-    /// underneath it.
+    /// independent from Director and preserves the managed Home state beneath
+    /// both drawers.
     root_terminal_drawer_open: bool,
+    /// The open drawer that owns root-pane input. `None` iff both drawers are
+    /// closed; the reducer keeps this invariant through every transition.
+    workspace_drawer_focus: Option<WorkspaceDrawerFocus>,
     /// Local `New` flow inside the Director mode drawer. Candidate
     /// availability is injected with [`AvailableModels`]; opening and moving
     /// this picker performs no daemon work.
@@ -1165,6 +1176,7 @@ impl AppState {
             overlay: None,
             director_drawer_open: false,
             root_terminal_drawer_open: false,
+            workspace_drawer_focus: None,
             director_new: DirectorNew::Idle,
             director_launching: None,
             note_editor: None,
@@ -1236,6 +1248,11 @@ impl AppState {
     #[must_use]
     pub const fn workspace_drawer_open(&self) -> bool {
         self.director_drawer_open || self.root_terminal_drawer_open
+    }
+    /// The visible workspace-global drawer that currently owns input.
+    #[must_use]
+    pub const fn workspace_drawer_focus(&self) -> Option<WorkspaceDrawerFocus> {
+        self.workspace_drawer_focus
     }
     /// Current local state of the drawer's explicit Agent CLI chooser.
     #[must_use]
@@ -3560,26 +3577,27 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(overlay) = state.overlay {
         return update_overlay(state, overlay, key);
     }
-    if state.director_drawer_open {
+    if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Director) {
         return update_director_drawer_key(state, key);
     }
-    if state.root_terminal_drawer_open {
+    if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Terminal) {
         return update_root_terminal_drawer_key(state, &key);
     }
     if matches!(key, AppKey::ToggleDirectorDrawer) {
         state.director_drawer_open = true;
-        state.root_terminal_drawer_open = false;
+        state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
         state.director_new = DirectorNew::Idle;
         return Vec::new();
     }
     if matches!(key, AppKey::OpenDirectorNew) {
         state.director_drawer_open = true;
-        state.root_terminal_drawer_open = false;
+        state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
         open_director_new(state);
         return Vec::new();
     }
     if matches!(key, AppKey::ToggleRootTerminalDrawer) {
         state.root_terminal_drawer_open = true;
+        state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Terminal);
         return vec![Effect::OpenTerminal {
             target: Target::Root(state.workspace),
             operation_id: OperationId::new(),
@@ -3653,9 +3671,8 @@ fn director_picker_shows_selection(state: &AppState) -> bool {
 
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if matches!(key, AppKey::ToggleRootTerminalDrawer) {
-        state.director_drawer_open = false;
-        state.director_new = DirectorNew::Idle;
         state.root_terminal_drawer_open = true;
+        state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Terminal);
         return vec![Effect::OpenTerminal {
             target: Target::Root(state.workspace),
             operation_id: OperationId::new(),
@@ -3664,6 +3681,9 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
     }
     if matches!(key, AppKey::ToggleDirectorDrawer) {
         state.director_drawer_open = false;
+        state.workspace_drawer_focus = state
+            .root_terminal_drawer_open
+            .then_some(WorkspaceDrawerFocus::Terminal);
         state.director_new = DirectorNew::Idle;
         return Vec::new();
     }
@@ -3674,6 +3694,9 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
         }
         (DirectorNew::Idle, AppKey::Escape) => {
             state.director_drawer_open = false;
+            state.workspace_drawer_focus = state
+                .root_terminal_drawer_open
+                .then_some(WorkspaceDrawerFocus::Terminal);
             Vec::new()
         }
         (DirectorNew::Choosing(_) | DirectorNew::Empty, AppKey::Escape) => {
@@ -4310,17 +4333,20 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
     match key {
         AppKey::ToggleRootTerminalDrawer => {
             state.root_terminal_drawer_open = false;
+            state.workspace_drawer_focus = state
+                .director_drawer_open
+                .then_some(WorkspaceDrawerFocus::Director);
             Vec::new()
         }
         AppKey::ToggleDirectorDrawer => {
-            state.root_terminal_drawer_open = false;
             state.director_drawer_open = true;
+            state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
             state.director_new = DirectorNew::Idle;
             Vec::new()
         }
         AppKey::OpenDirectorNew => {
-            state.root_terminal_drawer_open = false;
             state.director_drawer_open = true;
+            state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
             open_director_new(state);
             Vec::new()
         }
@@ -6611,8 +6637,12 @@ mod tests {
         }
 
         assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
-        assert!(!state.root_terminal_drawer_open());
+        assert!(state.root_terminal_drawer_open());
         assert!(state.director_drawer_open());
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
         assert_eq!(
             (
                 state.route(),
@@ -6625,7 +6655,7 @@ mod tests {
 
         let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
         assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
-        assert!(!state.root_terminal_drawer_open());
+        assert!(state.root_terminal_drawer_open());
         assert!(state.director_drawer_open());
         assert!(matches!(state.director_new(), DirectorNew::Choosing(_)));
     }

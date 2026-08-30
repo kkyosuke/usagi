@@ -2049,7 +2049,7 @@ pub fn render_home_at(
     if let Some(frame) = garden_frame(raw_height, raw_width, home, now) {
         return frame.rows;
     }
-    let body_height = height.saturating_sub(CHROME_ROWS);
+    let full_body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
@@ -2057,7 +2057,21 @@ pub fn render_home_at(
         // Director owns the right side. Give the concurrently visible managed
         // terminal the complete band to its left instead of retaining Home's
         // sidebar split and wrapping output underneath the drawer.
-        let terminal_width = director_drawer::geometry(height, width).left;
+        let director_geometry = director_drawer::geometry(height, width);
+        let terminal_width = director_geometry.left;
+        let root_terminal_width = if director_geometry.full_width {
+            width
+        } else {
+            terminal_width
+        };
+        let body_height = home
+            .root_terminal_drawer
+            .as_ref()
+            .map_or(full_body_height, |_| {
+                root_terminal_drawer::geometry_for(height, width, root_terminal_width)
+                    .top
+                    .saturating_sub(CHROME_ROWS)
+            });
         let right =
             dim_inactive_right_pane(true, home_right_pane(body_height, terminal_width, home));
         frame.extend(right.into_iter().map(|line| {
@@ -2068,9 +2082,27 @@ pub fn render_home_at(
             )
         }));
         frame.truncate(height);
-        let frame = director_drawer::render_over(height, width, &frame, drawer);
+        frame.resize_with(height, || " ".repeat(width));
+        let mut frame = director_drawer::render_over(height, width, &frame, drawer);
+        if let Some(terminal) = &home.root_terminal_drawer {
+            frame = root_terminal_drawer::render_over_for(
+                height,
+                width,
+                root_terminal_width,
+                &frame,
+                terminal,
+            );
+        }
         return render_home_modals(height, width, home, frame, now);
     }
+    let body_height = home
+        .root_terminal_drawer
+        .as_ref()
+        .map_or(full_body_height, |_| {
+            root_terminal_drawer::geometry(height, width)
+                .top
+                .saturating_sub(CHROME_ROWS)
+        });
     let split = panes::split(width, LEFT_WIDTH);
     let right = dim_inactive_right_pane(
         !home.right_pane_focused(),
@@ -2083,6 +2115,7 @@ pub fn render_home_at(
         split,
     ));
     frame.truncate(height);
+    frame.resize_with(height, || " ".repeat(width));
     let frame = if let Some(drawer) = &home.root_terminal_drawer {
         root_terminal_drawer::render_over(height, width, &frame, drawer)
     } else {
@@ -4015,6 +4048,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One projection seam covers closed, independent, and concurrent drawer frames.
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
@@ -4045,7 +4079,7 @@ mod tests {
         let mut open_state = AppState::home(workspace, Vec::new());
         let _ = update(&mut open_state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
         let open = HomeProjection::from_state(&open_state, "atlas", Path::new("/work"), &[])
-            .with_director_drawer(material);
+            .with_director_drawer(material.clone());
         let open_text = render_home(20, 100, &open).join("\n");
         assert!(open_text.contains("root conversation"));
         assert!(open_text.contains("director agent output"));
@@ -4078,10 +4112,61 @@ mod tests {
         );
         let open_terminal =
             HomeProjection::from_state(&terminal_state, "atlas", Path::new("/work"), &[])
-                .with_root_terminal_drawer(terminal_material);
+                .with_root_terminal_drawer(terminal_material.clone());
         let terminal_text = render_home(20, 100, &open_terminal).join("\n");
         assert!(terminal_text.contains("workspace shell output"));
         assert!(terminal_text.contains("1;7"));
+
+        let _ = update(
+            &mut terminal_state,
+            AppEvent::Key(AppKey::ToggleDirectorDrawer),
+        );
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        };
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Succeeded {
+                operation,
+                terminal,
+            },
+        );
+        let concurrent =
+            HomeProjection::from_state(&terminal_state, "atlas", Path::new("/work"), &[])
+                .with_pane(&pane)
+                .with_terminal_view(Some(TerminalViewProjection {
+                    rows: vec!["selected session agent output".to_owned()],
+                    row_offset: 0,
+                    total_rows: 1,
+                    scroll: 0,
+                    feedback: None,
+                }))
+                .with_director_drawer(material)
+                .with_root_terminal_drawer(terminal_material);
+        let concurrent_text = render_home(30, 160, &concurrent).join("\n");
+        assert!(concurrent_text.contains("director agent output"));
+        assert!(concurrent_text.contains("workspace shell output"));
+        assert!(concurrent_text.contains("selected session agent output"));
+
+        let narrow_text = render_home(30, 79, &concurrent).join("\n");
+        assert!(narrow_text.contains("director agent output"));
+        assert!(narrow_text.contains("workspace shell output"));
     }
 
     #[test]
