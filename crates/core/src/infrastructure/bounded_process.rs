@@ -81,7 +81,6 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
 /// Unlike [`observe`], this accepts owned argument strings so a caller can pass
 /// an opaque user prompt without joining it into a shell command.
 #[must_use]
-#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=observes_from_the_requested_directory_without_a_shell
 pub fn observe_in(
     program: &str,
     arguments: &[String],
