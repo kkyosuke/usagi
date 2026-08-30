@@ -5498,8 +5498,111 @@ fn dispatch_agent_tool(
         }
         let caller = authenticated.caller;
         if action == DispatchToolAction::AgentOpinion {
+            use usagi_core::infrastructure::bounded_process::{
+                ChildObservation, ChildPolicy, observe_in,
+            };
+            use usagi_core::infrastructure::runtime_model::{
+                ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+            };
+            use usagi_core::usecase::client::OPINION_EXECUTION_TIMEOUT_MS;
+
             drop(runtime);
-            return run_agent_opinion(bound, agent, &operation_id, workspace, &caller, payload);
+            let input = parse_opinion_payload(payload)?;
+            let repository_root = bound
+                .sessions()
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+                })?
+                .repository_root()
+                .to_path_buf();
+            let config = WorkspaceAgentConfig::read(&repository_root);
+            if !config.allows(&input.reviewer.target, &input.reviewer.model) {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "opinion target/model is not allowed by the current workspace configuration",
+                ));
+            }
+            if !PathExecutableLocator.is_available(&input.reviewer.target) {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "opinion reviewer executable is unavailable",
+                ));
+            }
+            let prompt = opinion_prompt(&input.question, input.context.as_deref());
+            let suffix = operation_id
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>();
+            let session_name = format!("opinion-{suffix}");
+            let _delegation_permit =
+                authorize_delegation(bound, agent, Some(&caller), None, &operation_id).map_err(
+                    |error| ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message()),
+                )?;
+            let created = bound
+                .sessions()
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+                })?
+                .handle(
+                    usagi_core::usecase::client::SessionAction::Create,
+                    &operation_id,
+                    &serde_json::json!({
+                        "name": session_name,
+                        "parent_session_id": caller.session_id,
+                    }),
+                )
+                .map_err(|error| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
+                })?;
+            let (session_id, _) = session_lineage_by_name(&created.body, &session_name)
+                .ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::Unavailable, "opinion session is not available")
+                })?;
+            let scope = bound
+                .scope_resolver()
+                .resolve_available_scope(workspace, Some(session_id))
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "opinion session is unavailable")
+                })?;
+            let arguments =
+                opinion_arguments(&input.reviewer.target, &input.reviewer.model, &prompt)?;
+            let observation = observe_in(
+                &input.reviewer.target,
+                &arguments,
+                &scope.working_directory,
+                ChildPolicy {
+                    timeout: Duration::from_millis(OPINION_EXECUTION_TIMEOUT_MS),
+                    terminate_grace: Duration::from_secs(2),
+                    output_limit: 64 * 1024,
+                },
+            );
+            let ChildObservation::Success(opinion) = observation else {
+                let reason = match observation {
+                    ChildObservation::SpawnFailed => "could not start",
+                    ChildObservation::ExitFailure => "exited unsuccessfully",
+                    ChildObservation::TimedOut => "timed out",
+                    ChildObservation::OutputTooLarge => "produced too much output",
+                    ChildObservation::InvalidOutput => "produced invalid output",
+                    ChildObservation::EmptyOutput => "returned no opinion",
+                    ChildObservation::ObservationFailed => "could not be observed",
+                    ChildObservation::Success(_) => unreachable!(),
+                };
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    format!("opinion reviewer {reason}; session {session_name} was retained"),
+                ));
+            };
+            return Ok((
+                usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
+                serde_json::json!({
+                    "target": input.reviewer.target,
+                    "model": input.reviewer.model,
+                    "session": session_name,
+                    "opinion": opinion,
+                }),
+            ));
         }
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
@@ -5895,119 +5998,6 @@ fn parse_opinion_payload(
     Ok(input)
 }
 
-fn run_agent_opinion(
-    bound: &ConnectionWorkspace,
-    agent: &SharedAgentRuntime,
-    operation_id: &str,
-    workspace: WorkspaceId,
-    caller: &usagi_core::domain::agent::CallerRef,
-    payload: serde_json::Value,
-) -> Result<
-    (
-        usagi_core::infrastructure::ipc::ResponseOutcome,
-        serde_json::Value,
-    ),
-    usagi_core::infrastructure::ipc::ProtocolError,
-> {
-    use std::time::Duration;
-    use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe_in};
-    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-    use usagi_core::infrastructure::runtime_model::{
-        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
-    };
-    use usagi_core::usecase::client::OPINION_EXECUTION_TIMEOUT_MS;
-
-    let input = parse_opinion_payload(payload)?;
-    let repository_root = bound
-        .sessions()
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
-        .repository_root()
-        .to_path_buf();
-    let config = WorkspaceAgentConfig::read(&repository_root);
-    if !config.allows(&input.reviewer.target, &input.reviewer.model) {
-        return Err(ProtocolError::new(
-            ErrorCode::InvalidArgument,
-            "opinion target/model is not allowed by the current workspace configuration",
-        ));
-    }
-    if !PathExecutableLocator.is_available(&input.reviewer.target) {
-        return Err(ProtocolError::new(
-            ErrorCode::Unavailable,
-            "opinion reviewer executable is unavailable",
-        ));
-    }
-    let prompt = opinion_prompt(&input.question, input.context.as_deref());
-    let suffix = operation_id
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>();
-    let session_name = format!("opinion-{suffix}");
-    let _delegation_permit = authorize_delegation(bound, agent, Some(caller), None, operation_id)
-        .map_err(|error| {
-        ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
-    })?;
-    let created = bound
-        .sessions()
-        .lock()
-        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
-        .handle(
-            usagi_core::usecase::client::SessionAction::Create,
-            operation_id,
-            &serde_json::json!({
-                "name": session_name,
-                "parent_session_id": caller.session_id,
-            }),
-        )
-        .map_err(|error| ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message()))?;
-    let (session_id, _) =
-        session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
-            ProtocolError::new(ErrorCode::Unavailable, "opinion session is not available")
-        })?;
-    let scope = bound
-        .scope_resolver()
-        .resolve_available_scope(workspace, Some(session_id))
-        .map_err(|_| {
-            ProtocolError::new(ErrorCode::Unavailable, "opinion session is unavailable")
-        })?;
-    let arguments = opinion_arguments(&input.reviewer.target, &input.reviewer.model, &prompt)?;
-    let observation = observe_in(
-        &input.reviewer.target,
-        &arguments,
-        &scope.working_directory,
-        ChildPolicy {
-            timeout: Duration::from_millis(OPINION_EXECUTION_TIMEOUT_MS),
-            terminate_grace: Duration::from_secs(2),
-            output_limit: 64 * 1024,
-        },
-    );
-    let ChildObservation::Success(opinion) = observation else {
-        let reason = match observation {
-            ChildObservation::SpawnFailed => "could not start",
-            ChildObservation::ExitFailure => "exited unsuccessfully",
-            ChildObservation::TimedOut => "timed out",
-            ChildObservation::OutputTooLarge => "produced too much output",
-            ChildObservation::InvalidOutput => "produced invalid output",
-            ChildObservation::EmptyOutput => "returned no opinion",
-            ChildObservation::ObservationFailed => "could not be observed",
-            ChildObservation::Success(_) => unreachable!(),
-        };
-        return Err(ProtocolError::new(
-            ErrorCode::Unavailable,
-            format!("opinion reviewer {reason}; session {session_name} was retained"),
-        ));
-    };
-    Ok((
-        usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
-        serde_json::json!({
-            "target": input.reviewer.target,
-            "model": input.reviewer.model,
-            "session": session_name,
-            "opinion": opinion,
-        }),
-    ))
-}
-
 fn opinion_arguments(
     target: &str,
     model: &str,
@@ -6062,7 +6052,44 @@ fn opinion_prompt(question: &str, context: Option<&str>) -> String {
 
 #[cfg(test)]
 mod opinion_tests {
-    use super::{opinion_arguments, opinion_prompt};
+    use super::{opinion_arguments, opinion_prompt, parse_opinion_payload};
+    use usagi_core::usecase::client::{OPINION_CONTEXT_MAX_BYTES, OPINION_QUESTION_MAX_BYTES};
+
+    #[test]
+    fn opinion_payload_validation_covers_every_bounded_rejection() {
+        assert!(parse_opinion_payload(serde_json::json!({})).is_err());
+        for payload in [
+            serde_json::json!({
+                "reviewer": {"target": "agy", "model": "gemini"},
+                "question": "  "
+            }),
+            serde_json::json!({
+                "reviewer": {"target": "agy", "model": "gemini"},
+                "question": "q".repeat(OPINION_QUESTION_MAX_BYTES + 1)
+            }),
+            serde_json::json!({
+                "reviewer": {"target": "agy", "model": "gemini"},
+                "question": "Review",
+                "context": "c".repeat(OPINION_CONTEXT_MAX_BYTES + 1)
+            }),
+            serde_json::json!({
+                "reviewer": {"target": "sakana-ai", "model": "fugu"},
+                "question": "Review"
+            }),
+        ] {
+            assert!(parse_opinion_payload(payload).is_err());
+        }
+        let valid = parse_opinion_payload(serde_json::json!({
+            "reviewer": {"target": "agy", "model": "gemini"},
+            "question": "Review",
+            "context": "Evidence"
+        }))
+        .unwrap();
+        assert_eq!(valid.reviewer.target, "agy");
+        assert_eq!(valid.reviewer.model, "gemini");
+        assert_eq!(valid.question, "Review");
+        assert_eq!(valid.context.as_deref(), Some("Evidence"));
+    }
 
     #[test]
     fn opinion_arguments_keep_each_provider_grammar_and_prompt_opaque() {
