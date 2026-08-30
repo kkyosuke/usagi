@@ -1877,10 +1877,10 @@ struct WorkspaceUi {
     /// observation. It never projects from an inventory cached before a later
     /// pane admission.
     agent_observation_requested: bool,
-    /// An Agent terminal exit changes daemon inventory. Unlike a display-only
-    /// observation request, this must schedule one follow-up when an older
-    /// restore snapshot is already in flight.
-    agent_exit_observation_requested: bool,
+    /// A successful Agent launch/resume or terminal exit changes daemon
+    /// inventory. Unlike a display-only observation request, this must schedule
+    /// one follow-up when an older restore snapshot is already in flight.
+    agent_inventory_change_observation_requested: bool,
 }
 
 struct AgentTabIntentContext {
@@ -2368,7 +2368,7 @@ impl WorkspaceUi {
             terminal_size: (0, 0),
             agent_tab_intent: None,
             agent_observation_requested: false,
-            agent_exit_observation_requested: false,
+            agent_inventory_change_observation_requested: false,
         }
     }
 
@@ -2786,12 +2786,12 @@ impl WorkspaceUi {
         std::mem::take(&mut self.agent_observation_requested)
     }
 
-    fn request_agent_exit_observation(&mut self) {
-        self.agent_exit_observation_requested = true;
+    fn request_agent_inventory_change_observation(&mut self) {
+        self.agent_inventory_change_observation_requested = true;
     }
 
-    fn take_agent_exit_observation_request(&mut self) -> bool {
-        std::mem::take(&mut self.agent_exit_observation_requested)
+    fn take_agent_inventory_change_observation_request(&mut self) -> bool {
+        std::mem::take(&mut self.agent_inventory_change_observation_requested)
     }
 
     fn agent_inventory(&self) -> Option<&AgentInventory> {
@@ -4713,7 +4713,7 @@ fn close_exited_panes(ui: &mut WorkspaceUi, runtime: &mut WorkspaceRuntime) {
         // the last coherent Agent inventory. Wake the dedicated restore lane so
         // a terminated Agent is removed there without waiting for an unrelated
         // session lifecycle change to trigger another observation.
-        ui.request_agent_exit_observation();
+        ui.request_agent_inventory_change_observation();
     }
 }
 
@@ -6233,6 +6233,12 @@ fn drain_pane_completions_into_runtime(
         }
         match completion.outcome {
             PaneLaunchOutcome::Agent { operation, result } => {
+                if result.is_ok() {
+                    // The daemon has admitted a new live runtime. Sidebar and
+                    // Garden membership comes from the coherent inventory, so
+                    // a cached pre-launch snapshot must not filter it back out.
+                    ui.request_agent_inventory_change_observation();
+                }
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
@@ -6297,6 +6303,9 @@ fn drain_pane_completions_into_runtime(
                 continuation,
                 result,
             } => {
+                if result.is_ok() {
+                    ui.request_agent_inventory_change_observation();
+                }
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
                 };
@@ -6939,7 +6948,7 @@ fn drive_workspace_controller(
         if ui.take_agent_observation_request() {
             restore_retry.request_observation(restore_clock.elapsed());
         }
-        if ui.take_agent_exit_observation_request() {
+        if ui.take_agent_inventory_change_observation_request() {
             restore_retry.request_changed_observation(restore_clock.elapsed());
         }
         drain_session_completions(&mut ui);
@@ -11166,6 +11175,10 @@ mod tests {
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a successful Agent launch must replace the pre-launch inventory"
+        );
         ui.resize_terminals(Geometry { cols: 30, rows: 6 });
         let projected_records = ui.workspace.sessions().to_vec();
         super::apply_session_projection(
@@ -11224,6 +11237,10 @@ mod tests {
             &mut pending,
             Geometry { cols: 20, rows: 5 },
         );
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a daemon admission still changes inventory after its pending tab closes"
+        );
 
         let failed_agent = OperationId::new();
         runtime.on_effect(&Effect::LaunchAgent {
@@ -11249,6 +11266,10 @@ mod tests {
             Geometry { cols: 20, rows: 5 },
         );
         assert!(pending.is_empty());
+        assert!(
+            !ui.take_agent_inventory_change_observation_request(),
+            "a rejected Agent launch does not change daemon inventory"
+        );
 
         ui.pane_completion_sender
             .send(super::PaneLaunchCompletion {
@@ -15827,7 +15848,7 @@ mod tests {
         assert!(!runtime.state().has_live_pane());
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
         assert!(
-            ui.take_agent_exit_observation_request(),
+            ui.take_agent_inventory_change_observation_request(),
             "an Agent exit must refresh sidebar and Garden membership immediately"
         );
     }
@@ -15980,7 +16001,7 @@ mod tests {
         );
         assert!(runtime.state().has_live_pane());
         assert!(
-            ui.take_agent_exit_observation_request(),
+            ui.take_agent_inventory_change_observation_request(),
             "a background Agent exit must wake the coherent inventory lane"
         );
         // The closed tab stops being watched on the next frame.
