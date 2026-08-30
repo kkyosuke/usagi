@@ -897,8 +897,9 @@ impl HomeProjection {
     /// shimmer, a pending tab's wave, and the create skeleton. The last three
     /// exist only while their subject does, so when none of them is on screen
     /// the clock can be folded onto the rabbit's representative tick and the
-    /// shell can skip the redraw (#554). The rabbit's own cadence is unchanged:
-    /// [`widgets::mascot::canonical_tick`] keeps every visibly distinct phase.
+    /// shell can skip the redraw (#554). The decorative rabbit is deliberately
+    /// slowed by [`widgets::mascot::canonical_tick`] while transient progress
+    /// animations continue to use the full-rate clock.
     ///
     /// Call this last — after every `with_*` step — because the pending tab and
     /// the create skeleton only become visible through those steps.

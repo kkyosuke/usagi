@@ -137,7 +137,11 @@ impl WorkspaceSnapshot {
 ///
 /// path の検証・登録・最終利用時刻の更新・state 読み込みは実 IO を持つ合成側が実装する。
 /// Open 一覧と Recent はともにこの 1 つの port を経由する。
-pub trait WorkspaceLoader {
+pub trait WorkspaceLoader: Send {
+    /// Whether potentially slow open/refresh calls should be moved to a worker
+    /// while the terminal keeps painting.
+    fn background_operations(&self) -> bool;
+
     /// `path` の workspace を開き、画面描画用 snapshot を返す。
     ///
     /// # Errors
@@ -163,14 +167,12 @@ pub trait WorkspaceLoader {
     /// Make an already prepared workspace the declaration used by subsequently
     /// created daemon ports. Batch preparation may have inspected another
     /// member last, so activation reasserts the chosen target without loading
-    /// it twice. Storage-free adapters may keep the default no-op.
+    /// it twice.
     ///
     /// # Errors
     ///
     /// Returns an error when the workspace declaration cannot be installed.
-    fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
-        Ok(())
-    }
+    fn activate_prepared(&mut self, path: &Path) -> io::Result<()>;
 
     /// Persist the ordered set of project tabs as one Unite recent. The
     /// default keeps compatibility adapters storage-free.

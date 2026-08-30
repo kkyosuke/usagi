@@ -3577,6 +3577,10 @@ impl PersistentSettingsPort {
 }
 
 impl SettingsPort for PersistentSettingsPort {
+    fn background_operations(&self) -> bool {
+        true
+    }
+
     fn select_workspace(&mut self, workspace_root: &Path) -> std::io::Result<()> {
         self.workspace = Some(WorkspaceSettingsStore::new(workspace_root));
         Ok(())
@@ -4009,6 +4013,10 @@ impl FsWorkspaceLoader {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_screen_graph_workspace_loader_contract
 impl WorkspaceLoader for FsWorkspaceLoader {
+    fn background_operations(&self) -> bool {
+        true
+    }
+
     fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
         validate_workspace_directory(path)?;
         let previous = crate::runtime::daemon::opened_workspace();
@@ -4450,31 +4458,56 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let available_models = available_agent_models();
     let mut loader = FsWorkspaceLoader::open_default()?;
     let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let snapshot = match loader.open(path) {
-        Ok(snapshot) => snapshot,
-        // A workspace that cannot be opened *right now* must not put an
-        // interactive user back on the shell: a wedged daemon would otherwise
-        // have locked them out of usagi entirely, with no surface left to
-        // diagnose or retry from. Fall into the switcher instead, carrying the
-        // reason on its first frame, where another workspace can be chosen or
-        // this one retried once a daemon answers. Without a terminal there is no
-        // switcher to fall into, so the failure stays a reported failure.
-        Err(error) => {
-            let notice = interactive
-                .then(|| application::open_failure_notice(&error))
-                .flatten();
-            let Some(notice) = notice else {
-                return Err(error);
-            };
-            drop(loader);
-            return launch_screen_graph(out, Start::Welcome, Some(notice));
-        }
-    };
-    let registry = loader.storage.load_workspaces().map_err(io_error)?;
     let mut settings = PersistentSettingsPort::open()?;
     if interactive {
         let mut backend_factory = ProductionBackendFactory::default();
         run_in_terminal(|terminal| {
+            let snapshot = match presentation::open_workspace_responsive(
+                terminal,
+                &mut loader,
+                path,
+                "Opening workspace…",
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        let (workspaces, recent) =
+                            load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                        return presentation::run_screen_graph_with_backend_and_notice(
+                            terminal,
+                            workspaces,
+                            recent,
+                            Utc::now(),
+                            Start::Welcome,
+                            &mut loader,
+                            &mut settings,
+                            &mut backend_factory,
+                            available_models,
+                            Some("Workspace opening was cancelled.".to_owned()),
+                        );
+                    }
+                    let Some(notice) = application::open_failure_notice(&error) else {
+                        return Err(error);
+                    };
+                    let (workspaces, recent) =
+                        load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                    return presentation::run_screen_graph_with_backend_and_notice(
+                        terminal,
+                        workspaces,
+                        recent,
+                        Utc::now(),
+                        Start::Welcome,
+                        &mut loader,
+                        &mut settings,
+                        &mut backend_factory,
+                        available_models,
+                        Some(notice),
+                    );
+                }
+            };
+            // `open` may register a directly addressed workspace, so read the
+            // deck registry only after that operation has committed.
+            let registry = loader.storage.load_workspaces().map_err(io_error)?;
             // A direct workspace entry has no Welcome behind it, so leaving
             // continues into the entry screens in this same process rather
             // than ending it: `usagi <path>` switches workspaces too (#556).
@@ -4511,6 +4544,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             }
         })?;
     } else {
+        let snapshot = loader.open(path)?;
         for line in presentation::render_home_snapshot(0, 0, &snapshot) {
             writeln!(out, "{line}")?;
         }
@@ -8462,6 +8496,7 @@ mod tests {
             storage: Storage::new(temporary.path()),
             workspace: None,
         };
+        assert!(first.background_operations());
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
