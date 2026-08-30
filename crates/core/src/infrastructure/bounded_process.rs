@@ -69,7 +69,6 @@ struct Capture {
 /// either pipe can fill without deadlocking the child, while retained memory is
 /// limited to `output_limit` bytes per stream.
 #[must_use]
-#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
     let mut command = Command::new(program);
     command.args(arguments);
@@ -92,6 +91,7 @@ pub fn observe_in(
     observe_command(command, policy, true)
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child,observes_from_the_requested_directory_without_a_shell
 fn observe_command(
     mut command: Command,
     policy: ChildPolicy,
