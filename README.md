@@ -46,8 +46,11 @@ usagi が目指すのは、複数種類の AI エージェントを同じ UI か
 
 workspace を開くと Home へ移る。最上段の project tab bar には同じ TUI で開いている workspace が並び、
 選択中 workspace の session と Preview / Terminal / Diff / Notes をその下へ全面表示する。`+ Open` は左右の余白を
-含めてクリックでき、Session Garden では開いている全 project の session をまとめて見渡せる。workspace root の
-shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。
+含めてクリックでき、登録済み workspace の複数選択に加えて `Tab` から既存ディレクトリを直接追加できる。overlay を
+開いている間は別の usagi が追加した workspace も自動で一覧へ反映される。Session Garden では開いている全 project の
+session をまとめて見渡せる。workspace root の
+shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer として開く。Session Garden はうさぎを左へ寄せ、
+右の `Notifications` に `Agent completed.` や入力待ちなど、現在の状態を短い文で表示する。
 
 ```text
  1 usagi   2 api   3 web   + Open
@@ -159,7 +162,8 @@ usagi open /path/to/project
 ```
 
 引数を省略するとカレントディレクトリを開く。次回からは `usagi` の Welcome にある Open / Recent
-から選べる。新しいリポジトリを clone したい場合は Welcome の New を使う。
+から選べる。Home の `+ Open` では `Tab` を押して既存ディレクトリのパスを入力しても登録・open できる。
+新しいリポジトリを clone したい場合は Welcome の New を使う。
 
 ### 2. session を作る
 
@@ -178,8 +182,9 @@ usagi session create remote-fix --base refs/remotes/origin/main
 ```
 
 session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
-Home の作成欄では `local:main` / `remote:origin/main` のように出所を区別した base branch を
-`↑↓` で選ぶ。CLI の `--base` は同じ対象を fully-qualified ref で指定する。
+Home の作成欄では `local:main` / `remote:origin/(default)` / `remote:origin/main` のように
+出所を区別した base branch を `↑↓` で選ぶ。`(default)` はその remote の既定 branch を表す。
+CLI の `--base` は同じ対象を fully-qualified ref で指定する。
 role は作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
 詳細は [session role](document/10-session-roles.md)を参照する。
 

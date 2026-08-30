@@ -28,11 +28,12 @@ use usagi_core::{
         agent::{
             AgentCapability, AgentIntegrationDiagnosis, AgentIntegrationRevision, AgentInventory,
             AgentProfileId, AgentResumableInventoryItem, AgentResumeRelation, AgentResumeTarget,
-            AgentRuntimeInventoryItem, AgentRuntimeInventoryState, AgentStatus, CallerRef,
-            DispatchBinding, DispatchRun, InboxKind, InboxMessage, LaunchMode, LaunchRequest,
-            LaunchScope, ModelSelector, OutdatedAgentRuntime, ProviderCaptureProvenance,
-            ProviderKind, ProviderResumePhase, ProviderResumeReason, ProviderResumeRef,
-            ProviderResumeStatus, ProviderSessionId, RunStatus, WorkerRef,
+            AgentRuntimeInventoryItem, AgentRuntimeInventoryState, AgentStatus,
+            AgentWorkspaceObservation, CallerRef, DispatchBinding, DispatchRun, InboxKind,
+            InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
+            OutdatedAgentRuntime, ProviderCaptureProvenance, ProviderKind, ProviderResumePhase,
+            ProviderResumeReason, ProviderResumeRef, ProviderResumeStatus, ProviderSessionId,
+            RunStatus, WorkerRef,
         },
         id::{
             AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, CompletionFence, ConnectionId,
@@ -1325,6 +1326,41 @@ impl AgentRuntime {
             runtimes,
             resumable,
         }
+    }
+
+    /// Returns one cross-project observation with both runtime detail and the
+    /// dispatch terminal state used by `session list`. Multiple dispatch Agents
+    /// in one session follow the same preference as that list: an Agent owning a
+    /// current run wins, with durable store order breaking ties.
+    pub fn workspace_observation(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<AgentWorkspaceObservation, ProtocolError> {
+        let mut selected = BTreeMap::new();
+        for agent in self
+            .dispatch
+            .agents_in_workspace(workspace)
+            .map_err(map_dispatch_storage_error)?
+        {
+            let Some(session) = agent.session_id else {
+                continue;
+            };
+            selected
+                .entry(session)
+                .and_modify(|current: &mut usagi_core::domain::agent::Agent| {
+                    if current.current_run.is_none() || agent.current_run.is_some() {
+                        current.clone_from(&agent);
+                    }
+                })
+                .or_insert(agent);
+        }
+        Ok(AgentWorkspaceObservation {
+            inventory: self.inventory(workspace),
+            session_statuses: selected
+                .into_iter()
+                .map(|(session, agent)| (session, agent.status))
+                .collect(),
+        })
     }
 
     /// Starts a new daemon-owned runtime for one exact interrupted source. This
@@ -4331,6 +4367,72 @@ mod tests {
     }
 
     // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    fn workspace_observation_prefers_the_sessions_current_dispatch_agent() {
+        let runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let idle = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(session),
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("idle").unwrap(),
+            )
+            .unwrap();
+        runtime
+            .dispatch
+            .transition_agent(idle.agent_id, AgentStatus::Idle, None)
+            .unwrap();
+        let running = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                Some(session),
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("running").unwrap(),
+            )
+            .unwrap();
+        runtime
+            .dispatch
+            .transition_agent(
+                running.agent_id,
+                AgentStatus::Running,
+                Some(OperationId::new()),
+            )
+            .unwrap();
+        let _root = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                None,
+                AgentProfileId::new("codex").unwrap(),
+                ModelSelector::new("root").unwrap(),
+            )
+            .unwrap();
+
+        let observation = runtime.workspace_observation(workspace).unwrap();
+        assert_eq!(observation.inventory.workspace_id, workspace);
+        assert_eq!(
+            observation.session_statuses,
+            BTreeMap::from([(session, AgentStatus::Running)])
+        );
+        assert!(
+            runtime
+                .workspace_observation(WorkspaceId::new())
+                .unwrap()
+                .session_statuses
+                .is_empty()
+        );
+
+        std::fs::write(runtime.dispatch.registry_path(), "broken").unwrap();
+        assert_eq!(
+            runtime.workspace_observation(workspace).unwrap_err().code,
+            ErrorCode::Unavailable
+        );
+    }
 
     #[test]
     fn daemon_dispatch_store_requires_ownership_without_reparenting() {

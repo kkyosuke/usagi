@@ -129,6 +129,10 @@ fn the_non_terminal_surface_names_spawns_reads_and_inventories() {
             (RequestClass::Inventory, ResourceOwner::Unscoped),
         ),
         (
+            "agent_workspace_observation",
+            (RequestClass::Inventory, ResourceOwner::Unscoped),
+        ),
+        (
             "diagnose_agents",
             (RequestClass::Inventory, ResourceOwner::Unscoped),
         ),

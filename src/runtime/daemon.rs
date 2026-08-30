@@ -5140,7 +5140,7 @@ fn start_ipc_accept_loop(
                                         Some("rollover") => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), request_id, &body, hello),
                                         Some("tenant") => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                         Some("session") => dispatch_session(&bound, &teardown, &agent_launch, &pr_inventory, request_id, &body, hello),
-                                        Some("agent" | "agent_inventory" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
+                                        Some("agent" | "agent_inventory" | "agent_workspace_observation" | "diagnose_agents" | "restart_agents" | "resume_agent" | "resume_agent_with_current_integration") => dispatch_agent(&agent_launch, &bound, request_id, &body, hello),
                                         Some("codex_session_capture") => dispatch_codex_session_capture(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("agent_phase_report") => dispatch_agent_phase_report(&agent_launch, peer_process, request_id, &body, hello),
                                         Some("dispatch") => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
@@ -8292,6 +8292,7 @@ fn reconcile_orphan_delegations(
 enum AgentDispatchRequest {
     Launch(String, usagi_core::usecase::client::AgentLaunchIntent),
     Inventory(WorkspaceId),
+    WorkspaceObservation(WorkspaceId),
     Diagnose(
         WorkspaceId,
         Vec<usagi_core::domain::agent::AgentIntegrationRevision>,
@@ -8330,6 +8331,7 @@ fn admit_agent_dispatch_request(
                 owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
             }
             AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
             | AgentDispatchRequest::Diagnose(_, _)
             | AgentDispatchRequest::Restart(_, _, _, _) => {
                 unreachable!("handled before readiness")
@@ -8355,6 +8357,7 @@ fn admit_agent_dispatch_request(
                     preflight.as_ref(),
                 ),
             AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
             | AgentDispatchRequest::Diagnose(_, _)
             | AgentDispatchRequest::Restart(_, _, _, _) => {
                 unreachable!("handled before readiness")
@@ -8379,6 +8382,18 @@ fn dispatch_agent_maintenance(
                 .map(|agent| {
                     serde_json::to_value(agent.inventory(*workspace))
                         .expect("safe Agent inventory is serializable")
+                }),
+        ),
+        AgentDispatchRequest::WorkspaceObservation(workspace) => Some(
+            agent
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
+                })
+                .and_then(|agent| agent.workspace_observation(*workspace))
+                .map(|observation| {
+                    serde_json::to_value(observation)
+                        .expect("safe Agent workspace observation is serializable")
                 }),
         ),
         AgentDispatchRequest::Diagnose(workspace, expected) => Some(
@@ -8433,6 +8448,9 @@ fn dispatch_agent(
             } => Some(AgentDispatchRequest::Launch(operation_id, intent)),
             DaemonRequest::AgentInventory { workspace } => {
                 Some(AgentDispatchRequest::Inventory(workspace))
+            }
+            DaemonRequest::AgentWorkspaceObservation { workspace } => {
+                Some(AgentDispatchRequest::WorkspaceObservation(workspace))
             }
             DaemonRequest::DiagnoseAgents {
                 workspace,

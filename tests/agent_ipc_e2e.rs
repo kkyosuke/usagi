@@ -16,7 +16,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use usagi_core::domain::agent::AgentProfileId;
+use usagi_core::domain::agent::{AgentProfileId, AgentWorkspaceObservation};
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::domain::terminal_launch::{
@@ -112,6 +112,13 @@ fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
     write_codex_cli(bin, "codex", count, ready_status);
 }
 
+/// Quote one UTF-8 path as a single POSIX shell word. Cargo may place the test
+/// binary under a target directory containing spaces, quotes, or a literal
+/// `$HOME`; double quotes would re-expand that text inside the fixture provider.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'"'"'"#))
+}
+
 fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &Path) {
     fs::create_dir_all(bin).unwrap();
     let script = format!(
@@ -133,14 +140,25 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
 /// same one-line conversation.
 fn write_codex_cli(bin: &Path, program: &str, count: &Path, ready_status: i32) {
     fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{}\" codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
-        env!("CARGO_BIN_EXE_usagi"),
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
     );
     let path = bin.join(program);
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn fixture_shell_quote_preserves_metacharacters_as_one_word() {
+    let value = "/tmp/$HOME/it's a target";
+    let output = Command::new("/bin/sh")
+        .args(["-c", &format!("printf '%s' {}", shell_quote(value))])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, value.as_bytes());
 }
 
 fn write_shell(path: &Path, count: &Path) {
@@ -601,6 +619,36 @@ fn screen_contains(rows: &[String], text: &str) -> bool {
     rows.iter().any(|row| row.contains(text))
 }
 
+/// Wait for the fixture process itself to publish a screen marker before
+/// driving its stdin. PTY echo can make an early write visible before the
+/// child has reached its read loop, which is not process readiness.
+fn wait_for_terminal_text(client: &mut impl DaemonClient, terminal: &TerminalRef, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let DaemonReply::Ok(snapshot) = client
+            .request(DaemonRequest::Terminal {
+                action: TerminalAction::Resync,
+                payload: serde_json::to_value(TerminalRequest::Resync {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            })
+            .expect("the fixture terminal remains readable")
+        else {
+            unreachable!()
+        };
+        let rows = restored_screen(&snapshot);
+        if screen_contains(&rows, expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture terminal did not publish {expected:?}: {rows:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Poll the durable final of one Agent launch, then read it once more.
 ///
 /// `ResponseOutcome::Ok` carries no envelope operation identity, so the final and
@@ -879,6 +927,22 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
     // Omitted profile and explicit `codex` both resolve through the root's
     // Codex default/registry path.  The omitted launch drives the full stream.
     let (operation, terminal) = launch(&mut first, workspace, session, None);
+    let DaemonReply::Ok(observation) = first
+        .request(DaemonRequest::AgentWorkspaceObservation { workspace })
+        .expect("the Garden observation is a read-only Agent request")
+    else {
+        panic!("the workspace observation is synchronous");
+    };
+    let observation: AgentWorkspaceObservation = serde_json::from_value(observation).unwrap();
+    assert_eq!(observation.inventory.workspace_id, workspace);
+    assert!(
+        observation
+            .inventory
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.terminal == terminal)
+    );
+    assert!(observation.session_statuses.contains_key(&session));
     thread::sleep(Duration::from_millis(100));
     let subscription = attach(&mut first, &terminal);
     first
@@ -1383,6 +1447,7 @@ fn drawer_close_reopen_continues_input_on_the_same_daemon_connection() {
     let first_attach = attach_response(&mut client, &terminal);
     assert_eq!(first_attach["next_input_seq"], 0);
     let first_subscription = first_attach["subscription"].as_u64().unwrap();
+    wait_for_terminal_text(&mut client, &terminal, "shell-ready");
     client
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Input,

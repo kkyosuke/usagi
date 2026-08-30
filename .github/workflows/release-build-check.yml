@@ -20,6 +20,7 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
+      - ".github/workflows/create-release-pr.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/auto-release.yml"
       - ".github/workflows/release-build-check.yml"

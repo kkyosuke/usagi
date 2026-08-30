@@ -2006,8 +2006,22 @@ impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
     fn inventory(
         &mut self,
         workspace: WorkspaceId,
-    ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-        fetch_agent_inventory(workspace)
+    ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
+        let mut client =
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(
+                usagi_core::usecase::client::DaemonRequest::AgentWorkspaceObservation { workspace },
+            )
+            .map_err(|_| "Agent workspace observation is unavailable".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                serde_json::from_value(body).map_err(|_| {
+                    "daemon returned an invalid Agent workspace observation".to_owned()
+                })
+            }
+        }
     }
 }
 
@@ -3964,6 +3978,7 @@ fn load_workspace_state(
 struct FsWorkspaceLoader {
     storage: Storage,
     create_completion: Option<mpsc::Receiver<WorkspaceCreateCompletion>>,
+    registry_refresh_completion: Option<mpsc::Receiver<std::io::Result<Vec<Workspace>>>>,
 }
 
 impl FsWorkspaceLoader {
@@ -3971,6 +3986,7 @@ impl FsWorkspaceLoader {
         Self {
             storage,
             create_completion: None,
+            registry_refresh_completion: None,
         }
     }
 
@@ -4018,7 +4034,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
     }
 
     fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
-        validate_workspace_directory(path)?;
+        let path = resolve_workspace_path(path)?;
         let previous = crate::runtime::daemon::opened_workspace();
         // Declare the workspace being opened before anything else touches the
         // daemon: a running multi-tenant daemon selects or adopts this exact
@@ -4026,12 +4042,12 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         // cold start binds the workspace being opened rather than this process's directory.
         // The refusal lands before any registry write or recent-list update, so a
         // workspace that cannot be shown is not recorded as opened either.
-        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
+        let opened = crate::runtime::daemon::declare_opened_workspace(&path)?;
         let result = (|| {
             let lifecycle = request_lifecycle_snapshot()
                 .map_err(|error| workspace_open_error(error, &opened))?;
             let workspace =
-                workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
+                workspace_usecase::open(&self.storage, &path, Utc::now()).map_err(io_error)?;
             // New workspaces copy Global's Agent / Issue / Memory defaults. For a
             // pre-existing registration from before workspace settings existed,
             // the first open performs the same one-time initialization. The store
@@ -4080,6 +4096,42 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         workspace_usecase::touch_unite(&self.storage, paths, Utc::now()).map_err(io_error)
     }
 
+    fn dispatch_registry_refresh(&mut self) -> std::io::Result<bool> {
+        if self.registry_refresh_completion.is_some() {
+            return Ok(false);
+        }
+        let storage_dir = self.storage.dir().to_path_buf();
+        let (completion_tx, completion_rx) = mpsc::channel();
+        thread::Builder::new()
+            .name("workspace-registry-refresh".to_owned())
+            .spawn(move || {
+                let result = Storage::new(storage_dir)
+                    .load_workspaces()
+                    .map_err(io_error);
+                let _ = completion_tx.send(result);
+            })
+            .map_err(io_error)?;
+        self.registry_refresh_completion = Some(completion_rx);
+        Ok(true)
+    }
+
+    fn take_registry_refresh(&mut self) -> Option<std::io::Result<Vec<Workspace>>> {
+        let receiver = self.registry_refresh_completion.as_ref()?;
+        match receiver.try_recv() {
+            Ok(completion) => {
+                self.registry_refresh_completion = None;
+                Some(completion)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.registry_refresh_completion = None;
+                Some(Err(io_error(
+                    "workspace registry refresh stopped unexpectedly",
+                )))
+            }
+        }
+    }
+
     fn activate_prepared(&mut self, path: &Path) -> std::io::Result<()> {
         crate::runtime::daemon::declare_opened_workspace(path).map(|_| ())
     }
@@ -4126,16 +4178,18 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                                 (workspace_usecase::NewWorkspaceKind::Existing, path)
                             }
                         };
+                    let probe = probe_path(target);
+                    let resolved_existing = (kind == workspace_usecase::NewWorkspaceKind::Existing
+                        && probe == workspace_usecase::WorkspaceProbe::Directory)
+                        .then(|| resolve_workspace_path(target))
+                        .transpose()?;
+                    let registry_target = resolved_existing.as_deref().unwrap_or(target);
                     let registered = workspace_usecase::is_registered(
                         &loader.storage.load_workspaces().map_err(io_error)?,
-                        target,
+                        registry_target,
                     );
-                    workspace_usecase::preflight_new_workspace(
-                        kind,
-                        registered,
-                        probe_path(target),
-                    )
-                    .map_err(|error| io_error(error.message()))?;
+                    workspace_usecase::preflight_new_workspace(kind, registered, probe)
+                        .map_err(|error| io_error(error.message()))?;
 
                     let path = match &effect.request {
                         NewRequest::Clone {
@@ -4157,10 +4211,13 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                             git_clone(&SystemGit, parent, repository, directory, branch.as_deref())
                                 .map_err(io_error)?
                         }
-                        NewRequest::Existing { path, name } => {
-                            workspace_usecase::register(&loader.storage, path, name, Utc::now())
+                        NewRequest::Existing { name, .. } => {
+                            let path = resolved_existing.ok_or_else(|| {
+                                io_error("existing workspace path could not be resolved")
+                            })?;
+                            workspace_usecase::register(&loader.storage, &path, name, Utc::now())
                                 .map_err(io_error)?;
-                            path.clone()
+                            path
                         }
                     };
                     // Both modes finish through the same snapshot path as Open.
@@ -5145,7 +5202,7 @@ mod tests {
         lifecycle_snapshot, load_screen_graph_data, load_workspace_state, map_terminal_error,
         metrics_cadence, passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
         provider_resume_projection, reduced_motion_from_environment, reply_geometry,
-        session_cadence, session_snapshot_result, terminal_copy_key,
+        resolve_workspace_path, session_cadence, session_snapshot_result, terminal_copy_key,
         terminal_inventory_matches_scope, validate_workspace_directory, version_detail,
         version_result_from_observation, workspace_open_error,
     };
@@ -8179,11 +8236,55 @@ mod tests {
     #[test]
     fn workspace_directory_validation_projects_metadata_errors() {
         let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("workspace");
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            resolve_workspace_path(&directory).unwrap(),
+            std::fs::canonicalize(&directory).unwrap()
+        );
         let missing = temporary.path().join("missing");
         assert_eq!(
             validate_workspace_directory(&missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    #[test]
+    fn workspace_registry_refresh_observes_an_external_store_update() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temporary.path());
+        let alpha = Workspace::new("alpha", "/alpha");
+        storage
+            .save_workspaces(std::slice::from_ref(&alpha))
+            .unwrap();
+        let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path()));
+
+        assert!(loader.dispatch_registry_refresh().unwrap());
+        assert!(!loader.dispatch_registry_refresh().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first = loop {
+            if let Some(result) = loader.take_registry_refresh() {
+                break result.unwrap();
+            }
+            assert!(Instant::now() < deadline, "registry refresh did not finish");
+            std::thread::yield_now();
+        };
+        assert_eq!(first, vec![alpha.clone()]);
+
+        let beta = Workspace::new("beta", "/beta");
+        storage
+            .save_workspaces(&[alpha.clone(), beta.clone()])
+            .unwrap();
+        assert!(loader.dispatch_registry_refresh().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let second = loop {
+            if let Some(result) = loader.take_registry_refresh() {
+                break result.unwrap();
+            }
+            assert!(Instant::now() < deadline, "registry refresh did not finish");
+            std::thread::yield_now();
+        };
+        assert_eq!(second, vec![alpha, beta]);
     }
 
     #[test]

@@ -1986,6 +1986,11 @@ pub enum AppEvent {
     /// launch. A mismatched operation is ignored, preserving the in-flight
     /// fence against stale or replayed completions.
     DirectorLaunchFinished(OperationId),
+    /// The runtime observed that the workspace-root Shell drawer owns no tabs.
+    /// This is an explicit close rather than the user-facing toggle: both
+    /// workspace drawers may be open while Director owns focus, and replaying a
+    /// toggle in that state would open/focus Shell and request a new terminal.
+    RootTerminalDrawerEmptied,
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -3265,6 +3270,15 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::DirectorLaunchFinished(operation) => {
             if state.director_launching == Some(operation) {
                 state.director_launching = None;
+            }
+            Vec::new()
+        }
+        AppEvent::RootTerminalDrawerEmptied => {
+            state.root_terminal_drawer_open = false;
+            if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Terminal) {
+                state.workspace_drawer_focus = state
+                    .director_drawer_open
+                    .then_some(WorkspaceDrawerFocus::Director);
             }
             Vec::new()
         }
@@ -5825,6 +5839,10 @@ mod tests {
                         refname: "refs/heads/main".into(),
                     },
                     BranchChoice {
+                        label: "remote:origin/(default)".into(),
+                        refname: "refs/remotes/origin/HEAD".into(),
+                    },
+                    BranchChoice {
                         label: "remote:origin/main".into(),
                         refname: "refs/remotes/origin/main".into(),
                     },
@@ -5845,7 +5863,7 @@ mod tests {
                 .as_str(),
             "coder"
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         state.create_session.as_mut().unwrap().move_role(true);
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
@@ -5856,7 +5874,7 @@ mod tests {
         assert!(
             matches!(effects.as_slice(), [Effect::CreateSession { intent, .. }]
             if intent.role_id.as_ref() == Some(&reviewer)
-                && intent.base_ref.as_deref() == Some("refs/remotes/origin/main")
+                && intent.base_ref.as_deref() == Some("refs/remotes/origin/HEAD")
                 && intent.profile.is_none() && intent.model.is_none())
         );
 
@@ -6658,6 +6676,36 @@ mod tests {
         assert!(state.root_terminal_drawer_open());
         assert!(state.director_drawer_open());
         assert!(matches!(state.director_new(), DirectorNew::Choosing(_)));
+    }
+
+    #[test]
+    fn empty_root_terminal_drawer_closes_without_replaying_the_user_toggle() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        assert!(matches!(effects.as_slice(), [Effect::OpenTerminal { .. }]));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        assert!(update(&mut state, AppEvent::RootTerminalDrawerEmptied).is_empty());
+        assert!(!state.root_terminal_drawer_open());
+        assert_eq!(state.workspace_drawer_focus(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert!(update(&mut state, AppEvent::RootTerminalDrawerEmptied).is_empty());
+        assert!(!state.root_terminal_drawer_open());
+        assert!(state.director_drawer_open());
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
     }
 
     #[test]

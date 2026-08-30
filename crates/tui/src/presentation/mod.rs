@@ -27,7 +27,7 @@ use chrono::{DateTime, Timelike, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
     AgentInventory, AgentProfileId, AgentResumeRelation, AgentResumeTarget,
-    AgentRuntimeInventoryState, ProviderResumeProjection,
+    AgentRuntimeInventoryState, AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
@@ -1206,19 +1206,19 @@ pub struct ControllerBackendComposition {
 /// never cold-starts a daemon, so a project whose daemon is gone simply keeps
 /// its read-only plot.
 pub trait GardenInventoryPort: Send {
-    /// The daemon's safe Agent inventory for one open project.
+    /// The daemon's safe runtime and dispatch observation for one open project.
     ///
     /// # Errors
     ///
     /// Returns safe feedback when the daemon is unavailable or refuses the
     /// workspace. The Garden keeps the plot it has.
-    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String>;
+    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
 }
 
 struct UnavailableGardenInventoryPort;
 
 impl GardenInventoryPort for UnavailableGardenInventoryPort {
-    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentInventory, String> {
+    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
         Err("Agent inventory is unavailable".to_owned())
     }
 }
@@ -1934,7 +1934,7 @@ struct GardenObservationCompletion {
     port: Box<dyn GardenInventoryPort>,
     /// Inventories the daemon answered, each already checked to be the
     /// workspace it was asked for.
-    inventories: Vec<AgentInventory>,
+    inventories: Vec<AgentWorkspaceObservation>,
 }
 
 /// Admission for the Garden's cross-project observation lane.
@@ -2002,7 +2002,7 @@ fn spawn_garden_observation_job(
         let mut inventories = Vec::new();
         for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
             if let Ok(inventory) = port.inventory(workspace)
-                && inventory.workspace_id == workspace
+                && inventory.inventory.workspace_id == workspace
             {
                 inventories.push(inventory);
             }
@@ -6713,6 +6713,11 @@ fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Opt
 /// Maximum number of completions one Home frame may apply from each queue.
 const FRAME_EVENT_BUDGET: usize = 128;
 
+/// Registry reads are useful only while `+ Open` is visible. A short bounded
+/// cadence feels live across processes without turning the Home frame loop into
+/// a filesystem poller.
+const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -6734,6 +6739,7 @@ fn drive_workspace_controller(
     entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
+    let mut registry = registry.to_vec();
     let WorkspaceEntryPolicy {
         available_models,
         default_model,
@@ -6843,6 +6849,8 @@ fn drive_workspace_controller(
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
     let mut restore_retry = RestoreRetryState::new();
+    let mut registry_refresh_pending = false;
+    let mut registry_refresh_due = std::time::Duration::ZERO;
     let mut garden_observation = GardenObservation::new();
     let mut garden_observations = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
@@ -6876,6 +6884,48 @@ fn drive_workspace_controller(
     let mut allowed_sessions_revision = u64::MAX;
     let mut current_sessions = BTreeSet::new();
     loop {
+        let registry_now = restore_clock.elapsed();
+        if deck.add_overlay_open()
+            && !registry_refresh_pending
+            && registry_now >= registry_refresh_due
+            && let Some(loader) = loader.as_mut()
+        {
+            match (**loader).dispatch_registry_refresh() {
+                Ok(true) => registry_refresh_pending = true,
+                Ok(false) => {
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                }
+                Err(error) => {
+                    deck.set_notice(error.to_string());
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                    drawn_material = None;
+                    frame_material_key = None;
+                }
+            }
+        }
+        if let Some(completion) = loader
+            .as_mut()
+            .and_then(|loader| (**loader).take_registry_refresh())
+        {
+            registry_refresh_pending = false;
+            registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+            match completion {
+                Ok(latest) => {
+                    registry = latest;
+                    if deck.add_overlay_open() {
+                        deck.refresh_add(&registry);
+                        drawn_material = None;
+                        frame_material_key = None;
+                    }
+                }
+                Err(error) if deck.add_overlay_open() => {
+                    deck.set_notice(error.to_string());
+                    drawn_material = None;
+                    frame_material_key = None;
+                }
+                Err(_) => {}
+            }
+        }
         if let Ok(catalog) = branch_catalog_receiver.try_recv() {
             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
                 catalog,
@@ -7282,7 +7332,8 @@ fn drive_workspace_controller(
         let opens_add = matches!(key, Key::Live(LiveTerminalAction::OpenWorkspace))
             || matches!(bar_target, Some(ProjectBarTarget::Add));
         if opens_add {
-            deck.open_add(registry);
+            deck.open_add(&registry);
+            registry_refresh_due = std::time::Duration::ZERO;
             drawn_material = None;
             frame_material_key = None;
             continue;
@@ -7763,9 +7814,9 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
 }
 
 /// Reads local and remote-tracking branch identities for the create picker.
-/// Symbolic remote aliases such as `origin/HEAD` are omitted so every row names
-/// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
-/// default instead of making the workspace unusable.
+/// A remote's symbolic `HEAD` is exposed as its `(default)` choice; other
+/// symbolic aliases are omitted. A failure shrinks the picker to the daemon's
+/// legacy `HEAD` default instead of making the workspace unusable.
 fn session_branch_catalog(
     workspace_root: &Path,
     configured_default: Option<&str>,
@@ -7818,23 +7869,32 @@ fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
         .lines()
         .filter_map(|line| {
             let (refname, symref) = line.split_once(' ').unwrap_or((line, ""));
-            if !symref.is_empty() {
-                return None;
-            }
-            let label = refname
-                .strip_prefix("refs/heads/")
-                .map(|name| format!("local:{name}"))
-                .or_else(|| {
-                    refname
-                        .strip_prefix("refs/remotes/")
-                        .map(|name| format!("remote:{name}"))
-                })?;
+            let label = if symref.is_empty() {
+                refname
+                    .strip_prefix("refs/heads/")
+                    .map(|name| format!("local:{name}"))
+                    .or_else(|| {
+                        refname
+                            .strip_prefix("refs/remotes/")
+                            .map(|name| format!("remote:{name}"))
+                    })
+            } else {
+                remote_default_branch_label(refname, symref)
+            }?;
             Some(BranchChoice {
                 label,
                 refname: refname.to_owned(),
             })
         })
         .collect()
+}
+
+fn remote_default_branch_label(refname: &str, symref: &str) -> Option<String> {
+    let name = refname.strip_prefix("refs/remotes/")?;
+    let remote = name.strip_suffix("/HEAD")?;
+    let target_prefix = format!("refs/remotes/{remote}/");
+    (!remote.is_empty() && symref.starts_with(&target_prefix) && symref != refname)
+        .then(|| format!("remote:{remote}/(default)"))
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
@@ -9119,6 +9179,7 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::{
         AgentInventory, AgentProfileId, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
+        AgentWorkspaceObservation,
     };
     use usagi_core::domain::id::{
         AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
@@ -9829,25 +9890,31 @@ mod tests {
         // The daemon answers for whichever workspace the request names, so the
         // other project's Agents reach its plot without a resident controller.
         let runtime_id = AgentRuntimeId::new();
-        assert!(deck.apply_garden_inventory(&AgentInventory {
-            workspace_id: beta.workspace_id,
-            runtimes: vec![AgentRuntimeInventoryItem {
-                runtime: AgentRuntimeRef {
-                    agent_runtime_id: runtime_id,
-                    terminal: TerminalRef {
-                        daemon_generation: DaemonGeneration::new(),
-                        terminal_id: TerminalId::new(),
-                        workspace_id: beta.workspace_id,
+        assert!(deck.apply_garden_inventory(&AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: beta.workspace_id,
+                runtimes: vec![AgentRuntimeInventoryItem {
+                    runtime: AgentRuntimeRef {
+                        agent_runtime_id: runtime_id,
+                        terminal: TerminalRef {
+                            daemon_generation: DaemonGeneration::new(),
+                            terminal_id: TerminalId::new(),
+                            workspace_id: beta.workspace_id,
+                            session_id: Some(beta.session_ids[0]),
+                            worktree_id: WorktreeId::new(),
+                        },
                         session_id: Some(beta.session_ids[0]),
-                        worktree_id: WorktreeId::new(),
                     },
-                    session_id: Some(beta.session_ids[0]),
-                },
-                continuation: AgentContinuationRef::new(),
-                state: AgentRuntimeInventoryState::Live,
-                resumed_from: None,
-            }],
-            resumable: Vec::new(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                }],
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::from([(
+                beta.session_ids[0],
+                usagi_core::domain::agent::AgentStatus::Idle,
+            )]),
         }));
         let material = build(&deck);
         let plots = material
@@ -9864,7 +9931,8 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("1 run")));
+        assert!(observed.iter().any(|row| row.contains("idle")));
+        assert!(observed.iter().any(|row| row.contains("0 running")));
     }
 
     #[test]
@@ -12966,10 +13034,10 @@ mod tests {
     }
 
     #[test]
-    fn branch_choices_distinguish_local_remote_and_skip_symbolic_aliases() {
+    fn branch_choices_include_remote_defaults_and_skip_other_symbolic_aliases() {
         assert_eq!(
             super::parse_session_branch_choices(
-                "refs/heads/main \nrefs/heads/feature \nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/main \nnot-a-ref\n"
+                "refs/heads/main \nrefs/heads/feature \nrefs/heads/current refs/heads/main\nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/alias refs/remotes/origin/main\nrefs/remotes/origin/main \nrefs/remotes/upstream/HEAD refs/remotes/other/main\nnot-a-ref\n"
             ),
             vec![
                 crate::usecase::application::controller::BranchChoice {
@@ -12979,6 +13047,10 @@ mod tests {
                 crate::usecase::application::controller::BranchChoice {
                     label: "local:feature".into(),
                     refname: "refs/heads/feature".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "remote:origin/(default)".into(),
+                    refname: "refs/remotes/origin/HEAD".into(),
                 },
                 crate::usecase::application::controller::BranchChoice {
                     label: "remote:origin/main".into(),
@@ -19200,12 +19272,15 @@ mod tests {
     #[test]
     fn a_garden_round_observes_every_other_project_and_drops_a_mismatched_answer() {
         struct FakeGardenInventory {
-            answers: BTreeMap<WorkspaceId, Result<AgentInventory, String>>,
+            answers: BTreeMap<WorkspaceId, Result<AgentWorkspaceObservation, String>>,
             asked: Arc<Mutex<Vec<WorkspaceId>>>,
         }
 
         impl super::GardenInventoryPort for FakeGardenInventory {
-            fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String> {
+            fn inventory(
+                &mut self,
+                workspace: WorkspaceId,
+            ) -> Result<AgentWorkspaceObservation, String> {
                 self.asked.lock().unwrap().push(workspace);
                 self.answers
                     .remove(&workspace)
@@ -19224,10 +19299,13 @@ mod tests {
         let observed = WorkspaceId::new();
         let mismatched = WorkspaceId::new();
         let unavailable = WorkspaceId::new();
-        let empty_inventory = |workspace| AgentInventory {
-            workspace_id: workspace,
-            runtimes: Vec::new(),
-            resumable: Vec::new(),
+        let empty_inventory = |workspace| AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: workspace,
+                runtimes: Vec::new(),
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::new(),
         };
         let asked = Arc::new(Mutex::new(Vec::new()));
         let port = FakeGardenInventory {
@@ -19255,7 +19333,7 @@ mod tests {
             completion
                 .inventories
                 .iter()
-                .map(|inventory| inventory.workspace_id)
+                .map(|inventory| inventory.inventory.workspace_id)
                 .collect::<Vec<_>>(),
             vec![observed]
         );
@@ -23718,6 +23796,11 @@ mod tests {
         Background,
     }
 
+    enum FakeRegistryRefresh {
+        Queued(Vec<Workspace>),
+        Pending(Vec<Workspace>),
+    }
+
     #[derive(Default)]
     struct FakeLoader {
         operation_mode: FakeOperationMode,
@@ -23754,6 +23837,8 @@ mod tests {
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
         open_delay: std::time::Duration,
+        registry_refresh: Option<FakeRegistryRefresh>,
+        registry_refresh_dispatches: usize,
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -23805,6 +23890,30 @@ mod tests {
         fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
             self.activate_error
                 .map_or(Ok(()), |error| Err(io::Error::other(error)))
+        }
+
+        fn dispatch_registry_refresh(&mut self) -> io::Result<bool> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Queued(registry)) => {
+                    self.registry_refresh = Some(FakeRegistryRefresh::Pending(registry));
+                    self.registry_refresh_dispatches += 1;
+                    Ok(true)
+                }
+                state => {
+                    self.registry_refresh = state;
+                    Ok(false)
+                }
+            }
+        }
+
+        fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Pending(registry)) => Some(Ok(registry)),
+                queued => {
+                    self.registry_refresh = queued;
+                    None
+                }
+            }
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -27351,7 +27460,10 @@ mod tests {
     }
 
     impl super::GardenInventoryPort for CountedPort {
-        fn inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentInventory, String> {
+        fn inventory(
+            &mut self,
+            _workspace: WorkspaceId,
+        ) -> Result<AgentWorkspaceObservation, String> {
             Err("Agent inventory is unavailable".to_owned())
         }
     }
@@ -27811,6 +27923,87 @@ mod tests {
                 RESIDENT_PORTS_PER_COMPOSITION,
                 2 * RESIDENT_PORTS_PER_COMPOSITION,
             ]
+        );
+    }
+
+    #[test]
+    fn project_add_accepts_and_opens_an_unregistered_directory_path() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Tab,
+            Key::Paste("/tmp/external".to_owned()),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/external")]
+        );
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Directory") && frame.contains("Tab registered")
+        }));
+    }
+
+    #[test]
+    fn project_add_applies_a_registry_refresh_while_the_overlay_is_open() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            registry_refresh: Some(FakeRegistryRefresh::Queued(vec![alpha.clone(), beta])),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![alpha],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(loader.registry_refresh_dispatches, 1);
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
         );
     }
 

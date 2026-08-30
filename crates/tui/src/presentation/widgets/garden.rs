@@ -23,6 +23,9 @@ const SIDE_PADDING: usize = 2;
 const HEADER_ROWS: usize = 3;
 const FOOTER_ROWS: usize = 2;
 const PLOT_WIDTH: usize = 28;
+const NOTIFICATION_MIN_WIDTH: usize = 24;
+const NOTIFICATION_MAX_WIDTH: usize = 36;
+const NOTIFICATION_SEPARATOR_WIDTH: usize = 2;
 const GROUND_ROWS: usize = 2;
 const PLOT_HEIGHT: usize = 8;
 /// plot のうち、うさぎと label が占める行数（残り 2 行が草地と土）。
@@ -190,7 +193,9 @@ struct PlacedRabbit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GardenLayout {
+    garden_width: usize,
     content_width: usize,
+    notification_width: usize,
     columns: usize,
     plot_rows: usize,
     garden_height: usize,
@@ -212,12 +217,17 @@ fn garden_layout(height: usize, width: usize) -> Option<GardenLayout> {
     if height < MIN_HEIGHT || width < MIN_WIDTH {
         return None;
     }
-    let content_width = width.saturating_sub(SIDE_PADDING * 2);
+    let notification_width = (width / 3).clamp(NOTIFICATION_MIN_WIDTH, NOTIFICATION_MAX_WIDTH);
+    let garden_width =
+        width.saturating_sub(notification_width + NOTIFICATION_SEPARATOR_WIDTH + SIDE_PADDING);
+    let content_width = garden_width.saturating_sub(SIDE_PADDING * 2);
     let columns = (content_width / PLOT_WIDTH).max(1);
     let garden_height = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
     let plot_rows = (garden_height / PLOT_HEIGHT).max(1);
     Some(GardenLayout {
+        garden_width,
         content_width,
+        notification_width,
         columns,
         plot_rows,
         garden_height,
@@ -247,11 +257,9 @@ fn garden_viewport(
         used_rows,
         used_columns,
         grid_top: HEADER_ROWS + layout.garden_height.saturating_sub(used_rows * PLOT_HEIGHT) / 2,
-        row_left: SIDE_PADDING
-            + layout
-                .content_width
-                .saturating_sub(used_columns * PLOT_WIDTH)
-                / 2,
+        // The Garden now owns the left side of the screen. Keep the first plot
+        // anchored to that edge instead of centering a partly-filled row.
+        row_left: SIDE_PADDING,
     }
 }
 
@@ -308,7 +316,7 @@ pub fn render_scrolled(
     rows.push(" ".repeat(width));
 
     // 使う plot 行数だけを縦中央へ寄せ、庭の下側だけが大きく空くのを避ける。
-    rows.resize_with(grid_top, || " ".repeat(width));
+    rows.resize_with(grid_top, || " ".repeat(layout.garden_width));
 
     let mut hitboxes = Vec::with_capacity(visible * (1 + MAX_VISIBLE_AGENTS));
     let plots = visible_sessions
@@ -326,11 +334,11 @@ pub fn render_scrolled(
                     line.push_str(&" ".repeat(PLOT_WIDTH));
                 }
             }
-            rows.push(pad_to_width(&line, width));
+            rows.push(pad_to_width(&line, layout.garden_width));
         }
         // 地面は plot の下だけでなく庭の幅いっぱいに敷く。うさぎの数で地面が途切れると
         // 中央の島のように見えるため。
-        rows.extend(ground_rows(width, layout.content_width));
+        rows.extend(ground_rows(layout.garden_width, layout.content_width));
         for column in 0..used_columns {
             let index = column * layout.plot_rows + plot_row;
             let Some((session, plot)) = visible_sessions.get(index).zip(plots.get(index)) else {
@@ -363,13 +371,19 @@ pub fn render_scrolled(
 
     if visible == 0 {
         rows.push(centered(
-            width,
+            layout.garden_width,
             &Style::new().dim().paint("No sessions in the garden"),
         ));
     }
 
     let footer_start = height - FOOTER_ROWS;
-    rows.resize_with(footer_start, || " ".repeat(width));
+    rows.resize_with(footer_start, || " ".repeat(layout.garden_width));
+    attach_notification_panel(
+        &mut rows[HEADER_ROWS..footer_start],
+        width,
+        layout,
+        visible_sessions,
+    );
     let (scroll_footer, scroll_hitboxes) = scroll_footer(
         width,
         footer_start,
@@ -390,6 +404,178 @@ pub fn render_scrolled(
         max_scroll,
         hidden_sessions,
     })
+}
+
+fn attach_notification_panel(
+    body: &mut [String],
+    width: usize,
+    layout: GardenLayout,
+    sessions: &[GardenSession],
+) {
+    let notifications =
+        notification_rows(layout.garden_height, layout.notification_width, sessions);
+    for (row, notification) in body.iter_mut().zip(notifications) {
+        let garden = pad_to_width(row, layout.garden_width);
+        let separator = Style::new().dim().paint("│");
+        *row = pad_to_width(
+            &format!(
+                "{garden}{separator} {}{}",
+                pad_to_width(&notification, layout.notification_width),
+                " ".repeat(SIDE_PADDING)
+            ),
+            width,
+        );
+    }
+}
+
+/// Render the current viewport's session state as a compact notification list.
+///
+/// These are explanations of the same safe projection that draws the rabbits,
+/// not an event log. Keeping both surfaces on one projection prevents a stale
+/// completion notice from disagreeing with the rabbit beside it.
+fn notification_rows(height: usize, width: usize, sessions: &[GardenSession]) -> Vec<String> {
+    let mut rows = Vec::with_capacity(height);
+    rows.push(
+        Role::Feature
+            .style()
+            .bold()
+            .paint(&clip_to_width("Notifications", width)),
+    );
+    rows.push(Style::new().dim().paint(&"─".repeat(width)));
+
+    if sessions.is_empty() {
+        rows.push(Style::new().dim().paint("No notifications"));
+        rows.resize_with(height, String::new);
+        return rows;
+    }
+
+    let available_rows = height.saturating_sub(rows.len());
+    let mut visible = (available_rows / 2).min(sessions.len());
+    if visible < sessions.len() {
+        // Reserve one final row for an explicit overflow marker.
+        visible = available_rows.saturating_sub(1) / 2;
+    }
+    for session in sessions.iter().take(visible) {
+        let (style, message) = notification(session);
+        let label = clip_to_width(&session.label, width.saturating_sub(2));
+        rows.push(format!("{} {label}", style.bold().paint("•")));
+        let message = clip_to_width(&message, width.saturating_sub(2));
+        rows.push(format!("  {}", style.paint(&message)));
+    }
+    if visible < sessions.len() {
+        rows.push(
+            Style::new()
+                .dim()
+                .paint(&format!("+{} more in this view", sessions.len() - visible)),
+        );
+    }
+    rows.resize_with(height, String::new);
+    rows
+}
+
+/// Choose one concise explanation for a Garden plot.
+fn notification(session: &GardenSession) -> (Style, String) {
+    if session.pr_merged {
+        return (Role::Success.style(), "PR merged.".to_owned());
+    }
+    match session.lifecycle {
+        SessionLifecycle::Creating | SessionLifecycle::Initializing => {
+            return (Role::Warning.style(), "Session is starting.".to_owned());
+        }
+        SessionLifecycle::Deleting => {
+            return (Style::new().dim(), "Session is closing.".to_owned());
+        }
+        SessionLifecycle::Failed => {
+            return (Role::Danger.style(), "Session failed.".to_owned());
+        }
+        SessionLifecycle::Available => {}
+    }
+    if !session.agents_observed {
+        return (Style::new().dim(), "Status is unavailable.".to_owned());
+    }
+    let dispatch_running = match session.agent_status {
+        Some(DispatchAgentStatus::Starting) => {
+            return (Role::Accent.style(), "Agent is starting.".to_owned());
+        }
+        Some(DispatchAgentStatus::Idle) => {
+            // A completed dispatch transitions its durable Agent back to Idle.
+            // The plot keeps the compact `idle` badge, while the notification
+            // explains the user-facing outcome of that transition.
+            return (Role::Success.style(), "Agent completed.".to_owned());
+        }
+        Some(DispatchAgentStatus::Exited) => {
+            return (Style::new().dim(), "Agent stopped.".to_owned());
+        }
+        Some(DispatchAgentStatus::Failed) => {
+            return (Role::Danger.style(), "Agent failed.".to_owned());
+        }
+        Some(DispatchAgentStatus::Running) => true,
+        None => false,
+    };
+
+    let agents = agent_status::ordered(&session.agents);
+    if agents.is_empty() {
+        if dispatch_running {
+            // The daemon's durable dispatch state can arrive one refresh before
+            // runtime inventory. Keep reporting the stronger known fact during
+            // that short observation gap.
+            return (Role::Success.style(), "Agent is working.".to_owned());
+        }
+        return (Style::new().dim(), "No agent activity.".to_owned());
+    }
+    if agents.len() == 1 {
+        return match agents[0].phase {
+            AgentPhase::Waiting => (Role::Warning.style(), "Agent needs your input.".to_owned()),
+            AgentPhase::Running => (Role::Success.style(), "Agent is working.".to_owned()),
+            AgentPhase::Interrupted => (Role::Warning.style(), "Agent was interrupted.".to_owned()),
+            AgentPhase::Ended | AgentPhase::Exited => {
+                (Role::Success.style(), "Agent completed.".to_owned())
+            }
+            AgentPhase::Ready | AgentPhase::Absent => {
+                (Style::new().dim(), "Agent is available.".to_owned())
+            }
+        };
+    }
+
+    let total = agents.len();
+    let count = |phase| {
+        let rank = agent_status::attention_rank(phase);
+        agents
+            .iter()
+            .filter(|agent| agent_status::attention_rank(agent.phase) == rank)
+            .count()
+    };
+    let waiting = count(AgentPhase::Waiting);
+    if waiting > 0 {
+        return (
+            Role::Warning.style(),
+            format!("{waiting}/{total} agents need input."),
+        );
+    }
+    let running = count(AgentPhase::Running);
+    if running > 0 {
+        return (
+            Role::Success.style(),
+            format!("{running}/{total} agents are working."),
+        );
+    }
+    let interrupted = count(AgentPhase::Interrupted);
+    if interrupted > 0 {
+        return (
+            Role::Warning.style(),
+            format!("{interrupted}/{total} agents interrupted."),
+        );
+    }
+    let completed = count(AgentPhase::Ended);
+    if completed > 0 {
+        let message = if completed == total {
+            format!("All {total} agents completed.")
+        } else {
+            format!("{completed}/{total} agents completed.")
+        };
+        return (Role::Success.style(), message);
+    }
+    (Style::new().dim(), format!("{total} agents are available."))
 }
 
 fn scroll_footer(
@@ -1078,27 +1264,29 @@ mod tests {
             .collect()
     }
 
-    fn plain(frame: &super::GardenFrame) -> Vec<String> {
-        frame
-            .rows
-            .iter()
-            .map(|row| {
-                let mut out = String::new();
-                let mut chars = row.chars();
-                while let Some(ch) = chars.next() {
-                    if ch == '\u{1b}' {
-                        for c in chars.by_ref() {
-                            if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
-                                break;
-                            }
-                        }
-                        continue;
+    fn plain_row(row: &str) -> String {
+        let mut out = String::new();
+        let mut chars = row.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                        break;
                     }
-                    out.push(ch);
                 }
-                out
-            })
-            .collect()
+                continue;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    fn plain_rows(rows: &[String]) -> Vec<String> {
+        rows.iter().map(|row| plain_row(row)).collect()
+    }
+
+    fn plain(frame: &super::GardenFrame) -> Vec<String> {
+        frame.rows.iter().map(|row| plain_row(row)).collect()
     }
 
     #[test]
@@ -1237,6 +1425,158 @@ mod tests {
     }
 
     #[test]
+    fn rabbits_are_left_of_a_viewport_synced_notification_panel() {
+        let sessions = vec![
+            session(
+                STEADY_ID,
+                "completed-work",
+                SessionLifecycle::Available,
+                AgentPhase::Ended,
+            ),
+            session(
+                "01000000-0000-4000-8000-000000000001",
+                "needs-input",
+                SessionLifecycle::Available,
+                AgentPhase::Waiting,
+            ),
+        ];
+        let frame = render(24, 100, "my-project", &sessions, 0, true).expect("garden fits");
+        let rows = plain(&frame);
+        let separator = rows
+            .iter()
+            .find_map(|row| row.find('│'))
+            .expect("the notification panel has a separator");
+        assert!(plots(&frame).iter().all(|plot| {
+            plot.column == super::SIDE_PADDING && plot.column + plot.width <= separator
+        }));
+        let text = rows.join("\n");
+        assert!(text.contains("Notifications"), "{text}");
+        assert!(text.contains("completed-work"), "{text}");
+        assert!(text.contains("Agent completed."), "{text}");
+        assert!(text.contains("Agent needs your input."), "{text}");
+    }
+
+    #[test]
+    fn notification_messages_cover_every_safe_garden_state() {
+        let message = |session: &GardenSession| super::notification(session).1;
+        let mut fixture = session(
+            STEADY_ID,
+            "state",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+
+        fixture.pr_merged = true;
+        assert_eq!(message(&fixture), "PR merged.");
+        fixture.pr_merged = false;
+        for (lifecycle, expected) in [
+            (SessionLifecycle::Creating, "Session is starting."),
+            (SessionLifecycle::Initializing, "Session is starting."),
+            (SessionLifecycle::Deleting, "Session is closing."),
+            (SessionLifecycle::Failed, "Session failed."),
+        ] {
+            fixture.lifecycle = lifecycle;
+            assert_eq!(message(&fixture), expected);
+        }
+        fixture.lifecycle = SessionLifecycle::Available;
+        fixture.agents_observed = false;
+        assert_eq!(message(&fixture), "Status is unavailable.");
+        fixture.agents_observed = true;
+
+        for (status, expected) in [
+            (DispatchAgentStatus::Starting, "Agent is starting."),
+            (DispatchAgentStatus::Idle, "Agent completed."),
+            (DispatchAgentStatus::Exited, "Agent stopped."),
+            (DispatchAgentStatus::Failed, "Agent failed."),
+        ] {
+            fixture.agent_status = Some(status);
+            assert_eq!(message(&fixture), expected);
+        }
+        fixture.agent_status = Some(DispatchAgentStatus::Running);
+        assert_eq!(message(&fixture), "Agent is working.");
+        fixture.agent_status = None;
+
+        for (phase, expected) in [
+            (AgentPhase::Waiting, "Agent needs your input."),
+            (AgentPhase::Running, "Agent is working."),
+            (AgentPhase::Interrupted, "Agent was interrupted."),
+            (AgentPhase::Ended, "Agent completed."),
+            (AgentPhase::Exited, "Agent completed."),
+            (AgentPhase::Ready, "Agent is available."),
+            (AgentPhase::Absent, "Agent is available."),
+        ] {
+            fixture.agents[0].phase = phase;
+            assert_eq!(message(&fixture), expected);
+        }
+        fixture.agents.clear();
+        assert_eq!(message(&fixture), "No agent activity.");
+        fixture.agent_status = Some(DispatchAgentStatus::Running);
+        assert_eq!(message(&fixture), "Agent is working.");
+        fixture.agent_status = None;
+
+        let phases = |values: &[AgentPhase]| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, phase)| {
+                    agent(&format!("{index:08x}-0000-4000-8000-000000000001"), *phase)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (agents, expected) in [
+            (
+                phases(&[AgentPhase::Waiting, AgentPhase::Running]),
+                "1/2 agents need input.",
+            ),
+            (
+                phases(&[AgentPhase::Running, AgentPhase::Ready]),
+                "1/2 agents are working.",
+            ),
+            (
+                phases(&[AgentPhase::Interrupted, AgentPhase::Ready]),
+                "1/2 agents interrupted.",
+            ),
+            (
+                phases(&[AgentPhase::Ended, AgentPhase::Exited]),
+                "All 2 agents completed.",
+            ),
+            (
+                phases(&[AgentPhase::Ended, AgentPhase::Ready]),
+                "1/2 agents completed.",
+            ),
+            (
+                phases(&[AgentPhase::Ready, AgentPhase::Absent]),
+                "2 agents are available.",
+            ),
+        ] {
+            fixture.agents = agents;
+            assert_eq!(message(&fixture), expected);
+        }
+    }
+
+    #[test]
+    fn notification_panel_reports_empty_and_overflow_states() {
+        let empty = super::notification_rows(8, 24, &[]).join("\n");
+        assert!(empty.contains("No notifications"));
+
+        let sessions = (0..4)
+            .map(|index| {
+                session(
+                    &format!("{index:08x}-0000-4000-8000-000000000001"),
+                    &format!("session-{index}"),
+                    SessionLifecycle::Available,
+                    AgentPhase::Ready,
+                )
+            })
+            .collect::<Vec<_>>();
+        let overflow = plain_rows(&super::notification_rows(8, 24, &sessions)).join("\n");
+        assert!(overflow.contains("session-0"));
+        assert!(overflow.contains("session-1"));
+        assert!(!overflow.contains("session-2"));
+        assert!(overflow.contains("+2 more in this view"));
+    }
+
+    #[test]
     fn narrow_or_short_terminals_do_not_replace_home() {
         assert!(render(MIN_HEIGHT - 1, MIN_WIDTH, "x", &[], 0, false).is_none());
         assert!(render(MIN_HEIGHT, MIN_WIDTH - 1, "x", &[], 0, false).is_none());
@@ -1275,23 +1615,24 @@ mod tests {
         let second = render_scrolled(14, 64, "x", &sessions, 0, 3, false).expect("garden fits");
         assert_eq!(first, second);
         assert_eq!(first.scroll, 0);
-        assert_eq!(first.max_scroll, 18);
-        assert!(first.rows.join("\n").contains("1-2 / 20"));
+        assert_eq!(first.max_scroll, 19);
+        assert!(first.rows.join("\n").contains("1-1 / 20"));
+        assert!(!first.rows.join("\n").contains("session-1"));
         assert!(!first.rows.join("\n").contains("session-2"));
 
         let shifted =
             render_scrolled(14, 64, "x", &sessions, 1, 3, false).expect("shifted viewport fits");
         assert!(shifted.rows.join("\n").contains("session-1"));
-        assert!(shifted.rows.join("\n").contains("session-2"));
+        assert!(!shifted.rows.join("\n").contains("session-2"));
 
         let last = render_scrolled(14, 64, "x", &sessions, usize::MAX, 3, false)
             .expect("last viewport fits");
-        assert_eq!(last.scroll, 18);
-        assert!(last.rows.join("\n").contains("19-20 / 20"));
+        assert_eq!(last.scroll, 19);
+        assert!(last.rows.join("\n").contains("20-20 / 20"));
         assert!(last.rows.join("\n").contains("session-19"));
         assert_eq!(last.scroll_hitboxes.len(), 2);
-        assert_eq!(last.scroll_hitboxes[0].scroll, 17);
-        assert_eq!(last.scroll_hitboxes[1].scroll, 18);
+        assert_eq!(last.scroll_hitboxes[0].scroll, 18);
+        assert_eq!(last.scroll_hitboxes[1].scroll, 19);
         for hitbox in &last.scroll_hitboxes {
             assert!(hitbox.contains(hitbox.column, hitbox.row));
             assert!(!hitbox.contains(hitbox.column + hitbox.width, hitbox.row));
@@ -1337,17 +1678,26 @@ mod tests {
                 .expect("session is visible")
         };
 
-        assert_eq!(first.max_scroll, 1);
-        assert!(first.rows.join("\n").contains("1-4 / 5"));
-        assert!(shifted.rows.join("\n").contains("3-5 / 5"));
-        for session in &sessions[2..4] {
-            let before = plot_for(&first, session.id);
-            let after = plot_for(&shifted, session.id);
-            assert_eq!(before.column - after.column, PLOT_WIDTH);
-            assert_eq!(before.row, after.row);
-        }
+        assert_eq!(first.max_scroll, 2);
+        assert!(first.rows.join("\n").contains("1-2 / 5"));
+        assert!(shifted.rows.join("\n").contains("3-4 / 5"));
+        let first_column = sessions[..2]
+            .iter()
+            .map(|session| plot_for(&first, session.id))
+            .collect::<Vec<_>>();
+        let shifted_column = sessions[2..4]
+            .iter()
+            .map(|session| plot_for(&shifted, session.id))
+            .collect::<Vec<_>>();
+        assert_eq!(first_column[0].column, first_column[1].column);
+        assert_eq!(shifted_column[0].column, shifted_column[1].column);
+        assert_eq!(first_column[0].column, shifted_column[0].column);
+        assert_eq!(first_column[0].row, shifted_column[0].row);
+        assert_eq!(first_column[1].row, shifted_column[1].row);
+
+        let last = render_scrolled(23, 80, "x", &sessions, 2, 3, false).expect("last column");
         assert!(
-            plots(&shifted)
+            plots(&last)
                 .iter()
                 .any(|plot| plot.session_id == sessions[4].id)
         );
@@ -1946,8 +2296,8 @@ mod tests {
             super::canonical_tick(14, 64, &sessions, 1, false)
         );
         assert_ne!(
-            super::canonical_tick_scrolled(14, 64, &sessions, 1, 0, false),
-            super::canonical_tick_scrolled(14, 64, &sessions, 1, 1, false)
+            super::canonical_tick_scrolled(14, 64, &sessions, 2, 0, false),
+            super::canonical_tick_scrolled(14, 64, &sessions, 2, 1, false)
         );
         assert_ne!(
             super::canonical_tick(24, 100, &sessions, 0, false),
@@ -2056,29 +2406,25 @@ mod tests {
     }
 
     #[test]
-    fn a_partly_filled_column_stays_centered_on_a_wide_terminal() {
-        // 145 桁は plot 5 列ぶん入るが、session は 2 つしかない。横スクロールでは
-        // 縦を先に埋めるため、2 羽の 1 列を庭の中央へ寄せる。
+    fn a_partly_filled_column_stays_left_of_notifications_on_a_wide_terminal() {
+        // 145 桁でも、2 羽の 1 列は左端へ固定し、右の notification panel と
+        // 視線が混ざらないようにする。
         let sessions = fixtures()[..2].to_vec();
         let frame = render(41, 145, "x", &sessions, 1, false).expect("garden fits");
         let plots = plots(&frame);
         assert_eq!(plots.len(), 2);
         assert_eq!(plots[0].column, plots[1].column);
-        let left = plots[0].column;
-        let right_gap = 145 - (plots[0].column + plots[0].width);
-        assert!(
-            left.abs_diff(right_gap) <= 1,
-            "the column is off-centre: {left} left vs {right_gap} right"
-        );
+        assert_eq!(plots[0].column, super::SIDE_PADDING);
 
-        // 地面は庭の幅いっぱいに伸び、うさぎの数で途切れない。
+        // 地面は左の庭領域いっぱいに伸び、うさぎの数で途切れない。
         let ground = plain(&frame)
             .into_iter()
             .find(|row| row.contains("--v"))
             .expect("the garden draws ground");
         assert_eq!(display_width(&ground), 145);
-        assert_eq!(ground.trim_end().len(), 145 - super::SIDE_PADDING);
-        assert!(!ground.trim().contains("  "));
+        let garden = ground.split('│').next().expect("left Garden region");
+        assert!(garden.starts_with("  --v"));
+        assert!(!garden.trim().contains("  "));
     }
 
     #[test]
@@ -2101,8 +2447,9 @@ mod tests {
             .into_iter()
             .find(|row| row.contains("--v"))
             .expect("the garden draws ground");
-        // 3 plot 分の地面が途切れずつながる（plot 間に空白が入らない）。
-        assert!(!ground.trim().contains("  "), "ground broke: {ground:?}");
+        // 左の庭領域では、隣り合う plot の地面が途切れずにつながる。
+        let garden = ground.split('│').next().expect("left Garden region");
+        assert!(!garden.trim().contains("  "), "ground broke: {garden:?}");
     }
 
     #[test]

@@ -89,7 +89,7 @@ impl OwnedRuntime {
 /// | `terminal` with `action` `input_outcome` | [`RequestClass::Read`] | yes |
 /// | `terminal`, every other action | [`RequestClass::TerminalIo`] | yes |
 /// | `agent` / `resume_agent` / `resume_agent_with_current_integration` | [`RequestClass::Spawn`] | no |
-/// | `agent_inventory` / `diagnose_agents` | [`RequestClass::Inventory`] | no |
+/// | `agent_inventory` / `agent_workspace_observation` / `diagnose_agents` | [`RequestClass::Inventory`] | no |
 /// | `metrics` / `pr` | [`RequestClass::Read`] | no |
 /// | anything else | [`RequestClass::Control`] | no |
 ///
@@ -109,7 +109,7 @@ pub fn classify_request(body: &Value, owned: OwnedRuntime) -> (RequestClass, Res
         Some("agent" | "resume_agent" | "resume_agent_with_current_integration") => {
             (RequestClass::Spawn, ResourceOwner::Unscoped)
         }
-        Some("agent_inventory" | "diagnose_agents") => {
+        Some("agent_inventory" | "agent_workspace_observation" | "diagnose_agents") => {
             (RequestClass::Inventory, ResourceOwner::Unscoped)
         }
         Some("tenant") if body.get("action").and_then(Value::as_str) == Some("inventory") => {
