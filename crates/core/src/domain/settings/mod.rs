@@ -383,6 +383,10 @@ pub struct Settings {
     pub pr_auto_open: PrAutoOpen,
     /// The provider used for Agent panes when no profile is selected explicitly.
     pub default_model: DefaultModel,
+    /// Fully-qualified Git ref selected by default when creating a session.
+    /// `None` follows the workspace's current checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     /// Whether issue-backed MCP tools are available to agents.
     pub issue_enabled: bool,
     /// Whether durable-memory MCP tools are available to agents.
@@ -403,6 +407,7 @@ impl Default for Settings {
             modal_selection_mode: ModalSelectionMode::default(),
             pr_auto_open: PrAutoOpen::default(),
             default_model: DefaultModel::default(),
+            default_branch: None,
             issue_enabled: true,
             memory_enabled: true,
             team_template: TeamTemplate::default(),
@@ -432,8 +437,9 @@ impl Settings {
         self
     }
 
-    /// Apply workspace-owned Agent, Team, Issue, Memory, and environment values over
-    /// this global baseline. Theme and modal interaction always remain global.
+    /// Apply workspace-owned Agent, Base branch, Team, Issue, Memory, and
+    /// environment values over this global baseline. Theme and modal interaction
+    /// always remain global.
     ///
     /// Environment bindings accumulate rather than replace: the workspace map is
     /// layered on top of the global one, so a same-named binding takes the
@@ -442,6 +448,9 @@ impl Settings {
     pub fn with_local(mut self, local: &LocalSettings) -> Self {
         if let Some(model) = local.default_model {
             self.default_model = model;
+        }
+        if let Some(branch) = &local.default_branch {
+            self.default_branch = Some(branch.clone());
         }
         if let Some(enabled) = local.issue_enabled {
             self.issue_enabled = enabled;
@@ -465,7 +474,7 @@ impl Settings {
     }
 }
 
-/// Per-workspace Agent, Team, Issue, and Memory settings stored in
+/// Per-workspace Agent, Base branch, Team, Issue, and Memory settings stored in
 /// `<workspace>/.usagi/settings.json` (or the development-mode-specific `dev`
 /// directory).
 ///
@@ -477,6 +486,9 @@ impl Settings {
 pub struct LocalSettings {
     #[serde(deserialize_with = "deserialize_local_default_model")]
     pub default_model: Option<DefaultModel>,
+    /// Workspace-specific session base ref. Absence follows the current checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     pub issue_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
     /// Workspace override for the built-in team template.
@@ -488,8 +500,8 @@ pub struct LocalSettings {
 }
 
 impl LocalSettings {
-    /// Replace the Agent, Team, Issue, and Memory choices with `settings`, keeping this
-    /// workspace's own environment bindings.
+    /// Replace the Agent, Base branch, Team, Issue, and Memory choices with
+    /// `settings`, keeping this workspace's own environment bindings.
     ///
     /// The Config surface edits a merged [`Settings`] view, which carries the
     /// *inherited* environment; writing that view back verbatim would copy every
@@ -498,6 +510,7 @@ impl LocalSettings {
     #[must_use]
     pub fn with_config(mut self, settings: &Settings) -> Self {
         self.default_model = Some(settings.default_model);
+        self.default_branch.clone_from(&settings.default_branch);
         self.issue_enabled = Some(settings.issue_enabled);
         self.memory_enabled = Some(settings.memory_enabled);
         self.team_template = Some(settings.team_template);

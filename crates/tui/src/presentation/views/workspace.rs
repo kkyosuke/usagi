@@ -144,8 +144,8 @@ pub struct ProjectedSession {
     /// Immediate organizational parent. `None` means a direct report to the
     /// Director (or a legacy session outside the role catalog).
     pub parent_session_id: Option<SessionId>,
-    /// Display depth below the Director. Legacy sessions without role metadata
-    /// use zero so their established flat label stays unchanged.
+    /// Number of visible session ancestors in the sidebar. Direct reports to the
+    /// implicit Director use zero because the Director is not rendered there.
     pub organization_depth: usize,
 }
 
@@ -464,7 +464,7 @@ impl HomeProjection {
                     .map(ToString::to_string);
                 if let Some(role) = state.session_roles().get(id) {
                     session.parent_session_id = role.parent_session_id;
-                    session.organization_depth = 1;
+                    session.organization_depth = 0;
                     let mut parent = role.parent_session_id;
                     let mut seen = BTreeSet::from([*id]);
                     while let Some(parent_id) = parent
@@ -2513,12 +2513,13 @@ fn home_row_lines_at(
     }
     let target = match row {
         Selection::Target(target) => Some(target),
-        Selection::NewSession => None,
+        Selection::Idle | Selection::NewSession => None,
     };
     let (label, detail, session) = match row {
         // Root is not part of managed Home rows. Keep the branch total for
         // stale synthetic projections without rendering a hidden root action.
-        Selection::Target(Target::Root(_)) => ("", "", None),
+        // Idle is likewise not a row, but remains total for defensive callers.
+        Selection::Idle | Selection::Target(Target::Root(_)) => ("", "", None),
         Selection::Target(Target::Session(id)) => home
             .sessions
             .iter()
@@ -2578,7 +2579,8 @@ fn home_row_lines_at(
     };
     let label = home_row_label(row, &label, selected, current, home.mode);
     let first = if let Some(session) = session {
-        let note = if session.has_notes { "✎" } else { "·" };
+        // Keep the note column stable without showing an unexplained placeholder.
+        let note = if session.has_notes { "✎" } else { " " };
         widgets::pad_to_width(
             &format!(
                 "{marker} {label}{badge}  {}",
@@ -2794,7 +2796,9 @@ fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
             Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("\u{f0907}"),
-            Selection::Target(Target::Root(_)) | Selection::NewSession => " ".to_string(),
+            Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
+                " ".to_string()
+            }
         };
     }
     if current {
@@ -3475,11 +3479,11 @@ mod tests {
         let mut state = AppState::home(workspace, vec![manager, worker]);
         let mut manager_row = projected_session(manager, "planning", "/work/planning");
         manager_row.role_id = Some("manager".to_owned());
-        manager_row.organization_depth = 1;
+        manager_row.organization_depth = 0;
         let mut worker_row = projected_session(worker, "api", "/work/api");
         worker_row.role_id = Some("worker".to_owned());
         worker_row.parent_session_id = Some(manager);
-        worker_row.organization_depth = 2;
+        worker_row.organization_depth = 1;
         let rows = [manager_row, worker_row];
 
         let sidebar = HomeProjection::from_ordered_state(&state, "atlas", Arc::from(rows.to_vec()));
@@ -3502,13 +3506,10 @@ mod tests {
         let manager_line = strip(&manager_lines[0]);
         let worker_line = strip(&worker_lines[0]);
         assert!(
-            manager_line.contains("└─ planning  ◆ Manager"),
+            manager_line.contains("planning  ◆ Manager"),
             "{manager_line:?}"
         );
-        assert!(
-            worker_line.contains("  └─ api  ● Worker"),
-            "{worker_line:?}"
-        );
+        assert!(worker_line.contains("└─ api  ● Worker"), "{worker_line:?}");
 
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         let _ = update(
@@ -4496,8 +4497,50 @@ mod tests {
             Path::new("/work"),
             &[available, child],
         ));
-        assert!(frame.contains("└─ alpha  • reviewer"));
-        assert!(frame.contains("  └─ beta  ● Worker"));
+        assert!(frame.contains("alpha  • reviewer"));
+        assert!(!frame.contains("└─ alpha"));
+        assert!(frame.contains("└─ beta  ● Worker"));
+    }
+
+    #[test]
+    fn sidebar_only_shows_the_note_icon_when_notes_exist() {
+        let workspace = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let state = AppState::home(workspace, vec![session_id]);
+        let session = projected_session(session_id, "alpha", "/work/alpha");
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            std::slice::from_ref(&session),
+        );
+        let first = strip(
+            &home_row_lines_at(
+                LEFT_WIDTH,
+                &home,
+                Selection::Target(Target::Session(session_id)),
+                SidebarDiffColumns::default(),
+                PR_RESERVE_WIDTH,
+                now(),
+            )[0],
+        );
+        assert!(!first.contains('·'));
+        assert!(!first.contains('✎'));
+
+        let mut noted = session;
+        noted.has_notes = true;
+        let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[noted]);
+        let first = strip(
+            &home_row_lines_at(
+                LEFT_WIDTH,
+                &home,
+                Selection::Target(Target::Session(session_id)),
+                SidebarDiffColumns::default(),
+                PR_RESERVE_WIDTH,
+                now(),
+            )[0],
+        );
+        assert!(first.contains('✎'));
     }
 
     #[test]
@@ -5824,8 +5867,14 @@ mod tests {
     #[test]
     fn switch_paints_the_selected_new_session_row_success_not_accent() {
         let workspace = WorkspaceId::new();
-        let state = AppState::home(workspace, Vec::new());
-        // An empty Home rests the Switch cursor on `+ new session`.
+        let mut state = AppState::home(workspace, Vec::new());
+        // An empty Home leaves the action unfocused until navigation selects it.
+        assert_eq!(state.selected(), Selection::Idle);
+        let idle = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);
+        let idle_rendered = render_home(30, 100, &idle).join("\n");
+        assert!(!idle_rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
         let home = HomeProjection::from_state(&state, "work", Path::new("/work"), &[]);

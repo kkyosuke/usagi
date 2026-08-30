@@ -825,16 +825,91 @@ impl BackendOverlayPort for ProductionOverlayPort {
     }
 }
 
-struct ProductionWorkspaceCommands;
+struct ProductionWorkspaceCommands {
+    workspace: WorkspaceId,
+    root: PathBuf,
+}
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
-    fn execute(&mut self, _: WorkspaceId, command: overview::Command, completions: Completions) {
-        completions.emit(
-            usagi_tui::usecase::application::controller::AppEvent::Backend(BackendEvent::Notice(
-                Notice::new(format!("{} is not available", command.name())),
-            )),
-        );
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        command: overview::Command,
+        completions: Completions,
+    ) {
+        let overview::Command::Clean { arguments } = command else {
+            completions.emit(
+                usagi_tui::usecase::application::controller::AppEvent::Backend(
+                    BackendEvent::Notice(Notice::new(format!(
+                        "{} is not available",
+                        command.name()
+                    ))),
+                ),
+            );
+            return;
+        };
+        let Ok(clean) = overview::parse_clean(&arguments) else {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "invalid clean arguments",
+            ))));
+            return;
+        };
+        let expected = self.workspace;
+        let root = self.root.clone();
+        if workspace != expected {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "clean target is no longer active",
+            ))));
+            return;
+        }
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let mut client = crate::runtime::daemon::policy_client_for_selected_workspace(
+                    ClientPolicy::tui(),
+                    &root,
+                )
+                .map_err(|error| format!("daemon unavailable: {error}"))?;
+                let reply = client
+                    .request(DaemonRequest::Session {
+                        action: SessionAction::Clean,
+                        operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                        payload: serde_json::json!({
+                            "apply": clean.apply,
+                            "force": clean.force,
+                        }),
+                    })
+                    .map_err(daemon_error_reason)?;
+                let body = match reply {
+                    DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+                };
+                let candidates = body
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                let removed = body
+                    .get("removed")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                let protected = body
+                    .get("protected")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                Ok(if clean.apply {
+                    format!("Cleaned {removed} orphan resource(s); {protected} protected")
+                } else if candidates == 0 {
+                    "No orphan session resources found".to_owned()
+                } else {
+                    format!(
+                        "Found {candidates} orphan resource(s); run clean --apply to remove safe candidates"
+                    )
+                })
+            })();
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                result.unwrap_or_else(|error| format!("Clean failed: {error}")),
+            ))));
+        });
     }
 }
 
@@ -903,7 +978,10 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             Box::new(host.clone()),
             Box::new(host),
             Box::new(store),
-            Box::new(ProductionWorkspaceCommands),
+            Box::new(ProductionWorkspaceCommands {
+                workspace: snapshot.workspace_id,
+                root: snapshot.workspace.path.clone(),
+            }),
         )
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
@@ -7761,12 +7839,17 @@ mod tests {
     fn terminal_adapter_projects_resolved_live_and_pointer_inputs() {
         let cases = [
             (
-                LiveInput::WheelUp { column: 0, row: 0 },
+                LiveInput::WheelUp {
+                    column: 0,
+                    row: 0,
+                    notches: 1,
+                },
                 Key::Live(
                     usagi_tui::usecase::terminal_input::LiveTerminalAction::Wheel {
                         up: true,
                         column: 0,
                         row: 0,
+                        notches: 1,
                     },
                 ),
             ),
@@ -8569,6 +8652,7 @@ mod tests {
         // editor and another Config writer update the local document.
         let mut draft = port.read(SettingsScope::Workspace).unwrap();
         draft.default_model = usagi_core::domain::settings::DefaultModel::Claude;
+        draft.default_branch = Some("refs/remotes/origin/main".to_owned());
         draft.memory_enabled = false;
         let concurrent = LocalSettings {
             default_model: Some(usagi_core::domain::settings::DefaultModel::SakanaAi),
@@ -8590,6 +8674,10 @@ mod tests {
             Some(usagi_core::domain::settings::DefaultModel::Claude)
         );
         assert_eq!(raw.memory_enabled, Some(false));
+        assert_eq!(
+            raw.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
 
         let mut reopened = PersistentSettingsPort {
             storage: Storage::new(&global_dir),
@@ -8602,6 +8690,10 @@ mod tests {
             usagi_core::domain::settings::DefaultModel::Claude
         );
         assert!(!effective.memory_enabled);
+        assert_eq!(
+            effective.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
         assert_eq!(effective.env, concurrent.env);
     }
 
@@ -8658,6 +8750,7 @@ mod tests {
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,

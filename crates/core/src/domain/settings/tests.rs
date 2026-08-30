@@ -72,6 +72,7 @@ fn settings_round_trip_through_json() {
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::Always,
         default_model: DefaultModel::Claude,
+        default_branch: Some("refs/heads/main".to_owned()),
         issue_enabled: false,
         memory_enabled: false,
         team_template: TeamTemplate::Pipeline,
@@ -82,6 +83,7 @@ fn settings_round_trip_through_json() {
     assert!(json.contains("\"theme\":\"dark\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
     assert!(json.contains("\"default_model\":\"claude\""));
+    assert!(json.contains("\"default_branch\":\"refs/heads/main\""));
     assert!(json.contains("\"issue_enabled\":false"));
     assert!(json.contains("\"memory_enabled\":false"));
     let back: Settings = serde_json::from_str(&json).unwrap();
@@ -348,6 +350,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         modal_selection_mode: ModalSelectionMode::Action,
         pr_auto_open: PrAutoOpen::SwitchOnly,
         default_model: DefaultModel::Claude,
+        default_branch: None,
         issue_enabled: true,
         memory_enabled: false,
         team_template: TeamTemplate::Hierarchical,
@@ -355,6 +358,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
     };
     let local = LocalSettings {
         default_model: Some(DefaultModel::OpenAi),
+        default_branch: Some("refs/remotes/origin/main".to_owned()),
         issue_enabled: Some(false),
         team_template: Some(TeamTemplate::Flat),
         ..LocalSettings::default()
@@ -367,6 +371,7 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             modal_selection_mode: ModalSelectionMode::Action,
             pr_auto_open: PrAutoOpen::SwitchOnly,
             default_model: DefaultModel::OpenAi,
+            default_branch: Some("refs/remotes/origin/main".to_owned()),
             issue_enabled: false,
             memory_enabled: false,
             team_template: TeamTemplate::Flat,
@@ -445,6 +450,7 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::NotifyOnly,
         default_model: DefaultModel::Claude,
+        default_branch: Some("refs/heads/main".to_owned()),
         issue_enabled: false,
         memory_enabled: false,
         ..Settings::default()
@@ -454,6 +460,7 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
     assert_eq!(saved.theme, Theme::Dark);
     assert_eq!(saved.modal_selection_mode, ModalSelectionMode::Prompt);
     assert_eq!(saved.default_model, DefaultModel::Claude);
+    assert_eq!(saved.default_branch, None);
     assert!(!saved.issue_enabled);
     assert!(!saved.memory_enabled);
     assert_eq!(saved.env, latest.env);
@@ -485,6 +492,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         modal_selection_mode: ModalSelectionMode::Prompt,
         pr_auto_open: PrAutoOpen::NotifyOnly,
         default_model: DefaultModel::Claude,
+        default_branch: Some("refs/heads/main".to_owned()),
         issue_enabled: false,
         memory_enabled: true,
         team_template: TeamTemplate::Pipeline,
@@ -498,6 +506,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             modal_selection_mode: ModalSelectionMode::Action,
             pr_auto_open: PrAutoOpen::SwitchOnly,
             default_model: DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,
             memory_enabled: true,
             team_template: TeamTemplate::Pipeline,
