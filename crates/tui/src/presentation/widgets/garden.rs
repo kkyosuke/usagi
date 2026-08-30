@@ -493,7 +493,7 @@ fn notification(session: &GardenSession) -> (Style, String) {
     if !session.agents_observed {
         return (Style::new().dim(), "Status is unavailable.".to_owned());
     }
-    match session.agent_status {
+    let dispatch_running = match session.agent_status {
         Some(DispatchAgentStatus::Starting) => {
             return (Role::Accent.style(), "Agent is starting.".to_owned());
         }
@@ -509,11 +509,18 @@ fn notification(session: &GardenSession) -> (Style, String) {
         Some(DispatchAgentStatus::Failed) => {
             return (Role::Danger.style(), "Agent failed.".to_owned());
         }
-        Some(DispatchAgentStatus::Running) | None => {}
-    }
+        Some(DispatchAgentStatus::Running) => true,
+        None => false,
+    };
 
     let agents = agent_status::ordered(&session.agents);
     if agents.is_empty() {
+        if dispatch_running {
+            // The daemon's durable dispatch state can arrive one refresh before
+            // runtime inventory. Keep reporting the stronger known fact during
+            // that short observation gap.
+            return (Role::Success.style(), "Agent is working.".to_owned());
+        }
         return (Style::new().dim(), "No agent activity.".to_owned());
     }
     if agents.len() == 1 {
@@ -1503,6 +1510,9 @@ mod tests {
         }
         fixture.agents.clear();
         assert_eq!(message(&fixture), "No agent activity.");
+        fixture.agent_status = Some(DispatchAgentStatus::Running);
+        assert_eq!(message(&fixture), "Agent is working.");
+        fixture.agent_status = None;
 
         let phases = |values: &[AgentPhase]| {
             values
