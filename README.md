@@ -181,8 +181,9 @@ usagi session create remote-fix --base refs/remotes/origin/main
 ```
 
 session は対象リポジトリの `.usagi/sessions/<name>/` に独立した worktree として作られる。
-Home の作成欄では `local:main` / `remote:origin/main` のように出所を区別した base branch を
-`↑↓` で選ぶ。CLI の `--base` は同じ対象を fully-qualified ref で指定する。
+Home の作成欄では `local:main` / `remote:origin/(default)` / `remote:origin/main` のように
+出所を区別した base branch を `↑↓` で選ぶ。`(default)` はその remote の既定 branch を表す。
+CLI の `--base` は同じ対象を fully-qualified ref で指定する。
 role は作業種別ごとの追加指示を選ぶ stable ID で、権限や sandbox を変更するものではない。
 詳細は [session role](document/10-session-roles.md)を参照する。
 

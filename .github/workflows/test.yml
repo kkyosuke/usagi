@@ -103,11 +103,39 @@ jobs:
     - name: Test release-version detector
       run: bash scripts/tests/version-changed.sh
 
+    - name: Test release-version validator
+      run: bash scripts/tests/release-version.sh
+
     - name: Test verified installer transaction
       run: bash scripts/tests/install.sh
 
     - name: Test release verification artifacts
       run: bash scripts/tests/release-verification-artifacts.sh
+
+  agent-ipc-macos:
+    name: Agent IPC macOS (${{ matrix.runner }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-latest]
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Rust Cache
+      uses: swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        shared-key: rust-agent-ipc-${{ matrix.runner }}
+
+    - name: Run shipping Agent IPC E2E
+      run: cargo test -p usagi --test agent_ipc_e2e --quiet
 
   policy-checks:
     name: Lightweight repository policy checks
@@ -173,7 +201,7 @@ jobs:
   full-test:
     name: full-test
     if: always()
-    needs: [changes, full-test-run, policy-checks]
+    needs: [changes, full-test-run, agent-ipc-macos, policy-checks]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
@@ -182,6 +210,8 @@ jobs:
         CHANGES_RESULT: ${{ needs.changes.result }}
         REQUIRED: ${{ needs.changes.outputs.rust }}
         RUN_RESULT: ${{ needs.full-test-run.result }}
+        MACOS_RESULT: ${{ needs.agent-ipc-macos.result }}
         POLICY_RESULT: ${{ needs.policy-checks.result }}
       run: |
         scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$RUN_RESULT" "$POLICY_RESULT"
+        scripts/ci/required-contexts.sh report "$REQUIRED" "$CHANGES_RESULT" "$MACOS_RESULT"

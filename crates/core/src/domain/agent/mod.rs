@@ -7,7 +7,11 @@
 pub mod mcp_tools;
 pub mod prompt;
 
-use std::{collections::BTreeSet, fmt, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -423,6 +427,16 @@ pub struct AgentInventory {
     pub workspace_id: WorkspaceId,
     pub runtimes: Vec<AgentRuntimeInventoryItem>,
     pub resumable: Vec<AgentResumableInventoryItem>,
+}
+
+/// Cross-project observation used by read-only process-level views. Runtime
+/// inventory supplies per-process detail while dispatch status supplies the
+/// daemon-authoritative terminal state for each managed session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentWorkspaceObservation {
+    pub inventory: AgentInventory,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_statuses: BTreeMap<SessionId, AgentStatus>,
 }
 
 /// Integration revision expected by the invoking `usagi` binary for one

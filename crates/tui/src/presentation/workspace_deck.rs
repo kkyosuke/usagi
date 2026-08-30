@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use usagi_core::domain::agent::AgentInventory;
+use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::workspace::Workspace;
@@ -49,6 +49,9 @@ struct CachedGardenSession {
     /// membership only: the lane observes the daemon inventory, never this
     /// project's controller, so the phases stay the coarse inventory states.
     agents: Vec<GardenAgent>,
+    /// Daemon-owned dispatch status observed in the same response as runtime
+    /// membership. `None` means this session has no dispatch Agent.
+    agent_status: Option<AgentStatus>,
 }
 
 impl CachedGardenSession {
@@ -59,6 +62,7 @@ impl CachedGardenSession {
             lifecycle: session.lifecycle,
             failure_summary: session.failure_summary.clone(),
             agents: Vec::new(),
+            agent_status: None,
         }
     }
 
@@ -83,7 +87,7 @@ impl CachedGardenSession {
             } else {
                 Vec::new()
             },
-            agent_status: None,
+            agent_status: observed.then_some(self.agent_status).flatten(),
             pr_merged: false,
         }
     }
@@ -109,6 +113,7 @@ impl WorkspaceSlot {
                     failure_summary: projection
                         .and_then(|projection| projection.failure_summary.clone()),
                     agents: Vec::new(),
+                    agent_status: None,
                 }
             })
             .collect();
@@ -423,7 +428,8 @@ impl WorkspaceDeck {
     ///
     /// Returns whether the projection changed, so the shell can redraw a Garden
     /// whose other material (session list, animation tick) stood still.
-    pub fn apply_garden_inventory(&mut self, inventory: &AgentInventory) -> bool {
+    pub fn apply_garden_inventory(&mut self, observation: &AgentWorkspaceObservation) -> bool {
+        let inventory = &observation.inventory;
         if inventory.workspace_id == self.active {
             return false;
         }
@@ -453,6 +459,11 @@ impl WorkspaceDeck {
             let agents = observed.remove(&session.id).unwrap_or_default();
             if session.agents != agents {
                 session.agents = agents;
+                changed = true;
+            }
+            let agent_status = observation.session_statuses.get(&session.id).copied();
+            if session.agent_status != agent_status {
+                session.agent_status = agent_status;
                 changed = true;
             }
         }
@@ -1426,22 +1437,39 @@ mod tests {
             usagi_core::domain::id::AgentRuntimeRef,
             usagi_core::domain::agent::AgentRuntimeInventoryState,
         )>,
-    ) -> AgentInventory {
-        AgentInventory {
-            workspace_id: workspace,
-            runtimes: runtimes
-                .into_iter()
-                .map(
-                    |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
-                        runtime,
-                        continuation: usagi_core::domain::id::AgentContinuationRef::new(),
-                        state,
-                        resumed_from: None,
-                    },
-                )
-                .collect(),
-            resumable: Vec::new(),
+    ) -> AgentWorkspaceObservation {
+        AgentWorkspaceObservation {
+            inventory: usagi_core::domain::agent::AgentInventory {
+                workspace_id: workspace,
+                runtimes: runtimes
+                    .into_iter()
+                    .map(
+                        |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
+                            runtime,
+                            continuation: usagi_core::domain::id::AgentContinuationRef::new(),
+                            state,
+                            resumed_from: None,
+                        },
+                    )
+                    .collect(),
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::new(),
         }
+    }
+
+    fn inventory_with_status(
+        workspace: WorkspaceId,
+        runtimes: Vec<(
+            usagi_core::domain::id::AgentRuntimeRef,
+            usagi_core::domain::agent::AgentRuntimeInventoryState,
+        )>,
+        session: SessionId,
+        status: AgentStatus,
+    ) -> AgentWorkspaceObservation {
+        let mut observation = inventory(workspace, runtimes);
+        observation.session_statuses.insert(session, status);
+        observation
     }
 
     /// The Garden draws every open project, so an inactive project's plots take
@@ -1465,7 +1493,7 @@ mod tests {
         let closed = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
         let root = runtime_ref(beta.workspace_id, None);
         let foreign = runtime_ref(beta.workspace_id, Some(SessionId::new()));
-        assert!(deck.apply_garden_inventory(&inventory(
+        assert!(deck.apply_garden_inventory(&inventory_with_status(
             beta.workspace_id,
             vec![
                 (live.clone(), AgentRuntimeInventoryState::Live),
@@ -1473,10 +1501,13 @@ mod tests {
                 (root, AgentRuntimeInventoryState::Live),
                 (foreign, AgentRuntimeInventoryState::Live),
             ],
+            beta.session_ids[0],
+            AgentStatus::Idle,
         )));
 
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(plot.agents_observed);
+        assert_eq!(plot.agent_status, Some(AgentStatus::Idle));
         // Only the runtime that owns a tab in a known session becomes a rabbit.
         assert_eq!(
             plot.agents
@@ -1487,9 +1518,11 @@ mod tests {
         );
 
         // Re-observing the same inventory changes no draw material.
-        assert!(!deck.apply_garden_inventory(&inventory(
+        assert!(!deck.apply_garden_inventory(&inventory_with_status(
             beta.workspace_id,
             vec![(live.clone(), AgentRuntimeInventoryState::Live)],
+            beta.session_ids[0],
+            AgentStatus::Idle,
         )));
         // The Agent leaving is membership too: the rabbit goes with it.
         assert!(deck.apply_garden_inventory(&inventory(beta.workspace_id, Vec::new())));
