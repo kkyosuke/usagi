@@ -8775,20 +8775,20 @@ mod tests {
         UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
         UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigContext,
-        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
-        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, activate_workspace_responsive, adjust_project_bar_pointer,
-        app_event_from_key, close_exited_panes, compose_workspace_shell_frame,
-        controller_terminal_view, copy_terminal_selection, director_organization,
-        dismiss_pr_modal_on_project_bar_click, drain_session_completions,
-        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
-        garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
-        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
-        key_to_terminal_bytes_for_mode, new_project_notice, open_workspace_responsive,
-        play_startup_splash, poll_and_project_terminals, prepare_activation_settings,
-        prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck,
-        projection_build_counts, recent_paths, registry_contains_path, remove_registry_paths,
-        render_controller_frame, render_home_material, render_home_snapshot,
+        WorkspaceConfigStep, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+        WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        activate_workspace_responsive, adjust_project_bar_pointer, app_event_from_key,
+        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
+        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
+        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
+        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
+        home_frame_material, intercept_live_terminal_control, is_user_activity,
+        key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
+        open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
+        prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
+        prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
+        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
         reset_projection_build_counts, restore_open_panes, retarget_director_chords,
         route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
         run as run_from_start, run_screen_graph_with_backend,
@@ -8799,8 +8799,9 @@ mod tests {
         run_workspace_controller_with_backend_and_settings,
         run_workspace_deck_with_backend_and_config, run_workspace_loading, safe_session_error,
         save_config_responsive, save_environment_responsive, select_right_pane_tab,
-        sidebar_pointer_event, step_config, step_new, step_open, terminal_geometry,
-        visit_garden_agent, welcome_action, workspace_has_unsaved_surface, write_banner,
+        sidebar_pointer_event, step_config, step_new, step_open, step_workspace_config,
+        terminal_geometry, visit_garden_agent, welcome_action, workspace_has_unsaved_surface,
+        write_banner,
     };
     use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
@@ -23208,6 +23209,7 @@ mod tests {
         opened: Vec<PathBuf>,
         refreshed: Vec<PathBuf>,
         open_snapshot: FakeOpenSnapshot,
+        activate_error: Option<&'static str>,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
         unregistered: Vec<PathBuf>,
@@ -23236,6 +23238,7 @@ mod tests {
         release_after_polls: Option<usize>,
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
+        open_delay: std::time::Duration,
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -23244,6 +23247,7 @@ mod tests {
         }
 
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            std::thread::sleep(self.open_delay);
             self.opened.push(path.to_path_buf());
             let fenced = self.refuse_paths.is_empty()
                 || self.refuse_paths.iter().any(|fenced| fenced == path);
@@ -23281,6 +23285,11 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workspace");
             Ok(snapshot(name))
+        }
+
+        fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
+            self.activate_error
+                .map_or(Ok(()), |error| Err(io::Error::other(error)))
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -23375,6 +23384,7 @@ mod tests {
     #[derive(Default)]
     struct ResponsiveLoadingTerminal {
         keys: VecDeque<Key>,
+        wait_keys: VecDeque<Key>,
         frames: Vec<Vec<String>>,
         draw_count: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -23398,7 +23408,7 @@ mod tests {
 
         fn wait_for_key(&mut self, duration: std::time::Duration) -> io::Result<Option<Key>> {
             self.wait(duration)?;
-            Ok(self.keys.pop_front())
+            Ok(self.wait_keys.pop_front())
         }
 
         fn read_key(&mut self) -> io::Result<Key> {
@@ -23411,7 +23421,7 @@ mod tests {
     #[test]
     fn blocking_operations_keep_painting_and_workspace_open_can_be_cancelled() {
         let mut term = ResponsiveLoadingTerminal {
-            keys: VecDeque::from([Key::Escape]),
+            wait_keys: VecDeque::from([Key::Escape]),
             ..ResponsiveLoadingTerminal::default()
         };
         let draw_count = Arc::clone(&term.draw_count);
@@ -23431,6 +23441,24 @@ mod tests {
         assert!(
             term.frames.len() >= 2,
             "the loading surface kept repainting"
+        );
+    }
+
+    #[test]
+    fn a_panicking_background_operation_is_reported_as_io_failure() {
+        let mut term = ResponsiveLoadingTerminal::default();
+        let error = run_workspace_loading(
+            &mut term,
+            "Saving settings…",
+            false,
+            || -> io::Result<()> { panic!("injected worker panic") },
+        )
+        .expect_err("worker panic is mapped to a stable error");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error.to_string(),
+            "background operation stopped unexpectedly"
         );
     }
 
@@ -23460,6 +23488,88 @@ mod tests {
 
         assert_eq!(loader.opened, vec![PathBuf::from("/tmp/background")]);
         assert_eq!(loader.refreshed, vec![PathBuf::from("/tmp/background")]);
+
+        let paths = vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")];
+        let (_, active, _) = prepare_workspace_deck(&mut term, &mut loader, &paths)
+            .expect("background deck preparation succeeds");
+        assert_eq!(active.workspace.path, PathBuf::from("/tmp/one"));
+
+        let mut failing_loader = FakeLoader {
+            activate_error: Some("activation failed"),
+            ..FakeLoader::default()
+        };
+        let error = prepare_workspace_deck(
+            &mut term,
+            &mut failing_loader,
+            &[PathBuf::from("/tmp/fail")],
+        )
+        .expect_err("activation failure is propagated");
+        assert_eq!(error.to_string(), "activation failed");
+    }
+
+    #[test]
+    fn cancelling_recent_and_open_list_restores_the_originating_screen() {
+        let cases = [
+            (
+                vec![Key::Char('1'), Key::Quit],
+                Vec::new(),
+                vec![recent("recent")],
+                "Menu",
+            ),
+            (
+                vec![Key::Char('o'), Key::Enter, Key::Quit],
+                vec![ws("open")],
+                Vec::new(),
+                "Open Workspace",
+            ),
+        ];
+
+        for (keys, workspaces, recent, originating_screen) in cases {
+            let mut term = ResponsiveLoadingTerminal {
+                keys: keys.into(),
+                wait_keys: VecDeque::from([Key::Escape]),
+                ..ResponsiveLoadingTerminal::default()
+            };
+            let mut loader = FakeLoader {
+                operation_mode: FakeOperationMode::Background,
+                open_delay: std::time::Duration::from_millis(20),
+                ..FakeLoader::default()
+            };
+            let mut settings = RecordingSettingsPort::default();
+            let mut sessions = UnavailableSessionCommandPortFactory;
+
+            assert_eq!(
+                run_with_settings(
+                    &mut term,
+                    workspaces,
+                    recent,
+                    now(),
+                    Start::Welcome,
+                    &mut loader,
+                    &mut settings,
+                    &mut sessions,
+                )
+                .unwrap(),
+                Exit::Quit
+            );
+            let frames = term
+                .frames
+                .iter()
+                .map(|frame| frame.join("\n"))
+                .collect::<Vec<_>>();
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains("Workspace opening was cancelled.")),
+                "cancel notice was absent from {originating_screen}: {frames:?}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains(originating_screen)),
+                "originating screen was absent: {frames:?}"
+            );
+        }
     }
 
     #[test]
@@ -24008,6 +24118,130 @@ mod tests {
         assert_eq!(settings.saves, 1);
         assert_eq!(settings.environment_saves, 1);
         assert_eq!(environment.settings().env["A"], "1");
+    }
+
+    #[test]
+    fn responsive_save_helpers_cover_empty_and_inline_environment_requests() {
+        let mut background = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut clean = Config::load(&mut background);
+        let mut term = ResponsiveLoadingTerminal::default();
+        assert!(!save_config_responsive(&mut term, &mut clean, &mut background, None).unwrap());
+        assert!(!save_environment_responsive(
+            &mut term,
+            &mut clean,
+            &mut background
+        ));
+
+        let mut inline = RecordingSettingsPort::default();
+        let mut environment = Config::load(&mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Enter, &mut inline);
+        let _ = step_config(
+            &mut environment,
+            Key::Paste("INLINE=1".to_owned()),
+            &mut inline,
+        );
+        let _ = step_config(&mut environment, Key::Tab, &mut inline);
+        assert!(save_environment_responsive(
+            &mut term,
+            &mut environment,
+            &mut inline
+        ));
+        assert_eq!(inline.environment_saves, 1);
+    }
+
+    #[test]
+    fn background_environment_shortcut_reaches_both_config_surfaces() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+        let _ = step_config(&mut config, Key::Enter, &mut settings);
+        let save = Key::Management {
+            action: AppKey::SaveRoles,
+            passthrough: vec![0x13],
+        };
+        assert!(matches!(
+            step_config(&mut config, save.clone(), &mut settings),
+            ConfigStep::SaveEnvironment
+        ));
+        assert!(matches!(
+            step_workspace_config(&mut config, save, &mut settings),
+            WorkspaceConfigStep::SaveEnvironment
+        ));
+    }
+
+    #[test]
+    fn workspace_config_dispatches_background_environment_save() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Enter,
+            Key::Paste("WORKSPACE=1".to_owned()),
+            Key::Tab,
+            Key::Enter,
+            Key::Escape,
+        ]);
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        assert_eq!(settings.environment_saves, 1);
+    }
+
+    #[test]
+    fn full_config_dispatches_background_environment_save() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut loader = FakeLoader::default();
+        let mut sessions = UnavailableSessionCommandPortFactory;
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Down,
+            Key::Enter,
+            Key::Paste("GLOBAL=1".to_owned()),
+            Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            },
+            Key::Escape,
+            Key::Quit,
+        ]);
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Config,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(settings.environment_saves, 1);
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to

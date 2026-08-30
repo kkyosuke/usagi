@@ -8418,6 +8418,7 @@ mod tests {
             storage: Storage::new(temporary.path()),
             workspace: None,
         };
+        assert!(first.background_operations());
         let settings = Settings {
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,

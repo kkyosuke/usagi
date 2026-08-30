@@ -139,11 +139,8 @@ impl WorkspaceSnapshot {
 /// Open 一覧と Recent はともにこの 1 つの port を経由する。
 pub trait WorkspaceLoader: Send {
     /// Whether potentially slow open/refresh calls should be moved to a worker
-    /// while the terminal keeps painting. In-memory test adapters may retain the
-    /// synchronous default.
-    fn background_operations(&self) -> bool {
-        false
-    }
+    /// while the terminal keeps painting.
+    fn background_operations(&self) -> bool;
 
     /// `path` の workspace を開き、画面描画用 snapshot を返す。
     ///
