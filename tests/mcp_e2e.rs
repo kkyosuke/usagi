@@ -102,10 +102,10 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 }
 
 #[test]
-fn production_tools_list_fixes_the_49_tool_schema_contract() {
+fn production_tools_list_fixes_the_50_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 49);
+    assert_eq!(tools.len(), 50);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -126,7 +126,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 38);
+    assert_eq!(names.len(), 39);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -1419,6 +1419,20 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
             .contains("caller provenance is unknown")
     );
     assert!(!mcp.fixture_log().exists());
+    let response = mcp.tool(
+        "agent_opinion",
+        &json!({
+            "reviewer":{"target":"codex","model":"fixture-codex"},
+            "question":"Review this without a credential"
+        }),
+    );
+    assert_eq!(response["error"]["code"], -32603);
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("caller provenance is unknown")
+    );
     let response = mcp.tool("user_decision_list", &json!({}));
     assert_eq!(response["error"]["code"], -32603);
     assert!(
@@ -1427,6 +1441,70 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
             .unwrap()
             .contains("decision caller provenance is unknown")
     );
+}
+
+#[test]
+fn production_agent_opinion_runs_agy_in_an_isolated_review_session() {
+    let mut mcp = McpHarness::start_with_all_agents();
+    drop(mcp.launch_caller());
+    mcp.replace_fixture_agent(
+        "agy",
+        "#!/bin/sh\nprintf 'Independent opinion\\nwith supporting detail\\n'\n",
+    );
+
+    let response = mcp.tool(
+        "agent_opinion",
+        &json!({
+            "reviewer":{"target":"agy","model":"fixture-agy"},
+            "question":"Is the durable ownership boundary sound?",
+            "context":"Focus on caller binding."
+        }),
+    );
+    let admission = tool_text(&response);
+    assert_eq!(admission["target"], "agy");
+    assert_eq!(admission["model"], "fixture-agy");
+    assert_eq!(
+        admission["opinion"],
+        "Independent opinion\nwith supporting detail"
+    );
+    let session = admission["session"].as_str().unwrap();
+    assert!(session.starts_with("opinion-"), "{admission}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let capture = loop {
+        if let Some(capture) = mcp.fixture_argv().into_iter().find(|capture| {
+            capture.runtime == "agy"
+                && capture
+                    .arguments
+                    .iter()
+                    .any(|argument| argument.contains("Is the durable ownership boundary sound?"))
+        }) {
+            break capture;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "agy opinion argv was not captured"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let prompt = capture
+        .arguments
+        .iter()
+        .find(|argument| argument.contains("Is the durable ownership boundary sound?"))
+        .unwrap();
+    assert!(prompt.contains("Work read-only"));
+    assert!(prompt.contains("Focus on caller binding."));
+    assert_eq!(capture.arguments[capture.arguments.len() - 2], "--print");
+    assert_eq!(capture.arguments.last(), Some(prompt));
+
+    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
+    let opinion = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == session)
+        .unwrap();
+    assert_eq!(opinion["parent_session_name"], "mcp-caller");
 }
 
 #[test]

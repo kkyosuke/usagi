@@ -275,11 +275,21 @@ pub fn decode_pr_snapshot(value: Value) -> Result<PrSnapshot, ClientError> {
     })
 }
 
+/// Maximum UTF-8 byte length accepted for an opinion question.
+pub const OPINION_QUESTION_MAX_BYTES: usize = 16 * 1024;
+/// Maximum UTF-8 byte length accepted for optional opinion context.
+pub const OPINION_CONTEXT_MAX_BYTES: usize = 32 * 1024;
+/// Maximum time allowed for the external opinion provider to finish.
+pub const OPINION_EXECUTION_TIMEOUT_MS: u64 = 5 * 60 * 1_000;
+/// Transport budget including provider termination and response framing.
+pub const OPINION_REQUEST_TIMEOUT_MS: u64 = OPINION_EXECUTION_TIMEOUT_MS + 30_000;
+
 /// The MCP operations backed by the daemon-owned dispatch registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchToolAction {
     Dispatch,
+    AgentOpinion,
     SessionGet,
     AgentList,
     AgentGet,
@@ -1807,6 +1817,7 @@ where
 {
     fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         let eligibility = RetryEligibility::classify(&request);
+        let timeout_ms = request_timeout_ms(&request, self.policy.timeout_ms);
         let attempts = 1u32.saturating_add(u32::from(self.policy.reconnect_attempts));
         // Overwritten by every non-returning failure path below; the loop always
         // runs at least once, so the initial value is a formality.
@@ -1816,12 +1827,12 @@ where
             let session = match self.session {
                 // A reused connection restarts its budget for this attempt.
                 Some(ref mut session) => {
-                    session.rearm(self.policy.timeout_ms);
+                    session.rearm(timeout_ms);
                     session
                 }
                 // A fresh connection begins this attempt's end-to-end budget; the
                 // returned session's deadline continues into the request exchange.
-                None => match (self.connect)(self.clock.clone(), self.policy.timeout_ms) {
+                None => match (self.connect)(self.clock.clone(), timeout_ms) {
                     Ok(session) => self.session.insert(session),
                     Err(error) => {
                         // No request was dispatched, so retrying a new connection
@@ -1850,6 +1861,20 @@ where
             }
         }
         Err(last)
+    }
+}
+
+const fn request_timeout_ms(request: &DaemonRequest, default_ms: u64) -> u64 {
+    if matches!(
+        request,
+        DaemonRequest::DispatchTool {
+            action: DispatchToolAction::AgentOpinion,
+            ..
+        }
+    ) {
+        OPINION_REQUEST_TIMEOUT_MS
+    } else {
+        default_ms
     }
 }
 
@@ -3009,6 +3034,27 @@ mod deadline_and_retry_tests {
         assert_eq!(counters.rearms.get(), 1);
         assert_eq!(counters.connects.get(), 0);
         assert!(client.session.is_some());
+    }
+
+    #[test]
+    fn opinion_request_gets_a_provider_sized_transport_budget() {
+        let ordinary = DaemonRequest::DispatchTool {
+            action: DispatchToolAction::AgentList,
+            operation_id: "read".into(),
+            payload: serde_json::json!({}),
+            caller_context: None,
+        };
+        let opinion = DaemonRequest::DispatchTool {
+            action: DispatchToolAction::AgentOpinion,
+            operation_id: "opinion".into(),
+            payload: serde_json::json!({}),
+            caller_context: None,
+        };
+        assert_eq!(request_timeout_ms(&ordinary, 30_000), 30_000);
+        assert_eq!(
+            request_timeout_ms(&opinion, 30_000),
+            OPINION_REQUEST_TIMEOUT_MS
+        );
     }
 
     #[test]

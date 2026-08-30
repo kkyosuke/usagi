@@ -171,12 +171,20 @@ impl McpHarness {
                 &fixture_mcp_input,
                 &fixture_mcp_output,
             );
+            install_fixture_agent(
+                &fixture_bin,
+                "agy",
+                &fixture_log,
+                &fixture_argv,
+                &fixture_mcp_input,
+                &fixture_mcp_output,
+            );
         }
         fs::create_dir(workspace.path().join(".usagi")).unwrap();
         fs::write(
             workspace.path().join(".usagi/config.toml"),
             if all_agents {
-                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n"
+                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n[agents.agy]\nmodels = [\"fixture-agy\"]\n"
             } else {
                 "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n"
             },
@@ -439,7 +447,7 @@ impl McpHarness {
     /// use this seam to make a worker call `agent_complete` or `agent_fail`
     /// without relying on a real provider login.
     pub fn replace_fixture_agent(&self, runtime: &str, script: &str) {
-        assert!(matches!(runtime, "codex" | "claude"));
+        assert!(matches!(runtime, "codex" | "claude" | "agy"));
         let executable = self.fixture_bin.join(runtime);
         fs::write(
             &executable,

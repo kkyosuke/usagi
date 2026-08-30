@@ -29,6 +29,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | daemon が worktree を破棄し、lifecycle store を更新する |
 | worker dispatch | `session_dispatch` | session を作成または再利用し、worker PTY と run/binding を durable に記録する |
+| third opinion | `agent_opinion` | 独立した reviewer session と CLI の制限モードで回答を同期的に得る |
 | worker の観測 | `session_get` / `agent_list` / `agent_get` | dispatch store の agent と run を返す |
 | worker の報告 | `agent_complete` / `agent_fail` | authenticated current run の報告を保存済み caller inbox へ配送する |
 | caller の受信 | `agent_inbox` / `agent_inbox_ack` | authenticated caller 自身の durable inbox をbounded pageで読み、処理後に明示ACKする |
@@ -78,6 +79,22 @@ credential を必要とする。手動で
 
 成功応答には durable `run_id`、`agent_id`、daemon-owned `terminal` が入る。既存 worker を再利用する場合は
 `agent` を `{"id":"<agent_id>"}` にする。
+
+## third opinion を依頼する
+
+`agent_opinion` は実装や設計の判断を別 Agent にレビューさせる。`reviewer.target` は
+`claude` / `codex` / `agy` で、model は `tools/list` がその target に列挙した値を使う。`agy` は
+Antigravity CLI の `agy` executable を直接使い、`sakana-ai` profile（`codex-fugu`）とは別 target である。
+
+```json
+{"name":"agent_opinion","arguments":{"reviewer":{"target":"agy","model":"fugu-model"},
+ "question":"この ownership 境界に race はないか", "context":"daemon restart 後も durable であることを重視する"}}
+```
+
+tool は reviewer の終了まで最大 5 分待ち、`target` / `model` / `session` / `opinion` を返す。reviewer には変更禁止の
+prompt と provider ごとの制限モードを渡し、専用 session に隔離するため caller の checkout は変更されない。ただし
+caller の未 commit 変更は専用 session に複製されないため、必要な差分は `context` に含める。回答と専用 session の変更を
+確認した後、不要になった session は `session_remove`（変更があれば `force: true`）する。
 
 ## 階層的に委譲する
 

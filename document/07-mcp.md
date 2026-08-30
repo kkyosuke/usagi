@@ -163,6 +163,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
+| `agent_opinion` | `claude` / `codex` / `agy` の reviewer を専用 session と制限モードで実行し、third opinion を同期的に返す |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
 `user_decision_request` の同期応答待ちは decision ごとの process-local 通知へ登録し、resolve / cancel / expire の
@@ -220,6 +221,18 @@ worker `SessionId` に daemon-owned PR inventory も更新し、TUI の sidebar 
 inbox の完了報告は維持して retryable error を返す。同じ report の再送は request の kind や artifact を信用せず、inbox に最初に
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
+
+`agent_opinion` は `reviewer.target` / `reviewer.model`、`question`、任意の `context` を受ける。operation ID から
+衝突しない `opinion-*` session 名を作り、ファイル編集・commit・push・PR・外部状態変更を禁止する reviewer prompt を
+外部 CLI へ渡す。tool call は最大 5 分待ち、`target` / `model` / `session` / `opinion` を返す。出力は 64 KiB に制限し、
+timeout・非 0 exit・空出力・上限超過では失敗理由と保持した session 名を返す。caller は必要な調査後に専用 session を
+`session_remove` する。専用 worktree への隔離により caller の checkout は変更されないが、caller の未 commit 変更も
+自動では複製しない。必要な差分は `context` に含め、reviewer が専用 session を変更した場合は確認後に `force: true` で削除する。
+argv の上限を越えないよう `question` は 16 KiB、`context` は 32 KiB までとし、schema と daemon の双方で検証する。
+
+公開 target は executable `claude` / `codex` / `agy` に一対一で対応する。`agy` は Antigravity CLI であり、
+`sakana-ai` profile（実行コマンド `codex-fugu`）とは別 target である。`tools/list` には MCP server 起動時の
+runtime/model snapshot で利用可能な組だけを載せ、daemon も workspace allowlist と executable を再検証する。
 
 session 作成系は optional role selector を受け取る。`session_create` / `session_delegate_issue` /
 `session_delegate_brief` は top-level `role`、`session_dispatch` は `session.role` を使う。daemon が current catalog と

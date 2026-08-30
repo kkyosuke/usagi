@@ -14,6 +14,7 @@ use serde::Deserialize;
 use crate::domain::settings::{AvailableModels, DefaultModel};
 
 const CONFIG_PATH: &str = ".usagi/config.toml";
+const STANDALONE_AGENT_TARGETS: &[&str] = &["agy"];
 
 /// One code-defined agent runtime exposed by daemon orchestration and MCP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +100,8 @@ impl WorkspaceAgentConfig {
         Self::from_runtime_allowlists([("claude", claude), ("codex", codex)])
     }
 
-    /// Builds an in-memory configuration keyed by supported runtime ID.
+    /// Builds an in-memory configuration keyed by a known managed runtime or
+    /// standalone Agent target.
     #[must_use]
     pub fn from_runtime_allowlists<'a>(
         allowlists: impl IntoIterator<Item = (&'a str, Vec<String>)>,
@@ -124,7 +126,7 @@ impl WorkspaceAgentConfig {
         let runtimes = parsed
             .agents
             .into_iter()
-            .filter(|(runtime, _)| supported_agent_runtimes().any(|entry| entry.id == runtime))
+            .filter(|(runtime, _)| is_known_agent_target(runtime))
             .filter_map(|(runtime, config)| {
                 valid_models(config.models).map(|models| (runtime, models))
             })
@@ -132,11 +134,10 @@ impl WorkspaceAgentConfig {
         Self { runtimes }
     }
 
-    /// Models allowed for this closed-vocabulary runtime.
+    /// Models allowed for this closed-vocabulary runtime or standalone target.
     #[must_use]
     pub fn models(&self, runtime: &str) -> &[String] {
-        supported_agent_runtimes()
-            .any(|entry| entry.id == runtime)
+        is_known_agent_target(runtime)
             .then(|| self.runtimes.get(runtime))
             .flatten()
             .map_or(&[], Vec::as_slice)
@@ -147,6 +148,11 @@ impl WorkspaceAgentConfig {
     pub fn allows(&self, runtime: &str, model: &str) -> bool {
         self.models(runtime).iter().any(|allowed| allowed == model)
     }
+}
+
+fn is_known_agent_target(target: &str) -> bool {
+    supported_agent_runtimes().any(|entry| entry.id == target)
+        || STANDALONE_AGENT_TARGETS.contains(&target)
 }
 
 fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
@@ -186,7 +192,7 @@ mod tests {
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         std::fs::write(
             workspace.path().join(".usagi/config.toml"),
-            "[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
+            "[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n[agents.agy]\nmodels = [\"gemini-pro\"]\n[agents.unknown]\nmodels = [\"ignored\"]\n",
         )
         .unwrap();
         let config = WorkspaceAgentConfig::read(workspace.path());
@@ -194,6 +200,8 @@ mod tests {
         assert!(!config.allows("claude", "opus"));
         assert!(config.models("codex").is_empty());
         assert!(config.allows("sakana-ai", "fugu-model"));
+        assert!(config.allows("agy", "gemini-pro"));
+        assert!(config.models("unknown").is_empty());
 
         assert!(
             WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())

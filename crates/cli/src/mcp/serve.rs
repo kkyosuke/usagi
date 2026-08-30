@@ -530,6 +530,9 @@ fn tools_list_result(snapshot: &RuntimeModelSnapshot, families: McpToolFamilies)
             if let Some(agent) = agent_selector_schema(snapshot, tool.name()) {
                 schema["properties"]["agent"] = agent;
             }
+            if tool.name() == "agent_opinion" {
+                schema["properties"]["reviewer"] = snapshot.opinion_reviewer_schema();
+            }
             if matches!(tool.name(), "session_create" | "session_delegate_issue") {
                 schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
             }
@@ -584,6 +587,14 @@ fn tools_call(
         schema["properties"]["agent"] = agent_schema;
         if let Some(agent) = arguments.get("agent")
             && let Err(message) = validate_agent_selector(snapshot, name, agent)
+        {
+            return protocol::error(id, error_code::INVALID_PARAMS, &message);
+        }
+    }
+    if name == "agent_opinion" {
+        schema["properties"]["reviewer"] = snapshot.opinion_reviewer_schema();
+        if let Some(reviewer) = arguments.get("reviewer")
+            && let Err(message) = snapshot.validate_opinion_reviewer(reviewer)
         {
             return protocol::error(id, error_code::INVALID_PARAMS, &message);
         }
@@ -990,6 +1001,9 @@ mod tests {
         if let Some(agent) = agent_selector_schema(snapshot, name) {
             schema["properties"]["agent"] = agent;
         }
+        if name == "agent_opinion" {
+            schema["properties"]["reviewer"] = snapshot.opinion_reviewer_schema();
+        }
         value(&schema)
     }
 
@@ -1123,7 +1137,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 50);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1169,7 +1183,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 38);
+        assert_eq!(names.len(), 39);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -1898,6 +1912,10 @@ mod tests {
             (
                 "session_dispatch",
                 usagi_core::usecase::client::DispatchToolAction::Dispatch,
+            ),
+            (
+                "agent_opinion",
+                usagi_core::usecase::client::DispatchToolAction::AgentOpinion,
             ),
             (
                 "session_get",

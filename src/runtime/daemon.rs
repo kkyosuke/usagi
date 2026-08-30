@@ -5344,6 +5344,7 @@ fn dispatch_dispatch_tool(
         matches!(
             action,
             DispatchToolAction::Dispatch
+                | DispatchToolAction::AgentOpinion
                 | DispatchToolAction::SessionGet
                 | DispatchToolAction::AgentList
                 | DispatchToolAction::AgentGet
@@ -5496,6 +5497,10 @@ fn dispatch_agent_tool(
             ));
         }
         let caller = authenticated.caller;
+        if action == DispatchToolAction::AgentOpinion {
+            drop(runtime);
+            return run_agent_opinion(bound, agent, &operation_id, workspace, &caller, payload);
+        }
         let store = runtime.dispatch_store();
         let task_for = |agent_id: AgentId| -> Result<serde_json::Value, ProtocolError> {
             let mut runs = store
@@ -5833,6 +5838,266 @@ fn dispatch_agent_tool(
             usagi_core::infrastructure::ipc::ResponseOutcome::Error(error),
             serde_json::Value::Null,
         ),
+    }
+}
+
+#[derive(Deserialize)]
+struct OpinionReviewer {
+    target: String,
+    model: String,
+}
+
+#[derive(Deserialize)]
+struct OpinionPayload {
+    reviewer: OpinionReviewer,
+    question: String,
+    #[serde(default)]
+    context: Option<String>,
+}
+
+fn parse_opinion_payload(
+    payload: serde_json::Value,
+) -> Result<OpinionPayload, usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    use usagi_core::usecase::client::{OPINION_CONTEXT_MAX_BYTES, OPINION_QUESTION_MAX_BYTES};
+
+    let input = serde_json::from_value::<OpinionPayload>(payload).map_err(|_| {
+        ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent_opinion payload")
+    })?;
+    if input.question.trim().is_empty() {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "opinion question must not be empty",
+        ));
+    }
+    if input.question.len() > OPINION_QUESTION_MAX_BYTES {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "opinion question is too large",
+        ));
+    }
+    if input
+        .context
+        .as_ref()
+        .is_some_and(|context| context.len() > OPINION_CONTEXT_MAX_BYTES)
+    {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "opinion context is too large",
+        ));
+    }
+    if !matches!(input.reviewer.target.as_str(), "claude" | "codex" | "agy") {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "opinion reviewer target must be one of: claude, codex, agy",
+        ));
+    }
+    Ok(input)
+}
+
+fn run_agent_opinion(
+    bound: &ConnectionWorkspace,
+    agent: &SharedAgentRuntime,
+    operation_id: &str,
+    workspace: WorkspaceId,
+    caller: &usagi_core::domain::agent::CallerRef,
+    payload: serde_json::Value,
+) -> Result<
+    (
+        usagi_core::infrastructure::ipc::ResponseOutcome,
+        serde_json::Value,
+    ),
+    usagi_core::infrastructure::ipc::ProtocolError,
+> {
+    use std::time::Duration;
+    use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe_in};
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    use usagi_core::infrastructure::runtime_model::{
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+    };
+    use usagi_core::usecase::client::OPINION_EXECUTION_TIMEOUT_MS;
+
+    let input = parse_opinion_payload(payload)?;
+    let repository_root = bound
+        .sessions()
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
+        .repository_root()
+        .to_path_buf();
+    let config = WorkspaceAgentConfig::read(&repository_root);
+    if !config.allows(&input.reviewer.target, &input.reviewer.model) {
+        return Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "opinion target/model is not allowed by the current workspace configuration",
+        ));
+    }
+    if !PathExecutableLocator.is_available(&input.reviewer.target) {
+        return Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "opinion reviewer executable is unavailable",
+        ));
+    }
+    let prompt = opinion_prompt(&input.question, input.context.as_deref());
+    let suffix = operation_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>();
+    let session_name = format!("opinion-{suffix}");
+    let _delegation_permit = authorize_delegation(bound, agent, Some(caller), None, operation_id)
+        .map_err(|error| {
+        ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
+    })?;
+    let created = bound
+        .sessions()
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable"))?
+        .handle(
+            usagi_core::usecase::client::SessionAction::Create,
+            operation_id,
+            &serde_json::json!({
+                "name": session_name,
+                "parent_session_id": caller.session_id,
+            }),
+        )
+        .map_err(|error| ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message()))?;
+    let (session_id, _) =
+        session_lineage_by_name(&created.body, &session_name).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unavailable, "opinion session is not available")
+        })?;
+    let scope = bound
+        .scope_resolver()
+        .resolve_available_scope(workspace, Some(session_id))
+        .map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "opinion session is unavailable")
+        })?;
+    let arguments = opinion_arguments(&input.reviewer.target, &input.reviewer.model, &prompt)?;
+    let observation = observe_in(
+        &input.reviewer.target,
+        &arguments,
+        &scope.working_directory,
+        ChildPolicy {
+            timeout: Duration::from_millis(OPINION_EXECUTION_TIMEOUT_MS),
+            terminate_grace: Duration::from_secs(2),
+            output_limit: 64 * 1024,
+        },
+    );
+    let ChildObservation::Success(opinion) = observation else {
+        let reason = match observation {
+            ChildObservation::SpawnFailed => "could not start",
+            ChildObservation::ExitFailure => "exited unsuccessfully",
+            ChildObservation::TimedOut => "timed out",
+            ChildObservation::OutputTooLarge => "produced too much output",
+            ChildObservation::InvalidOutput => "produced invalid output",
+            ChildObservation::EmptyOutput => "returned no opinion",
+            ChildObservation::ObservationFailed => "could not be observed",
+            ChildObservation::Success(_) => unreachable!(),
+        };
+        return Err(ProtocolError::new(
+            ErrorCode::Unavailable,
+            format!("opinion reviewer {reason}; session {session_name} was retained"),
+        ));
+    };
+    Ok((
+        usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
+        serde_json::json!({
+            "target": input.reviewer.target,
+            "model": input.reviewer.model,
+            "session": session_name,
+            "opinion": opinion,
+        }),
+    ))
+}
+
+fn opinion_arguments(
+    target: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<Vec<String>, usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+    match target {
+        "claude" => Ok(vec![
+            "--print".into(),
+            "--permission-mode".into(),
+            "plan".into(),
+            "--model".into(),
+            model.into(),
+            "--".into(),
+            prompt.into(),
+        ]),
+        "codex" => Ok(vec![
+            "exec".into(),
+            "--sandbox".into(),
+            "read-only".into(),
+            "--model".into(),
+            model.into(),
+            "--color".into(),
+            "never".into(),
+            prompt.into(),
+        ]),
+        // agy's Go flag parser consumes the value immediately after `--print`,
+        // so the prompt must stay last.
+        "agy" => Ok(vec![
+            "--model".into(),
+            model.into(),
+            "--sandbox".into(),
+            "--print".into(),
+            prompt.into(),
+        ]),
+        _ => Err(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "opinion reviewer target must be one of: claude, codex, agy",
+        )),
+    }
+}
+
+fn opinion_prompt(question: &str, context: Option<&str>) -> String {
+    let context = context
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(|| "(no additional context)".to_owned(), ToOwned::to_owned);
+    format!(
+        "You are an independent third-opinion reviewer. Work read-only: do not edit files, create commits, push branches, open PRs, or alter external state. Inspect the available workspace only as evidence for your analysis. Evaluate the question critically, call out assumptions and risks, and return a concrete recommendation as plain text.\n\n<question>\n{question}\n</question>\n\n<context>\n{context}\n</context>"
+    )
+}
+
+#[cfg(test)]
+mod opinion_tests {
+    use super::{opinion_arguments, opinion_prompt};
+
+    #[test]
+    fn opinion_arguments_keep_each_provider_grammar_and_prompt_opaque() {
+        let prompt = opinion_prompt(
+            "Is this boundary sound?",
+            Some("Focus on durable ownership."),
+        );
+        assert!(prompt.contains("Work read-only"));
+        assert!(prompt.contains("Is this boundary sound?"));
+        assert!(prompt.contains("Focus on durable ownership."));
+        let claude = opinion_arguments("claude", "sonnet", &prompt).unwrap();
+        assert_eq!(
+            &claude[..5],
+            ["--print", "--permission-mode", "plan", "--model", "sonnet"]
+        );
+        assert_eq!(claude.last(), Some(&prompt));
+        let codex = opinion_arguments("codex", "gpt", &prompt).unwrap();
+        assert_eq!(
+            &codex[..7],
+            [
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--model",
+                "gpt",
+                "--color",
+                "never"
+            ]
+        );
+        assert_eq!(codex.last(), Some(&prompt));
+        let agy = opinion_arguments("agy", "gemini", &prompt).unwrap();
+        assert_eq!(&agy[..4], ["--model", "gemini", "--sandbox", "--print"]);
+        assert_eq!(agy.last(), Some(&prompt));
+        assert!(opinion_arguments("sakana-ai", "fugu", &prompt).is_err());
+        assert!(opinion_prompt("Review", Some("  ")).contains("(no additional context)"));
     }
 }
 

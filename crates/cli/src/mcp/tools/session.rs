@@ -6,6 +6,7 @@
 use crate::mcp::tool::Tool;
 use std::sync::OnceLock;
 use usagi_core::domain::user_decision::UserDecisionPolicy;
+use usagi_core::usecase::client::{OPINION_CONTEXT_MAX_BYTES, OPINION_QUESTION_MAX_BYTES};
 
 /// session 系 tool の一覧（オーケストレーションの delegate_* を含む）。
 #[must_use]
@@ -31,6 +32,7 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionDelegateIssue),
         Box::new(SessionDelegateBrief),
         Box::new(SessionDispatch),
+        Box::new(AgentOpinion),
         Box::new(SessionGet),
         Box::new(AgentList),
         Box::new(AgentGet),
@@ -45,6 +47,41 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(UserDecisionCancel),
         Box::new(UserDecisionExpire),
     ]
+}
+
+/// `agent_opinion` —別 runtime の隔離 reviewer へ意見を依頼する。
+pub struct AgentOpinion;
+impl Tool for AgentOpinion {
+    fn name(&self) -> &'static str {
+        "agent_opinion"
+    }
+    fn description(&self) -> &'static str {
+        "claude / codex / agy の独立した reviewer を専用 session と制限モードで実行し、third opinion を同期的に返す"
+    }
+    fn input_schema(&self) -> &'static str {
+        static SCHEMA: OnceLock<String> = OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reviewer": {"oneOf": [{
+                        "type": "object",
+                        "properties": {
+                            "target": {"type": "string"},
+                            "model": {"type": "string"},
+                        },
+                        "required": ["target", "model"],
+                        "additionalProperties": false,
+                    }]},
+                    "question": bounded_string_schema(OPINION_QUESTION_MAX_BYTES, true),
+                    "context": bounded_string_schema(OPINION_CONTEXT_MAX_BYTES, false),
+                },
+                "required": ["reviewer", "question"],
+                "additionalProperties": false,
+            })
+            .to_string()
+        })
+    }
 }
 pub struct UserDecisionRequest;
 impl Tool for UserDecisionRequest {

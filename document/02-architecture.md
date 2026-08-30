@@ -1096,7 +1096,7 @@ terminal environment が guard の前提を差し替えない。
 
 ## 入口面 MCP の tool dispatch
 
-dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
+dispatch MCP の正本は本節である。`session_dispatch`、`agent_opinion`、`session_get`、`agent_list`、`agent_get`、
 `agent_complete`、`agent_fail`、`agent_inbox`、`agent_inbox_ack` は tool schema と daemon IPC request 型を公開する。
 daemon は private caller credential を live runtime と照合し、session lifecycle、Agent runtime、dispatch
 store と caller inbox を一つの durable 経路として compose する。credential の無い呼び出しや current run と
@@ -1120,6 +1120,12 @@ server lifetime 中は変わらないため、設定、PATH、CLI install/uninst
 
 既存の `session_delegate_brief`、`session_delegate_issue`、`issue_to_prompt`、`session_prompt`、
 `session_complete` は引き続き利用できる。
+
+`agent_opinion` は managed Agent dispatch とは別の同期 review 入口である。公開 target `claude` / `codex` / `agy` のうち
+runtime/model snapshot に存在する reviewer だけを schema に載せる。daemon は operation ID 由来の専用 session を作り、
+変更禁止 prompt と provider ごとの非対話・制限モードで CLI を bounded 実行して、標準出力を response に返す。
+reviewer の変更は専用 worktree に隔離され、caller の worktree には到達しない。`agy` は Antigravity CLI
+の executable であり、`sakana-ai` profile（`codex-fugu`）とは別である。
 
 `crates/cli` の `mcp/` は、エージェント向けの tool 面（IF）を持つ。CLI が人間向けの
 `usagi <cmd>` を提供するのに対し、MCP は issue / memory / session の tool を JSON-RPC で

@@ -12,6 +12,7 @@ pub use usagi_core::infrastructure::runtime_model::{
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeModelSnapshot {
     runtimes: Vec<RuntimeModels>,
+    opinion_runtimes: Vec<RuntimeModels>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +25,7 @@ impl RuntimeModelSnapshot {
     /// Capture config and executable availability once.
     #[must_use]
     pub fn capture(config: &WorkspaceAgentConfig, locator: &dyn ExecutableLocator) -> Self {
-        let runtimes = supported_agent_runtimes()
+        let runtimes: Vec<RuntimeModels> = supported_agent_runtimes()
             .filter_map(|runtime| {
                 let models = config.models(runtime.id);
                 (locator.is_available(runtime.executable) && !models.is_empty()).then(|| {
@@ -35,7 +36,22 @@ impl RuntimeModelSnapshot {
                 })
             })
             .collect();
-        Self { runtimes }
+        let mut opinion_runtimes = runtimes
+            .iter()
+            .filter(|entry| matches!(entry.runtime, "claude" | "codex"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let agy_models = config.models("agy");
+        if locator.is_available("agy") && !agy_models.is_empty() {
+            opinion_runtimes.push(RuntimeModels {
+                runtime: "agy",
+                models: agy_models.to_vec(),
+            });
+        }
+        Self {
+            runtimes,
+            opinion_runtimes,
+        }
     }
 
     /// Build the closed-vocabulary runtime schema for legacy session tools.
@@ -69,6 +85,25 @@ impl RuntimeModelSnapshot {
     #[must_use]
     pub fn new_agent_schema(&self) -> Value {
         json!({"oneOf": self.new_agent_branches().collect::<Vec<_>>()})
+    }
+
+    /// Build the reviewer selector for `agent_opinion`.
+    ///
+    /// Opinion execution also supports the standalone `agy` CLI without
+    /// exposing it through the managed Agent runtime catalog.
+    #[must_use]
+    pub fn opinion_reviewer_schema(&self) -> Value {
+        json!({"oneOf": self.opinion_runtimes.iter().map(|entry| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "target": {"const": entry.runtime},
+                    "model": {"type": "string", "enum": entry.models},
+                },
+                "required": ["target", "model"],
+                "additionalProperties": false,
+            })
+        }).collect::<Vec<_>>()})
     }
 
     fn new_agent_branches(&self) -> impl Iterator<Item = Value> + '_ {
@@ -143,6 +178,34 @@ impl RuntimeModelSnapshot {
         self.validate_agent(agent)
     }
 
+    /// Validate a public opinion reviewer selector against this server's
+    /// immutable runtime/model availability snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe validation message for an unknown target, incomplete
+    /// selector, or model that is not allowed for the resolved runtime.
+    pub fn validate_opinion_reviewer(&self, reviewer: &Value) -> Result<(), String> {
+        let object = reviewer
+            .as_object()
+            .ok_or_else(|| "reviewer must be an object".to_owned())?;
+        let (Some(target), Some(model)) = (
+            object.get("target").and_then(Value::as_str),
+            object.get("model").and_then(Value::as_str),
+        ) else {
+            return Err("reviewer.target and reviewer.model must be supplied together".into());
+        };
+        if object.len() != 2 {
+            return Err("reviewer must contain only target and model".into());
+        }
+        self.opinion_runtimes
+            .iter()
+            .find(|entry| entry.runtime == target)
+            .filter(|entry| entry.models.iter().any(|allowed| allowed == model))
+            .map(|_| ())
+            .ok_or_else(|| "opinion target/model is not allowed by this MCP server snapshot".into())
+    }
+
     /// Validate and normalize deprecated `agent_cli` on legacy session tools.
     ///
     /// # Errors
@@ -209,6 +272,46 @@ mod tests {
     impl ExecutableLocator for FakeLocator {
         fn is_available(&self, executable: &str) -> bool {
             self.0.contains(&executable)
+        }
+    }
+
+    #[test]
+    fn opinion_reviewer_includes_the_standalone_agy_cli_only_for_opinions() {
+        let config = WorkspaceAgentConfig::from_runtime_allowlists([
+            ("claude", vec!["sonnet".into()]),
+            ("codex", vec!["gpt".into()]),
+            ("agy", vec!["gemini-pro".into()]),
+        ]);
+        let snapshot =
+            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["claude", "codex", "agy"]));
+        let schema = snapshot.opinion_reviewer_schema();
+        let branches = schema["oneOf"].as_array().unwrap();
+        assert!(branches.iter().any(|branch| {
+            branch["properties"]["target"]["const"] == "agy"
+                && branch["properties"]["model"]["enum"] == json!(["gemini-pro"])
+        }));
+        assert!(
+            snapshot.agent_schema()["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|branch| branch["properties"]["runtime"]["const"] != "agy")
+        );
+        for reviewer in [
+            json!({"target":"claude", "model":"sonnet"}),
+            json!({"target":"codex", "model":"gpt"}),
+            json!({"target":"agy", "model":"gemini-pro"}),
+        ] {
+            assert!(snapshot.validate_opinion_reviewer(&reviewer).is_ok());
+        }
+        for reviewer in [
+            json!("agy"),
+            json!({"target":"agy"}),
+            json!({"target":"agy", "model":"other"}),
+            json!({"target":"sakana-ai", "model":"fugu"}),
+            json!({"target":"agy", "model":"gemini-pro", "extra":true}),
+        ] {
+            assert!(snapshot.validate_opinion_reviewer(&reviewer).is_err());
         }
     }
 

@@ -72,8 +72,33 @@ struct Capture {
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
     let mut command = Command::new(program);
+    command.args(arguments);
+    observe_command(command, policy, false)
+}
+
+/// Runs one public, non-interactive CLI probe from a trusted working directory.
+///
+/// Unlike [`observe`], this accepts owned argument strings so a caller can pass
+/// an opaque user prompt without joining it into a shell command.
+#[must_use]
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=observes_from_the_requested_directory_without_a_shell
+pub fn observe_in(
+    program: &str,
+    arguments: &[String],
+    working_directory: &std::path::Path,
+    policy: ChildPolicy,
+) -> ChildObservation {
+    let mut command = Command::new(program);
+    command.args(arguments).current_dir(working_directory);
+    observe_command(command, policy, true)
+}
+
+fn observe_command(
+    mut command: Command,
+    policy: ChildPolicy,
+    preserve_multiline: bool,
+) -> ChildObservation {
     command
-        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -137,7 +162,28 @@ pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildO
     if !status.success() {
         return ChildObservation::ExitFailure;
     }
-    normalize_output(stdout.bytes, stderr.bytes)
+    if preserve_multiline {
+        normalize_full_output(stdout.bytes, stderr.bytes)
+    } else {
+        normalize_output(stdout.bytes, stderr.bytes)
+    }
+}
+
+fn normalize_full_output(stdout: Vec<u8>, stderr: Vec<u8>) -> ChildObservation {
+    let selected = if stdout.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        stdout
+    } else {
+        stderr
+    };
+    let Ok(text) = String::from_utf8(selected) else {
+        return ChildObservation::InvalidOutput;
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        ChildObservation::EmptyOutput
+    } else {
+        ChildObservation::Success(text.to_owned())
+    }
 }
 
 /// Runs a non-interactive command with bounded input, output, lifetime, and
@@ -378,6 +424,44 @@ mod tests {
         assert_eq!(
             observe("sh", &["-c", "printf '   \\n'"], policy()),
             ChildObservation::EmptyOutput
+        );
+    }
+
+    #[test]
+    fn observes_from_the_requested_directory_without_a_shell() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            observe_in(
+                "pwd",
+                &[],
+                directory.path(),
+                ChildPolicy {
+                    output_limit: 4 * 1024,
+                    ..policy()
+                },
+            ),
+            ChildObservation::Success(
+                directory
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn directory_observation_preserves_a_multiline_result() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            observe_in(
+                "sh",
+                &["-c".into(), "printf 'first\\nsecond\\n'".into()],
+                directory.path(),
+                policy(),
+            ),
+            ChildObservation::Success("first\nsecond".to_owned())
         );
     }
 
