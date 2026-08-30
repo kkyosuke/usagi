@@ -20527,6 +20527,12 @@ mod tests {
             visible,
             [root_terminal.clone(), managed.clone(), root_agent.clone()]
         );
+        assert_eq!(
+            super::visible_managed_background_terminal(&runtime, 8, 160),
+            None,
+            "a full-height root drawer must not retain an occluded managed Agent"
+        );
+        assert_eq!(super::root_terminal_available_width(30, 79, true), 79);
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));

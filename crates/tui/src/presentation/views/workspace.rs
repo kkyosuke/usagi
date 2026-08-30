@@ -4124,6 +4124,10 @@ mod tests {
         assert!(concurrent_text.contains("director agent output"));
         assert!(concurrent_text.contains("workspace shell output"));
         assert!(concurrent_text.contains("selected session agent output"));
+
+        let narrow_text = render_home(30, 79, &concurrent).join("\n");
+        assert!(narrow_text.contains("director agent output"));
+        assert!(narrow_text.contains("workspace shell output"));
     }
 
     #[test]
