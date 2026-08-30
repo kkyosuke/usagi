@@ -1474,7 +1474,7 @@ response が失われた・timeout した場合は、その pane を安全な失
 受け取り、以降は redraw ごとに `Resume { after_offset }` で offset 以降の出力だけを取得する。attach では
 checkpoint から screen を復元し（履歴の control byte を再生しない）、以降の suffix を**その復元済み parser**へ
 feed する。screen は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）で、
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・Reverse Index（`ESC M`）・SGR の色と属性・alternate screen buffer）で、
 その screen 行を右ペインへ clip して表示する。PTY output の適用は parser state だけを更新し、retained scrollback 全体の
 描画 cache は作らない。各 frame は現在の viewport に必要な行 window だけを ANSI 付き表示へ投影し、URL 検出もその
 window に接する折返し logical line までに限定する。このため通常の output・idle redraw・scroll 操作は 10,000 行の
@@ -1485,9 +1485,12 @@ live の input cursor は現在セルを反転して表示する。output offset
 resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
 checkpoint は `output_offset` 時点の完全な screen state（可視 grid・scrollback とその oldest-row origin・cursor・saved cursor・
-scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・application cursor / bracketed paste / mouse protocol）を含むため、retention の先頭が
+scroll region・SGR・alternate と背景 primary buffer・decoder の途中状態・DEC synchronized output（mode 2026）の bounded な未 commit bytes・application cursor / bracketed paste / mouse protocol）を含むため、retention の先頭が
 UTF-8 / CSI / OSC / SGR / alternate の途中でも reconnect 前後で可視セル・cursor・style が一致し、
 `cells_with_scrollback` を使う selection / copy history も untrimmed な参照と一致する。
+DEC synchronized output の開始から終了までは committed screen を描画し続け、終了 sequence が PTY chunk を跨いでも
+更新後の frame を atomic に公開する。未完了 bytes は 128 KiB で上限を設け、終端を失った stream は上限到達時に通常描画へ
+fail open して daemon/TUI の保持量を bounded に保つ。
 
 `Resume`（poll）は**描画スレッドでは行わない**。専用接続を持つ背景スレッド（foreground poll pump）が、attach 済みの
 terminal を fetch して per-terminal の read-ahead バッファへ積み、描画スレッドは redraw ごとにそのバッファを**非ブロッキングに
