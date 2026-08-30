@@ -1440,6 +1440,9 @@ mod tests {
         };
         let descriptor =
             ToolDescriptor::new(Box::new(LocalTool), ToolRoute::Local, CallerPolicy::Public);
+        assert_eq!(descriptor.name(), "local_fixture");
+        assert_eq!(descriptor.description(), "local result fixture");
+        assert!(descriptor.input_schema().contains("object"));
         let response = execute_tool(
             serde_json::json!(1),
             &descriptor,

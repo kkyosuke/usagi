@@ -40,11 +40,11 @@ impl OllamaOpinion {
             LocalOpinionError::Invalid(message) => ToolError::InvalidParams(message),
             LocalOpinionError::Provider(message) => ToolError::Execution(message),
         })?;
-        serde_json::to_string_pretty(&serde_json::json!({
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
             "model": opinion.model,
             "opinion": opinion.content,
         }))
-        .map_err(|error| ToolError::Execution(error.to_string()))
+        .expect("an opinion containing only strings must serialize"))
     }
 }
 
@@ -62,7 +62,7 @@ impl Tool for OllamaOpinion {
     }
 
     fn call(&self, params: &str, _store_root: &Path) -> Result<String, ToolError> {
-        Self::call_with_port(params, &OllamaClient)
+        Self::call_with_port(params, &OllamaClient::default())
     }
 }
 
