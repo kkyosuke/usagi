@@ -6466,10 +6466,10 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
         || state.role_editor().is_some()
 }
 
-/// Run one blocking operation on a scoped worker while continuing to paint and
-/// consume terminal input. For cancellable workspace opens, Escape discards a
-/// late result; the underlying call is allowed to settle safely before its
-/// borrowed port is returned.
+/// Run one blocking operation on a scoped worker while continuing to paint.
+/// For cancellable workspace opens, Escape discards a late result; the
+/// underlying call is allowed to settle safely before its borrowed port is
+/// returned. Non-cancellable saves leave queued input untouched.
 fn run_workspace_loading<T: Send>(
     term: &mut dyn Terminal,
     label: &str,
@@ -6480,7 +6480,7 @@ fn run_workspace_loading<T: Send>(
         let worker = scope.spawn(operation);
         let mut frame = 0_usize;
         let mut cancelled = false;
-        while !worker.is_finished() {
+        loop {
             let (height, width) = term.size()?;
             let status = if cancelled { "Cancelling…" } else { label };
             term.draw(&widgets::loading::loading_screen(
@@ -6490,13 +6490,22 @@ fn run_workspace_loading<T: Send>(
                 frame / 3,
                 status,
             ))?;
-            if cancellable
-                && matches!(
-                    term.wait_for_key(std::time::Duration::from_millis(80))?,
-                    Some(Key::Escape)
-                )
-            {
-                cancelled = true;
+            // Even an immediately completed operation gets one visible frame.
+            // Without this fence, fast settings writes skipped feedback
+            // entirely and made the Enter key appear to do nothing.
+            if worker.is_finished() {
+                break;
+            }
+            let tick = std::time::Duration::from_millis(80);
+            if cancellable && !cancelled {
+                if matches!(term.wait_for_key(tick)?, Some(Key::Escape)) {
+                    cancelled = true;
+                }
+            } else {
+                // Saving and the post-cancel wait cannot accept input, but they
+                // must still yield so a slow operation does not become a render
+                // loop or consume keys intended for the next screen.
+                term.wait(tick)?;
             }
             frame = frame.wrapping_add(1);
         }
@@ -23862,6 +23871,7 @@ mod tests {
     struct ResponsiveLoadingTerminal {
         keys: VecDeque<Key>,
         wait_keys: VecDeque<Key>,
+        waits: Vec<std::time::Duration>,
         frames: Vec<Vec<String>>,
         draw_count: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -23879,6 +23889,7 @@ mod tests {
         }
 
         fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+            self.waits.push(duration);
             std::thread::sleep(duration.min(std::time::Duration::from_millis(2)));
             Ok(())
         }
@@ -23898,13 +23909,13 @@ mod tests {
     #[test]
     fn blocking_operations_keep_painting_and_workspace_open_can_be_cancelled() {
         let mut term = ResponsiveLoadingTerminal {
-            wait_keys: VecDeque::from([Key::Escape]),
+            wait_keys: VecDeque::from([Key::Escape, Key::Enter]),
             ..ResponsiveLoadingTerminal::default()
         };
         let draw_count = Arc::clone(&term.draw_count);
 
         let error = run_workspace_loading(&mut term, "Opening workspace…", true, || {
-            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 2 {
+            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 3 {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
             Ok(())
@@ -23916,9 +23927,42 @@ mod tests {
         assert!(painted.contains("Opening workspace…"));
         assert!(painted.contains("Cancelling…"));
         assert!(
+            term.frames.len() >= 3,
+            "the loading surface kept repainting"
+        );
+        assert_eq!(term.wait_keys, VecDeque::from([Key::Enter]));
+    }
+
+    #[test]
+    fn non_cancellable_loading_throttles_frames_without_consuming_input() {
+        let mut term = ResponsiveLoadingTerminal {
+            wait_keys: VecDeque::from([Key::Enter]),
+            ..ResponsiveLoadingTerminal::default()
+        };
+        let draw_count = Arc::clone(&term.draw_count);
+
+        run_workspace_loading(&mut term, "Saving settings…", false, || {
+            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+        .expect("non-cancellable save completes");
+
+        assert!(
             term.frames.len() >= 2,
             "the loading surface kept repainting"
         );
+        assert!(
+            !term.waits.is_empty(),
+            "the render loop yielded between frames"
+        );
+        assert!(
+            term.waits
+                .iter()
+                .all(|duration| *duration == std::time::Duration::from_millis(80))
+        );
+        assert_eq!(term.wait_keys, VecDeque::from([Key::Enter]));
     }
 
     #[test]
@@ -24595,6 +24639,9 @@ mod tests {
         assert_eq!(settings.saves, 1);
         assert_eq!(settings.environment_saves, 1);
         assert_eq!(environment.settings().env["A"], "1");
+        let painted = term.frames.iter().flatten().cloned().collect::<String>();
+        assert!(painted.contains("Saving settings…"));
+        assert!(painted.contains("Saving environment…"));
     }
 
     #[test]
