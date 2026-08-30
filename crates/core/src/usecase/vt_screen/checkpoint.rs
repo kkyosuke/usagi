@@ -9,7 +9,8 @@
 //! `primary` and, while a full-screen app owns the alternate buffer, an
 //! `alternate`), each buffer's cursor / saved cursor / scroll region, the
 //! scrollback, an interned style table (cells reference it by index), and the
-//! decoder's in-flight phase / CSI params / partial UTF-8. Serialize and
+//! decoder's in-flight phase / CSI params / partial UTF-8 / synchronized
+//! update bytes. Serialize and
 //! reconstruct live with the parser (`VtScreen::checkpoint` /
 //! `VtScreen::from_checkpoint`) so the daemon and TUI never re-implement them.
 //!
@@ -51,6 +52,11 @@ pub const STYLE_BYTES_MAX: usize = PARAMS_MAX + 3;
 pub const UTF8_PENDING_MAX: usize = 3;
 /// Maximum length of a complete UTF-8 sequence, so `utf8_needed` is bounded.
 pub const UTF8_NEEDED_MAX: u8 = 4;
+/// Maximum bytes retained for one incomplete DEC synchronized-output update
+/// (`DECSET 2026`). A normal Codex frame is much smaller; the bound prevents a
+/// missing `DECRST 2026` from retaining an unbounded PTY stream. On overflow the
+/// live parser fails open by applying the pending bytes as an ordinary update.
+pub const SYNCHRONIZED_OUTPUT_MAX: usize = 128 * 1024;
 /// Maximum serialized size of a single checkpoint. The default IPC frame is
 /// 1 MiB; this leaves envelope headroom so a checkpoint always fits one frame.
 pub const CHECKPOINT_BYTES_MAX: usize = 1024 * 1024 - 4 * 1024;
@@ -184,6 +190,13 @@ pub struct DecoderCheckpoint {
     pub utf8_pending: Vec<u8>,
     /// Total length of the multibyte sequence being assembled.
     pub utf8_needed: u8,
+    /// Bytes received after `DECSET 2026` and not yet committed by `DECRST
+    /// 2026`. `None` means synchronized output is inactive; `Some(empty)` is an
+    /// active update whose body has not arrived yet.
+    ///
+    /// This additive field defaults to inactive for older revision-2 peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synchronized_output: Option<Vec<u8>>,
 }
 
 /// A versioned, self-contained semantic snapshot of a [`VtScreen`](super::VtScreen).
@@ -288,6 +301,9 @@ pub enum CheckpointError {
     Utf8PendingTooLong(usize),
     /// `utf8_needed` exceeds [`UTF8_NEEDED_MAX`].
     Utf8NeededOutOfRange(u8),
+    /// A pending synchronized-output update exceeds
+    /// [`SYNCHRONIZED_OUTPUT_MAX`].
+    SynchronizedOutputTooLong(usize),
     /// `active` and the presence of `alternate` disagree.
     ActiveBufferMismatch,
     /// A serialized checkpoint exceeds [`CHECKPOINT_BYTES_MAX`].
@@ -348,6 +364,10 @@ impl std::fmt::Display for CheckpointError {
             Self::Utf8NeededOutOfRange(needed) => {
                 write!(f, "utf8 needed {needed} exceeds {UTF8_NEEDED_MAX}")
             }
+            Self::SynchronizedOutputTooLong(len) => write!(
+                f,
+                "synchronized output length {len} exceeds {SYNCHRONIZED_OUTPUT_MAX}"
+            ),
             Self::ActiveBufferMismatch => {
                 write!(
                     f,
@@ -422,6 +442,19 @@ impl ScreenCheckpoint {
         if self.decoder.utf8_needed > UTF8_NEEDED_MAX {
             return Err(CheckpointError::Utf8NeededOutOfRange(
                 self.decoder.utf8_needed,
+            ));
+        }
+        if self
+            .decoder
+            .synchronized_output
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() > SYNCHRONIZED_OUTPUT_MAX)
+        {
+            return Err(CheckpointError::SynchronizedOutputTooLong(
+                self.decoder
+                    .synchronized_output
+                    .as_ref()
+                    .map_or(0, Vec::len),
             ));
         }
         // `active` and `alternate` must agree before we decide which buffer maps
