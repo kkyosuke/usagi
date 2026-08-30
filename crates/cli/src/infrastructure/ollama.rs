@@ -14,7 +14,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const REVIEWER_SYSTEM_PROMPT: &str = "You are an independent third-opinion reviewer. Analyze the question critically, state assumptions, identify risks or counterarguments, and give a concise recommendation. Do not claim access to tools or context that was not provided.";
 
-pub struct OllamaClient;
+pub struct OllamaClient {
+    address: SocketAddr,
+}
+
+impl Default for OllamaClient {
+    fn default() -> Self {
+        Self {
+            address: OLLAMA_ADDR,
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
@@ -47,7 +57,7 @@ struct ErrorResponse {
 
 impl LocalOpinionPort for OllamaClient {
     fn ask(&self, model: &str, prompt: &str) -> Result<LocalOpinion, String> {
-        ask_at(OLLAMA_ADDR, model, prompt)
+        ask_at(self.address, model, prompt)
     }
 }
 
@@ -69,27 +79,53 @@ fn ask_at(address: SocketAddr, model: &str, prompt: &str) -> Result<LocalOpinion
         ],
         stream: false,
     })
-    .map_err(|error| error.to_string())?;
-    let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|error| {
-        format!("cannot connect to Ollama at 127.0.0.1:11434; install/start Ollama and pull the requested model: {error}")
-    })?;
-    stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
-        .map_err(|error| format!("cannot configure Ollama socket: {error}"))?;
-    write!(
-        stream,
-        "POST /api/chat HTTP/1.0\r\nHost: 127.0.0.1:11434\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )
-    .and_then(|()| stream.write_all(&body))
-    .map_err(|error| format!("failed to send request to Ollama: {error}"))?;
+    .expect("a chat request containing only strings must serialize");
+    let mut stream = connect(address, CONNECT_TIMEOUT)?;
+    configure_timeouts(&stream, IO_TIMEOUT, IO_TIMEOUT)?;
+    write_request(&mut stream, &body)?;
 
     let raw = read_bounded(&mut stream)?;
     parse_http_response(&raw)
 }
 
-fn read_bounded(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+fn connect(address: SocketAddr, timeout: Duration) -> Result<TcpStream, String> {
+    match TcpStream::connect_timeout(&address, timeout) {
+        Ok(stream) => Ok(stream),
+        Err(error) => Err(format!(
+            "cannot connect to Ollama at {address}; install/start Ollama and pull the requested model: {error}"
+        )),
+    }
+}
+
+fn configure_timeouts(
+    stream: &TcpStream,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<(), String> {
+    if let Err(error) = stream.set_read_timeout(Some(read_timeout)) {
+        return Err(format!("cannot configure Ollama socket: {error}"));
+    }
+    if let Err(error) = stream.set_write_timeout(Some(write_timeout)) {
+        return Err(format!("cannot configure Ollama socket: {error}"));
+    }
+    Ok(())
+}
+
+fn write_request(writer: &mut impl Write, body: &[u8]) -> Result<(), String> {
+    let headers = format!(
+        "POST /api/chat HTTP/1.0\r\nHost: 127.0.0.1:11434\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    if let Err(error) = writer.write_all(headers.as_bytes()) {
+        return Err(format!("failed to send request to Ollama: {error}"));
+    }
+    if let Err(error) = writer.write_all(body) {
+        return Err(format!("failed to send request to Ollama: {error}"));
+    }
+    Ok(())
+}
+
+fn read_bounded(stream: &mut impl Read) -> Result<Vec<u8>, String> {
     let mut raw = Vec::new();
     let mut limited = stream.take((MAX_RESPONSE_BYTES + 1) as u64);
     loop {
@@ -154,6 +190,53 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
+    struct FailingWriter {
+        writes: usize,
+        fail_on: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.writes == self.fail_on {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed",
+                ))
+            } else {
+                Ok(buffer.len())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ErrorReader;
+
+    impl Read for ErrorReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("failed"))
+        }
+    }
+
+    struct ResetReader(bool);
+
+    impl Read for ResetReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "reset",
+                ));
+            }
+            self.0 = true;
+            buffer[..7].copy_from_slice(b"partial");
+            Ok(7)
+        }
+    }
+
     fn server(response: Vec<u8>) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -169,11 +252,11 @@ mod tests {
     fn read_request(socket: &mut TcpStream) -> Vec<u8> {
         let mut request = Vec::new();
         loop {
-            let mut buffer = [0_u8; 1024];
+            // Read one byte at a time so the fixture deterministically exercises the
+            // incomplete-header path on every platform.
+            let mut buffer = [0_u8; 1];
             let count = socket.read(&mut buffer).unwrap();
-            if count == 0 {
-                break;
-            }
+            assert_ne!(count, 0, "client closed before sending a complete request");
             request.extend_from_slice(&buffer[..count]);
             let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
             else {
@@ -206,7 +289,9 @@ mod tests {
             "200 OK",
             r#"{"model":"gemma3:4b","message":{"content":"check the rollback path"}}"#,
         ));
-        let answer = ask_at(address, "gemma3:4b", "review this design").unwrap();
+        let answer = OllamaClient { address }
+            .ask("gemma3:4b", "review this design")
+            .unwrap();
         assert_eq!(answer.model, "gemma3:4b");
         assert_eq!(answer.content, "check the rollback path");
         let request = String::from_utf8(worker.join().unwrap()).unwrap();
@@ -226,6 +311,39 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot connect")
         );
+    }
+
+    #[test]
+    fn timeout_configuration_and_write_failures_are_mapped() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || listener.accept().unwrap().0);
+        let stream = connect(address, CONNECT_TIMEOUT).unwrap();
+        let peer = worker.join().unwrap();
+        assert!(configure_timeouts(&stream, Duration::ZERO, IO_TIMEOUT).is_err());
+        assert!(configure_timeouts(&stream, IO_TIMEOUT, Duration::ZERO).is_err());
+        drop(peer);
+
+        for fail_on in [1, 2] {
+            assert!(write_request(&mut FailingWriter { writes: 0, fail_on }, b"body").is_err());
+        }
+        FailingWriter {
+            writes: 0,
+            fail_on: usize::MAX,
+        }
+        .flush()
+        .unwrap();
+    }
+
+    #[test]
+    fn read_failures_and_resets_are_mapped() {
+        assert!(
+            read_bounded(&mut ErrorReader)
+                .unwrap_err()
+                .contains("failed to read")
+        );
+
+        assert_eq!(read_bounded(&mut ResetReader(false)).unwrap(), b"partial");
     }
 
     #[test]
@@ -255,6 +373,6 @@ mod tests {
     #[test]
     fn default_client_implements_the_port() {
         fn assert_port(_: &dyn LocalOpinionPort) {}
-        assert_port(&OllamaClient);
+        assert_port(&OllamaClient::default());
     }
 }
