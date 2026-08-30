@@ -1461,7 +1461,8 @@ projection の closed vocabulary は `none` / `ready` / `running` / `waiting` / 
 
 報告 phase は [agent phase report request](04-ipc.md#agent-phase-report-request) だけが運び、kernel 由来の hook
 process identity で報告元 runtime に束縛される。Claude の command hook は exec form なので provider の direct child として
-照合でき、従来の inherited process group も互換経路として受理する。反映は次の規則に従う。
+照合でき、Codex の command hook を含む inherited process group も受理する。両 provider は同じphase写像を使い、
+Claude の `Notification` と Codex の `PermissionRequest` はどちらも `waiting` を報告する。反映は次の規則に従う。
 
 | 報告 phase | projection | 集約重み | durable `ProviderResumePhase` |
 |---|---|---|---|

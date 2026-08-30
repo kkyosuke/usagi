@@ -46,11 +46,12 @@ pub enum AgentPhase {
 /// This table is the single source for both the adapter which injects the hooks
 /// into a launched agent and the hook entry which validates one report.  A hook
 /// event outside this table has no phase, so a report naming it is refused.
-pub const AGENT_PHASE_HOOK_EVENTS: [(&str, AgentPhase); 7] = [
+pub const AGENT_PHASE_HOOK_EVENTS: [(&str, AgentPhase); 8] = [
     ("SessionStart", AgentPhase::Ready),
     ("UserPromptSubmit", AgentPhase::Running),
     ("PreToolUse", AgentPhase::Running),
     ("PostToolUse", AgentPhase::Waiting),
+    ("PermissionRequest", AgentPhase::Waiting),
     ("Notification", AgentPhase::Waiting),
     ("Stop", AgentPhase::Ended),
     ("SessionEnd", AgentPhase::Exited),
@@ -860,7 +861,11 @@ mod tests {
             AgentPhase::for_hook_event("PostToolUse"),
             Some(AgentPhase::Waiting)
         );
-        assert_eq!(AGENT_PHASE_HOOK_EVENTS.len(), 7);
+        assert_eq!(
+            AgentPhase::for_hook_event("PermissionRequest"),
+            Some(AgentPhase::Waiting)
+        );
+        assert_eq!(AGENT_PHASE_HOOK_EVENTS.len(), 8);
     }
     #[test]
     fn creation_completion_and_reverse_snapshot_are_fenced() {

@@ -24,6 +24,7 @@ use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
+use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::DefaultModel;
 use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
 use usagi_core::infrastructure::daemon::{
@@ -1688,21 +1689,33 @@ fn mcp_environment(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    let hook_command = format!("{} codex-session-capture", shell_quote(command));
-    let hook_command = serde_json::to_string(&hook_command).map_err(|_| ())?;
+    let capture_command = format!("{} codex-session-capture", shell_quote(command));
+    let capture_command = serde_json::to_string(&capture_command).map_err(|_| ())?;
     let mut arguments = codex_product_mcp_arguments(command);
-    arguments.extend([
-        // SessionStart is Codex's documented structured lifecycle channel. It
-        // sends a JSON object containing the current `session_id` on stdin.
-        // Restrict capture to a newly-created provider conversation: explicit
-        // resume already carries its validated durable provider identity.
-        "-c".into(),
-        r"features.hooks = true".into(),
-        "-c".into(),
-        format!(
-            r#"hooks.SessionStart = [{{ matcher = "^startup$", hooks = [{{ type = "command", command = {hook_command}, timeout = 10 }}] }}]"#
-        ),
-    ]);
+    arguments.extend(["-c".into(), r"features.hooks = true".into()]);
+    for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
+        // Codex exposes PermissionRequest for the same user-attention boundary
+        // that Claude exposes as Notification. Each provider therefore reports
+        // `waiting` without pretending it supports the other's native event.
+        if event == "Notification" {
+            continue;
+        }
+        let phase_command = format!("{} agent-phase {}", shell_quote(command), phase.as_token());
+        let phase_command = serde_json::to_string(&phase_command).map_err(|_| ())?;
+        let timeout = if event == "SessionEnd" { 3 } else { 10 };
+        let groups = if event == "SessionStart" {
+            // Only a new conversation may establish provider resume identity;
+            // phase reporting also applies to resume/clear/compact starts.
+            format!(
+                r#"[{{ matcher = "^startup$", hooks = [{{ type = "command", command = {capture_command}, timeout = 10 }}] }}, {{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
+            )
+        } else {
+            format!(
+                r#"[{{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
+            )
+        };
+        arguments.extend(["-c".into(), format!("hooks.{event} = {groups}")]);
+    }
     Ok(arguments)
 }
 
@@ -18014,8 +18027,9 @@ mod tests {
     fn product_mcp_arguments_start_usagi_mcp_from_the_daemon_binary() {
         let command = Path::new("/opt/usagi/bin/usagi");
 
+        let codex = codex_integration_arguments(command).unwrap();
         assert_eq!(
-            codex_integration_arguments(command).unwrap(),
+            &codex[..10],
             [
                 "-c",
                 "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
@@ -18027,10 +18041,39 @@ mod tests {
                 "mcp_servers.usagi.default_tools_approval_mode = \"approve\"",
                 "-c",
                 "features.hooks = true",
-                "-c",
-                "hooks.SessionStart = [{ matcher = \"^startup$\", hooks = [{ type = \"command\", command = \"'/opt/usagi/bin/usagi' codex-session-capture\", timeout = 10 }] }]",
             ]
         );
+        assert_eq!(codex.len(), 24);
+        for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
+            if event == "Notification" {
+                assert!(
+                    !codex
+                        .iter()
+                        .any(|argument| argument.starts_with("hooks.Notification"))
+                );
+                continue;
+            }
+            let assignment = codex
+                .iter()
+                .find(|argument| argument.starts_with(&format!("hooks.{event} = ")))
+                .unwrap_or_else(|| panic!("missing Codex {event} hook"));
+            assert!(
+                assignment.contains(&format!("agent-phase {}", phase.as_token())),
+                "{assignment}"
+            );
+        }
+        let session_start = codex
+            .iter()
+            .find(|argument| argument.starts_with("hooks.SessionStart = "))
+            .unwrap();
+        assert!(session_start.contains("matcher = \"^startup$\""));
+        assert!(session_start.contains("codex-session-capture"));
+        assert!(session_start.contains("agent-phase ready"));
+        let session_end = codex
+            .iter()
+            .find(|argument| argument.starts_with("hooks.SessionEnd = "))
+            .unwrap();
+        assert!(session_end.contains("timeout = 3"));
         assert_eq!(
             claude_mcp_arguments(command).unwrap(),
             [

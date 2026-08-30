@@ -872,11 +872,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   subprocess の実 IO は合成ルートが実行する。installer は inherited CWD の binary を参照せず、検証 artifact のない旧 release
   へ fallback しない。更新後のバイナリは次回の `usagi` 起動から使われる。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
-  出るツール呼び出しを拒否）と、各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
+  出るツール呼び出しを拒否）と、Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
   （phase 報告）。この 2 つは人間向けではないため `--help` に出さない（`hide = true`）。呼び手（人手でも
   エージェントの推論でもなくエージェントのハーネスが自動実行）も目的も人間向けコマンドと違うので、
   ハンドラは `cli/commands/` ではなく **`cli/hooks/`** に分離する（clap の `Command` ツリーと `Run`
-  dispatch は共有）。MCP tool と違い Claude のフックはシェルコマンドしか呼べないため、この統合は
+  dispatch は共有）。MCP tool と違い provider のフックは command を呼び出すため、この統合は
   CLI コマンドとして持つしかない。`guard-workspace` は enforcing で、`PreToolUse` payload（`cwd` /
   `tool_name` / `tool_input`）を stdin から読み、`cwd` から選んだ 2 モード（session / root）で判定する。
   session モードは session worktree の外を狙う file 書き込みを拒否し、root モードはコーディネータの
@@ -897,7 +897,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   core の closed vocabulary（`ready` / `running` / `waiting` / `ended` / `exited`）で、hook の stdin JSON が名乗る
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
   `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。command hook は
-  `command` と `args` を分けた exec form で注入し、shell の quote / tokenization と中間 process に依存しない。報告は
+  Claude には `command` と `args` を分けた exec form、Codex には起動時のinline TOML command hookとして注入する。報告は
   kernel から得た hook PID・parent PID・process group を exact live runtime と照合して束縛し、caller は runtime /
   session / path を名指しできない。provider の direct child は inherited / self-led process group の双方を受理し、
   shell form との互換用に provider と同じ process group も受理する。未知 phase・malformed payload・配線外 event は
@@ -985,9 +985,14 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   （host path をディスクへ materialize しない）。各 command hook は `command: <usagi path>` と
   `args: [...]` を分けた exec form であり、Claude は shell を介さず hook process を直接 spawn する。
   `PreToolUse` の phase 報告とライフサイクル event
-  （`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
+  （`SessionStart` / `UserPromptSubmit` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd`）→ `usagi agent-phase <phase>`
   と `guard-workspace` は両 mode に配線する。root の guard は file write と unsafe shell/Git を deny し、OS sandbox
   も checkout と Git common dir の書き込みを拒否する。
+- **Codex inline hooks**: daemon が `features.hooks = true` と lifecycle hook のinline TOMLを起動引数へ渡す。
+  `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Stop` / `SessionEnd` を
+  Claude と同じphaseへ写し、Claudeの`Notification`とCodexの`PermissionRequest`はいずれも`waiting`を報告する。
+  新規会話の`SessionStart(startup)`だけはphase報告に加えてprovider session IDをcaptureし、resume/clear/compactでは
+  phaseだけを報告する。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
   root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証し、両 mode へ
   同じように渡す（agent child の環境変数は policy 解決に使わない）。

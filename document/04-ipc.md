@@ -574,7 +574,7 @@ path / provider を指定できず、daemon は credential から exact live run
 body を持たない。
 
 phase は wire に載る前に hook 側で検証する。usagi が配線した lifecycle event（`SessionStart` /
-`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
+`UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd`）と phase の対応が hook input の
 `hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
