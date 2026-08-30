@@ -4794,6 +4794,21 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Ok(overview::Command::Clean { arguments }) => {
+            if overview::parse_clean(&arguments).is_err() {
+                state.notice = Some(Notice::new(
+                    "invalid clean arguments (usage: clean [--apply [--force]])",
+                ));
+                Vec::new()
+            } else {
+                state.overlay = None;
+                state.notice = Some(Notice::new("Inspecting orphan session resources"));
+                vec![Effect::WorkspaceCommand {
+                    workspace: state.workspace,
+                    command: overview::Command::Clean { arguments },
+                }]
+            }
+        }
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
                 if state.garden_available {
@@ -9701,6 +9716,41 @@ mod tests {
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("config takes no arguments (usage: config)")
+        );
+    }
+
+    #[test]
+    fn overview_clean_requires_explicit_apply_before_force() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("clean --apply".to_owned())),
+            ),
+            vec![Effect::WorkspaceCommand {
+                workspace,
+                command: overview::Command::Clean {
+                    arguments: "--apply".to_owned(),
+                },
+            }]
+        );
+        assert_eq!(state.overlay(), None);
+
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("clean --force".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("invalid clean arguments (usage: clean [--apply [--force]])")
         );
     }
 
