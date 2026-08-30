@@ -11,6 +11,8 @@ use usagi_core::usecase::client::{DispatchToolAction, SessionAction, SupervisorT
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolRoute {
     Store,
+    /// MCP server process で完結する、永続 store を持たない local adapter。
+    Local,
     Session(SessionAction),
     AgentInventory,
     AgentResume,
@@ -100,6 +102,15 @@ impl ToolDescriptor {
     /// Returns the adapter's validation, execution, or capability error.
     pub fn call_store(&self, arguments: &Value, store_root: &Path) -> Result<String, ToolError> {
         self.tool.call(&arguments.to_string(), store_root)
+    }
+
+    /// Executes a process-local adapter that does not use the workspace store.
+    ///
+    /// # Errors
+    ///
+    /// Returns the adapter's validation or execution error.
+    pub fn call_local(&self, arguments: &Value) -> Result<String, ToolError> {
+        self.tool.call(&arguments.to_string(), Path::new("."))
     }
 
     /// Validates runtime arguments with the exact schema advertised for this call.

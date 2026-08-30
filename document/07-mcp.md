@@ -127,7 +127,7 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 ## tool 面
 
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
-validator、execution route、caller policy の正本である。Issue / Memory がともに有効な既定レジストリは 49 件を返す。
+validator、execution route、caller policy の正本である。Issue / Memory がともに有効な既定レジストリは 50 件を返す。
 `tools/list` と `tools/call` は同じ descriptor registry を参照するため、掲載された tool は必ず
 1 つの実行経路と caller policy を持つ。`tools/call` の実挙動は次のとおりである。
 
@@ -162,6 +162,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成し、TUI の resolve 後に `decision_id` と回答を同じ MCP 応答で返す。agent 経路は作成した owner/run の decision だけを操作できる |
 | `issue_*` / `memory_*` | cwd の Markdown store を core usecase 経由で操作する |
+| `ollama_opinion` | `127.0.0.1:11434` の Ollama `/api/chat` に model と質問を送り、独立した third opinion を返す。cloud model 名を拒否し、prompt は 32 KiB、応答全体は 1 MiB を上限とする |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合し、handshake で fence した workspace に属する daemon-owned worker PTY と dispatch store/inbox を操作する。別 workspace の `agent_id` は存在しないものとして扱い、list にも混ぜない |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 

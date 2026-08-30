@@ -5,7 +5,11 @@
 //! （document/proposals/01-entry-surfaces.md）。
 //! usagi-core にのみ依存し、usagi-tui / usagi-daemon には依存しない
 //! （daemon との連携は usagi-core の IPC プロトコル型を介した実行時通信のみ）。
-//! 実 IO は行わず、入出力は呼び出し側（合成ルート）から注入する。
+//! process の標準 IO は行わず、入出力は呼び出し側（合成ルート）から注入する。
+//! MCP の local opinion usecase が持つ outbound port は、この面の infrastructure が
+//! bounded localhost HTTP adapter として実装する。
 
 pub mod cli;
+pub mod infrastructure;
 pub mod mcp;
+pub mod usecase;

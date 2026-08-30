@@ -143,6 +143,33 @@ usagi completion zsh > ~/.zfunc/_usagi
 usagi completion fish > ~/.config/fish/completions/usagi.fish
 ```
 
+### Ollama の local LLM を third opinion に使う
+
+Ollama の公式 installer で本体を導入し、ローカルで使う model を取得する。model は数 GB 以上の
+disk を使う場合がある。
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull gemma3
+ollama ls
+```
+
+macOS では [Ollama.app の導入手順](https://docs.ollama.com/macos)、Linux では
+[Linux の導入手順](https://docs.ollama.com/linux)も選べる。起動していなければ `ollama serve` を実行する。
+
+usagi から起動した Agent には `ollama_opinion` MCP tool が公開される。Agent へ「`gemma3` に
+third opinion を聞いて」のように依頼すると、tool は `127.0.0.1:11434` の
+[Ollama chat API](https://docs.ollama.com/api/chat)だけを呼ぶ。model と prompt は毎回明示され、
+応答は `{ "model": "...", "opinion": "..." }` になる。
+
+```json
+{"model":"gemma3","prompt":"この設計の見落としと代替案を独立した観点でレビューしてください"}
+```
+
+この tool は Ollama の `:cloud` / `-cloud` model を拒否する。ローカル実行をさらに Ollama 側でも
+固定したい場合は、`OLLAMA_NO_CLOUD=1` を設定して Ollama を再起動する
+（[cloud 機能を無効にする公式手順](https://docs.ollama.com/faq)）。
+
 ## Quick Start
 
 ### 1. workspace を開く
@@ -217,6 +244,7 @@ daemon が認証したその session の worktree に固定される。
 | `session_*` | session の作成・削除・状態確認、prompt 配送、別 Agent への委譲 |
 | `issue_*` | git で共有する `.usagi/issues/` のタスクを検索・更新する |
 | `memory_*` | git で共有する `.usagi/memory/` の知識を保存・検索する |
+| `ollama_opinion` | localhost の Ollama model に独立した third opinion を聞く |
 | `agent_*` | 委譲した worker の完了報告と inbox を扱う |
 | `user_decision_*` | Agent から利用者へ判断を依頼し、TUI で回答する |
 | `supervisor_*` | 複数 step の durable な実行・再試行・確認を管理する |

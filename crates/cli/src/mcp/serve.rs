@@ -704,11 +704,25 @@ fn execute_tool(
             )
         }
         ToolRoute::Store => store_tool_call(id, descriptor, &arguments, store_root),
+        ToolRoute::Local => local_tool_call(id, descriptor, &arguments),
         ToolRoute::Unavailable(reason) => protocol::error(
             id,
             error_code::INTERNAL_ERROR,
             &format!("tool unavailable: {reason}"),
         ),
+    }
+}
+
+fn local_tool_call(id: Value, descriptor: &ToolDescriptor, arguments: &Value) -> Value {
+    match descriptor.call_local(arguments) {
+        Ok(result) => protocol::success(
+            id,
+            json!({"content":[{"type":"text","text":result}], "isError": false}),
+        ),
+        Err(ToolError::InvalidParams(message)) => {
+            protocol::error(id, error_code::INVALID_PARAMS, &message)
+        }
+        Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
     }
 }
 
@@ -908,6 +922,25 @@ mod tests {
 
         fn call(&self, _params: &str, _store_root: &Path) -> Result<String, ToolError> {
             Err((self.0)())
+        }
+    }
+
+    struct LocalTool;
+    impl Tool for LocalTool {
+        fn name(&self) -> &'static str {
+            "local_fixture"
+        }
+
+        fn description(&self) -> &'static str {
+            "local result fixture"
+        }
+
+        fn input_schema(&self) -> &'static str {
+            r#"{"type":"object","properties":{}}"#
+        }
+
+        fn call(&self, _params: &str, _store_root: &Path) -> Result<String, ToolError> {
+            Ok(r#"{"opinion":"independent"}"#.into())
         }
     }
 
@@ -1123,7 +1156,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 50);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1169,7 +1202,8 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 38);
+        assert_eq!(names.len(), 39);
+        assert!(names.contains(&"ollama_opinion"));
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -1396,6 +1430,57 @@ mod tests {
             normalize_caller_credential(Some("secret".into())),
             Some("secret".into())
         );
+    }
+
+    #[test]
+    fn local_route_returns_an_mcp_tool_result_and_maps_errors() {
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        let descriptor =
+            ToolDescriptor::new(Box::new(LocalTool), ToolRoute::Local, CallerPolicy::Public);
+        let response = execute_tool(
+            serde_json::json!(1),
+            &descriptor,
+            serde_json::json!({}),
+            &mut client,
+            None,
+            Path::new("."),
+        );
+        assert_eq!(response["result"]["content"][0]["type"], "text");
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            r#"{"opinion":"independent"}"#
+        );
+        assert_eq!(response["result"]["isError"], false);
+
+        let cases: [(fn() -> ToolError, i32); 2] = [
+            (
+                || ToolError::InvalidParams("invalid".into()),
+                crate::mcp::protocol::error_code::INVALID_PARAMS,
+            ),
+            (
+                || ToolError::Execution("offline".into()),
+                crate::mcp::protocol::error_code::INTERNAL_ERROR,
+            ),
+        ];
+        for (factory, code) in cases {
+            let descriptor = ToolDescriptor::new(
+                Box::new(ErrorTool(factory)),
+                ToolRoute::Local,
+                CallerPolicy::Public,
+            );
+            let response = execute_tool(
+                serde_json::json!(2),
+                &descriptor,
+                serde_json::json!({}),
+                &mut client,
+                None,
+                Path::new("."),
+            );
+            assert_eq!(response["error"]["code"], code);
+        }
     }
 
     #[test]

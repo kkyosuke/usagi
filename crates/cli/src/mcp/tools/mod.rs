@@ -10,6 +10,7 @@
 pub mod issue;
 mod issue_wire;
 pub mod memory;
+pub mod ollama;
 pub mod session;
 pub mod supervisor;
 
@@ -49,6 +50,7 @@ pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> 
     if families.memory {
         tools.extend(memory::tools());
     }
+    tools.extend(ollama::tools());
     tools.extend(
         session::tools()
             .into_iter()
@@ -66,12 +68,13 @@ fn descriptor(tool: Box<dyn Tool>) -> ToolDescriptor {
     use SessionAction as Session;
     use SupervisorToolAction as Supervisor;
     use ToolRoute::{
-        AgentInventory, AgentResume, Dispatch as DispatchRoute, Session as SessionRoute, Store,
-        Supervisor as SupervisorRoute,
+        AgentInventory, AgentResume, Dispatch as DispatchRoute, Local, Session as SessionRoute,
+        Store, Supervisor as SupervisorRoute,
     };
 
     let (route, policy) = match tool.name() {
         name if name.starts_with("issue_") || name.starts_with("memory_") => (Store, Public),
+        "ollama_opinion" => (Local, Public),
         "session_create" => (SessionRoute(Session::Create), SessionCredential),
         "session_list" => (SessionRoute(Session::List), Public),
         "session_status" => (SessionRoute(Session::Status), Public),
@@ -166,6 +169,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
             (descriptor.route(), descriptor.caller_policy()),
             (
                 ToolRoute::Store
+                    | ToolRoute::Local
                     | ToolRoute::Session(_)
                     | ToolRoute::AgentInventory
                     | ToolRoute::AgentResume,
@@ -181,6 +185,7 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
         }
         let route = match descriptor.route() {
             ToolRoute::Store => format!("store:{}", descriptor.name()),
+            ToolRoute::Local => format!("local:{}", descriptor.name()),
             route => format!("{route:?}"),
         };
         if !routes.insert(route.clone()) {
@@ -305,7 +310,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 49); // issue 6 + memory 4 + session 33 + supervisor 6
+        assert_eq!(reg.len(), 50); // issue 6 + memory 4 + Ollama 1 + session 33 + supervisor 6
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -317,7 +322,10 @@ mod tests {
             assert_eq!(schema["type"], "object");
             assert!(schema.get("properties").is_some());
 
-            if !name.starts_with("issue_") && !name.starts_with("memory_") {
+            if !name.starts_with("issue_")
+                && !name.starts_with("memory_")
+                && name != "ollama_opinion"
+            {
                 assert!(
                     matches!(tool.call_store(&serde_json::json!({}), Path::new(".")), Err(ToolError::Unimplemented(n)) if n == name)
                 );
@@ -401,6 +409,7 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
+        assert_eq!(super::ollama::tools().len(), 1);
         assert_eq!(super::session::tools().len(), 33);
         assert_eq!(super::supervisor::tools().len(), 6);
     }
@@ -447,14 +456,15 @@ mod tests {
             issue: false,
             memory: false,
         });
-        assert_eq!(neither.len(), 38);
+        assert_eq!(neither.len(), 39);
+        assert!(neither.iter().any(|tool| tool.name() == "ollama_opinion"));
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 49);
+        assert_eq!(registry.len(), 50);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());
@@ -471,6 +481,7 @@ mod tests {
                 (descriptor.route(), descriptor.caller_policy()),
                 (
                     ToolRoute::Store
+                        | ToolRoute::Local
                         | ToolRoute::Session(_)
                         | ToolRoute::AgentInventory
                         | ToolRoute::AgentResume,
