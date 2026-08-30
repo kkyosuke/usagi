@@ -177,6 +177,18 @@ impl LiveTerminalControls {
             .saturating_add(u64::from(before != self.active.scroll));
     }
 
+    /// Reset viewport-only state after an explicit terminal clear.
+    pub fn reset_after_clear(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        self.active.scroll = 0;
+        self.active.max_scroll = 0;
+        self.active.projected_extent = None;
+        self.active.pointer_press = None;
+        self.active.selection = None;
+        self.active.dragging = false;
+        self.active.feedback = None;
+    }
+
     /// Begin a drag selection, replacing any earlier (including finished) one,
     /// and surface that a selection has started.
     pub fn begin_selection(&mut self, selection: TerminalSelection) {

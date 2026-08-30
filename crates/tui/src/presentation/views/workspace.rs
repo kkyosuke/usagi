@@ -4019,6 +4019,7 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
+            tabs: Vec::new(),
             pending: false,
             feedback: None,
         };

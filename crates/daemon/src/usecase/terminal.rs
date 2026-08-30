@@ -1201,6 +1201,29 @@ impl TerminalRegistry {
         Ok(ack)
     }
 
+    /// Applies an explicit user clear to the authoritative primary screen.
+    /// The PTY still receives the original control byte; this mutation only
+    /// makes future attach checkpoints agree with the client that initiated it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::StaleTarget`] when `reference` is not owned by
+    /// this registry.
+    pub fn clear_primary_for_user(
+        &mut self,
+        reference: &TerminalRef,
+    ) -> Result<bool, RegistryError> {
+        let entry = self.entry_mut(reference)?;
+        let cleared = entry.screen.clear_primary_for_user();
+        if cleared {
+            RETENTION_DROPPED_BYTES.fetch_add(counted(entry.retained_bytes), Ordering::Relaxed);
+            entry.journal.clear();
+            entry.retained_bytes = 0;
+            account_screen(entry);
+        }
+        Ok(cleared)
+    }
+
     /// Reads the recorded final of one durable input operation without writing.
     ///
     /// `Ok(None)` is a typed unknown: the operation was never recorded here, or
