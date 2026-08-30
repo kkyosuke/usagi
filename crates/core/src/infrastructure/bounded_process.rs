@@ -465,6 +465,22 @@ mod tests {
     }
 
     #[test]
+    fn full_output_normalization_covers_stderr_empty_and_invalid_results() {
+        assert_eq!(
+            normalize_full_output(Vec::new(), b" first\nsecond\n".to_vec()),
+            ChildObservation::Success("first\nsecond".to_owned())
+        );
+        assert_eq!(
+            normalize_full_output(b" \n".to_vec(), b"\t".to_vec()),
+            ChildObservation::EmptyOutput
+        );
+        assert_eq!(
+            normalize_full_output(vec![0xff], Vec::new()),
+            ChildObservation::InvalidOutput
+        );
+    }
+
+    #[test]
     fn rejects_invalid_or_oversized_output() {
         assert_eq!(
             observe("sh", &["-c", "printf '\\377'"], policy()),
