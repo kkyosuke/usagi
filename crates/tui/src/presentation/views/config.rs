@@ -11,7 +11,9 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style, editor_surface_style};
 use crate::presentation::widgets::{self, modal, select};
-use crate::usecase::application::environment_source::EnvironmentSourceEditor;
+use crate::usecase::application::{
+    controller::BranchChoice, environment_source::EnvironmentSourceEditor,
+};
 
 const TITLE: &str = "Config";
 const FOOTER: &str = "↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
@@ -125,6 +127,7 @@ pub enum Field {
     PrAutoOpen,
     Environment,
     DefaultModel,
+    DefaultBranch,
     TeamTemplate,
     Issue,
     Memory,
@@ -160,6 +163,7 @@ pub struct Config {
     field: Field,
     settings: ScopeSettings,
     available_models: AvailableAgentModels,
+    branches: Vec<BranchChoice>,
     notice: Option<String>,
     save_phase: SavePhase,
     save_animation_frame: usize,
@@ -208,6 +212,7 @@ impl Config {
             field,
             settings: ScopeSettings { saved, draft },
             available_models,
+            branches: Vec::new(),
             notice: error,
             save_phase: SavePhase::Idle,
             save_animation_frame: 0,
@@ -229,6 +234,20 @@ impl Config {
         Self::load_scope(port, SettingsScope::Workspace, available_models)
     }
 
+    /// Read workspace settings with the Git refs offered by the session-create
+    /// picker. Config stores the selected fully-qualified ref, while rendering
+    /// the same safe local/remote labels as the create form.
+    #[must_use]
+    pub fn load_workspace_with_available_models_and_branches(
+        port: &mut dyn SettingsPort,
+        available_models: AvailableAgentModels,
+        branches: &[BranchChoice],
+    ) -> Self {
+        let mut config = Self::load_scope(port, SettingsScope::Workspace, available_models);
+        config.branches = branches.to_vec();
+        config
+    }
+
     /// Returns the selected persistence scope.
     #[must_use]
     pub fn scope(&self) -> SettingsScope {
@@ -248,7 +267,7 @@ impl Config {
                 Field::Theme => Field::ModalSelectionMode,
                 Field::ModalSelectionMode => Field::Environment,
                 Field::Environment => Field::DefaultModel,
-                Field::DefaultModel => Field::TeamTemplate,
+                Field::DefaultModel | Field::DefaultBranch => Field::TeamTemplate,
                 Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::PrAutoOpen,
@@ -257,7 +276,8 @@ impl Config {
             },
             SettingsScope::Workspace => match self.field {
                 Field::DefaultModel => Field::Environment,
-                Field::Environment => Field::TeamTemplate,
+                Field::Environment => Field::DefaultBranch,
+                Field::DefaultBranch => Field::TeamTemplate,
                 Field::TeamTemplate => Field::Issue,
                 Field::Issue => Field::Memory,
                 Field::Memory => Field::Save,
@@ -282,7 +302,7 @@ impl Config {
                 Field::Theme => Field::Save,
                 Field::ModalSelectionMode => Field::Theme,
                 Field::Environment => Field::ModalSelectionMode,
-                Field::DefaultModel => Field::Environment,
+                Field::DefaultModel | Field::DefaultBranch => Field::Environment,
                 Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::DefaultModel,
                 Field::Memory => Field::Issue,
@@ -292,7 +312,8 @@ impl Config {
             SettingsScope::Workspace => match self.field {
                 Field::Environment => Field::DefaultModel,
                 Field::Issue => Field::TeamTemplate,
-                Field::TeamTemplate => Field::Environment,
+                Field::TeamTemplate => Field::DefaultBranch,
+                Field::DefaultBranch => Field::Environment,
                 Field::Memory => Field::Issue,
                 Field::Save => Field::Memory,
                 Field::DefaultModel
@@ -372,6 +393,31 @@ impl Config {
         self.notice = None;
     }
 
+    /// Cycle the session base between the current checkout and every concrete
+    /// local or remote-tracking branch in the workspace catalog.
+    pub fn cycle_default_branch(&mut self, forward: bool) {
+        let current = self.current().draft.default_branch.as_deref();
+        let current_index = current
+            .and_then(|refname| {
+                self.branches
+                    .iter()
+                    .position(|branch| branch.refname == refname)
+                    .map(|index| index + 1)
+            })
+            .unwrap_or(0);
+        let choice_count = self.branches.len() + 1;
+        let next_index = if forward {
+            (current_index + 1) % choice_count
+        } else {
+            (current_index + choice_count - 1) % choice_count
+        };
+        self.current_mut().draft.default_branch = next_index
+            .checked_sub(1)
+            .and_then(|index| self.branches.get(index))
+            .map(|branch| branch.refname.clone());
+        self.notice = None;
+    }
+
     /// Whether the visual Team picker currently owns Config input.
     #[must_use]
     pub fn is_selecting_team(&self) -> bool {
@@ -438,6 +484,7 @@ impl Config {
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
+            Field::DefaultBranch => self.cycle_default_branch(forward),
             Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
             Field::TeamTemplate | Field::Environment | Field::Save => return false,
@@ -1021,7 +1068,25 @@ fn workspace_rows(config: &Config) -> Vec<String> {
     let mut lines = workspace_setting_rows(config);
     let environment_index = usize::from(!config.available_models.is_empty());
     lines.insert(environment_index, environment_row(config));
+    lines.insert(environment_index + 1, default_branch_row(config));
     lines
+}
+
+fn default_branch_row(config: &Config) -> String {
+    let label = match config.settings().default_branch.as_deref() {
+        None => "current checkout",
+        Some(refname) => config
+            .branches
+            .iter()
+            .find(|branch| branch.refname == refname)
+            .map_or("unavailable", |branch| branch.label.as_str()),
+    };
+    select::render(
+        "Base branch",
+        label,
+        config.field() == Field::DefaultBranch,
+        config.settings().default_branch != config.current().saved.default_branch,
+    )
 }
 
 fn environment_row(config: &Config) -> String {
@@ -1179,6 +1244,7 @@ mod tests {
         team_template_name,
     };
     use crate::presentation::widgets::{display_width, modal, strip_ansi};
+    use crate::usecase::application::controller::BranchChoice;
     use crate::usecase::application::environment_source::{
         EnvironmentSourceEditor, parse_environment_source,
     };
@@ -1677,7 +1743,11 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::TeamTemplate);
         config.previous_field();
+        assert_eq!(config.field(), Field::DefaultBranch);
+        config.previous_field();
         assert_eq!(config.field(), Field::Environment);
+        config.next_field();
+        assert_eq!(config.field(), Field::DefaultBranch);
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
         config.next_field();
@@ -1973,6 +2043,59 @@ mod tests {
     }
 
     #[test]
+    fn workspace_default_branch_cycles_known_refs_and_is_saved() {
+        let mut port = FakeSettingsPort::default();
+        let branches = vec![
+            BranchChoice {
+                label: "local:main".to_owned(),
+                refname: "refs/heads/main".to_owned(),
+            },
+            BranchChoice {
+                label: "remote:origin/main".to_owned(),
+                refname: "refs/remotes/origin/main".to_owned(),
+            },
+        ];
+        let mut config = Config::load_workspace_with_available_models_and_branches(
+            &mut port,
+            AvailableAgentModels::all(),
+            &branches,
+        );
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::DefaultBranch);
+        assert!(
+            render(24, 80, &config)
+                .join("\n")
+                .contains("current checkout")
+        );
+
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.settings().default_branch.as_deref(),
+            Some("refs/heads/main")
+        );
+        assert!(render(24, 80, &config).join("\n").contains("local:main"));
+        assert!(config.cycle_selected(true));
+        assert_eq!(
+            config.settings().default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+        assert!(config.cycle_selected(true));
+        assert_eq!(config.settings().default_branch, None);
+
+        assert!(config.cycle_selected(false));
+        for _ in 0..4 {
+            config.next_field();
+        }
+        assert!(config.begin_save());
+        assert!(config.commit_save(&mut port));
+        assert_eq!(
+            port.workspace.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+    }
+
+    #[test]
     fn issue_and_memory_availability_toggle_independently() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
@@ -2010,6 +2133,7 @@ mod tests {
         assert!(!config.open_team_picker());
         config.cycle_team_card(true);
         config.move_team_picker_vertical(true);
+        config.next_field();
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
@@ -2090,6 +2214,7 @@ mod tests {
                 &mut port,
                 AvailableAgentModels::all(),
             );
+            restored.next_field();
             restored.next_field();
             restored.next_field();
             assert!(restored.open_team_picker());

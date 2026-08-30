@@ -17,6 +17,10 @@ use usagi_tui::usecase::terminal_input::{
     PointerEvent, PointerKind, RuntimeEvent,
 };
 
+/// Maximum ready wheel events folded into one frame. The bound lets a sustained
+/// input stream redraw periodically instead of draining forever.
+const WHEEL_COALESCE_LIMIT: usize = 32;
+
 /// poll/read を差し替えられる crossterm event source。
 pub trait CrosstermEventSource {
     /// `timeout` まで terminal event を待てるか調べる。
@@ -111,13 +115,7 @@ pub struct EventPump<S, R> {
     backend: R,
     tick_interval: Duration,
     next_tick_at: Duration,
-    pending_source: Option<Event>,
-}
-
-enum TerminalPoll<B> {
-    Empty,
-    Ignored,
-    Event(RuntimeEvent<B>),
+    pending_terminal: Option<Event>,
 }
 
 impl<S, R> EventPump<S, R>
@@ -133,7 +131,7 @@ where
             backend,
             tick_interval,
             next_tick_at: now.saturating_add(tick_interval),
-            pending_source: None,
+            pending_terminal: None,
         }
     }
 
@@ -144,11 +142,9 @@ where
     /// して terminal event のみを返す。backend はこの待機後の次 cycle で観測する。
     #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=source_poll_and_read_errors_are_projected_from_each_pump_phase
     pub fn next(&mut self, now: Duration) -> io::Result<RuntimeEvent<R::Event>> {
-        loop {
-            match self.poll_terminal(Duration::ZERO)? {
-                TerminalPoll::Event(event) => return Ok(event),
-                TerminalPoll::Ignored => {}
-                TerminalPoll::Empty => break,
+        while let Some(event) = self.poll_terminal(Duration::ZERO)? {
+            if let Some(event) = adapt_event(event) {
+                return self.coalesce_wheel(event);
             }
         }
         if let Some(event) = self.backend.try_recv() {
@@ -161,10 +157,11 @@ where
 
         let timeout = self.next_tick_at.saturating_sub(now);
         loop {
-            match self.poll_terminal(timeout)? {
-                TerminalPoll::Event(event) => return Ok(event),
-                TerminalPoll::Ignored => continue,
-                TerminalPoll::Empty => {}
+            if let Some(event) = self.poll_terminal(timeout)? {
+                if let Some(event) = adapt_event(event) {
+                    return self.coalesce_wheel(event);
+                }
+                continue;
             }
             advance_tick(
                 &mut self.next_tick_at,
@@ -175,50 +172,76 @@ where
         }
     }
 
-    /// Coalesce a ready burst of same-direction wheel events at the same cell
-    /// into one semantic input. A different event is retained for the next call,
-    /// preserving FIFO ordering while allowing one repaint per burst.
-    fn poll_terminal(&mut self, timeout: Duration) -> io::Result<TerminalPoll<R::Event>> {
-        let first = if let Some(event) = self.pending_source.take() {
-            Some(event)
-        } else {
-            poll_source(&mut self.source, timeout)?
+    fn poll_terminal(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        if self.pending_terminal.is_some() {
+            return Ok(self.pending_terminal.take());
+        }
+        poll_source(&mut self.source, timeout)
+    }
+
+    /// Fold only an immediately-ready, same-direction wheel burst. The first
+    /// different event is retained verbatim for the next call, preserving input
+    /// order across keys, resize, pointer phases, and direction changes.
+    fn coalesce_wheel(
+        &mut self,
+        mut event: RuntimeEvent<R::Event>,
+    ) -> io::Result<RuntimeEvent<R::Event>> {
+        let direction = match &event {
+            RuntimeEvent::Input(LiveInput::WheelUp { .. }) => Some(true),
+            RuntimeEvent::Input(LiveInput::WheelDown { .. }) => Some(false),
+            _ => None,
         };
-        let Some(first) = first else {
-            return Ok(TerminalPoll::Empty);
+        let Some(direction) = direction else {
+            return Ok(event);
         };
-        let (up, column, row) = match &first {
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
-                (true, mouse.column, mouse.row)
-            }
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
-                (false, mouse.column, mouse.row)
-            }
-            _ => {
-                return Ok(adapt_event(first).map_or(TerminalPoll::Ignored, TerminalPoll::Event));
-            }
-        };
-        let mut steps = 1_u16;
-        while let Some(event) = poll_source(&mut self.source, Duration::ZERO)? {
-            let same = matches!(
-                &event,
-                Event::Mouse(mouse)
-                    if (up && mouse.kind == MouseEventKind::ScrollUp)
-                        || (!up && mouse.kind == MouseEventKind::ScrollDown)
-            ) && matches!(&event, Event::Mouse(mouse) if mouse.column == column && mouse.row == row);
-            if same {
-                steps = steps.saturating_add(1);
-            } else {
-                self.pending_source = Some(event);
+
+        for _ in 1..WHEEL_COALESCE_LIMIT {
+            let Some(raw) = self.poll_terminal(Duration::ZERO)? else {
                 break;
+            };
+            let Some(next) = adapt_event::<R::Event>(raw.clone()) else {
+                continue;
+            };
+            match (&mut event, next) {
+                (
+                    RuntimeEvent::Input(LiveInput::WheelUp {
+                        column,
+                        row,
+                        notches,
+                    }),
+                    RuntimeEvent::Input(LiveInput::WheelUp {
+                        column: next_column,
+                        row: next_row,
+                        notches: next_notches,
+                    }),
+                ) if direction => {
+                    *column = next_column;
+                    *row = next_row;
+                    *notches = notches.saturating_add(next_notches);
+                }
+                (
+                    RuntimeEvent::Input(LiveInput::WheelDown {
+                        column,
+                        row,
+                        notches,
+                    }),
+                    RuntimeEvent::Input(LiveInput::WheelDown {
+                        column: next_column,
+                        row: next_row,
+                        notches: next_notches,
+                    }),
+                ) if !direction => {
+                    *column = next_column;
+                    *row = next_row;
+                    *notches = notches.saturating_add(next_notches);
+                }
+                _ => {
+                    self.pending_terminal = Some(raw);
+                    break;
+                }
             }
         }
-        let input = if up {
-            LiveInput::WheelUp { column, row, steps }
-        } else {
-            LiveInput::WheelDown { column, row, steps }
-        };
-        Ok(TerminalPoll::Event(RuntimeEvent::Input(input)))
+        Ok(event)
     }
 }
 
@@ -256,12 +279,12 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
             MouseEventKind::ScrollUp => Some(RuntimeEvent::Input(LiveInput::WheelUp {
                 column: mouse.column,
                 row: mouse.row,
-                steps: 1,
+                notches: 1,
             })),
             MouseEventKind::ScrollDown => Some(RuntimeEvent::Input(LiveInput::WheelDown {
                 column: mouse.column,
                 row: mouse.row,
-                steps: 1,
+                notches: 1,
             })),
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
@@ -423,6 +446,15 @@ mod tests {
     const T0: Duration = Duration::from_secs(10);
     const TICK: Duration = Duration::from_millis(100);
 
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
     #[test]
     fn adapter_preserves_key_kind_modifiers_text_paste_and_resize() {
         let key = KeyEvent::new_with_kind(
@@ -517,7 +549,7 @@ mod tests {
             Some(RuntimeEvent::Input(LiveInput::WheelUp {
                 column: 41,
                 row: 12,
-                steps: 1,
+                notches: 1,
             }))
         );
         assert_eq!(
@@ -525,42 +557,9 @@ mod tests {
             Some(RuntimeEvent::Input(LiveInput::WheelDown {
                 column: 41,
                 row: 12,
-                steps: 1,
+                notches: 1,
             }))
         );
-    }
-
-    #[test]
-    fn event_pump_coalesces_a_ready_wheel_burst_and_preserves_the_next_input() {
-        let wheel = |kind| {
-            Event::Mouse(MouseEvent {
-                kind,
-                column: 7,
-                row: 9,
-                modifiers: KeyModifiers::NONE,
-            })
-        };
-        let key = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        let source = FakeSource::with([
-            wheel(MouseEventKind::ScrollUp),
-            wheel(MouseEventKind::ScrollUp),
-            wheel(MouseEventKind::ScrollUp),
-            key,
-        ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
-
-        assert_eq!(
-            pump.next(T0).unwrap(),
-            RuntimeEvent::Input(LiveInput::WheelUp {
-                column: 7,
-                row: 9,
-                steps: 3,
-            })
-        );
-        assert!(matches!(
-            pump.next(T0).unwrap(),
-            RuntimeEvent::Input(LiveInput::Key(_))
-        ));
     }
 
     #[test]
@@ -591,6 +590,67 @@ mod tests {
         assert_eq!(
             pump.next(T0).unwrap(),
             RuntimeEvent::Input(LiveInput::Paste(b"paste".to_vec()))
+        );
+    }
+
+    #[test]
+    fn same_direction_wheel_burst_is_coalesced_before_the_next_frame() {
+        let source = FakeSource::with([
+            wheel(MouseEventKind::ScrollUp, 4, 7),
+            wheel(MouseEventKind::ScrollUp, 5, 8),
+            // An ignored focus notification neither splits nor reorders the
+            // surrounding wheel burst.
+            Event::FocusGained,
+            wheel(MouseEventKind::ScrollUp, 6, 9),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelUp {
+                column: 6,
+                row: 9,
+                notches: 3,
+            })
+        );
+        assert!(matches!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Key(_))
+        ));
+    }
+
+    #[test]
+    fn wheel_coalescing_preserves_direction_changes_and_has_a_redraw_bound() {
+        let mut events = (0..=WHEEL_COALESCE_LIMIT)
+            .map(|_| wheel(MouseEventKind::ScrollDown, 1, 2))
+            .collect::<Vec<_>>();
+        events.push(wheel(MouseEventKind::ScrollUp, 3, 4));
+        let mut pump = EventPump::new(FakeSource::with(events), FakeBackend::default(), TICK, T0);
+
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 1,
+                row: 2,
+                notches: WHEEL_COALESCE_LIMIT,
+            })
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 1,
+                row: 2,
+                notches: 1,
+            })
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelUp {
+                column: 3,
+                row: 4,
+                notches: 1,
+            })
         );
     }
 

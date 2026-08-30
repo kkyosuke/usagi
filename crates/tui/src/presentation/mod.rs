@@ -91,7 +91,7 @@ use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSel
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
-use crate::usecase::application::terminal_selection::TerminalSelection;
+use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
@@ -1517,24 +1517,25 @@ struct WorkspaceConfigContext<'a> {
     available_models: AvailableAgentModels,
 }
 
-/// Which Agent CLIs the Closeup `agent` command may select, and which one an
-/// omitted `-m` uses.
+/// Effective defaults needed when entering one workspace.
 ///
-/// Availability is observed by the composition root (the shell owns the PATH
-/// probe) and the default comes from the effective settings, so the TUI itself
-/// performs no IO to answer either question. The default fits callers without a
-/// probe or resolved settings: every CLI offered, `codex` selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AgentModelPolicy {
-    available: AvailableAgentModels,
-    default: usagi_core::domain::settings::DefaultModel,
+/// Agent availability is observed by the composition root (the shell owns the
+/// PATH probe); model and branch defaults come from effective settings. The
+/// fallback fits callers without resolved settings: every CLI offered, `codex`
+/// selected, and the current checkout used for new sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceEntryPolicy {
+    available_models: AvailableAgentModels,
+    default_model: usagi_core::domain::settings::DefaultModel,
+    default_branch: Option<String>,
 }
 
-impl Default for AgentModelPolicy {
+impl Default for WorkspaceEntryPolicy {
     fn default() -> Self {
         Self {
-            available: AvailableAgentModels::all(),
-            default: usagi_core::domain::settings::DefaultModel::default(),
+            available_models: AvailableAgentModels::all(),
+            default_model: usagi_core::domain::settings::DefaultModel::default(),
+            default_branch: None,
         }
     }
 }
@@ -2932,6 +2933,17 @@ impl WorkspaceUi {
             .map(TerminalSession::cells)
     }
 
+    fn begin_terminal_selection(
+        &self,
+        terminal: &TerminalRef,
+        anchor: TerminalPoint,
+    ) -> Option<TerminalSelection> {
+        self.terminals
+            .iter()
+            .find(|session| session.terminal().fences(terminal))
+            .map(|session| session.begin_selection(anchor))
+    }
+
     fn terminal_error(&self, terminal: &TerminalRef) -> Option<&str> {
         self.terminals
             .iter()
@@ -3054,9 +3066,14 @@ fn run_workspace_config(
     term: &mut dyn Terminal,
     settings: &mut dyn SettingsPort,
     available_models: AvailableAgentModels,
+    branches: &[BranchChoice],
     base: &[String],
 ) -> io::Result<()> {
-    let mut form = Config::load_workspace_with_available_models(settings, available_models);
+    let mut form = Config::load_workspace_with_available_models_and_branches(
+        settings,
+        available_models,
+        branches,
+    );
     loop {
         let (height, width) = term.size()?;
         term.draw(&config::render_over(height, width, base, &form))?;
@@ -4098,7 +4115,7 @@ fn project_controller_sessions(ui: &WorkspaceUi, state: &AppState) -> Vec<Projec
                 .map(ToString::to_string);
             if let Some(role) = ui.workspace.session_roles().get(id) {
                 projected.parent_session_id = role.parent_session_id;
-                projected.organization_depth = 1;
+                projected.organization_depth = 0;
                 let mut parent = role.parent_session_id;
                 let mut seen = BTreeSet::from([*id]);
                 while let Some(parent_id) = parent
@@ -5142,10 +5159,10 @@ fn handle_terminal_pointer(
             let Some(point) = point_at(pointer.column, pointer.row) else {
                 return false;
             };
-            let Some(cells) = ui.terminal_cells(&terminal) else {
+            let Some(selection) = ui.begin_terminal_selection(&terminal, point) else {
                 return false;
             };
-            controls.press_pointer(TerminalSelection::begin(cells, point));
+            controls.press_pointer(selection);
         }
         PointerKind::Drag => {
             if runtime.focused_terminal().is_none() {
@@ -5378,7 +5395,7 @@ fn intercept_live_terminal_control(
                 up,
                 column,
                 row,
-                steps,
+                notches,
             }) => {
                 let point = if runtime.state().director_drawer_open() {
                     director_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
@@ -5397,24 +5414,21 @@ fn intercept_live_terminal_control(
                     return true;
                 };
                 let bytes = if modes.mouse_protocol {
-                    Some(encode_mouse_wheel(
-                        *up,
-                        point.column,
-                        point.row,
-                        modes.mouse_encoding,
-                    ))
+                    Some(
+                        encode_mouse_wheel(*up, point.column, point.row, modes.mouse_encoding)
+                            .repeat(*notches),
+                    )
                 } else if modes.alternate_screen {
-                    Some(encode_wheel_arrows(*up, modes.application_cursor))
+                    Some(encode_wheel_arrows(*up, modes.application_cursor).repeat(*notches))
                 } else {
                     None
                 };
                 if let Some(bytes) = bytes {
-                    let bytes = bytes.repeat(usize::from(*steps));
                     if let Err(message) = ui.send_terminal_bytes(&terminal, &bytes) {
                         controls.set_feedback(message);
                     }
                 } else {
-                    let lines = usize::from(*steps).saturating_mul(WHEEL_LINES);
+                    let lines = notches.saturating_mul(WHEEL_LINES);
                     if *up {
                         controls.scroll_up_by(lines);
                     } else {
@@ -5787,6 +5801,22 @@ fn render_controller_frame(
         create_pending,
         Utc::now(),
     ))
+}
+
+/// Add the project tab bar and deck overlay to a Home-height frame.
+///
+/// Both the ordinary frame loop and modal backgrounds use this composition so
+/// opening a modal cannot move the workspace projection into row zero.
+fn compose_workspace_shell_frame(
+    deck: &WorkspaceDeck,
+    home_height: usize,
+    width: usize,
+    home: &[String],
+) -> Vec<String> {
+    let mut frame = Vec::with_capacity(home_height.saturating_add(PROJECT_BAR_ROWS));
+    frame.push(project_bar(deck, width).line);
+    frame.extend(render_overlay(deck, home_height, width, home));
+    frame
 }
 
 /// Apply actions already routed by [`DaemonBackend`] to the stateful terminal
@@ -6496,9 +6526,14 @@ fn drive_workspace_controller(
     backend_factory: &mut dyn ControllerBackendFactory,
     modal_selection_mode: usagi_core::domain::settings::ModalSelectionMode,
     pr_auto_open: usagi_core::domain::settings::PrAutoOpen,
-    agent_models: AgentModelPolicy,
+    entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
+    let WorkspaceEntryPolicy {
+        available_models,
+        default_model,
+        default_branch,
+    } = entry_policy;
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
     let workspace_name = snapshot.workspace.name.clone();
@@ -6557,12 +6592,16 @@ fn drive_workspace_controller(
     // one-shot worker without ever holding the render thread.
     let (branch_catalog_sender, branch_catalog_receiver) = mpsc::channel();
     let branch_catalog_root = root_cwd.clone();
+    let branch_catalog_default = default_branch.clone();
     let _ = std::thread::Builder::new()
         .name("tui-branch-catalog".to_owned())
         .spawn(move || {
-            let _ = branch_catalog_sender.send(session_branch_catalog(&branch_catalog_root));
+            let _ = branch_catalog_sender.send(session_branch_catalog(
+                &branch_catalog_root,
+                branch_catalog_default.as_deref(),
+            ));
         });
-    runtime.set_agent_models(agent_models.available, agent_models.default);
+    runtime.set_agent_models(available_models, default_model);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
@@ -6900,9 +6939,7 @@ fn drive_workspace_controller(
             // below, so nothing that makes progress depends on the redraw.
             if !controller_may_be_noop || drawn_material.as_ref() != Some(&material) {
                 let home = render_home_material(&material);
-                let mut frame = Vec::with_capacity(terminal_height);
-                frame.push(project_bar(deck, width).line);
-                frame.extend(render_overlay(deck, height, width, &home));
+                let frame = compose_workspace_shell_frame(deck, height, width, &home);
                 term.draw(&frame)?;
                 drawn_material = Some(material);
             }
@@ -7356,7 +7393,7 @@ fn drive_workspace_controller(
                 let terminal_view = drawn_material
                     .as_ref()
                     .and_then(|material| material.projection.terminal_view().cloned());
-                let base = render_controller_frame(
+                let home = render_controller_frame(
                     height,
                     width,
                     &runtime,
@@ -7371,7 +7408,23 @@ fn drive_workspace_controller(
                         .as_ref()
                         .map(|create| create.name.as_str()),
                 );
-                run_workspace_config(term, context.settings, context.available_models, &base)?;
+                // Workspace frames reserve row zero for the project bar. Keep
+                // that exact composition behind Config; otherwise the Home
+                // projection is drawn one row too high while the modal is open.
+                let base = compose_workspace_shell_frame(deck, height, width, &home);
+                let branch_catalog = session_branch_catalog(
+                    &root_cwd,
+                    usagi_core::usecase::settings::read_for_workspace_entry(context.settings)
+                        .default_branch
+                        .as_deref(),
+                );
+                run_workspace_config(
+                    term,
+                    context.settings,
+                    context.available_models,
+                    &branch_catalog.branches,
+                    &base,
+                )?;
                 // The modal drew over the frame the gate remembers, so the next
                 // tick must redraw even if no material changed underneath it.
                 drawn_material = None;
@@ -7383,6 +7436,9 @@ fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
+                let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
+                    session_branch_catalog(&root_cwd, effective.default_branch.as_deref()),
+                )));
                 // Team selection changes the effective role catalog immediately
                 // for the next session creation or Agent launch.
                 let role_catalog = session_role_catalog(data_home.as_deref(), &root_cwd);
@@ -7435,7 +7491,10 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
 /// Symbolic remote aliases such as `origin/HEAD` are omitted so every row names
 /// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
 /// default instead of making the workspace unusable.
-fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
+fn session_branch_catalog(
+    workspace_root: &Path,
+    configured_default: Option<&str>,
+) -> SessionBranchCatalog {
     let output = usagi_core::infrastructure::git::confined_git_command(workspace_root)
         .args([
             "for-each-ref",
@@ -7449,12 +7508,17 @@ fn session_branch_catalog(workspace_root: &Path) -> SessionBranchCatalog {
         Ok(_) | Err(_) => return SessionBranchCatalog::default(),
     };
     let branches = parse_session_branch_choices(&String::from_utf8_lossy(&output.stdout));
-    let default = branch_default_from_output(
-        usagi_core::infrastructure::git::confined_git_command(workspace_root)
-            .args(["symbolic-ref", "--quiet", "HEAD"])
-            .output(),
-        &branches,
-    );
+    let default = configured_default
+        .filter(|configured| branches.iter().any(|branch| branch.refname == *configured))
+        .map(str::to_owned)
+        .or_else(|| {
+            branch_default_from_output(
+                usagi_core::infrastructure::git::confined_git_command(workspace_root)
+                    .args(["symbolic-ref", "--quiet", "HEAD"])
+                    .output(),
+                &branches,
+            )
+        });
     SessionBranchCatalog { branches, default }
 }
 
@@ -7519,7 +7583,7 @@ pub fn run_workspace_controller_with_backend(
         backend_factory,
         usagi_core::domain::settings::ModalSelectionMode::Action,
         usagi_core::domain::settings::PrAutoOpen::default(),
-        AgentModelPolicy::default(),
+        WorkspaceEntryPolicy::default(),
         None,
     )
     .map(WorkspaceStep::exit)
@@ -7547,9 +7611,10 @@ pub fn run_workspace_controller_with_backend_and_settings(
         backend_factory,
         settings.modal_selection_mode,
         settings.pr_auto_open,
-        AgentModelPolicy {
-            default: settings.default_model,
-            ..AgentModelPolicy::default()
+        WorkspaceEntryPolicy {
+            default_model: settings.default_model,
+            default_branch: settings.default_branch.clone(),
+            ..WorkspaceEntryPolicy::default()
         },
         None,
     )
@@ -7581,9 +7646,10 @@ pub fn run_workspace_controller_with_backend_and_config(
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
-        AgentModelPolicy {
-            available: available_models,
-            default: effective.default_model,
+        WorkspaceEntryPolicy {
+            available_models,
+            default_model: effective.default_model,
+            default_branch: effective.default_branch.clone(),
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -7917,9 +7983,10 @@ fn open_snapshot_via_controller(
         backend_factory,
         effective.modal_selection_mode,
         effective.pr_auto_open,
-        AgentModelPolicy {
-            available: available_models,
-            default: effective.default_model,
+        WorkspaceEntryPolicy {
+            available_models,
+            default_model: effective.default_model,
+            default_branch: effective.default_branch.clone(),
         },
         Some(WorkspaceConfigContext {
             settings,
@@ -8711,8 +8778,9 @@ mod tests {
         WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
         WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
         WorkspaceView, activate_workspace_responsive, adjust_project_bar_pointer,
-        app_event_from_key, close_exited_panes, controller_terminal_view, copy_terminal_selection,
-        director_organization, dismiss_pr_modal_on_project_bar_click, drain_session_completions,
+        app_event_from_key, close_exited_panes, compose_workspace_shell_frame,
+        controller_terminal_view, copy_terminal_selection, director_organization,
+        dismiss_pr_modal_on_project_bar_click, drain_session_completions,
         foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
         garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
         intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
@@ -10604,12 +10672,12 @@ mod tests {
                 .map(|session| (session.label.as_str(), session.organization_depth))
                 .collect::<Vec<_>>(),
             vec![
-                ("manager", 1),
-                ("worker", 2),
-                ("stopped", 3),
-                ("running", 1),
-                ("failed", 2),
-                ("orphan", 1),
+                ("manager", 0),
+                ("worker", 1),
+                ("stopped", 2),
+                ("running", 0),
+                ("failed", 1),
+                ("orphan", 0),
             ]
         );
         assert_eq!(projected[1].parent_session_id, Some(director_child));
@@ -12453,6 +12521,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_shell_composition_keeps_home_below_the_project_bar() {
+        let snapshot = snapshot("atlas");
+        let deck = WorkspaceDeck::new(&snapshot);
+        let home = (0..19)
+            .map(|row| format!("home row {row}"))
+            .collect::<Vec<_>>();
+
+        let frame = compose_workspace_shell_frame(&deck, 19, 80, &home);
+
+        assert_eq!(frame.len(), 20);
+        assert!(strip_ansi(&frame[0]).contains("atlas"));
+        assert_eq!(frame[1], "home row 0");
+    }
+
+    #[test]
     fn closeup_environment_editor_is_composited_over_home() {
         use crate::presentation::views::workspace::ProjectedSession;
         use crate::presentation::workspace_runtime::WorkspaceRuntime;
@@ -12644,7 +12727,7 @@ mod tests {
             .is_none()
         );
         assert_eq!(
-            super::session_branch_catalog(&root.path().join("missing")),
+            super::session_branch_catalog(&root.path().join("missing"), None),
             crate::usecase::application::controller::SessionBranchCatalog::default()
         );
     }
@@ -12667,7 +12750,7 @@ mod tests {
         assert!(git(&["add", "tracked"]).success());
         assert!(git(&["commit", "-m", "base"]).success());
 
-        let catalog = super::session_branch_catalog(root.path());
+        let catalog = super::session_branch_catalog(root.path(), None);
 
         assert_eq!(catalog.default.as_deref(), Some("refs/heads/main"));
         assert_eq!(
@@ -12677,6 +12760,13 @@ mod tests {
                 refname: "refs/heads/main".into(),
             }]
         );
+
+        assert!(git(&["branch", "feature"]).success());
+        let configured = super::session_branch_catalog(root.path(), Some("refs/heads/feature"));
+        assert_eq!(configured.default.as_deref(), Some("refs/heads/feature"));
+
+        let stale = super::session_branch_catalog(root.path(), Some("refs/heads/missing"));
+        assert_eq!(stale.default.as_deref(), Some("refs/heads/main"));
     }
 
     #[test]
@@ -16306,11 +16396,11 @@ mod tests {
         let cases = [
             (
                 b"\x1b[?1000h\x1b[?1006hclaude".as_slice(),
-                Some(b"\x1b[<64;5;1M".to_vec()),
+                Some(b"\x1b[<64;5;1M".repeat(3)),
             ),
             (
                 b"\x1b[?1049h\x1b[?1hcodex".as_slice(),
-                Some(b"\x1bOA".repeat(super::WHEEL_LINES)),
+                Some(b"\x1bOA".repeat(super::WHEEL_LINES * 3)),
             ),
             (b"\x1b[?1000hclaude".as_slice(), None),
         ];
@@ -16344,7 +16434,7 @@ mod tests {
                     up: true,
                     column: 41,
                     row: 5,
-                    steps: 1,
+                    notches: 3,
                 }),
                 &mut ui,
                 &mut runtime,
@@ -16396,7 +16486,7 @@ mod tests {
                 up: true,
                 column: 0,
                 row: 0,
-                steps: 1,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16414,7 +16504,7 @@ mod tests {
                 up: true,
                 column: 41,
                 row: 5,
-                steps: 1,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16437,7 +16527,7 @@ mod tests {
                 up: false,
                 column: 41,
                 row: 5,
-                steps: 1,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16460,7 +16550,7 @@ mod tests {
                 up: true,
                 column: 41,
                 row: 5,
-                steps: 1,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -16484,7 +16574,7 @@ mod tests {
                 up: true,
                 column: u16::try_from(drawer.left.saturating_add(2)).expect("drawer column"),
                 row: u16::try_from(drawer.top.saturating_add(4)).expect("drawer row"),
-                steps: 1,
+                notches: 1,
             }),
             &mut empty_ui,
             &mut empty_runtime,
@@ -17403,7 +17493,7 @@ mod tests {
                 up: true,
                 column: 2,
                 row,
-                steps: 1,
+                notches: 1,
             }),
             &mut ui,
             &mut runtime,
@@ -23727,6 +23817,7 @@ mod tests {
             Key::Down,
             Key::Down,
             Key::Down,
+            Key::Down,
             Key::Right,
             Key::Down,
             Key::Down,
@@ -23934,10 +24025,11 @@ mod tests {
         Key::Enter,
     ];
 
-    // Workspace Config starts on Agent and contains Agent → env → Team →
-    // Issue → Memory → Save.
-    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 7] = [
+    // Workspace Config starts on Agent and contains Agent → env → Base branch →
+    // Team → Issue → Memory → Save.
+    const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 8] = [
         Key::Right,
+        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -23962,7 +24054,14 @@ mod tests {
         let base = vec!["home".to_owned(); 24];
         let mut settings = RecordingSettingsPort::default();
         let mut back = FakeTerminal::with_keys(&[Key::Escape]);
-        run_workspace_config(&mut back, &mut settings, AvailableAgentModels::all(), &base).unwrap();
+        run_workspace_config(
+            &mut back,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
 
         let keys = WORKSPACE_CONFIG_SAVE_KEYS
             .iter()
@@ -23978,6 +24077,7 @@ mod tests {
             &mut failed,
             &mut failing_settings,
             AvailableAgentModels::all(),
+            &[],
             &base,
         )
         .unwrap();
@@ -23997,7 +24097,14 @@ mod tests {
         let mut term =
             FakeTerminal::with_keys(&[Key::Quit, Key::CtrlQ, Key::Char('q'), Key::Escape]);
 
-        run_workspace_config(&mut term, &mut settings, AvailableAgentModels::all(), &base).unwrap();
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
 
         assert_eq!(term.frames.len(), 4);
         assert!(

@@ -7798,14 +7798,14 @@ mod tests {
                 LiveInput::WheelUp {
                     column: 0,
                     row: 0,
-                    steps: 1,
+                    notches: 1,
                 },
                 Key::Live(
                     usagi_tui::usecase::terminal_input::LiveTerminalAction::Wheel {
                         up: true,
                         column: 0,
                         row: 0,
-                        steps: 1,
+                        notches: 1,
                     },
                 ),
             ),
@@ -8608,6 +8608,7 @@ mod tests {
         // editor and another Config writer update the local document.
         let mut draft = port.read(SettingsScope::Workspace).unwrap();
         draft.default_model = usagi_core::domain::settings::DefaultModel::Claude;
+        draft.default_branch = Some("refs/remotes/origin/main".to_owned());
         draft.memory_enabled = false;
         let concurrent = LocalSettings {
             default_model: Some(usagi_core::domain::settings::DefaultModel::SakanaAi),
@@ -8629,6 +8630,10 @@ mod tests {
             Some(usagi_core::domain::settings::DefaultModel::Claude)
         );
         assert_eq!(raw.memory_enabled, Some(false));
+        assert_eq!(
+            raw.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
 
         let mut reopened = PersistentSettingsPort {
             storage: Storage::new(&global_dir),
@@ -8641,6 +8646,10 @@ mod tests {
             usagi_core::domain::settings::DefaultModel::Claude
         );
         assert!(!effective.memory_enabled);
+        assert_eq!(
+            effective.default_branch.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
         assert_eq!(effective.env, concurrent.env);
     }
 
@@ -8697,6 +8706,7 @@ mod tests {
             modal_selection_mode: ModalSelectionMode::Prompt,
             pr_auto_open: usagi_core::domain::settings::PrAutoOpen::Always,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,

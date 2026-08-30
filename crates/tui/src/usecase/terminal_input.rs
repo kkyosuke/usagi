@@ -127,9 +127,19 @@ pub enum LiveInput {
     /// sidebar hit testing.
     Mouse { column: u16, row: u16 },
     /// Pointer wheel moved toward older terminal output.
-    WheelUp { column: u16, row: u16, steps: u16 },
+    WheelUp {
+        column: u16,
+        row: u16,
+        /// Physical notches coalesced before the next frame is drawn.
+        notches: usize,
+    },
     /// Pointer wheel moved toward newer terminal output.
-    WheelDown { column: u16, row: u16, steps: u16 },
+    WheelDown {
+        column: u16,
+        row: u16,
+        /// Physical notches coalesced before the next frame is drawn.
+        notches: usize,
+    },
     /// Pointer lifecycle for terminal-output click/selection. It never reaches
     /// the PTY.
     Pointer(PointerEvent),
@@ -223,7 +233,8 @@ pub enum LiveTerminalAction {
         up: bool,
         column: u16,
         row: u16,
-        steps: u16,
+        /// Physical notches represented by this action.
+        notches: usize,
     },
 }
 
@@ -273,22 +284,30 @@ impl LiveInputClassifier {
 
         match input {
             LiveInput::Key(key) => self.classify_key(now, leader_alive, &key),
-            LiveInput::WheelUp { column, row, steps } => {
+            LiveInput::WheelUp {
+                column,
+                row,
+                notches,
+            } => {
                 self.leader_at = None;
                 LiveInputOutput::Action(LiveTerminalAction::Wheel {
                     up: true,
                     column,
                     row,
-                    steps,
+                    notches,
                 })
             }
-            LiveInput::WheelDown { column, row, steps } => {
+            LiveInput::WheelDown {
+                column,
+                row,
+                notches,
+            } => {
                 self.leader_at = None;
                 LiveInputOutput::Action(LiveTerminalAction::Wheel {
                     up: false,
                     column,
                     row,
-                    steps,
+                    notches,
                 })
             }
             LiveInput::Text(text) => self.classify_bytes(leader_alive, text.into_bytes()),
@@ -1170,14 +1189,14 @@ mod tests {
                 LiveInput::WheelUp {
                     column: 4,
                     row: 9,
-                    steps: 3,
+                    notches: 3,
                 },
             ),
             LiveInputOutput::Action(LiveTerminalAction::Wheel {
                 up: true,
                 column: 4,
                 row: 9,
-                steps: 3,
+                notches: 3,
             })
         );
         assert_eq!(
@@ -1186,14 +1205,14 @@ mod tests {
                 LiveInput::WheelDown {
                     column: 2,
                     row: 7,
-                    steps: 2,
+                    notches: 2,
                 },
             ),
             LiveInputOutput::Action(LiveTerminalAction::Wheel {
                 up: false,
                 column: 2,
                 row: 7,
-                steps: 2,
+                notches: 2,
             })
         );
     }
