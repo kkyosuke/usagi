@@ -1,5 +1,5 @@
 ---
-number: 727
+number: 728
 title: "feat(mcp): Ollama の local LLM を third opinion tool として公開する"
 status: done
 priority: medium
