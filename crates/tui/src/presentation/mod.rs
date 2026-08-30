@@ -75,7 +75,7 @@ use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DirectorNew, Effect, EnvironmentEntry,
     ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay,
     PendingToken, RoleChoice, Route, SessionBranchCatalog, SessionRoleCatalog,
-    SessionRoleProjection, Target,
+    SessionRoleProjection, Target, WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
@@ -87,7 +87,7 @@ use crate::usecase::application::daemon_backend::{
     TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
-use crate::usecase::application::pane::{PaneKind, PaneSelection, PaneTab, TabSelection};
+use crate::usecase::application::pane::{PaneKind, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
@@ -834,12 +834,12 @@ fn drawer_agent_owns_escape(runtime: &WorkspaceRuntime) -> bool {
 /// chords keep their managed-pane meaning, so the retargeting is applied once,
 /// before any consumer of the key observes it.
 fn retarget_drawer_chords(runtime: &WorkspaceRuntime, key: Key) -> Key {
-    if runtime.state().root_terminal_drawer_open()
+    if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal)
         && matches!(key, Key::Live(LiveTerminalAction::DirectorNew))
     {
         return Key::Live(LiveTerminalAction::NewRootTerminal);
     }
-    if !runtime.state().director_drawer_open() {
+    if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director) {
         return key;
     }
     match key {
@@ -2475,6 +2475,7 @@ impl WorkspaceUi {
 
     /// Keep exactly the active target's selected foreground terminal attached.
     /// Every hidden background target and unselected tab remains detached.
+    #[cfg(test)]
     fn sync_foreground_terminal(&mut self, focused: Option<&TerminalRef>, geometry: Geometry) {
         let visible = focused
             .map(|terminal| vec![(terminal.clone(), geometry)])
@@ -3929,19 +3930,32 @@ fn terminal_geometry(height: usize, width: usize) -> Geometry {
 /// The Director overlays the right side of Home. Resizing the background PTY
 /// to that visible band keeps wrapping and cursor placement aligned with what
 /// the operator can actually see instead of continuing underneath the drawer.
-fn director_background_terminal_geometry(height: usize, width: usize) -> Geometry {
+fn managed_background_terminal_geometry(
+    height: usize,
+    width: usize,
+    director_open: bool,
+    root_terminal_open: bool,
+) -> Geometry {
     let (height, _) = widgets::normalize_size(height, width);
-    let cols = director_drawer::geometry(height, width).left;
+    let cols = if director_open {
+        director_drawer::geometry(height, width).left
+    } else {
+        workspace::terminal_viewport(height, width).1
+    };
+    let rows = if root_terminal_open {
+        let available_width = root_terminal_available_width(height, width, director_open);
+        root_terminal_drawer::geometry_for(height, width, available_width)
+            .top
+            .saturating_sub(2 + 5)
+            .max(1)
+    } else {
+        height.saturating_sub(2 + 5).max(1)
+    };
     Geometry {
         cols: u16::try_from(cols.min(usize::from(u16::MAX)))
             .expect("clamped Director background width fits u16"),
-        rows: u16::try_from(
-            height
-                .saturating_sub(2 + 5)
-                .max(1)
-                .min(usize::from(u16::MAX)),
-        )
-        .expect("clamped Director background height fits u16"),
+        rows: u16::try_from(rows.min(usize::from(u16::MAX)))
+            .expect("clamped Director background height fits u16"),
     }
 }
 
@@ -3950,8 +3964,9 @@ fn foreground_terminal_geometry(
     width: usize,
     director_open: bool,
     root_terminal_open: bool,
+    focus: Option<WorkspaceDrawerFocus>,
 ) -> Geometry {
-    if director_open {
+    if director_open && focus == Some(WorkspaceDrawerFocus::Director) {
         let viewport = director_drawer::terminal_viewport(height, width);
         Geometry {
             cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
@@ -3960,7 +3975,12 @@ fn foreground_terminal_geometry(
                 .expect("clamped drawer terminal height fits u16"),
         }
     } else if root_terminal_open {
-        let viewport = root_terminal_drawer::terminal_viewport(height, width);
+        let available_width = if director_open {
+            director_drawer::geometry(height, width).left
+        } else {
+            width
+        };
+        let viewport = root_terminal_drawer::terminal_viewport_for(height, width, available_width);
         Geometry {
             cols: u16::try_from(viewport.cols.min(usize::from(u16::MAX)))
                 .expect("clamped root-terminal drawer width fits u16"),
@@ -3972,16 +3992,99 @@ fn foreground_terminal_geometry(
     }
 }
 
+fn root_terminal_available_width(height: usize, width: usize, director_open: bool) -> usize {
+    if director_open {
+        let director = director_drawer::geometry(height, width);
+        if director.full_width {
+            width
+        } else {
+            director.left
+        }
+    } else {
+        width
+    }
+}
+
 /// Return the managed terminal that is genuinely visible beside Director.
 /// A full-width drawer occludes Home completely, so keeping that terminal
 /// attached would spend a stream slot on an invisible surface.
-fn visible_director_background_terminal(
+fn visible_managed_background_terminal(
     runtime: &WorkspaceRuntime,
     height: usize,
     width: usize,
 ) -> Option<TerminalRef> {
     let terminal = runtime.director_background_terminal()?;
-    (!director_drawer::geometry(height, width).full_width).then_some(terminal)
+    let director_open = runtime.state().director_drawer_open();
+    let root_open = runtime.state().root_terminal_drawer_open();
+    if director_open && director_drawer::geometry(height, width).full_width {
+        return None;
+    }
+    if root_open {
+        let available_width = root_terminal_available_width(height, width, director_open);
+        if root_terminal_drawer::geometry_for(height, width, available_width).full_height {
+            return None;
+        }
+    }
+    Some(terminal)
+}
+
+/// Stable terminal/viewport set visible across Home and both workspace drawers.
+/// The focused root surface comes first; retained surfaces are read-only.
+fn visible_workspace_terminals(
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> Vec<(TerminalRef, Geometry)> {
+    let mut visible = Vec::with_capacity(3);
+    let mut push = |terminal: Option<TerminalRef>, geometry: Geometry| {
+        if let Some(terminal) = terminal
+            && !visible
+                .iter()
+                .any(|(shown, _): &(TerminalRef, Geometry)| shown.fences(&terminal))
+        {
+            visible.push((terminal, geometry));
+        }
+    };
+    push(
+        runtime.preview_terminal(),
+        foreground_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            runtime.state().root_terminal_drawer_open(),
+            runtime.state().workspace_drawer_focus(),
+        ),
+    );
+    push(
+        visible_managed_background_terminal(runtime, height, width),
+        managed_background_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            runtime.state().root_terminal_drawer_open(),
+        ),
+    );
+    push(
+        runtime.director_terminal(),
+        foreground_terminal_geometry(
+            height,
+            width,
+            true,
+            false,
+            Some(WorkspaceDrawerFocus::Director),
+        ),
+    );
+    push(
+        runtime.root_terminal(),
+        foreground_terminal_geometry(
+            height,
+            width,
+            runtime.state().director_drawer_open(),
+            true,
+            Some(WorkspaceDrawerFocus::Terminal),
+        ),
+    );
+    visible
 }
 
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
@@ -4398,7 +4501,7 @@ fn director_drawer_projection(
         return DirectorDrawerProjection::default();
     }
     let pane = runtime.active_pane();
-    let selected = pane.selected();
+    let selected = runtime.director_selection();
     let mut conversations = Vec::new();
     for tab in pane.tabs() {
         let conversation = match tab {
@@ -4407,16 +4510,15 @@ fn director_drawer_projection(
                     ui.agent_continuation_for(&live.terminal),
                 ),
                 selected: matches!(
-                    selected,
-                    PaneSelection::Tab(TabSelection::Live(terminal))
-                        if terminal.fences(&live.terminal)
+                    selected.as_ref(),
+                    Some(TabSelection::Live(terminal)) if terminal.fences(&live.terminal)
                 ),
             }),
             PaneTab::Interrupted(interrupted) => Some(DirectorConversation {
                 label: interrupted.tab.safe_label(),
                 selected: matches!(
-                    selected,
-                    PaneSelection::Tab(TabSelection::Interrupted(continuation))
+                    selected.as_ref(),
+                    Some(TabSelection::Interrupted(continuation))
                         if *continuation == interrupted.tab.continuation
                 ),
             }),
@@ -4424,9 +4526,8 @@ fn director_drawer_projection(
                 Some(DirectorConversation {
                     label: "Agent (starting)".to_owned(),
                     selected: matches!(
-                        selected,
-                        PaneSelection::Tab(TabSelection::Pending(operation))
-                            if *operation == pending.operation
+                        selected.as_ref(),
+                        Some(TabSelection::Pending(operation)) if *operation == pending.operation
                     ),
                 })
             }
@@ -5163,10 +5264,22 @@ fn handle_terminal_pointer(
     pointer: PointerEvent,
 ) -> bool {
     let point_at = |column, row| {
-        if runtime.state().director_drawer_open() {
+        if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director) {
             director_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
-        } else if runtime.state().root_terminal_drawer_open() {
-            root_terminal_drawer::terminal_point_at(height, width, rows_len, scroll, column, row)
+        } else if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal) {
+            root_terminal_drawer::terminal_point_at_for(
+                height,
+                width,
+                root_terminal_available_width(
+                    height,
+                    width,
+                    runtime.state().director_drawer_open(),
+                ),
+                rows_len,
+                scroll,
+                column,
+                row,
+            )
         } else {
             terminal_point_at(height, width, rows_len, scroll, column, row)
         }
@@ -5452,10 +5565,26 @@ fn intercept_live_terminal_control(
                 row,
                 notches,
             }) => {
-                let point = if runtime.state().director_drawer_open() {
+                let point = if runtime.state().workspace_drawer_focus()
+                    == Some(WorkspaceDrawerFocus::Director)
+                {
                     director_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
-                } else if runtime.state().root_terminal_drawer_open() {
-                    root_terminal_drawer::terminal_point_at(height, width, 0, 0, *column, *row)
+                } else if runtime.state().workspace_drawer_focus()
+                    == Some(WorkspaceDrawerFocus::Terminal)
+                {
+                    root_terminal_drawer::terminal_point_at_for(
+                        height,
+                        width,
+                        root_terminal_available_width(
+                            height,
+                            width,
+                            runtime.state().director_drawer_open(),
+                        ),
+                        0,
+                        0,
+                        *column,
+                        *row,
+                    )
                 } else {
                     terminal_point_at(height, width, 0, 0, *column, *row)
                 };
@@ -5621,7 +5750,7 @@ struct FrameMaterialKey {
     sessions: (u64, Option<SessionId>, u64),
     shell: u64,
     metrics: u64,
-    terminal: (u64, u64),
+    terminal: (u64, u64, u64, u64),
     animation: u64,
     create_pending: Option<String>,
     /// Rounds of the Garden's cross-project observation that changed a plot.
@@ -5689,6 +5818,12 @@ fn home_frame_material(
     create_pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> HomeFrameMaterial {
+    let (managed_terminal_view, root_terminal_view) =
+        if runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal) {
+            (None, terminal_view.map(Arc::new))
+        } else {
+            (terminal_view.map(Arc::new), None)
+        };
     home_frame_material_shared(
         height,
         width,
@@ -5698,7 +5833,8 @@ fn home_frame_material(
         metrics,
         health,
         Arc::new(git_diffs.clone()),
-        terminal_view.map(Arc::new),
+        managed_terminal_view,
+        root_terminal_view.as_deref(),
         create_pending,
         now,
     )
@@ -5715,7 +5851,8 @@ fn home_frame_material_shared(
     metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
     health: usagi_core::usecase::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
-    terminal_view: Option<Arc<TerminalViewProjection>>,
+    managed_terminal_view: Option<Arc<TerminalViewProjection>>,
+    root_terminal_view: Option<&TerminalViewProjection>,
     create_pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> HomeFrameMaterial {
@@ -5729,12 +5866,7 @@ fn home_frame_material_shared(
                     .find(|session| session.id == target)
                     .map(|session| (session.label.clone(), confirm))
             });
-    let root_terminal_projection = runtime.root_terminal_projection(terminal_view.as_deref());
-    let home_terminal_view = if runtime.state().root_terminal_drawer_open() {
-        None
-    } else {
-        terminal_view
-    };
+    let root_terminal_projection = runtime.root_terminal_projection(root_terminal_view);
     let projection = HomeProjection::from_ordered_state(runtime.state(), workspace_name, sessions)
         .with_pane(runtime.preview_pane())
         .with_metrics(metrics)
@@ -5742,7 +5874,7 @@ fn home_frame_material_shared(
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
         .with_shared_git_diffs(git_diffs)
-        .with_shared_terminal_view(home_terminal_view)
+        .with_shared_terminal_view(managed_terminal_view)
         .with_director_drawer(runtime.director_projection().clone())
         .with_root_terminal_drawer(root_terminal_projection)
         .with_create_pending(create_pending.map(str::to_owned))
@@ -6724,6 +6856,12 @@ fn drive_workspace_controller(
     let mut background_terminal_material_key = None;
     let mut background_terminal_view: Option<Arc<TerminalViewProjection>> = None;
     let mut background_terminal_generation = 0_u64;
+    let mut director_terminal_material_key = None;
+    let mut director_terminal_view: Option<Arc<TerminalViewProjection>> = None;
+    let mut director_terminal_generation = 0_u64;
+    let mut root_terminal_material_key = None;
+    let mut root_terminal_view: Option<Arc<TerminalViewProjection>> = None;
+    let mut root_terminal_generation = 0_u64;
     let mut director_material_key = None;
     let mut frame_material_key: Option<FrameMaterialKey> = None;
     let mut allowed_sessions_revision = u64::MAX;
@@ -6824,28 +6962,16 @@ fn drive_workspace_controller(
             width,
             runtime.state().director_drawer_open(),
             runtime.state().root_terminal_drawer_open(),
+            runtime.state().workspace_drawer_focus(),
         );
         drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
-        // Ordinarily the right pane's preview is the only visible attachment.
-        // Director adds a second, read-only attachment for the managed terminal
-        // still visible behind the drawer. Each keeps its own viewport: the root
-        // conversation uses drawer geometry while the dimmed pane keeps the
-        // ordinary Home right-pane geometry.
-        let foreground_terminal = runtime.preview_terminal();
-        let background_terminal = visible_director_background_terminal(&runtime, height, width);
-        if let Some(terminal) = background_terminal {
-            let mut visible_terminals = Vec::with_capacity(2);
-            if let Some(foreground) = foreground_terminal {
-                visible_terminals.push((foreground, geometry));
-            }
-            visible_terminals.push((
-                terminal,
-                director_background_terminal_geometry(height, width),
-            ));
-            ui.sync_visible_terminals(&visible_terminals);
-        } else {
-            ui.sync_foreground_terminal(foreground_terminal.as_ref(), geometry);
-        }
+        // Keep every genuinely visible terminal attached. Concurrent Director
+        // and root-terminal drawers add two root surfaces beside the dimmed
+        // managed-session Agent instead of replacing or detaching it.
+        let director_terminal = runtime.director_terminal();
+        let root_terminal = runtime.root_terminal();
+        let visible_terminals = visible_workspace_terminals(&runtime, height, width);
+        ui.sync_visible_terminals(&visible_terminals);
         // Polling still runs every tick so output/admission progresses, but row
         // String creation and URL scanning run only behind the projection key.
         close_exited_panes(&mut ui, &mut runtime);
@@ -6861,7 +6987,7 @@ fn drive_workspace_controller(
             .and_then(|terminal| ui.terminal_projection_key(terminal))
             .unwrap_or(0);
         let next_terminal_key = (
-            focused_terminal,
+            focused_terminal.clone(),
             screen_revision,
             controls.revision(),
             geometry,
@@ -6877,13 +7003,20 @@ fn drive_workspace_controller(
             terminal_material_key = Some(next_terminal_key);
             terminal_generation = terminal_generation.saturating_add(1);
         }
-        let background_terminal = visible_director_background_terminal(&runtime, height, width);
+        let background_terminal = visible_managed_background_terminal(&runtime, height, width);
         let background_revision = background_terminal
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
             .unwrap_or(0);
-        let background_rows =
-            usize::from(director_background_terminal_geometry(height, width).rows);
+        let background_rows = usize::from(
+            managed_background_terminal_geometry(
+                height,
+                width,
+                runtime.state().director_drawer_open(),
+                runtime.state().root_terminal_drawer_open(),
+            )
+            .rows,
+        );
         let next_background_key = (
             background_terminal.clone(),
             background_revision,
@@ -6897,14 +7030,77 @@ fn drive_workspace_controller(
             background_terminal_material_key = Some(next_background_key);
             background_terminal_generation = background_terminal_generation.saturating_add(1);
         }
+        let director_rows = director_drawer::terminal_viewport(height, width).rows;
+        let director_revision = director_terminal
+            .as_ref()
+            .and_then(|terminal| ui.terminal_projection_key(terminal))
+            .unwrap_or(0);
+        let director_focused = director_terminal.as_ref().is_some_and(|director| {
+            focused_terminal
+                .as_ref()
+                .is_some_and(|focused| focused.fences(director))
+        });
+        let next_director_terminal_key = (
+            director_terminal.clone(),
+            director_revision,
+            director_rows,
+            director_focused,
+            terminal_generation,
+        );
+        if director_terminal_material_key.as_ref() != Some(&next_director_terminal_key) {
+            director_terminal_view = if director_focused {
+                terminal_view.as_ref().map(Arc::clone)
+            } else {
+                director_terminal
+                    .as_ref()
+                    .and_then(|terminal| ui.retained_terminal_view(terminal, director_rows))
+                    .map(Arc::new)
+            };
+            director_terminal_material_key = Some(next_director_terminal_key);
+            director_terminal_generation = director_terminal_generation.saturating_add(1);
+        }
+        let root_rows = root_terminal_drawer::terminal_viewport_for(
+            height,
+            width,
+            root_terminal_available_width(height, width, runtime.state().director_drawer_open()),
+        )
+        .rows;
+        let root_revision = root_terminal
+            .as_ref()
+            .and_then(|terminal| ui.terminal_projection_key(terminal))
+            .unwrap_or(0);
+        let root_focused = root_terminal.as_ref().is_some_and(|root| {
+            focused_terminal
+                .as_ref()
+                .is_some_and(|focused| focused.fences(root))
+        });
+        let next_root_terminal_key = (
+            root_terminal.clone(),
+            root_revision,
+            root_rows,
+            root_focused,
+            terminal_generation,
+        );
+        if root_terminal_material_key.as_ref() != Some(&next_root_terminal_key) {
+            root_terminal_view = if root_focused {
+                terminal_view.as_ref().map(Arc::clone)
+            } else {
+                root_terminal
+                    .as_ref()
+                    .and_then(|terminal| ui.retained_terminal_view(terminal, root_rows))
+                    .map(Arc::new)
+            };
+            root_terminal_material_key = Some(next_root_terminal_key);
+            root_terminal_generation = root_terminal_generation.saturating_add(1);
+        }
         let next_director_key = (
             runtime.material_key(),
             ui.material_revision,
-            terminal_generation,
+            director_terminal_generation,
         );
         if director_material_key != Some(next_director_key) {
             let drawer_projection =
-                director_drawer_projection(&ui, &runtime, terminal_view.as_deref());
+                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref());
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -6963,7 +7159,12 @@ fn drive_workspace_controller(
             sessions: next_session_key,
             shell: ui.material_revision,
             metrics: metrics_projection.generation(),
-            terminal: (terminal_generation, background_terminal_generation),
+            terminal: (
+                terminal_generation,
+                background_terminal_generation,
+                director_terminal_generation,
+                root_terminal_generation,
+            ),
             animation,
             create_pending: ui
                 .creating_session
@@ -6985,11 +7186,12 @@ fn drive_workspace_controller(
                 metrics_projection.metrics(),
                 metrics_projection.health(),
                 metrics_projection.shared_git_diffs(),
-                if runtime.state().director_drawer_open() {
+                if runtime.state().workspace_drawer_open() {
                     background_terminal_view.as_ref().map(Arc::clone)
                 } else {
                     terminal_view.as_ref().map(Arc::clone)
                 },
+                root_terminal_view.as_deref(),
                 ui.creating_session
                     .as_ref()
                     .map(|create| create.name.as_str()),
@@ -8879,6 +9081,7 @@ mod tests {
         AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabProjection,
         AgentTabSlotIntent, AgentTabTargetProjection,
     };
+    use crate::usecase::application::controller::WorkspaceDrawerFocus;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, DirectorNew, Effect, EnvironmentEntry,
         GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay, PendingToken,
@@ -17513,7 +17716,10 @@ mod tests {
             }],
         ));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        ui.start_terminal_session(terminal, foreground_terminal_geometry(20, 80, true, false));
+        ui.start_terminal_session(
+            terminal,
+            foreground_terminal_geometry(20, 80, true, false, Some(WorkspaceDrawerFocus::Director)),
+        );
         let mut controls = LiveTerminalControls::default();
         let mut term = FakeTerminal::default();
         let mut browser = RecordingBrowser::default();
@@ -20194,8 +20400,15 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
-        let managed_director_geometry = super::director_background_terminal_geometry(24, 100);
-        let drawer_geometry = foreground_terminal_geometry(24, 100, true, false);
+        let managed_director_geometry =
+            super::managed_background_terminal_geometry(24, 100, true, false);
+        let drawer_geometry = foreground_terminal_geometry(
+            24,
+            100,
+            true,
+            false,
+            Some(WorkspaceDrawerFocus::Director),
+        );
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
@@ -20248,14 +20461,86 @@ mod tests {
 
     fn assert_director_background_visibility(runtime: &WorkspaceRuntime, managed: &TerminalRef) {
         assert_eq!(
-            super::visible_director_background_terminal(runtime, 24, 80).as_ref(),
+            super::visible_managed_background_terminal(runtime, 24, 80).as_ref(),
             Some(managed)
         );
         assert_eq!(
-            super::visible_director_background_terminal(runtime, 24, 79),
+            super::visible_managed_background_terminal(runtime, 24, 79),
             None,
             "a full-width drawer must not keep an occluded terminal attached"
         );
+    }
+
+    #[test]
+    fn concurrent_drawers_keep_root_surfaces_and_selected_session_agent_visible() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = scoped_terminal_ref(workspace, Some(session));
+        let root_agent = scoped_terminal_ref(workspace, None);
+        let root_terminal = scoped_terminal_ref(workspace, None);
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = runtime.handle_key(Key::Enter);
+        let fence = runtime.restore_fence();
+        assert!(runtime.restore_snapshot(
+            fence.0,
+            fence.1,
+            vec![
+                super::PaneRestoreTarget {
+                    target: Target::Session(session),
+                    panes: vec![LivePane {
+                        terminal: managed.clone(),
+                        kind: PaneKind::Agent,
+                    }],
+                    selected: Some(managed.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+                super::PaneRestoreTarget {
+                    target: Target::Root(workspace),
+                    panes: vec![
+                        LivePane {
+                            terminal: root_agent.clone(),
+                            kind: PaneKind::Agent,
+                        },
+                        LivePane {
+                            terminal: root_terminal.clone(),
+                            kind: PaneKind::Terminal,
+                        },
+                    ],
+                    selected: Some(root_agent.clone()),
+                    selected_interrupted: None,
+                    interrupted: Vec::new(),
+                },
+            ],
+        ));
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert!(runtime.state().director_drawer_open());
+        assert!(runtime.state().root_terminal_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
+        let visible = super::visible_workspace_terminals(&runtime, 30, 160)
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible,
+            [root_terminal.clone(), managed.clone(), root_agent.clone()]
+        );
+        assert_eq!(
+            super::visible_managed_background_terminal(&runtime, 8, 160),
+            None,
+            "a full-height root drawer must not retain an occluded managed Agent"
+        );
+        assert_eq!(super::root_terminal_available_width(30, 79, true), 79);
+
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
+        let visible = super::visible_workspace_terminals(&runtime, 30, 160)
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect::<Vec<_>>();
+        assert_eq!(visible, [root_agent, managed, root_terminal]);
     }
 
     fn sync_test_director_terminals(
@@ -20268,11 +20553,17 @@ mod tests {
         ui.sync_visible_terminals(&[
             (
                 root.clone(),
-                foreground_terminal_geometry(height, width, true, false),
+                foreground_terminal_geometry(
+                    height,
+                    width,
+                    true,
+                    false,
+                    Some(WorkspaceDrawerFocus::Director),
+                ),
             ),
             (
                 managed.clone(),
-                super::director_background_terminal_geometry(height, width),
+                super::managed_background_terminal_geometry(height, width, true, false),
             ),
         ]);
     }
@@ -20329,7 +20620,13 @@ mod tests {
             ],
         ));
         let managed_geometry = terminal_geometry(24, 100);
-        let drawer_geometry = foreground_terminal_geometry(24, 100, true, false);
+        let drawer_geometry = foreground_terminal_geometry(
+            24,
+            100,
+            true,
+            false,
+            Some(WorkspaceDrawerFocus::Director),
+        );
         let mut controls = LiveTerminalControls::default();
 
         ui.sync_foreground_terminal(Some(&managed), managed_geometry);
@@ -20394,12 +20691,12 @@ mod tests {
             [
                 (
                     managed.clone(),
-                    super::director_background_terminal_geometry(24, 100),
+                    super::managed_background_terminal_geometry(24, 100, true, false),
                 ),
                 (managed.clone(), managed_geometry),
                 (
                     managed,
-                    super::director_background_terminal_geometry(24, 100),
+                    super::managed_background_terminal_geometry(24, 100, true, false),
                 ),
             ]
         );
@@ -21945,6 +22242,23 @@ mod tests {
             runtime.state().director_new(),
             DirectorNew::Choosing(DefaultModel::Claude)
         ));
+
+        // Director remains visible behind Shell, but its chord vocabulary no
+        // longer applies while Shell owns root input.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(
+            runtime.state().workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Terminal)
+        );
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
+            Key::Live(LiveTerminalAction::NextTab)
+        );
+        assert_eq!(
+            retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew)),
+            Key::Live(LiveTerminalAction::NewRootTerminal)
+        );
     }
 
     #[test]
@@ -25971,15 +26285,27 @@ mod tests {
             }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, true, false),
+            foreground_terminal_geometry(
+                24,
+                100,
+                true,
+                false,
+                Some(WorkspaceDrawerFocus::Director),
+            ),
             Geometry { cols: 56, rows: 17 }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, false, true),
+            foreground_terminal_geometry(
+                24,
+                100,
+                false,
+                true,
+                Some(WorkspaceDrawerFocus::Terminal),
+            ),
             Geometry { cols: 96, rows: 7 }
         );
         assert_eq!(
-            foreground_terminal_geometry(24, 100, false, false),
+            foreground_terminal_geometry(24, 100, false, false, None),
             terminal_geometry(24, 100)
         );
     }
