@@ -519,6 +519,8 @@ pub struct TerminalSession {
     /// shrinking it early would irreversibly clip cells while the PTY still
     /// uses the old width.
     pending_geometry: Option<Geometry>,
+    /// Client-local view mutations that do not advance the daemon output cursor.
+    local_view_revision: u64,
 }
 
 impl TerminalSession {
@@ -553,6 +555,7 @@ impl TerminalSession {
             resize_retry_at: None,
             viewport_notice: None,
             pending_geometry: None,
+            local_view_revision: 0,
         }
     }
 
@@ -587,7 +590,16 @@ impl TerminalSession {
         (self.state as u8).hash(&mut key);
         (self.history as u8).hash(&mut key);
         self.error.hash(&mut key);
+        self.local_view_revision.hash(&mut key);
         key.finish()
+    }
+
+    /// Clears this client's primary viewport immediately while the shell
+    /// processes the forwarded readline clear chord.
+    pub fn clear_for_user(&mut self) -> bool {
+        let cleared = self.screen.clear_for_user();
+        self.local_view_revision = self.local_view_revision.saturating_add(u64::from(cleared));
+        cleared
     }
 
     /// Whether the current view restored the terminal's retained history, or is
