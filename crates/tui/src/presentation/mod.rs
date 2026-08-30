@@ -6704,6 +6704,11 @@ fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Opt
 /// Maximum number of completions one Home frame may apply from each queue.
 const FRAME_EVENT_BUDGET: usize = 128;
 
+/// Registry reads are useful only while `+ Open` is visible. A short bounded
+/// cadence feels live across processes without turning the Home frame loop into
+/// a filesystem poller.
+const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -6725,6 +6730,7 @@ fn drive_workspace_controller(
     entry_policy: WorkspaceEntryPolicy,
     mut workspace_config: Option<WorkspaceConfigContext<'_>>,
 ) -> io::Result<WorkspaceStep> {
+    let mut registry = registry.to_vec();
     let WorkspaceEntryPolicy {
         available_models,
         default_model,
@@ -6834,6 +6840,8 @@ fn drive_workspace_controller(
     // and a capped backoff across worker jobs; a frame tick never resets it.
     let restore_clock = std::time::Instant::now();
     let mut restore_retry = RestoreRetryState::new();
+    let mut registry_refresh_pending = false;
+    let mut registry_refresh_due = std::time::Duration::ZERO;
     let mut garden_observation = GardenObservation::new();
     let mut garden_observations = 0_u64;
     // Filesystem hint for the inline create form. It is off the frame budget:
@@ -6867,6 +6875,48 @@ fn drive_workspace_controller(
     let mut allowed_sessions_revision = u64::MAX;
     let mut current_sessions = BTreeSet::new();
     loop {
+        let registry_now = restore_clock.elapsed();
+        if deck.add_overlay_open()
+            && !registry_refresh_pending
+            && registry_now >= registry_refresh_due
+            && let Some(loader) = loader.as_mut()
+        {
+            match (**loader).dispatch_registry_refresh() {
+                Ok(true) => registry_refresh_pending = true,
+                Ok(false) => {
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                }
+                Err(error) => {
+                    deck.set_notice(error.to_string());
+                    registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+                    drawn_material = None;
+                    frame_material_key = None;
+                }
+            }
+        }
+        if let Some(completion) = loader
+            .as_mut()
+            .and_then(|loader| (**loader).take_registry_refresh())
+        {
+            registry_refresh_pending = false;
+            registry_refresh_due = registry_now + REGISTRY_REFRESH_INTERVAL;
+            match completion {
+                Ok(latest) => {
+                    registry = latest;
+                    if deck.add_overlay_open() {
+                        deck.refresh_add(&registry);
+                        drawn_material = None;
+                        frame_material_key = None;
+                    }
+                }
+                Err(error) if deck.add_overlay_open() => {
+                    deck.set_notice(error.to_string());
+                    drawn_material = None;
+                    frame_material_key = None;
+                }
+                Err(_) => {}
+            }
+        }
         if let Ok(catalog) = branch_catalog_receiver.try_recv() {
             let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
                 catalog,
@@ -7273,7 +7323,8 @@ fn drive_workspace_controller(
         let opens_add = matches!(key, Key::Live(LiveTerminalAction::OpenWorkspace))
             || matches!(bar_target, Some(ProjectBarTarget::Add));
         if opens_add {
-            deck.open_add(registry);
+            deck.open_add(&registry);
+            registry_refresh_due = std::time::Duration::ZERO;
             drawn_material = None;
             frame_material_key = None;
             continue;
@@ -23697,6 +23748,11 @@ mod tests {
         Background,
     }
 
+    enum FakeRegistryRefresh {
+        Queued(Vec<Workspace>),
+        Pending(Vec<Workspace>),
+    }
+
     #[derive(Default)]
     struct FakeLoader {
         operation_mode: FakeOperationMode,
@@ -23733,6 +23789,8 @@ mod tests {
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
         open_delay: std::time::Duration,
+        registry_refresh: Option<FakeRegistryRefresh>,
+        registry_refresh_dispatches: usize,
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -23784,6 +23842,30 @@ mod tests {
         fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
             self.activate_error
                 .map_or(Ok(()), |error| Err(io::Error::other(error)))
+        }
+
+        fn dispatch_registry_refresh(&mut self) -> io::Result<bool> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Queued(registry)) => {
+                    self.registry_refresh = Some(FakeRegistryRefresh::Pending(registry));
+                    self.registry_refresh_dispatches += 1;
+                    Ok(true)
+                }
+                state => {
+                    self.registry_refresh = state;
+                    Ok(false)
+                }
+            }
+        }
+
+        fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>> {
+            match self.registry_refresh.take() {
+                Some(FakeRegistryRefresh::Pending(registry)) => Some(Ok(registry)),
+                queued => {
+                    self.registry_refresh = queued;
+                    None
+                }
+            }
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -27790,6 +27872,87 @@ mod tests {
                 RESIDENT_PORTS_PER_COMPOSITION,
                 2 * RESIDENT_PORTS_PER_COMPOSITION,
             ]
+        );
+    }
+
+    #[test]
+    fn project_add_accepts_and_opens_an_unregistered_directory_path() {
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Tab,
+            Key::Paste("/tmp/external".to_owned()),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        term.size = Some((24, 80));
+        let mut loader = FakeLoader::default();
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![ws("alpha")],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/external")]
+        );
+        assert!(term.frames.iter().any(|frame| {
+            let frame = frame.join("\n");
+            frame.contains("Directory") && frame.contains("Tab registered")
+        }));
+    }
+
+    #[test]
+    fn project_add_applies_a_registry_refresh_while_the_overlay_is_open() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Enter,
+            Key::Live(LiveTerminalAction::OpenWorkspace),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::CtrlQ,
+            Key::Char('q'),
+        ]);
+        let mut loader = FakeLoader {
+            registry_refresh: Some(FakeRegistryRefresh::Queued(vec![alpha.clone(), beta])),
+            ..FakeLoader::default()
+        };
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+
+        run_screen_graph_with_backend(
+            &mut term,
+            vec![alpha],
+            Vec::new(),
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+        )
+        .unwrap();
+
+        assert_eq!(loader.registry_refresh_dispatches, 1);
+        assert_eq!(
+            loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
         );
     }
 
