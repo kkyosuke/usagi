@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "total": 500,
+  "total": 502,
   "owners": {
     "core": 9,
-    "daemon": 333,
-    "root-cli": 37,
+    "daemon": 336,
+    "root-cli": 36,
     "tui": 121
   },
   "paths": {
@@ -18,7 +18,7 @@
     "crates/daemon/src/infrastructure/generation_registry.rs": 7,
     "crates/daemon/src/infrastructure/pty.rs": 3,
     "crates/daemon/src/infrastructure/resource_store.rs": 12,
-    "crates/daemon/src/infrastructure/session_worktree.rs": 10,
+    "crates/daemon/src/infrastructure/session_worktree.rs": 11,
     "crates/daemon/src/infrastructure/unix_transport.rs": 36,
     "crates/daemon/src/usecase/stop.rs": 1,
     "crates/daemon/src/usecase/supervisor_runtime.rs": 1,
@@ -51,9 +51,9 @@
     "src/runtime/agent_tab_intent.rs": 1,
     "src/runtime/bootstrap.rs": 3,
     "src/runtime/cli.rs": 10,
-    "src/runtime/clean.rs": 16,
+    "src/runtime/clean.rs": 15,
     "src/runtime/clipboard.rs": 1,
-    "src/runtime/daemon.rs": 251,
+    "src/runtime/daemon.rs": 253,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/inventory_pump.rs": 1,
     "src/runtime/launchd.rs": 1,

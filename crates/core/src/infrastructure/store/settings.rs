@@ -131,6 +131,7 @@ mod tests {
         let store = WorkspaceSettingsStore::new(workspace.path());
         let initial = LocalSettings {
             default_model: Some(DefaultModel::Claude),
+            default_branch: Some("refs/heads/main".to_owned()),
             issue_enabled: Some(false),
             memory_enabled: Some(true),
             team_template: Some(crate::domain::settings::TeamTemplate::Flat),

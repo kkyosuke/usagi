@@ -194,7 +194,7 @@ impl WorkspaceRuntime {
         }
         match self.state.selected() {
             Selection::Target(Target::Session(session)) => Some(session),
-            Selection::Target(Target::Root(_)) | Selection::NewSession => None,
+            Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => None,
         }
     }
 
@@ -2501,7 +2501,12 @@ mod tests {
     fn new_session_row_enter_emits_create_effect() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        // An empty Home already rests on `+ new session`; open the form.
+        // Enter on an empty workspace is neutral. Explicit navigation selects
+        // the action row before Enter opens its form.
+        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert_eq!(runtime.state().selected(), Selection::Idle);
+        let _ = runtime.handle_key(Key::Down);
+        assert_eq!(runtime.state().selected(), Selection::NewSession);
         let _ = runtime.handle_key(Key::Enter); // open create form
         let _ = runtime.handle_key(Key::Char('a'));
         let effects = runtime.handle_key(Key::Enter);

@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::infrastructure::git::{GitRunner, list_worktrees};
 use crate::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
 
 /// One registered workspace entry and whether its path still exists.
@@ -90,6 +91,71 @@ pub struct CleanInventory {
     pub daemon_data: Vec<DaemonWorkspaceData>,
     pub repositories: Vec<RepositoryInventory>,
     pub processes: Vec<ObservedProcess>,
+}
+
+/// Observe the managed worktree and branch namespace for one repository.
+///
+/// Both the standalone CLI and the running daemon use this exact inventory
+/// path, so cleanup classification cannot drift between the offline and
+/// daemon-owned surfaces.
+///
+/// # Errors
+///
+/// Returns the first Git observation failure. A path outside a Git worktree is
+/// represented as `Ok(None)` rather than an empty, cleanup-authorizing
+/// inventory.
+pub fn observe_repository(
+    git: &dyn GitRunner,
+    root: &Path,
+) -> anyhow::Result<Option<RepositoryInventory>> {
+    let probe = git.run(root, &["rev-parse", "--is-inside-work-tree"])?;
+    if !probe.success || probe.stdout.trim() != "true" {
+        return Ok(None);
+    }
+    let expected_parent = root.join(STATE_DIR).join(SESSIONS_DIR);
+    let mut worktrees = Vec::new();
+    for worktree in list_worktrees(git, root)? {
+        if worktree.path.parent() != Some(expected_parent.as_path()) {
+            continue;
+        }
+        let status = git.run(&worktree.path, &["status", "--porcelain"])?;
+        worktrees.push(ObservedWorktree {
+            path: worktree.path,
+            dirty: !status.success || !status.stdout.trim().is_empty() || worktree.branch.is_none(),
+            branch: worktree.branch,
+        });
+    }
+    let refs = git.run(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/usagi/",
+        ],
+    )?;
+    if !refs.success {
+        anyhow::bail!("git branch inventory failed: {}", refs.stderr.trim());
+    }
+    let mut branches = Vec::new();
+    for name in refs
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let merged = git
+            .run(root, &["merge-base", "--is-ancestor", name, "HEAD"])?
+            .success;
+        branches.push(ObservedBranch {
+            name: name.to_owned(),
+            merged,
+        });
+    }
+    Ok(Some(RepositoryInventory {
+        root: root.to_path_buf(),
+        worktrees,
+        branches,
+    }))
 }
 
 /// A provably unlinked resource. Ordering is significant: worktrees precede
@@ -278,6 +344,25 @@ fn managed_worktree_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::{GitOutput, GitRunner};
+    use std::cell::Cell;
+
+    struct BrokenBranchInventory {
+        calls: Cell<usize>,
+    }
+
+    impl GitRunner for BrokenBranchInventory {
+        fn run(&self, _repo: &Path, _args: &[&str]) -> anyhow::Result<GitOutput> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            match call {
+                0 => Ok(ok("true")),
+                1 => Ok(ok("")),
+                _ => Err(anyhow::anyhow!("branch inventory transport failed")),
+            }
+        }
+    }
 
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -298,6 +383,102 @@ mod tests {
             start_identity: format!("identity-{pid}"),
             accounted,
         }
+    }
+
+    #[test]
+    fn repository_observation_classifies_managed_git_resources() {
+        let worktrees = "worktree /repo\nHEAD root\nbranch refs/heads/main\n\
+                         \nworktree /elsewhere\nHEAD other\nbranch refs/heads/usagi/elsewhere\n\
+                         \nworktree /repo/.usagi/sessions/clean\nHEAD clean\nbranch refs/heads/usagi/clean\n\
+                         \nworktree /repo/.usagi/sessions/detached\nHEAD detached\ndetached\n";
+        let git = FakeGit::new(vec![
+            ok("true\n"),
+            ok(worktrees),
+            ok(""),
+            fail("status unavailable"),
+            ok("usagi/clean\n\nusagi/detached\n"),
+            ok(""),
+            fail("not merged"),
+        ]);
+
+        assert_eq!(
+            observe_repository(&git, Path::new("/repo")).unwrap(),
+            Some(RepositoryInventory {
+                root: "/repo".into(),
+                worktrees: vec![
+                    ObservedWorktree {
+                        path: "/repo/.usagi/sessions/clean".into(),
+                        dirty: false,
+                        branch: Some("usagi/clean".into()),
+                    },
+                    ObservedWorktree {
+                        path: "/repo/.usagi/sessions/detached".into(),
+                        dirty: true,
+                        branch: None,
+                    },
+                ],
+                branches: vec![
+                    ObservedBranch {
+                        name: "usagi/clean".into(),
+                        merged: true,
+                    },
+                    ObservedBranch {
+                        name: "usagi/detached".into(),
+                        merged: false,
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            git.calls.borrow().as_slice(),
+            &[
+                vec!["rev-parse", "--is-inside-work-tree"],
+                vec!["worktree", "list", "--porcelain"],
+                vec!["status", "--porcelain"],
+                vec!["status", "--porcelain"],
+                vec![
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads/usagi/",
+                ],
+                vec!["merge-base", "--is-ancestor", "usagi/clean", "HEAD"],
+                vec!["merge-base", "--is-ancestor", "usagi/detached", "HEAD",],
+            ]
+        );
+    }
+
+    #[test]
+    fn repository_observation_fails_closed_when_git_evidence_is_missing() {
+        let outside = FakeGit::new(vec![fail("not a repository")]);
+        assert_eq!(
+            observe_repository(&outside, Path::new("/repo")).unwrap(),
+            None
+        );
+
+        let worktrees_unavailable = FakeGit::new(vec![ok("true"), fail("broken worktrees")]);
+        assert!(observe_repository(&worktrees_unavailable, Path::new("/repo")).is_err());
+
+        let branches_unavailable = FakeGit::new(vec![
+            ok("true"),
+            ok("worktree /repo\nHEAD root\nbranch refs/heads/main\n"),
+            fail("broken refs"),
+        ]);
+        assert!(
+            observe_repository(&branches_unavailable, Path::new("/repo"))
+                .unwrap_err()
+                .to_string()
+                .contains("broken refs")
+        );
+
+        let branch_transport = BrokenBranchInventory {
+            calls: Cell::new(0),
+        };
+        assert!(
+            observe_repository(&branch_transport, Path::new("/repo"))
+                .unwrap_err()
+                .to_string()
+                .contains("branch inventory transport failed")
+        );
     }
 
     /// Only a helper whose build is gone *and* which this data home does not

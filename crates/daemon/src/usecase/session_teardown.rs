@@ -41,6 +41,10 @@ pub struct PendingTeardown {
     /// durable delete plan so a resumed teardown undoes exactly as much as the
     /// admission promised.
     pub delete_branch: bool,
+    /// Exact local branch to delete. Orphan recovery records the branch found
+    /// in the linked worktree; ordinary sessions leave this unset and derive
+    /// `usagi/<name>`.
+    pub branch_name: Option<String>,
     /// Whether branch deletion may discard unmerged commits. This is reserved
     /// for daemon-owned compensation; requested deletion remains safe.
     pub force_delete_branch: bool,
@@ -181,6 +185,7 @@ mod tests {
             session_root: PathBuf::from("/repo/.usagi/sessions").join(name),
             force: false,
             delete_branch: false,
+            branch_name: None,
             force_delete_branch: false,
             merged_head_oid: None,
         }
