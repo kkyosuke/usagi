@@ -12,13 +12,13 @@ use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, confined_git_command, delete_branch, list_worktrees, remove_worktree,
 };
-use usagi_core::infrastructure::paths::{self, SESSIONS_DIR, STATE_DIR};
+use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::clean::{
-    CleanCandidate, CleanInventory, DaemonWorkspaceData, HelperRole, ObservedBranch,
-    ObservedProcess, ObservedWorktree, RegisteredWorkspace, RepositoryInventory,
+    CleanCandidate, CleanInventory, DaemonWorkspaceData, HelperRole, ObservedProcess,
+    RegisteredWorkspace,
 };
 use usagi_daemon::infrastructure::unix_transport::ensure_private_dir;
 use usagi_daemon::usecase::authority::registry::RegistryDocument;
@@ -176,7 +176,7 @@ fn discover() -> io::Result<Discovery> {
                 state.root().display()
             ));
         } else if trusted_repository {
-            match discover_repository(&git, state.root()) {
+            match usagi_core::usecase::clean::observe_repository(&git, state.root()) {
                 Ok(Some(repository)) => repositories.push(repository),
                 Ok(None) => {}
                 Err(error) => warnings.push(format!(
@@ -195,71 +195,6 @@ fn discover() -> io::Result<Discovery> {
         },
         warnings,
     })
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=clean_planner_classifies_all_effects
-fn discover_repository(
-    git: &dyn GitRunner,
-    root: &Path,
-) -> io::Result<Option<RepositoryInventory>> {
-    let probe = git
-        .run(root, &["rev-parse", "--is-inside-work-tree"])
-        .map_err(io::Error::other)?;
-    if !probe.success || probe.stdout.trim() != "true" {
-        return Ok(None);
-    }
-    let expected_parent = root.join(STATE_DIR).join(SESSIONS_DIR);
-    let mut worktrees = Vec::new();
-    for worktree in list_worktrees(git, root).map_err(io::Error::other)? {
-        if worktree.path.parent() != Some(expected_parent.as_path()) {
-            continue;
-        }
-        let status = git
-            .run(&worktree.path, &["status", "--porcelain"])
-            .map_err(io::Error::other)?;
-        worktrees.push(ObservedWorktree {
-            path: worktree.path,
-            dirty: !status.success || !status.stdout.trim().is_empty() || worktree.branch.is_none(),
-            branch: worktree.branch,
-        });
-    }
-    let refs = git
-        .run(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "refs/heads/usagi/",
-            ],
-        )
-        .map_err(io::Error::other)?;
-    if !refs.success {
-        return Err(io::Error::other(format!(
-            "git branch inventory failed: {}",
-            refs.stderr.trim()
-        )));
-    }
-    let mut branches = Vec::new();
-    for name in refs
-        .stdout
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        let merged = git
-            .run(root, &["merge-base", "--is-ancestor", name, "HEAD"])
-            .map_err(io::Error::other)?
-            .success;
-        branches.push(ObservedBranch {
-            name: name.to_owned(),
-            merged,
-        });
-    }
-    Ok(Some(RepositoryInventory {
-        root: root.to_path_buf(),
-        worktrees,
-        branches,
-    }))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=clean_planner_classifies_all_effects

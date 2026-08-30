@@ -825,16 +825,91 @@ impl BackendOverlayPort for ProductionOverlayPort {
     }
 }
 
-struct ProductionWorkspaceCommands;
+struct ProductionWorkspaceCommands {
+    workspace: WorkspaceId,
+    root: PathBuf,
+}
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
-    fn execute(&mut self, _: WorkspaceId, command: overview::Command, completions: Completions) {
-        completions.emit(
-            usagi_tui::usecase::application::controller::AppEvent::Backend(BackendEvent::Notice(
-                Notice::new(format!("{} is not available", command.name())),
-            )),
-        );
+    fn execute(
+        &mut self,
+        workspace: WorkspaceId,
+        command: overview::Command,
+        completions: Completions,
+    ) {
+        let overview::Command::Clean { arguments } = command else {
+            completions.emit(
+                usagi_tui::usecase::application::controller::AppEvent::Backend(
+                    BackendEvent::Notice(Notice::new(format!(
+                        "{} is not available",
+                        command.name()
+                    ))),
+                ),
+            );
+            return;
+        };
+        let Ok(clean) = overview::parse_clean(&arguments) else {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "invalid clean arguments",
+            ))));
+            return;
+        };
+        let expected = self.workspace;
+        let root = self.root.clone();
+        if workspace != expected {
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "clean target is no longer active",
+            ))));
+            return;
+        }
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let mut client = crate::runtime::daemon::policy_client_for_selected_workspace(
+                    ClientPolicy::tui(),
+                    &root,
+                )
+                .map_err(|error| format!("daemon unavailable: {error}"))?;
+                let reply = client
+                    .request(DaemonRequest::Session {
+                        action: SessionAction::Clean,
+                        operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                        payload: serde_json::json!({
+                            "apply": clean.apply,
+                            "force": clean.force,
+                        }),
+                    })
+                    .map_err(daemon_error_reason)?;
+                let body = match reply {
+                    DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+                };
+                let candidates = body
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                let removed = body
+                    .get("removed")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                let protected = body
+                    .get("protected")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| "daemon returned an invalid clean result".to_owned())?;
+                Ok(if clean.apply {
+                    format!("Cleaned {removed} orphan resource(s); {protected} protected")
+                } else if candidates == 0 {
+                    "No orphan session resources found".to_owned()
+                } else {
+                    format!(
+                        "Found {candidates} orphan resource(s); run clean --apply to remove safe candidates"
+                    )
+                })
+            })();
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                result.unwrap_or_else(|error| format!("Clean failed: {error}")),
+            ))));
+        });
     }
 }
 
@@ -903,7 +978,10 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             Box::new(host.clone()),
             Box::new(host),
             Box::new(store),
-            Box::new(ProductionWorkspaceCommands),
+            Box::new(ProductionWorkspaceCommands {
+                workspace: snapshot.workspace_id,
+                root: snapshot.workspace.path.clone(),
+            }),
         )
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
