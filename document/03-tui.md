@@ -344,8 +344,8 @@ scroll、tab close / reorder、text selection、copy、link open は入力を受
 | Switch | 左 sidebar |
 | Closeup で pending / interrupted tab を選択中（live terminal viewport が無い） | Closeup の management input |
 | overlay・Closeup action modal が前面にある | その overlay |
-| [指示モード](#指示モードdirector-mode)の drawer が開いている | drawer の root conversation |
-| [workspace terminal drawer](#workspace-terminal-drawer)が開いている | drawer の root shell |
+| [指示モード](#指示モードdirector-mode)の drawer が入力を所有している | drawer の root conversation |
+| [workspace terminal drawer](#workspace-terminal-drawer)が入力を所有している | drawer の root shell |
 
 Switch の `←` / `→` は、上部に開いている project tab の安定した並びで前 / 次へ移動する。端では
 反対側へ循環し、tab が 1 件だけなら no-op になる。overlay、Closeup、編集欄、Director drawer が
@@ -373,10 +373,12 @@ preview は表示だけを移し、command target（active）と live PTY 入力
 active を変えないのは [Home と target](#home-と-target) のとおりで、Switch は PTY へキーを流さないため、
 入力は常に active target の focus 済み tab へ向かう。一度も開かれていない session を hover した場合は、
 未起動 target と同じ空の pane を描く。client が daemon へ attach する foreground terminal は preview に
-追従するため、通常は同時に attach する live terminal は 1 つである。Director drawer が開いている間だけは、
-背景の右ペインが Switch の cursor に追従したまま、foreground input を drawer で選択中の root conversation が
-所有する。このとき可視の managed terminal も 2 本目の read-only attachment として Director の左端までの可視 geometry へ resize し、
-出力を取得し続ける。したがって Agent content は dim のまま更新され、drawer を開いたことでは静止しない。
+追従するため、通常は同時に attach する live terminal は 1 つである。workspace drawer が開いている間は、
+背景の右ペインが Switch の cursor に追従したまま、最後に開いた drawer の root surface が foreground input を
+所有する。このとき可視の managed terminal は read-only attachment として残り、root shell だけを開いた場合はその上、
+Director も開いた場合は Director の左側かつ root shell の上の可視 geometry へ resize して出力を取得し続ける。
+Director と root shell が同時に開いていれば、入力を持たない root surface も read-only で attach する。したがって
+最大 3 本の terminal が同時に更新され、drawer を開いたことでは選択 session の Agent content を閉じたり静止させたりしない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
 一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
@@ -514,9 +516,14 @@ Home header の `[ ⌂ Shell ]` button または `Ctrl-O t` で toggle し、閉
 drawer の通常高は Home の 55% とし、10 rows 以上 32 rows 以下へ clamp する。背景に必要な高さを残せない短い端末では
 header の直下から下端までを使う。terminal viewport は border、title、footer を除いた drawer 専用 geometry で計算し、
 背景 Home は header を除いて dim にする。`[ ⌂ Shell ]` と `[ ♛ Director ]` は同じ header layout で描画・hit-test し、
-2 つの drawer は排他的に開く。一方を開くと他方を閉じるが、managed Closeup と root Agent/Terminal の各選択状態は保持する。
+2 つの drawer は同時に開ける。Director も開いている場合、workspace terminal drawer は Director の左側の band だけを使い、
+選択 session の Agent pane をその上に残す。Director が全幅へ縮退する狭幅では root shell が下側へ重なり、Director の上側を残す。
+最後に開いた drawer が入力を所有し、もう一方を再度選ぶと閉じずに入力を移す。
+入力を所有している drawer の toggle を実行したときだけその drawer を閉じ、残った drawer へ入力を戻す。
+managed Closeup と root Agent/Terminal の各選択状態はこの切替で保持する。
 
-drawer が開いている間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
+workspace terminal drawer が入力を所有している間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
+Director が後から入力を取得した場合も root terminal は描画と出力購読を継続するが、入力は受け取らない。
 `Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O t` または header button に限定する。
 workspace open / daemon reconnect では live root generic Terminal を inventory から復元するが、drawer は自動で開かず、
 明示的に開くまで背景で detached のまま保持する。root Diff は引き続き admission しない。

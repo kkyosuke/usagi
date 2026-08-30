@@ -45,7 +45,19 @@ pub struct RootTerminalViewport {
 /// Compute a full-width drawer that rises from the bottom edge.
 #[must_use]
 pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeometry {
+    geometry_for(raw_height, raw_width, usize::MAX)
+}
+
+/// Compute the bottom drawer inside a bounded horizontal band. Director uses
+/// its left background band here so both drawers remain fully visible.
+#[must_use]
+pub fn geometry_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+) -> RootTerminalDrawerGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let width = width.min(available_width);
     let available = height.saturating_sub(1);
     let desired = height.saturating_mul(11) / 20;
     let coexist_height = desired
@@ -69,7 +81,16 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeomet
 /// Terminal rows/columns inside the drawer's border, padding, and footer.
 #[must_use]
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> RootTerminalViewport {
-    let drawer = geometry(raw_height, raw_width);
+    terminal_viewport_for(raw_height, raw_width, usize::MAX)
+}
+
+#[must_use]
+pub fn terminal_viewport_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+) -> RootTerminalViewport {
+    let drawer = geometry_for(raw_height, raw_width, available_width);
     RootTerminalViewport {
         // modal::boxed: borders + two padding rows; body: footer row.
         rows: drawer.height.saturating_sub(5),
@@ -86,8 +107,29 @@ pub fn terminal_point_at(
     column: u16,
     row: u16,
 ) -> Option<TerminalPoint> {
-    let drawer = geometry(raw_height, raw_width);
-    let viewport = terminal_viewport(raw_height, raw_width);
+    terminal_point_at_for(
+        raw_height,
+        raw_width,
+        usize::MAX,
+        rows_len,
+        scroll,
+        column,
+        row,
+    )
+}
+
+#[must_use]
+pub fn terminal_point_at_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    rows_len: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let drawer = geometry_for(raw_height, raw_width, available_width);
+    let viewport = terminal_viewport_for(raw_height, raw_width, available_width);
     let column = usize::from(column).checked_sub(2)?;
     let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(2))?;
     if column >= viewport.cols || content_row >= viewport.rows {
@@ -108,15 +150,28 @@ pub fn render_over(
     base: &[String],
     projection: &RootTerminalDrawerProjection,
 ) -> Vec<String> {
+    render_over_for(raw_height, raw_width, usize::MAX, base, projection)
+}
+
+#[must_use]
+pub fn render_over_for(
+    raw_height: usize,
+    raw_width: usize,
+    available_width: usize,
+    base: &[String],
+    projection: &RootTerminalDrawerProjection,
+) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let drawer = geometry(raw_height, raw_width);
+    let drawer = geometry_for(raw_height, raw_width, available_width);
     let mut frame = (0..height)
         .map(|row| {
             let line = modal::columns(base.get(row).map_or("", String::as_str), 0, width);
-            if row == 0 {
+            if row == 0 || drawer.width == 0 {
                 line
             } else {
-                widgets::dim_ansi(&line)
+                let left = modal::columns(&line, 0, drawer.width);
+                let right = modal::columns(&line, drawer.width, width - drawer.width);
+                format!("{}{right}", widgets::dim_ansi(&left))
             }
         })
         .collect::<Vec<_>>();
@@ -153,7 +208,12 @@ pub fn render_over(
     for (offset, panel_line) in panel.iter().take(drawer.height).enumerate() {
         let row = drawer.top + offset;
         if row < frame.len() {
-            frame[row] = format!("{panel_line}\u{1b}[0m");
+            let suffix = modal::columns(
+                &frame[row],
+                drawer.width,
+                width.saturating_sub(drawer.width),
+            );
+            frame[row] = format!("{panel_line}\u{1b}[0m{suffix}");
         }
     }
     frame
@@ -176,6 +236,10 @@ mod tests {
         assert_eq!(short.height, 11);
         assert!(short.full_height);
         assert_eq!(geometry(0, 0), geometry(24, 80));
+
+        let bounded = geometry_for(30, 100, 40);
+        assert_eq!(bounded.width, 40);
+        assert_eq!(bounded.left, 0);
     }
 
     #[test]
@@ -198,6 +262,8 @@ mod tests {
         );
         assert_eq!(terminal_point_at(30, 100, 20, 0, 1, 0), None);
         assert_eq!(terminal_point_at(30, 100, 20, 0, 98, 29), None);
+        assert_eq!(terminal_viewport_for(30, 100, 40).cols, 36);
+        assert_eq!(terminal_point_at_for(30, 100, 40, 20, 0, 41, 29), None);
     }
 
     #[test]
@@ -226,6 +292,13 @@ mod tests {
                 .any(|line| strip_ansi(line).contains("root output"))
         );
         assert!(frame.iter().all(|line| display_width(line) == 100));
+
+        let bounded_base = (0..30)
+            .map(|row| format!("{}right background {row}", " ".repeat(50)))
+            .collect::<Vec<_>>();
+        let bounded = render_over_for(30, 100, 40, &bounded_base, &projection);
+        assert!(strip_ansi(&bounded[geometry_for(30, 100, 40).top]).contains("Workspace Terminal"));
+        assert!(strip_ansi(&bounded[29]).contains("right background 29"));
     }
 
     #[test]
