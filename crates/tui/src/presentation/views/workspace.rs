@@ -4505,6 +4505,10 @@ mod tests {
                         refname: "refs/heads/main".into(),
                     },
                     BranchChoice {
+                        label: "remote:origin/(default)".into(),
+                        refname: "refs/remotes/origin/HEAD".into(),
+                    },
+                    BranchChoice {
                         label: "remote:origin/main".into(),
                         refname: "refs/remotes/origin/main".into(),
                     },
@@ -4521,6 +4525,14 @@ mod tests {
         ));
         assert!(local.contains("base: local:main"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let remote_default = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(remote_default.contains("base: remote:origin/(default)"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let remote = joined_home(&HomeProjection::from_state(
             &state,
             "work",
@@ -4528,6 +4540,14 @@ mod tests {
             &[],
         ));
         assert!(remote.contains("base: remote:origin/main"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let remote_default = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(remote_default.contains("base: remote:origin/(default)"));
     }
 
     #[test]
