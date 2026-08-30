@@ -62,6 +62,7 @@ pub struct Cell {
     ch: char,
     style: String,
     continuation: bool,
+    wrapped: bool,
 }
 
 impl Cell {
@@ -85,11 +86,19 @@ impl Cell {
         self.continuation
     }
 
+    /// Whether this cell marks a physical row boundary produced by terminal
+    /// auto-wrap rather than an explicit line feed.
+    #[must_use]
+    pub const fn wrapped(&self) -> bool {
+        self.wrapped
+    }
+
     fn blank() -> Self {
         Self {
             ch: ' ',
             style: String::new(),
             continuation: false,
+            wrapped: false,
         }
     }
 }
@@ -562,6 +571,18 @@ impl VtScreen {
         rows
     }
 
+    /// Returns one auto-wrap marker per retained physical row, aligned with
+    /// [`Self::cells_with_scrollback`]. A true entry means copying into the
+    /// following row must not insert a newline.
+    #[must_use]
+    pub fn soft_wraps_with_scrollback(&self) -> Vec<bool> {
+        self.scrollback
+            .iter()
+            .chain(&self.grid)
+            .map(|row| row.iter().any(Cell::wrapped))
+            .collect()
+    }
+
     /// The zero-based cursor position, clamped inside the grid.
     #[must_use]
     pub const fn cursor(&self) -> (usize, usize) {
@@ -757,6 +778,9 @@ impl VtScreen {
             (ch, width)
         };
         if self.cursor_col >= self.cols || self.cursor_col + width > self.cols {
+            if let Some(cell) = self.grid[self.cursor_row].last_mut() {
+                cell.wrapped = true;
+            }
             self.cursor_col = 0;
             self.line_feed();
         }
@@ -769,12 +793,14 @@ impl VtScreen {
             ch,
             style: self.style.clone(),
             continuation: false,
+            wrapped: false,
         };
         for column in 1..width {
             self.grid[self.cursor_row][self.cursor_col + column] = Cell {
                 ch: '\0',
                 style: self.style.clone(),
                 continuation: true,
+                wrapped: false,
             };
         }
         self.cursor_col += width;
@@ -1027,7 +1053,8 @@ fn encode_row(row: &[Cell], styles: &mut StyleInterner) -> RowCheckpoint {
             Some(last)
                 if last.style_id == style_id
                     && last.ch == cell.ch
-                    && last.continuation == cell.continuation =>
+                    && last.continuation == cell.continuation
+                    && last.wrapped == cell.wrapped =>
             {
                 last.repeat += 1;
             }
@@ -1035,6 +1062,7 @@ fn encode_row(row: &[Cell], styles: &mut StyleInterner) -> RowCheckpoint {
                 style_id,
                 ch: cell.ch,
                 continuation: cell.continuation,
+                wrapped: cell.wrapped,
                 repeat: 1,
             }),
         }
@@ -1075,6 +1103,7 @@ fn decode_row(
             ch: run.ch,
             style: styles[run.style_id as usize].clone(),
             continuation: run.continuation,
+            wrapped: run.wrapped,
         };
         for _ in 0..run.repeat {
             cells.push(cell.clone());
@@ -1367,8 +1396,15 @@ fn append_scrollback(rows: &mut VecDeque<Vec<Cell>>, row: Vec<Cell>, max_rows: u
 }
 
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
+    let wrapped = row.iter().any(Cell::wrapped);
     row.truncate(cols);
     row.resize(cols, Cell::blank());
+    for cell in row.iter_mut() {
+        cell.wrapped = false;
+    }
+    if wrapped && let Some(cell) = row.last_mut() {
+        cell.wrapped = true;
+    }
     let mut column = 0;
     while column < row.len() {
         if row[column].continuation {
@@ -1609,7 +1645,18 @@ mod tests {
 
     #[test]
     fn printing_past_the_width_wraps_to_the_next_row() {
-        assert_eq!(screen_after(2, 3, b"abcd"), vec!["abc", "d"]);
+        let mut screen = VtScreen::new(2, 3);
+        screen.advance(b"abcd");
+        assert_eq!(rows(&screen), vec!["abc", "d"]);
+        assert_eq!(screen.soft_wraps_with_scrollback(), vec![true, false]);
+    }
+
+    #[test]
+    fn explicit_newline_after_a_full_row_is_not_an_auto_wrap() {
+        let mut screen = VtScreen::new(2, 3);
+        screen.advance(b"abc\r\nd");
+        assert_eq!(rows(&screen), vec!["abc", "d"]);
+        assert_eq!(screen.soft_wraps_with_scrollback(), vec![false, false]);
     }
 
     #[test]
@@ -1772,6 +1819,7 @@ mod tests {
                 ch,
                 style: String::new(),
                 continuation: false,
+                wrapped: false,
             }]
         };
 
@@ -2368,6 +2416,7 @@ mod tests {
                         style_id: 0,
                         ch: ' ',
                         continuation: false,
+                        wrapped: false,
                         repeat: 1,
                     }],
                 }],
@@ -2524,6 +2573,7 @@ mod tests {
                 style_id: 9,
                 ch: ' ',
                 continuation: false,
+                wrapped: false,
                 repeat: 1,
             }],
         }];
@@ -2541,12 +2591,14 @@ mod tests {
                     style_id: 0,
                     ch: ' ',
                     continuation: false,
+                    wrapped: false,
                     repeat: u32::MAX,
                 },
                 CellRun {
                     style_id: 0,
                     ch: ' ',
                     continuation: false,
+                    wrapped: false,
                     repeat: u32::MAX,
                 },
             ],
@@ -2605,6 +2657,7 @@ mod tests {
                     style_id: 0,
                     ch: ' ',
                     continuation: false,
+                    wrapped: false,
                     repeat: 1
                 }],
             };
@@ -2628,6 +2681,7 @@ mod tests {
                     style_id: 0,
                     ch: 'x',
                     continuation: false,
+                    wrapped: false,
                     repeat: 1,
                 };
                 3

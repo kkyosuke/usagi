@@ -811,9 +811,11 @@ impl Target {
     }
 }
 
-/// Home の navigation cursor。`NewSession` は action row であり active にはならない。
+/// Home の navigation cursor。action row と空 workspace の中立状態を区別する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Selection {
+    /// session が無い Home で、まだ action row を明示選択していない。
+    Idle,
     /// root または session target を選ぶ。
     Target(Target),
     /// `+ new session` action row を選ぶ。
@@ -1151,11 +1153,11 @@ impl ExitChoice {
 
 impl AppState {
     /// The first managed session is selected/active when present. An empty Home
-    /// selects `+ new session` and has no active managed target.
+    /// starts neutral instead of implicitly selecting the new-session action.
     #[must_use]
     pub fn home(workspace: WorkspaceId, sessions: Vec<SessionId>) -> Self {
         let active = sessions.first().copied();
-        let selected = active.map_or(Selection::NewSession, |session| {
+        let selected = active.map_or(Selection::Idle, |session| {
             Selection::Target(Target::Session(session))
         });
         Self {
@@ -1614,17 +1616,18 @@ impl AppState {
             self.selected = match self.selected {
                 Selection::Target(Target::Session(session)) => {
                     replacement_session(previous_sessions, &self.sessions, session, |_| true)
-                        .map_or(Selection::NewSession, |session| {
+                        .map_or(Selection::Idle, |session| {
                             Selection::Target(Target::Session(session))
                         })
                 }
-                Selection::Target(Target::Root(_)) | Selection::NewSession => self
-                    .sessions
-                    .first()
-                    .copied()
-                    .map_or(Selection::NewSession, |session| {
-                        Selection::Target(Target::Session(session))
-                    }),
+                Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => {
+                    self.sessions
+                        .first()
+                        .copied()
+                        .map_or(Selection::Idle, |session| {
+                            Selection::Target(Target::Session(session))
+                        })
+                }
             };
         }
         if let Some(active) = self.active
@@ -1720,7 +1723,7 @@ fn sidebar_row_height(row: Selection) -> usize {
         Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
         // Root is not a Home row. Treat a stale/private synthetic value as one
         // line so geometry remains total without reintroducing a divider.
-        Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
+        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
     }
 }
 
@@ -1729,7 +1732,7 @@ fn sidebar_row_height(row: Selection) -> usize {
 fn sidebar_row_content_lines(row: Selection) -> usize {
     match row {
         Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
-        Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
+        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
     }
 }
 
@@ -4800,6 +4803,21 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Ok(overview::Command::Clean { arguments }) => {
+            if overview::parse_clean(&arguments).is_err() {
+                state.notice = Some(Notice::new(
+                    "invalid clean arguments (usage: clean [--apply [--force]])",
+                ));
+                Vec::new()
+            } else {
+                state.overlay = None;
+                state.notice = Some(Notice::new("Inspecting orphan session resources"));
+                vec![Effect::WorkspaceCommand {
+                    workspace: state.workspace,
+                    command: overview::Command::Clean { arguments },
+                }]
+            }
+        }
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
                 if state.garden_available {
@@ -5213,7 +5231,7 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
         }
         // Root and stale session selections are not Home rows and cannot open a
         // managed Closeup.
-        Selection::Target(Target::Root(_) | Target::Session(_)) => Vec::new(),
+        Selection::Idle | Selection::Target(Target::Root(_) | Target::Session(_)) => Vec::new(),
         Selection::NewSession => open_create_session(state),
     }
 }
@@ -6155,7 +6173,7 @@ mod tests {
     }
 
     #[test]
-    fn home_starts_with_first_session_or_new_session_when_empty() {
+    fn home_starts_with_first_session_or_neutral_selection_when_empty() {
         let (workspace, first, second) = ids();
         let state = AppState::home(workspace, vec![first, second]);
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
@@ -6164,8 +6182,19 @@ mod tests {
         assert_eq!(state.sessions(), &[first, second]);
 
         let empty = AppState::home(workspace, Vec::new());
-        assert_eq!(empty.selected(), Selection::NewSession);
+        assert_eq!(empty.selected(), Selection::Idle);
         assert_eq!(empty.active(), None);
+
+        let mut empty = empty;
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(empty.overlay(), None);
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Char('t'))).is_empty());
+        assert_eq!(empty.selected(), Selection::Idle);
+        assert_eq!(empty.overlay(), None);
+        let _ = update(&mut empty, AppEvent::Key(AppKey::Down));
+        assert_eq!(empty.selected(), Selection::NewSession);
+        assert!(update(&mut empty, AppEvent::Key(AppKey::Char('t'))).is_empty());
+        assert_eq!(empty.overlay(), Some(Overlay::CreateSession));
     }
 
     #[test]
@@ -7609,7 +7638,7 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
         );
-        assert_eq!(state.selected(), Selection::NewSession);
+        assert_eq!(state.selected(), Selection::Idle);
         assert_eq!(state.active(), None);
     }
 
@@ -8209,7 +8238,7 @@ mod tests {
         );
         assert!(terminal.is_empty());
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-        assert_eq!(state.selected(), Selection::NewSession);
+        assert_eq!(state.selected(), Selection::Idle);
 
         // Workspace-global surfaces remain independent of managed navigation.
         assert!(matches!(
@@ -9699,6 +9728,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn overview_clean_requires_explicit_apply_before_force() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("clean --apply".to_owned())),
+            ),
+            vec![Effect::WorkspaceCommand {
+                workspace,
+                command: overview::Command::Clean {
+                    arguments: "--apply".to_owned(),
+                },
+            }]
+        );
+        assert_eq!(state.overlay(), None);
+
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("clean --force".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("invalid clean arguments (usage: clean [--apply [--force]])")
+        );
+    }
+
     fn pending_decision(workspace: WorkspaceId) -> UserDecision {
         UserDecision {
             decision_id: UserDecisionId::new(),
@@ -9997,6 +10061,8 @@ mod tests {
         assert!(state.session_pr_revision() > revision);
         assert!(state.pr_overlay().is_none());
         assert_eq!(state.overlay(), None);
+        assert_eq!(state.selected(), Selection::Idle);
+        assert_eq!(state.active(), None);
     }
 
     #[test]

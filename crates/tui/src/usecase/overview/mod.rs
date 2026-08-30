@@ -38,6 +38,7 @@ pub struct CommandInfo {
 /// `arguments` は前後の空白だけを除いた未解釈文字列で、文法の検証は各ハンドラに委ねる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Clean { arguments: String },
     Config { arguments: String },
     Daemon { arguments: String },
     Env { arguments: String },
@@ -45,6 +46,14 @@ pub enum Command {
     Issue { arguments: String },
     Roles { arguments: String },
     Session { arguments: String },
+}
+
+/// Parsed orphan cleanup intent. Applying and forcing are deliberately
+/// separate acknowledgements because only force may discard Git changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanCommand {
+    pub apply: bool,
+    pub force: bool,
 }
 
 /// `session` command の daemon-authoritative 操作意図。
@@ -82,6 +91,15 @@ struct CommandDefinition {
 /// Overview 固有コマンドの registry。metadata と入力名の解決で共有する単一情報源。
 /// 候補表示が安定するよう名前順に並べる。
 const DEFINITIONS: &[CommandDefinition] = &[
+    CommandDefinition {
+        info: CommandInfo {
+            name: "clean",
+            description: "Inspect or remove orphan session resources",
+            usage: "clean [--apply [--force]]",
+            long_description: "Compare daemon lifecycle state with managed Git worktrees and branches.",
+        },
+        factory: |arguments| Command::Clean { arguments },
+    },
     CommandDefinition {
         info: CommandInfo {
             name: "config",
@@ -146,6 +164,30 @@ const DEFINITIONS: &[CommandDefinition] = &[
         factory: |arguments| Command::Session { arguments },
     },
 ];
+
+/// Parse the same explicit confirmation vocabulary as `usagi clean`.
+///
+/// # Errors
+///
+/// Returns a usage error unless the arguments are empty, `--apply`, or the
+/// explicit `--apply --force` pair.
+pub fn parse_clean(arguments: &str) -> Result<CleanCommand, &'static str> {
+    match arguments.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Ok(CleanCommand {
+            apply: false,
+            force: false,
+        }),
+        ["--apply"] => Ok(CleanCommand {
+            apply: true,
+            force: false,
+        }),
+        ["--apply", "--force"] | ["--force", "--apply"] => Ok(CleanCommand {
+            apply: true,
+            force: true,
+        }),
+        _ => Err("invalid clean arguments (usage: clean [--apply [--force]])"),
+    }
+}
 
 /// `session` が受け付ける workspace-level subcommand。実行の解釈は session
 /// handler が所有し、ここは palette の補完候補だけを一元化する。
@@ -293,6 +335,7 @@ impl Command {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::Clean { .. } => "clean",
             Self::Config { .. } => "config",
             Self::Daemon { .. } => "daemon",
             Self::Env { .. } => "env",
@@ -308,6 +351,7 @@ impl Command {
         use commands as h;
 
         match self {
+            Self::Clean { arguments } => Box::new(h::Clean { arguments }),
             Self::Config { arguments } => Box::new(h::Config { arguments }),
             Self::Daemon { arguments } => Box::new(h::Daemon { arguments }),
             Self::Env { arguments } => Box::new(h::Env { arguments }),
@@ -396,8 +440,9 @@ pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry, ParseError,
-        SessionCommand, commands, complete, completion, dispatch, help, interpret, parse_session,
+        CleanCommand, Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry,
+        ParseError, SessionCommand, commands, complete, completion, dispatch, help, interpret,
+        parse_clean, parse_session,
     };
 
     struct FakeRegistry(Vec<CommandInfo>);
@@ -415,7 +460,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
             ]
         );
         assert!(
@@ -425,6 +470,9 @@ mod tests {
         );
         assert_eq!(
             [
+                Command::Clean {
+                    arguments: String::new()
+                },
                 Command::Config {
                     arguments: String::new()
                 },
@@ -449,9 +497,43 @@ mod tests {
             ]
             .map(|command| command.name()),
             [
-                "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
             ]
         );
+    }
+
+    #[test]
+    fn clean_requires_explicit_apply_and_force_acknowledgements() {
+        assert_eq!(
+            parse_clean(""),
+            Ok(CleanCommand {
+                apply: false,
+                force: false,
+            })
+        );
+        assert_eq!(
+            parse_clean("--apply"),
+            Ok(CleanCommand {
+                apply: true,
+                force: false,
+            })
+        );
+        assert_eq!(
+            parse_clean("--apply --force"),
+            Ok(CleanCommand {
+                apply: true,
+                force: true,
+            })
+        );
+        assert_eq!(
+            parse_clean("--force --apply"),
+            Ok(CleanCommand {
+                apply: true,
+                force: true,
+            })
+        );
+        assert!(parse_clean("--force").is_err());
+        assert!(parse_clean("--apply extra").is_err());
     }
 
     #[test]
