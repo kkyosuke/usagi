@@ -1915,7 +1915,8 @@ mod tests {
     use super::{
         AgentResumeRelation, CloseOutcome, InterruptedTab, PaneEvent, PaneKind, PaneRegistryEffect,
         PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection,
-        RootTerminalTabProjection, TabSelection, WorkspaceRuntime, tab_selection,
+        RootTerminalTabProjection, TabSelection, WorkspaceRuntime, root_tab_is_terminal,
+        tab_selection,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
@@ -1924,8 +1925,8 @@ mod tests {
         Target,
     };
     use crate::usecase::application::pane::{
-        LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection, PendingPane,
-        reduce_registry,
+        InterruptedPane, LivePane, PaneEffect, PaneRegistry, PaneRegistryEvent, PaneSelection,
+        PendingPane, reduce_registry,
     };
     use crate::usecase::terminal_input::LiveTerminalAction;
     use chrono::Utc;
@@ -3505,7 +3506,7 @@ mod tests {
         assert_eq!(
             runtime.root_terminal_projection(Some(&terminal_view)),
             RootTerminalDrawerProjection {
-                terminal_view: Some(terminal_view),
+                terminal_view: Some(terminal_view.clone()),
                 tabs: vec![RootTerminalTabProjection {
                     label: "Terminal 1".to_owned(),
                     selected: true,
@@ -3514,6 +3515,21 @@ mod tests {
                 pending: true,
                 feedback: None,
             }
+        );
+        let rendered = runtime.render(
+            24,
+            100,
+            "demo",
+            ".",
+            &[],
+            None,
+            &BTreeMap::new(),
+            Some(terminal_view),
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|row| row.contains("Workspace Terminal"))
         );
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
@@ -3527,6 +3543,12 @@ mod tests {
     #[test]
     fn bottom_terminal_drawer_opens_new_tabs_cycles_terminals_and_closes_when_empty() {
         let workspace = WorkspaceId::new();
+        assert!(!root_tab_is_terminal(&PaneTab::Interrupted(
+            InterruptedPane {
+                tab: interrupted_tab(workspace, SessionId::new(), true),
+                resuming: None,
+            }
+        )));
         let first = TerminalRef {
             daemon_generation: DaemonGeneration::new(),
             terminal_id: TerminalId::new(),

@@ -8633,8 +8633,9 @@ mod tests {
         run_workspace_controller_with_backend_and_config,
         run_workspace_controller_with_backend_and_settings,
         run_workspace_deck_with_backend_and_config, safe_session_error, select_right_pane_tab,
-        sidebar_pointer_event, step_config, step_new, step_open, terminal_geometry,
-        visit_garden_agent, welcome_action, workspace_has_unsaved_surface, write_banner,
+        select_root_terminal_tab, sidebar_pointer_event, step_config, step_new, step_open,
+        terminal_geometry, visit_garden_agent, welcome_action, workspace_has_unsaved_surface,
+        write_banner,
     };
     use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
@@ -21725,6 +21726,71 @@ mod tests {
             retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::NextTab)),
             Key::Live(LiveTerminalAction::NextTab)
         );
+    }
+
+    #[test]
+    fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let managed = live_terminal_ref(workspace, session);
+        let (mut ui, mut runtime) = focused_live_pane(
+            workspace,
+            session,
+            managed.clone(),
+            Box::new(WheelRecordingPort {
+                terminal: managed,
+                replay: Vec::new(),
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                input_error: false,
+            }),
+        );
+        let first = scoped_terminal_ref(workspace, None);
+        let second = scoped_terminal_ref(workspace, None);
+        for terminal in [&first, &second] {
+            let operation = OperationId::new();
+            let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Terminal);
+            let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
+        }
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+        let _ = runtime.select_tab_selection(TabSelection::Live(first.clone()));
+
+        assert!(!select_root_terminal_tab(&Key::Other, &mut runtime));
+        assert!(select_root_terminal_tab(
+            &Key::Live(LiveTerminalAction::NextTab),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(second.clone()));
+        assert!(select_root_terminal_tab(
+            &Key::Live(LiveTerminalAction::PreviousTab),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(first));
+
+        let mut controls = LiveTerminalControls::default();
+        let mut term = FakeTerminal::default();
+        let mut browser = UnavailableBrowserOpener;
+        let mut pending_targets = std::collections::HashMap::new();
+        let tab_row = u16::try_from(
+            crate::presentation::views::root_terminal_drawer::geometry(30, 100).top + 2,
+        )
+        .unwrap();
+        assert!(intercept_live_terminal_control(
+            &Key::Click {
+                column: 15,
+                row: tab_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            30,
+            100,
+            0,
+            0,
+        ));
+        assert_eq!(runtime.focused_terminal(), Some(second));
     }
 
     #[test]

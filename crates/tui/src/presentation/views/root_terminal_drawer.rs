@@ -284,6 +284,7 @@ mod tests {
         let body_row = u16::try_from(top + 3).unwrap();
         assert_eq!(tab_at(30, 100, &tabs, 2, tab_row), Some(0));
         assert_eq!(tab_at(30, 100, &tabs, 15, tab_row), Some(1));
+        assert_eq!(tab_at(30, 100, &tabs, 29, tab_row), None);
         assert_eq!(tab_at(30, 100, &tabs, 2, body_row), None);
     }
 
@@ -300,11 +301,18 @@ mod tests {
                 scroll: 0,
                 feedback: None,
             }),
-            tabs: vec![RootTerminalTabProjection {
-                label: "Terminal 1".to_owned(),
-                selected: true,
-                pending: false,
-            }],
+            tabs: vec![
+                RootTerminalTabProjection {
+                    label: "Terminal 1".to_owned(),
+                    selected: true,
+                    pending: false,
+                },
+                RootTerminalTabProjection {
+                    label: "Terminal 2".to_owned(),
+                    selected: false,
+                    pending: false,
+                },
+            ],
             pending: false,
             feedback: None,
         };
