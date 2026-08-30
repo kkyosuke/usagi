@@ -12,6 +12,7 @@ use crate::presentation::theme::{Role, Style, garden_rabbit_style};
 use super::agent_status;
 use super::button::InlineButton;
 use super::{clip_to_width, display_width, pad_to_width};
+use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
 
 /// Garden を表示できる最小端末幅。
 pub const MIN_WIDTH: usize = 64;
@@ -91,6 +92,10 @@ pub struct GardenSession {
     /// that an empty cached list means the session owns no Agents.
     pub agents_observed: bool,
     pub agents: Vec<GardenAgent>,
+    /// Daemon-owned dispatch availability from `session list`. Runtime phases
+    /// remain the per-Agent detail, but a terminal dispatch state (idle,
+    /// exited, or failed) overrides a stale/coarse `live -> running` badge.
+    pub agent_status: Option<DispatchAgentStatus>,
     /// A short, non-blocking celebration after one of the session's PRs merges.
     pub pr_merged: bool,
 }
@@ -545,10 +550,27 @@ fn session_may_animate(session: &GardenSession) -> bool {
 fn header_line(width: usize, workspace_name: &str, sessions: &[GardenSession]) -> String {
     let running = sessions
         .iter()
-        .filter(|session| session.lifecycle == SessionLifecycle::Available)
-        .flat_map(|session| &session.agents)
-        .filter(|agent| agent.phase == AgentPhase::Running)
-        .count();
+        .map(|session| {
+            if session.lifecycle != SessionLifecycle::Available
+                || matches!(
+                    session.agent_status,
+                    Some(
+                        DispatchAgentStatus::Starting
+                            | DispatchAgentStatus::Idle
+                            | DispatchAgentStatus::Exited
+                            | DispatchAgentStatus::Failed
+                    )
+                )
+            {
+                return 0;
+            }
+            session
+                .agents
+                .iter()
+                .filter(|agent| agent.phase == AgentPhase::Running)
+                .count()
+        })
+        .sum::<usize>();
     let left = Role::Feature.style().bold().paint(&format!(
         " usagi / {}",
         clip_to_width(workspace_name, width / 2)
@@ -603,7 +625,7 @@ fn footer_line(width: usize, scrollable: bool) -> String {
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let label = signpost(&session.label);
-    let ([status, ears, head, body, feet], rabbits) = if session.agents_observed {
+    let ([mut status, ears, head, body, feet], rabbits) = if session.agents_observed {
         match session.lifecycle {
             SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
             // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
@@ -612,9 +634,28 @@ fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     } else {
         (inactive_plot(session), Vec::new())
     };
+    if session.lifecycle == SessionLifecycle::Available
+        && session.agents_observed
+        && let Some(dispatch_status) = dispatch_status_line(session.agent_status)
+    {
+        status = centered(PLOT_WIDTH, &dispatch_status);
+    }
     Plot {
         rows: [label, status, ears, head, body, feet],
         rabbits,
+    }
+}
+
+/// A terminal dispatch status is stronger than the inventory's coarse `Live`
+/// fallback. `Running` deliberately returns `None`: runtime-local Waiting and
+/// Interrupted phases are more precise while a dispatch is active.
+fn dispatch_status_line(status: Option<DispatchAgentStatus>) -> Option<String> {
+    match status? {
+        DispatchAgentStatus::Running => None,
+        DispatchAgentStatus::Starting => Some(Role::Accent.style().bold().paint("starting")),
+        DispatchAgentStatus::Idle => Some(Style::new().dim().paint("idle")),
+        DispatchAgentStatus::Exited => Some(Style::new().dim().paint("stopped")),
+        DispatchAgentStatus::Failed => Some(Role::Danger.style().bold().paint("failed")),
     }
 }
 
@@ -1010,6 +1051,7 @@ mod tests {
         render_scrolled,
     };
     use crate::presentation::widgets::display_width;
+    use usagi_core::domain::agent::AgentStatus as DispatchAgentStatus;
     use usagi_core::domain::id::{AgentRuntimeId, SessionId};
     use usagi_core::domain::session_lifecycle::{AgentPhase, SessionLifecycle};
 
@@ -1059,6 +1101,41 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn dispatch_status_overrides_the_coarse_live_running_badge() {
+        for (status, expected) in [
+            (DispatchAgentStatus::Starting, "starting"),
+            (DispatchAgentStatus::Idle, "idle"),
+            (DispatchAgentStatus::Exited, "stopped"),
+            (DispatchAgentStatus::Failed, "failed"),
+        ] {
+            let mut session = session(
+                STEADY_ID,
+                "status",
+                SessionLifecycle::Available,
+                AgentPhase::Running,
+            );
+            session.agent_status = Some(status);
+            let frame = render(24, 100, "x", &[session], 0, true).expect("garden fits");
+            let text = plain(&frame).join("\n");
+            assert!(text.contains(expected), "{status:?}: {text}");
+            assert!(
+                text.contains("1 sessions · 0 running"),
+                "{status:?}: {text}"
+            );
+        }
+
+        let mut waiting = session(
+            STEADY_ID,
+            "status",
+            SessionLifecycle::Available,
+            AgentPhase::Waiting,
+        );
+        waiting.agent_status = Some(DispatchAgentStatus::Running);
+        let frame = render(24, 100, "x", &[waiting], 0, true).expect("garden fits");
+        assert!(plain(&frame).join("\n").contains("waiting"));
+    }
+
     fn only(lifecycle: SessionLifecycle, phase: AgentPhase, tick: u64) -> Vec<String> {
         only_with_motion(lifecycle, phase, tick, false)
     }
@@ -1099,6 +1176,7 @@ mod tests {
                 runtime_id: AgentRuntimeId::parse(id).expect("fixture runtime id"),
                 phase,
             }],
+            agent_status: None,
         }
     }
 
@@ -1321,6 +1399,7 @@ mod tests {
             agents_observed: true,
             pr_merged: false,
             agents,
+            agent_status: None,
         };
         let first = render(24, 100, "x", &[make_session(shuffled)], 2, false).expect("fits");
         let second = render(24, 100, "x", &[make_session(reversed)], 2, false).expect("fits");
@@ -1354,6 +1433,7 @@ mod tests {
             agents_observed: true,
             pr_merged: false,
             agents: vec![folded, running, waiting, hidden, ready],
+            agent_status: None,
         }];
         let frame = render(24, 100, "x", &sessions, 0, true).expect("garden fits");
         let rabbits = rabbits(&frame);
@@ -1454,6 +1534,7 @@ mod tests {
                 agents_observed: true,
                 pr_merged: false,
                 agents: Vec::new(),
+                agent_status: None,
             }],
             0,
             false,
@@ -1479,6 +1560,7 @@ mod tests {
                 agents_observed: false,
                 pr_merged: false,
                 agents: Vec::new(),
+                agent_status: None,
             }],
             0,
             false,
@@ -1506,6 +1588,7 @@ mod tests {
                 agents_observed: false,
                 pr_merged: false,
                 agents: Vec::new(),
+                agent_status: None,
             };
             let first = render(
                 24,
@@ -1800,6 +1883,7 @@ mod tests {
             agents_observed: true,
             pr_merged: false,
             agents,
+            agent_status: None,
         };
         let running_beyond_the_cap = plot(
             "running-beyond-the-cap",
@@ -1921,6 +2005,7 @@ mod tests {
             agents_observed: true,
             pr_merged: false,
             agents,
+            agent_status: None,
         };
 
         let all_waiting =
