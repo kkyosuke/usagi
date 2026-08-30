@@ -21791,6 +21791,22 @@ mod tests {
             0,
         ));
         assert_eq!(runtime.focused_terminal(), Some(second));
+        assert!(!intercept_live_terminal_control(
+            &Key::Click {
+                column: 29,
+                row: tab_row,
+            },
+            &mut ui,
+            &mut runtime,
+            &mut controls,
+            &mut term,
+            &mut browser,
+            &mut pending_targets,
+            30,
+            100,
+            0,
+            0,
+        ));
     }
 
     #[test]
