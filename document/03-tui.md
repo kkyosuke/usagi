@@ -973,13 +973,34 @@ resident にせず、観測できていない membership を推測もしない�
 閉じると表示前と同じ Home へ戻る。設計判断は
 [15. session garden](proposals/15-session-garden.md) を参照する。
 
-区画は端末の縦方向へ収まる数を1列として tab 順に上から下、次に右へ並べる。横方向に収まらない場合は固定容量で
+Garden 本体は左、`Notifications` panel は右に分ける。panel は端末幅の 3 分の 1 を基準に 24〜36 桁を使い、
+左の Garden は残りの幅で先頭 plot を左端へ固定する。区画は左領域の縦方向へ収まる数を1列として tab 順に上から下、
+次に右へ並べる。横方向に収まらない場合は固定容量で
 切り捨てず、footer の `← Scroll` / `Scroll →` button または `←` / `→` key で viewport を1 plot列ずつ動かす。
 footer は表示中のsession範囲と全件数を示し、最後のprojectを含む全sessionへGarden内から到達できる。scroll button は
 左右1cellのpaddingを含む描画範囲全体をclick targetにし、左右端の無効な方向を押してもGardenを閉じない。
 
 開き方は 2 つある。Overview の `garden` command で手動で開くか、Home が一定時間 idle になったときに
 自動で開く。
+
+### notification panel
+
+右 panel は event 履歴を別に保持せず、現在の viewport に見えている session と同じ safe projection を短い説明文へ写す。
+各項目は session label と説明の 2 行で、縦幅に収まらない項目は `+N more in this view` に畳む。Garden を横スクロールすると
+panel も同じ viewport へ切り替わるため、見えていないうさぎの古い通知が残ることはない。
+
+| 現在状態 | 1 Agent の説明例 |
+|---|---|
+| `Waiting` | `Agent needs your input.` |
+| `Running` | `Agent is working.` |
+| dispatch `Idle`、または phase `Ended` / `Exited` | `Agent completed.` |
+| `Interrupted` | `Agent was interrupted.` |
+| session lifecycle `Failed` | `Session failed.` |
+| PR merge celebration | `PR merged.` |
+
+複数 Agent が属する session は、注目度の高い現在状態と該当数を `1/3 agents need input.` のように示す。
+通知は lifecycle、dispatch status、Agent phase の順に強い事実を採用し、raw error、prompt、terminal output、provider-native ID は
+panel へ渡さない。inactive project をまだ観測していない場合は `Status is unavailable.` とし、状態を推測しない。
 
 ### 区画とうさぎ
 
@@ -1029,7 +1050,7 @@ controller が runtime の `Ended` / `Exited` を観測した runtime（tab は�
 composition root は起動時に `USAGI_REDUCE_MOTION=1` を読み、boolean を projection へ注入する。この設定では
 全 pose を静止姿勢に固定し、lifecycle と Agent phase の状態ラベルだけを更新する。
 
-Garden の背景は workspace 名から決定的に配置した `.` / `*` の空、session 名を挟んだ立札、庭の全幅へ続く草地と
+Garden の背景は workspace 名から決定的に配置した `.` / `*` の空、session 名を挟んだ立札、左の庭領域へ続く草地と
 薄い土の 2 層で構成する。装飾は ASCII を基本とし、同じ workspace・session 順・端末幅では refresh ごとに移動しない。
 状態ラベルに加え、`Ready` は足元の草、`Done` は `z`、`Failed` は枯れ草を小さく添える。これらは雰囲気の補助であり、
 状態の意味は引き続き文字ラベルと顔で伝える。footer は左にうさぎの click 操作、右に任意キーで起こす操作を分けて表示する。

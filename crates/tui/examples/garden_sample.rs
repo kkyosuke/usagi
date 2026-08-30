@@ -24,7 +24,7 @@ fn main() {
             "02000000-0000-4000-8000-000000000003",
             "coder",
             SessionLifecycle::Available,
-            AgentPhase::Absent,
+            AgentPhase::Ended,
         ),
         sample(
             "03000000-0000-4000-8000-000000000004",
@@ -69,7 +69,7 @@ fn main() {
         0,
         (1, false),
     );
-    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 2 plot が見える。
+    // 64x14 terminal の先頭 1 行は project bar、残る 13 行では 1 plot が見える。
     // 左右端を出し、1 列ずつ横スクロールして全 session へ到達できることを眺める。
     scene_scrolled(
         "64x14 terminal · Garden left edge",
@@ -85,7 +85,7 @@ fn main() {
         13,
         64,
         &sessions,
-        4,
+        usize::MAX,
         1,
         false,
     );

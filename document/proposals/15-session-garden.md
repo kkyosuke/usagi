@@ -274,8 +274,9 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 
 10. inactive project の Agent membership を Garden 表示中だけ daemon から観測し、cached lifecycle が
     `Available` の区画へうさぎを描く。
+11. うさぎの plot を左領域へ寄せ、右の notification panel に同じ safe projection から導出した現在状態を表示する。
 
-1〜10 はすべて実装済みで、うさぎは agent 単位である。
+1〜11 はすべて実装済みで、うさぎは agent 単位である。
 
 受け入れ条件は次のとおりである。
 
@@ -295,6 +296,7 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 - Garden から daemon command を直接発行しない。observation lane は read-only で、daemon を起動しない。
 - 開いているどの project の session も、その project の Agent を観測できていればうさぎになり、観測できて
   いなければ推測されない。
+- notification panel は表示中の plot と同じ viewport を説明し、完了、入力待ち、実行中、失敗を安全な文で区別する。
 - selected session が snapshot 更新で消えた場合は、既存 reconciliation と同じ surviving session へ着地する。
 
 ## 採用しない案
