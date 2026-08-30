@@ -707,7 +707,11 @@ impl TerminalSession {
     /// the returned selection's copy text.
     #[must_use]
     pub fn begin_selection(&self, anchor: TerminalPoint) -> TerminalSelection {
-        TerminalSelection::begin(self.cells(), anchor)
+        TerminalSelection::begin_with_wraps(
+            self.cells(),
+            self.screen.soft_wraps_with_scrollback(),
+            anchor,
+        )
     }
 
     /// Attaches (or reattaches) with this pane's viewport and rebuilds the
@@ -3481,10 +3485,13 @@ mod tests {
 
     #[test]
     fn begin_selection_snapshots_the_current_terminal_cells() {
-        let session = TerminalSession::new(terminal(), geometry());
+        let mut session = TerminalSession::new(terminal(), Geometry { rows: 2, cols: 4 });
+        session.screen.advance(b"abcde");
         let point = TerminalPoint { row: 0, column: 0 };
-        let selection = session.begin_selection(point);
+        let mut selection = session.begin_selection(point);
+        selection.extend(TerminalPoint { row: 1, column: 0 });
         assert_eq!(selection.anchor(), point);
-        assert_eq!(selection.focus(), point);
+        assert_eq!(selection.focus(), TerminalPoint { row: 1, column: 0 });
+        assert_eq!(selection.text(), "abcde");
     }
 }

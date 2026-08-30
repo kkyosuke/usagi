@@ -19,7 +19,7 @@ const INNER_WIDTH: usize = 56;
 /// 一度に出す候補の最大数。
 const MAX_MATCHES: usize = 8;
 /// input, heading, candidates, help, result, and footer.
-const BODY_HEIGHT: usize = 16;
+const BODY_HEIGHT: usize = 20;
 
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -331,6 +331,7 @@ impl OverviewModal {
 
     fn subcommands(&self) -> &'static [&'static str] {
         match self.selected_command().map(|command| command.name) {
+            Some("clean") => &["--apply", "--apply --force"],
             Some("session") => &["list", "overview", "remove"],
             _ => &[],
         }
@@ -470,7 +471,7 @@ mod tests {
         assert_eq!(modal.input(), "");
         assert_eq!(modal.cursor(), 0);
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.matches().len(), 7);
+        assert_eq!(modal.matches().len(), 8);
         // derive された Clone / Debug / Eq も触れる。
         assert!(format!("{:?}", modal.clone()).contains("OverviewModal"));
         assert_eq!(modal.clone(), modal);
@@ -480,7 +481,7 @@ mod tests {
         // registry metadata の derive も。
         let hint = modal.matches()[0];
         assert_eq!(hint, hint);
-        assert!(format!("{hint:?}").contains("config"));
+        assert!(format!("{hint:?}").contains("clean"));
     }
 
     #[test]
@@ -519,20 +520,20 @@ mod tests {
             vec!["config"]
         );
         modal.backspace();
-        // "c" に戻ると config だけ（他に c 始まりなし）。
+        // "c" に戻ると clean と config が再び候補になる。
         assert_eq!(
             modal.matches().iter().map(|c| c.name).collect::<Vec<_>>(),
-            vec!["config"]
+            vec!["clean", "config"]
         );
         modal.backspace();
-        assert_eq!(modal.matches().len(), 7);
+        assert_eq!(modal.matches().len(), 8);
     }
 
     #[test]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
-        modal.select_prev(); // wrap to last (6)
-        assert_eq!(modal.selected(), 6);
+        modal.select_prev(); // wrap to last (7)
+        assert_eq!(modal.selected(), 7);
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
     }
@@ -541,7 +542,10 @@ mod tests {
     fn action_mode_expands_and_cycles_session_subcommands() {
         let mut modal = OverviewModal::new();
         modal.expand_selected();
-        assert_eq!(modal.submission(), "config");
+        assert_eq!(modal.submission(), "clean --apply");
+        modal.select_next();
+        assert_eq!(modal.submission(), "clean --apply --force");
+        assert!(modal.collapse());
 
         modal.select_prev(); // session
         modal.expand_selected();
@@ -560,6 +564,12 @@ mod tests {
         assert!(expanded.contains("remove"));
         assert!(modal.collapse());
         assert!(!modal.collapse());
+
+        let mut plain = OverviewModal::new();
+        plain.paste("config");
+        plain.expand_selected();
+        assert!(!plain.collapse());
+        assert_eq!(plain.submission(), "config");
     }
 
     #[test]
@@ -572,7 +582,7 @@ mod tests {
         assert_eq!(modal.submission(), expected);
 
         let empty = OverviewModal::new();
-        assert_eq!(empty.submission(), "config");
+        assert_eq!(empty.submission(), "clean");
     }
 
     #[test]
@@ -660,7 +670,7 @@ mod tests {
         let mut modal = OverviewModal::new();
         modal.set_result("Settings saved");
         let text = joined(&modal);
-        assert!(text.contains("Open the local settings surface"));
+        assert!(text.contains("Compare daemon lifecycle state"));
         assert!(text.contains("Settings saved"));
         assert!(text.contains("Tab: complete"));
         assert_eq!(

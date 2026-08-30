@@ -766,7 +766,7 @@ verified process identity の disappearance または orphan だけを記録し�
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙
-（`config` / `env` / `issue` / `session`）を持つ。
+（`clean` / `config` / `env` / `issue` / `session`）を持つ。
 `interpret` は入力をトップレベル名と trim 済みの未解釈引数に分け、`Command::into_handler` が
 コマンドごとのハンドラへ変換する。ハンドラは `Run` トレイトを実装し、実 IO や画面状態を
 直接操作せず純粋な `CommandResult` を返す。コマンド固有処理を持たない現在のハンドラは、
@@ -793,6 +793,9 @@ verified process identity の disappearance または orphan だけを記録し�
   起動時と session command の accepted/final 後に daemon の lifecycle snapshot を再取得し、sidebar/Overview の
   read-only projection を置換する。この projection を legacy `WorkspaceState` へ書き戻さず、reconnect/reload は
   snapshot と operation replay の barrier から再構成する。
+- **orphan cleanup 接続**: controller は `Command::Clean` を workspace effect に変換し、adapter は
+  daemon の session action へ送る。daemon は保持中の workspace fence の内側で lifecycle snapshot と
+  managed Git namespace を照合し、削除直前にも session 名が未登録であることを再検証する。
 
 ## TUI Closeup のコマンド dispatch
 

@@ -546,6 +546,8 @@ pub struct DispatchIntent {
 pub enum SessionAction {
     Create,
     Remove,
+    /// Inspect or remove Git resources absent from daemon lifecycle state.
+    Clean,
     List,
     Status,
     Overview,
