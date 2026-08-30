@@ -1815,9 +1815,12 @@ pub enum AppKey {
     /// existing modal overlay owns input; while open, this and Escape are the
     /// only keys that mutate Home state.
     ToggleDirectorDrawer,
-    /// Toggle the bottom workspace-root terminal drawer (`Ctrl-O t`). Opening
-    /// explicitly asks the daemon to open or reuse the trusted root shell.
+    /// Toggle the bottom workspace-root terminal drawer (`Ctrl-O Ctrl-T`, with
+    /// `Ctrl-O t` retained for compatibility). Opening explicitly asks the
+    /// daemon to open or reuse the trusted root shell.
     ToggleRootTerminalDrawer,
+    /// Open a new tab in the already-open workspace-root terminal drawer.
+    OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
     /// workspace scope overlay を開く。
@@ -4305,6 +4308,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::OpenQuitConfirmation
         | AppKey::ToggleDirectorDrawer
         | AppKey::ToggleRootTerminalDrawer
+        | AppKey::OpenRootTerminal
         | AppKey::OpenDirectorNew
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
@@ -4346,6 +4350,11 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             open_director_new(state);
             Vec::new()
         }
+        AppKey::OpenRootTerminal => vec![Effect::OpenTerminal {
+            target: Target::Root(state.workspace),
+            operation_id: OperationId::new(),
+            arguments: "new".to_owned(),
+        }],
         // The root shell owns ordinary input, including Escape. All other Home
         // mutations remain inert while the drawer is frontmost.
         AppKey::CtrlN

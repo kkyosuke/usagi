@@ -83,14 +83,15 @@ Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme�
 
 ![Team template picker](assets/team-template-picker.svg)
 
-dirty な Save 行で `Enter` を押すと保存フローが始まり、
-Save button 自体が **loading（`saving…`）** 表示に変わる。保存が成功すると同じ button が **`saved`** 表示へ変わり、
+dirty な Save 行で `Enter` を押すと保存フローが始まり、実際の settings / Environment の永続化を背景 worker へ渡す。
+描画スレッドはその完了を待つ間も spinner と **`Saving settings…` / `Saving environment…`** を更新する。
+保存が成功すると Save button が **`saved`** 表示へ変わり、
 短い確認表示ののち、ユーザー操作なしで呼び出し元へ自動的に戻る。Welcome の Config は Welcome へ戻る。
 Overview の Config は、その workspace を settings port に束縛し、live pane と session を背景に維持したまま Home へ戻る。
 保存が失敗した場合は
 自動で戻らず Config に留まり、`Save failed: …` の notice を出す。draft は dirty のまま保たれるため、
 その場で確認・修正して再試行できる。
-保存の実行中は入力を読まず、保存中の再押下（連打）は無視されるため、保存が二重に走ることはない。`Esc` は
+保存中の入力は worker を再投入せず消費するため、保存の再押下（連打）で二重に走ることはない。保存開始前の `Esc` は
 呼び出し元へ戻る。Welcome または `usagi config` から開いた全画面 Config では `Ctrl+C` / `Ctrl+Q` で終了する。
 Workspace 上の overlay modal では両キーを消費して Config に留まり、背面の Home へ終了操作を伝播しない。
 
@@ -135,7 +136,9 @@ live PTY と management surface の両方で解決できる 1 秒の `Ctrl-O` le
 
 Add は現在の Home composition を背面に保ち、既存 tab を checked で示す。checked row の `Ctrl-D` は switcher の `x` と同じ
 project close を実行し、未追加 row では何もしない。filter 入力の plain `x` は従来どおり文字として扱う。選択した全 workspace の snapshot と settings を
-現在の composition を保ったまま準備し、1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
+現在の composition を保ったまま背景 worker で準備し、`Opening workspace N / total…` の spinner を表示する。
+`Esc` は画面上の待機を取り消し、完了済みの late result を破棄して元の workspace authority を再申告する。
+1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
 旧 composition を drop してから新しい composition を作る。通常切替も同じ prepare → commit 境界を使うため、失敗時は current workspace と
 その接続を保つ。未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
 
@@ -491,7 +494,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `Ctrl-P` | OpenPullRequests | focused session の Pull Request modal を開く |
 | `Ctrl-O` `,` | OpenGarden | 前面 modal が無い workspace の session garden を開く |
 | `Ctrl-O` `Ctrl-G` | Director | [指示モード（Director mode）](#指示モードdirector-mode) を toggle する |
-| `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する |
+| `Ctrl-O` `Ctrl-T` / `Ctrl-O` `t` | WorkspaceTerminal | [workspace terminal drawer](#workspace-terminal-drawer) を toggle する。IME 中も届く `Ctrl-T` を標準操作とする |
 | `Ctrl-O` `n` | DirectorNew | 指示モードを開き、明示的な New CLI picker を表示する（[指示モード](#指示モードdirector-mode)が開いている間は NextTab） |
 | `Ctrl-O` `]` | MoveTabNext | 選択 tab を次の表示 slot へ移動し、Agent 順序を commit する |
 | `Ctrl-O` `[` | MoveTabPrevious | 選択 tab を前の表示 slot へ移動し、Agent 順序を commit する |
@@ -502,7 +505,7 @@ identity は保持しない。tab 巡回は live PTY の有無ではなく tab �
 | `Ctrl-O` `d` / `↓` | ScrollDown | 右ペインの scrollback を 1 行 live bottom 方向へ |
 | `Ctrl-O` `b` / `End` | ScrollBottom | 右ペインを live bottom へ 1 手で戻し、新しい出力への追従を再開する |
 
-follow-up の plain `,` / `n` / `p` / `t` / `Ctrl-G` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
+follow-up の plain `,` / `n` / `p` / `t` / `Ctrl-G` / `Ctrl-T` / `x` / `Ctrl-X` / `[` / `]` / `u` / `d` / `b` / `↑` / `↓` / `End` は leader が生きている間だけ予約し、leader 無しの単体キーは PTY へ送る。
 classifier は plain `n` を New、`Ctrl-N` を NextTab として修飾状態で区別する。この 2 つの意味だけは
 **指示モードの drawer が開いている間に入れ替わる**（`Ctrl-O Ctrl-N` が New、`Ctrl-O n` が conversation の
 NextTab）。入れ替えは frame loop が key を 1 度だけ retarget するので、PTY 転送・pane control・reducer は
@@ -518,8 +521,18 @@ Windows の `Ctrl+C` は terminal 出力を選択中なら copy とし、選択�
 
 root scope（`session_id: None`）の generic Terminal は、managed session の Closeup や Agent-only の
 [指示モード](#指示モードdirector-mode)には混ぜず、Home 全幅の下端から重なる workspace terminal drawer に表示する。
-Home header の `[ ⌂ Shell ]` button または `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
+Home header の `[ ⌂ Shell ]` button、`Ctrl-O Ctrl-T`、または互換操作の `Ctrl-O t` で toggle し、閉じた状態から開く操作は root scope の
 `OpenTerminal` を発行する。daemon に live Terminal があれば同じ runtime を再利用し、無ければ新規に起動する。
+
+drawer は root generic Terminal ごとに `Terminal 1`、`Terminal 2` …のタブを表示する。drawer 内の `Ctrl-O n` は
+`OpenTerminal(new)` で新しいタブを追加し、`Ctrl-O Ctrl-N` / `Ctrl-O p` は root Agent を混ぜず terminal タブだけを
+次 / 前へ循環する。tab の click も表示中の terminal-only index を stable tab identity へ解決して選択する。
+`Ctrl-O x` は選択中の shell を終了してタブを閉じ、最後の terminal タブが無くなれば drawer も閉じる。
+shell 自身が終了した場合も同じように最後のタブで drawer を閉じる。
+
+generic shell の `Ctrl-L` は primary screen の retained scrollback、選択、scroll 位置を破棄し、入力行を viewport の
+先頭へ戻す。その後も同じ control byte を PTY へ渡すため、readline は編集中の入力を先頭行へ再描画する。alternate screen は
+アプリケーションが所有するため、TUI 側では消去しない。generic shell の `Ctrl-C` reset も割込み後に同じ clear を適用する。
 
 drawer の通常高は Home の 55% とし、10 rows 以上 32 rows 以下へ clamp する。背景に必要な高さを残せない短い端末では
 header の直下から下端までを使う。terminal viewport は border、title、footer を除いた drawer 専用 geometry で計算し、
@@ -532,7 +545,7 @@ managed Closeup と root Agent/Terminal の各選択状態はこの切替で保�
 
 workspace terminal drawer が入力を所有している間は selected root generic Terminal が keyboard、paste、scroll、selection、copy、link、pointer を所有する。
 Director が後から入力を取得した場合も root terminal は描画と出力購読を継続するが、入力は受け取らない。
-`Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O t` または header button に限定する。
+`Esc` は shell へ送るため drawer を閉じない。drawer を閉じる操作は `Ctrl-O Ctrl-T` / `Ctrl-O t` または header button に限定する。
 workspace open / daemon reconnect では live root generic Terminal を inventory から復元するが、drawer は自動で開かず、
 明示的に開くまで背景で detached のまま保持する。root Diff は引き続き admission しない。
 
@@ -703,6 +716,8 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   ドラッグリサイズは 1 event につき 1 回の再描画だけを費やす。実サイズは frame 先頭の `term.size()` から読む。
 - **lane が応答しなくても frame は進む**。lane が hung / 不在でも frame loop は drain が空振りするだけなので、描画・
   入力・modal・quit は待たされない。
+- **1 frame が取り込む completion は各 queue 128 件まで**とする。producer が大量の結果を一度に届けても残りは次の
+  frame へ持ち越し、入力と描画を starvation させない。
 - **失敗の表示は失敗の連続に対して 1 回である**。cadence ごとに notice を積まない。decision lane は失敗状態へ入った
   ときに 1 回だけ notice を出し、次に成功したらその抑止を解く。session lane の失敗は refresh を要求した完了経路の
   notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。
@@ -715,13 +730,17 @@ frame から追い出したのに続き、**ローカルのファイル IO と�
 
 | 作業 | idle な tick で払うか | 決めるもの |
 |---|---|---|
-| lane の drain（decision / session / metrics / terminal / pane completion） | 払う | 毎 tick 無条件 |
+| lane の bounded drain（decision / session / metrics / terminal / pane completion） | 払う | 毎 tick、各 queue 最大 128 件 |
 | restore retry の admission、pane launch の投入、入力処理 | 払う | 毎 tick 無条件 |
 | `.usagi/sessions` のディレクトリ走査 | 払わない | inline create フォームが開いているか |
 | frame の構築と端末への diff | 変化した tick だけ払う | frame material が前 frame と異なるか |
 
 **描画だけを skip する。** drain と admission は毎 tick 走るため、skip された tick でも lane の観測は取り込まれ、
 restore の再試行は期限どおり始まり、キー入力は同じ tick で処理される。skip は入力から反映までの latency を増やさない。
+Home の時計 material は分単位へ丸め、session membership の集合は workspace revision が変わったときだけ再構築する。
+branch catalog の Git subprocess も Home の初回描画後に one-shot worker で読み、完了時だけ material を更新する。
+mouse wheel の同方向・同一 cell の burst は terminal adapter が steps 付きの 1 input へ畳み、移動量を保ったまま
+1 回の再描画で反映する。pointer が別 surface へ移った event は畳まず FIFO 順を保つ。
 
 ### create フォームの衝突ヒント
 
@@ -1209,7 +1228,9 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 ## Sidebar mascot
 
 Home の左 sidebar は footer の直上に usagi を表示する。frame は reducer が所有する tick でだけ
-進み、瞬きと耳の動きは純粋 render で決まる。mascot block の直下には常に 1 行の空行を予約し、footer、
+進み、瞬きと耳の動きは純粋 render で決まる。装飾 animation は 6-phase clock の各 phase を 8 tick 保持し、
+見た目が同じ 4 つの resting phase は同じ frame へ畳んで約 4fps に抑える。
+`USAGI_REDUCE_MOTION=1` では静止する。mascot block の直下には常に 1 行の空行を予約し、footer、
 session viewport、pending row と重ならない。狭いペインでは menu の viewport を優先して mascot block 全体を
 省略する。この tick が idle な Home の再描画をどれだけ発生させるかは [frame 予算](#frame-予算) が決める。
 

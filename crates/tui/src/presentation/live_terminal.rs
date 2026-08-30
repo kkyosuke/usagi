@@ -134,11 +134,16 @@ impl LiveTerminalControls {
 
     /// Scroll one line toward older output, clamped to the last projected extent.
     pub fn scroll_up(&mut self) {
+        self.scroll_up_by(1);
+    }
+
+    /// Scroll several lines toward older output in one bounded state update.
+    pub fn scroll_up_by(&mut self, lines: usize) {
         let before = self.active.scroll;
         self.active.scroll = self
             .active
             .scroll
-            .saturating_add(1)
+            .saturating_add(lines)
             .min(self.active.max_scroll);
         self.revision = self
             .revision
@@ -147,8 +152,13 @@ impl LiveTerminalControls {
 
     /// Scroll one line back toward the live bottom.
     pub fn scroll_down(&mut self) {
+        self.scroll_down_by(1);
+    }
+
+    /// Scroll several lines toward the live bottom in one bounded state update.
+    pub fn scroll_down_by(&mut self, lines: usize) {
         let before = self.active.scroll;
-        self.active.scroll = self.active.scroll.saturating_sub(1);
+        self.active.scroll = self.active.scroll.saturating_sub(lines);
         self.revision = self
             .revision
             .saturating_add(u64::from(before != self.active.scroll));
@@ -165,6 +175,18 @@ impl LiveTerminalControls {
         self.revision = self
             .revision
             .saturating_add(u64::from(before != self.active.scroll));
+    }
+
+    /// Reset viewport-only state after an explicit terminal clear.
+    pub fn reset_after_clear(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        self.active.scroll = 0;
+        self.active.max_scroll = 0;
+        self.active.projected_extent = None;
+        self.active.pointer_press = None;
+        self.active.selection = None;
+        self.active.dragging = false;
+        self.active.feedback = None;
     }
 
     /// Begin a drag selection, replacing any earlier (including finished) one,
