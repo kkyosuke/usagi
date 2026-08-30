@@ -184,6 +184,20 @@ pub trait WorkspaceLoader: Send {
         Ok(())
     }
 
+    /// Start a non-blocking read of the global workspace registry.
+    ///
+    /// Home uses this only while its `+ Open` overlay is visible so workspace
+    /// additions from another usagi process become selectable without putting
+    /// file IO on the frame thread. `Ok(true)` means a refresh was admitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the refresh worker cannot be started.
+    fn dispatch_registry_refresh(&mut self) -> io::Result<bool>;
+
+    /// Take a completed global workspace-registry read without waiting.
+    fn take_registry_refresh(&mut self) -> Option<io::Result<Vec<Workspace>>>;
+
     /// Remove entries that no longer point at directories and return the paths
     /// removed from the core-owned workspace registry. The caller has already
     /// obtained explicit user confirmation before invoking this operation.
