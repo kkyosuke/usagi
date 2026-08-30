@@ -7754,9 +7754,9 @@ fn session_role_catalog(data_home: Option<&Path>, workspace_root: &Path) -> Sess
 }
 
 /// Reads local and remote-tracking branch identities for the create picker.
-/// Symbolic remote aliases such as `origin/HEAD` are omitted so every row names
-/// one stable ref. A failure shrinks the picker to the daemon's legacy `HEAD`
-/// default instead of making the workspace unusable.
+/// A remote's symbolic `HEAD` is exposed as its `(default)` choice; other
+/// symbolic aliases are omitted. A failure shrinks the picker to the daemon's
+/// legacy `HEAD` default instead of making the workspace unusable.
 fn session_branch_catalog(
     workspace_root: &Path,
     configured_default: Option<&str>,
@@ -7809,23 +7809,32 @@ fn parse_session_branch_choices(output: &str) -> Vec<BranchChoice> {
         .lines()
         .filter_map(|line| {
             let (refname, symref) = line.split_once(' ').unwrap_or((line, ""));
-            if !symref.is_empty() {
-                return None;
-            }
-            let label = refname
-                .strip_prefix("refs/heads/")
-                .map(|name| format!("local:{name}"))
-                .or_else(|| {
-                    refname
-                        .strip_prefix("refs/remotes/")
-                        .map(|name| format!("remote:{name}"))
-                })?;
+            let label = if symref.is_empty() {
+                refname
+                    .strip_prefix("refs/heads/")
+                    .map(|name| format!("local:{name}"))
+                    .or_else(|| {
+                        refname
+                            .strip_prefix("refs/remotes/")
+                            .map(|name| format!("remote:{name}"))
+                    })
+            } else {
+                remote_default_branch_label(refname, symref)
+            }?;
             Some(BranchChoice {
                 label,
                 refname: refname.to_owned(),
             })
         })
         .collect()
+}
+
+fn remote_default_branch_label(refname: &str, symref: &str) -> Option<String> {
+    let name = refname.strip_prefix("refs/remotes/")?;
+    let remote = name.strip_suffix("/HEAD")?;
+    let target_prefix = format!("refs/remotes/{remote}/");
+    (!remote.is_empty() && symref.starts_with(&target_prefix) && symref != refname)
+        .then(|| format!("remote:{remote}/(default)"))
 }
 
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
@@ -12945,10 +12954,10 @@ mod tests {
     }
 
     #[test]
-    fn branch_choices_distinguish_local_remote_and_skip_symbolic_aliases() {
+    fn branch_choices_include_remote_defaults_and_skip_other_symbolic_aliases() {
         assert_eq!(
             super::parse_session_branch_choices(
-                "refs/heads/main \nrefs/heads/feature \nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/main \nnot-a-ref\n"
+                "refs/heads/main \nrefs/heads/feature \nrefs/heads/current refs/heads/main\nrefs/remotes/origin/HEAD refs/remotes/origin/main\nrefs/remotes/origin/alias refs/remotes/origin/main\nrefs/remotes/origin/main \nrefs/remotes/upstream/HEAD refs/remotes/other/main\nnot-a-ref\n"
             ),
             vec![
                 crate::usecase::application::controller::BranchChoice {
@@ -12958,6 +12967,10 @@ mod tests {
                 crate::usecase::application::controller::BranchChoice {
                     label: "local:feature".into(),
                     refname: "refs/heads/feature".into(),
+                },
+                crate::usecase::application::controller::BranchChoice {
+                    label: "remote:origin/(default)".into(),
+                    refname: "refs/remotes/origin/HEAD".into(),
                 },
                 crate::usecase::application::controller::BranchChoice {
                     label: "remote:origin/main".into(),

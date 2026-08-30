@@ -5825,6 +5825,10 @@ mod tests {
                         refname: "refs/heads/main".into(),
                     },
                     BranchChoice {
+                        label: "remote:origin/(default)".into(),
+                        refname: "refs/remotes/origin/HEAD".into(),
+                    },
+                    BranchChoice {
                         label: "remote:origin/main".into(),
                         refname: "refs/remotes/origin/main".into(),
                     },
@@ -5845,7 +5849,7 @@ mod tests {
                 .as_str(),
             "coder"
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         state.create_session.as_mut().unwrap().move_role(true);
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
@@ -5856,7 +5860,7 @@ mod tests {
         assert!(
             matches!(effects.as_slice(), [Effect::CreateSession { intent, .. }]
             if intent.role_id.as_ref() == Some(&reviewer)
-                && intent.base_ref.as_deref() == Some("refs/remotes/origin/main")
+                && intent.base_ref.as_deref() == Some("refs/remotes/origin/HEAD")
                 && intent.profile.is_none() && intent.model.is_none())
         );
 
