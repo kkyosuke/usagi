@@ -1381,6 +1381,8 @@ enum ConfigStep {
     /// writes, then on success holds the `done` frame before returning home; a
     /// failed write stays on Config with an error for retry.
     Save,
+    /// A validated environment write should be persisted by the caller.
+    SaveEnvironment,
 }
 
 /// Draw one complete highlight sweep across the pending Save button. Settings
@@ -1406,6 +1408,43 @@ fn play_config_save_wave(
     Ok(())
 }
 
+fn save_config_responsive(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    settings: &mut dyn SettingsPort,
+    base: Option<&[String]>,
+) -> io::Result<bool> {
+    if !settings.background_operations() {
+        play_config_save_wave(term, form, base)?;
+        return Ok(form.commit_save(settings));
+    }
+    let Some((scope, draft)) = form.save_request() else {
+        return Ok(false);
+    };
+    let result = run_workspace_loading(term, "Saving settings…", false, || {
+        settings.save(scope, &draft)
+    });
+    Ok(form.finish_save(draft, result))
+}
+
+fn save_environment_responsive(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    settings: &mut dyn SettingsPort,
+) -> bool {
+    let Some((scope, bindings)) = form.environment_save_request() else {
+        return false;
+    };
+    let result = if settings.background_operations() {
+        run_workspace_loading(term, "Saving environment…", false, || {
+            settings.save_environment(scope, &bindings)
+        })
+    } else {
+        settings.save_environment(scope, &bindings)
+    };
+    form.finish_environment_save(bindings, result)
+}
+
 /// Workspace Config is a Home-owned modal and therefore cannot request that the
 /// enclosing TUI exit. Quit chords are projected to [`Self::Stay`] at the modal
 /// input boundary.
@@ -1413,6 +1452,7 @@ enum WorkspaceConfigStep {
     Stay,
     Back,
     Save,
+    SaveEnvironment,
 }
 
 /// New 画面でキー `key` を処理した結果の遷移。
@@ -2945,9 +2985,15 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
                 action: AppKey::SaveRoles,
                 ..
             } if config.scope() == usagi_core::usecase::settings::SettingsScope::Global => {
+                if settings.background_operations() {
+                    return ConfigStep::SaveEnvironment;
+                }
                 config.save_environment(settings);
             }
             Key::Enter if config.is_environment_save_focused() => {
+                if settings.background_operations() {
+                    return ConfigStep::SaveEnvironment;
+                }
                 config.save_environment(settings);
             }
             Key::Enter => config.newline_environment(),
@@ -3010,6 +3056,7 @@ fn step_workspace_config(
         ConfigStep::Stay | ConfigStep::Quit => WorkspaceConfigStep::Stay,
         ConfigStep::Back => WorkspaceConfigStep::Back,
         ConfigStep::Save => WorkspaceConfigStep::Save,
+        ConfigStep::SaveEnvironment => WorkspaceConfigStep::SaveEnvironment,
     }
 }
 
@@ -3034,14 +3081,16 @@ fn run_workspace_config(
             WorkspaceConfigStep::Stay => {}
             WorkspaceConfigStep::Back => return Ok(()),
             WorkspaceConfigStep::Save => {
-                play_config_save_wave(term, &mut form, Some(base))?;
-                if form.commit_save(settings) {
+                if save_config_responsive(term, &mut form, settings, Some(base))? {
                     let (height, width) = term.size()?;
                     term.draw(&config::render_over(height, width, base, &form))?;
                     term.wait(config::DONE_DISPLAY)?;
                     form.reset_save();
                     return Ok(());
                 }
+            }
+            WorkspaceConfigStep::SaveEnvironment => {
+                let _ = save_environment_responsive(term, &mut form, settings);
             }
         }
     }
@@ -3466,7 +3515,12 @@ fn apply_session_projection(
 /// controller [`BackendEvent::Notice`]. Both are distinct from an in-form local
 /// validation error.
 fn drain_session_completions(ui: &mut WorkspaceUi) {
-    while let Ok(completion) = ui.session_completions.try_recv() {
+    let completions = ui
+        .session_completions
+        .try_iter()
+        .take(FRAME_EVENT_BUDGET)
+        .collect::<Vec<_>>();
+    for completion in completions {
         if ui.active_session_command != Some(completion.command_id) {
             continue;
         }
@@ -5374,12 +5428,11 @@ fn intercept_live_terminal_control(
                         controls.set_feedback(message);
                     }
                 } else {
-                    for _ in 0..WHEEL_LINES.saturating_mul(*notches) {
-                        if *up {
-                            controls.scroll_up();
-                        } else {
-                            controls.scroll_down();
-                        }
+                    let lines = notches.saturating_mul(WHEEL_LINES);
+                    if *up {
+                        controls.scroll_up_by(lines);
+                    } else {
+                        controls.scroll_down_by(lines);
                     }
                 }
             }
@@ -5778,7 +5831,7 @@ fn drain_controller_host_actions(
     session_refresh: &mut dyn SessionRefreshPort,
     pending_session_refresh: &mut Option<Completions>,
 ) {
-    while let Ok(action) = actions.try_recv() {
+    for action in actions.try_iter().take(FRAME_EVENT_BUDGET) {
         match action {
             ControllerHostAction::Create(request, completions) => {
                 let name = request.intent.name;
@@ -5982,7 +6035,12 @@ fn drain_pane_completions_into_runtime(
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
     _geometry: Geometry,
 ) {
-    while let Ok(completion) = ui.pane_completions.try_recv() {
+    let completions = ui
+        .pane_completions
+        .try_iter()
+        .take(FRAME_EVENT_BUDGET)
+        .collect::<Vec<_>>();
+    for completion in completions {
         if ui.active_pane_launch == Some(completion.launch_id) {
             ui.active_pane_launch = None;
         }
@@ -6221,18 +6279,112 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
         || state.role_editor().is_some()
 }
 
+/// Run one blocking operation on a scoped worker while continuing to paint and
+/// consume terminal input. For cancellable workspace opens, Escape discards a
+/// late result; the underlying call is allowed to settle safely before its
+/// borrowed port is returned.
+fn run_workspace_loading<T: Send>(
+    term: &mut dyn Terminal,
+    label: &str,
+    cancellable: bool,
+    operation: impl FnOnce() -> io::Result<T> + Send,
+) -> io::Result<T> {
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(operation);
+        let mut frame = 0_usize;
+        let mut cancelled = false;
+        while !worker.is_finished() {
+            let (height, width) = term.size()?;
+            let status = if cancelled { "Cancelling…" } else { label };
+            term.draw(&widgets::loading::loading_screen(
+                width,
+                height,
+                frame,
+                frame / 3,
+                status,
+            ))?;
+            if cancellable
+                && matches!(
+                    term.wait_for_key(std::time::Duration::from_millis(80))?,
+                    Some(Key::Escape)
+                )
+            {
+                cancelled = true;
+            }
+            frame = frame.wrapping_add(1);
+        }
+        let result = worker
+            .join()
+            .map_err(|_| io::Error::other("background operation stopped unexpectedly"))?;
+        if cancelled {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "operation was cancelled",
+            ))
+        } else {
+            result
+        }
+    })
+}
+
+/// Open and refresh a workspace while an interactive production adapter keeps
+/// presenting progress.
+///
+/// # Errors
+///
+/// Returns loader, terminal, worker, or cancellation failures.
+pub fn open_workspace_responsive(
+    term: &mut dyn Terminal,
+    loader: &mut dyn WorkspaceLoader,
+    path: &Path,
+    label: &str,
+) -> io::Result<WorkspaceSnapshot> {
+    if !loader.background_operations() {
+        let snapshot = loader.open(path)?;
+        return Ok(refresh_empty_workspace_snapshot(loader, snapshot));
+    }
+    run_workspace_loading(term, label, true, || {
+        let snapshot = loader.open(path)?;
+        Ok(refresh_empty_workspace_snapshot(loader, snapshot))
+    })
+}
+
+fn activate_workspace_responsive(
+    term: &mut dyn Terminal,
+    loader: &mut dyn WorkspaceLoader,
+    path: &Path,
+    label: &str,
+) -> io::Result<()> {
+    if loader.background_operations() {
+        run_workspace_loading(term, label, false, || loader.activate_prepared(path))
+    } else {
+        loader.activate_prepared(path)
+    }
+}
+
 fn prepare_deck_workspace(
+    term: &mut dyn Terminal,
     loader: &mut Option<&mut dyn WorkspaceLoader>,
     deck: &mut WorkspaceDeck,
     path: &Path,
+    label: &str,
 ) -> Option<WorkspaceSnapshot> {
     let Some(loader) = loader.as_mut() else {
         deck.set_notice("Open the workspace list to add or switch projects.");
         return None;
     };
-    match (**loader).open(path) {
-        Ok(snapshot) => Some(refresh_empty_workspace_snapshot(&mut **loader, snapshot)),
+    match open_workspace_responsive(term, &mut **loader, path, label) {
+        Ok(snapshot) => Some(snapshot),
         Err(error) => {
+            // A cancelled worker may already have completed its declaration.
+            // Reassert the still-visible project before its resident pumps run
+            // again, so cancellation never silently switches tenant authority.
+            let _ = activate_workspace_responsive(
+                term,
+                &mut **loader,
+                deck.active_path(),
+                "Restoring current workspace…",
+            );
             deck.set_notice(error.to_string());
             None
         }
@@ -6353,6 +6505,9 @@ fn switch_arrow_target(deck: &WorkspaceDeck, state: &AppState, key: &Key) -> Opt
     }
 }
 
+/// Maximum number of completions one Home frame may apply from each queue.
+const FRAME_EVENT_BUDGET: usize = 128;
+
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
@@ -6432,9 +6587,20 @@ fn drive_workspace_controller(
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
         role_catalog,
     )));
-    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
-        session_branch_catalog(&root_cwd, default_branch.as_deref()),
-    )));
+    // Git ref discovery can be slow on large or remote filesystems. Start Home
+    // immediately with the daemon's HEAD default, then reflux the catalog from a
+    // one-shot worker without ever holding the render thread.
+    let (branch_catalog_sender, branch_catalog_receiver) = mpsc::channel();
+    let branch_catalog_root = root_cwd.clone();
+    let branch_catalog_default = default_branch.clone();
+    let _ = std::thread::Builder::new()
+        .name("tui-branch-catalog".to_owned())
+        .spawn(move || {
+            let _ = branch_catalog_sender.send(session_branch_catalog(
+                &branch_catalog_root,
+                branch_catalog_default.as_deref(),
+            ));
+        });
     runtime.set_agent_models(available_models, default_model);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
@@ -6496,8 +6662,15 @@ fn drive_workspace_controller(
     let mut background_terminal_generation = 0_u64;
     let mut director_material_key = None;
     let mut frame_material_key: Option<FrameMaterialKey> = None;
+    let mut allowed_sessions_revision = u64::MAX;
+    let mut current_sessions = BTreeSet::new();
     loop {
-        for event in backend.drain_events() {
+        if let Ok(catalog) = branch_catalog_receiver.try_recv() {
+            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
+                catalog,
+            )));
+        }
+        for event in backend.drain_events_bounded(FRAME_EVENT_BUDGET) {
             let _ = runtime.apply_event(event);
         }
         while let Some(epoch) = restore_connection.take_reconnected_epoch() {
@@ -6532,14 +6705,13 @@ fn drive_workspace_controller(
         if let Some(session) = pending_garden_visit.take() {
             let _ = runtime.apply_event(AppEvent::VisitSession(session));
         }
-        let current_sessions = ui
-            .workspace
-            .session_ids()
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        ui.set_allowed_agent_sessions(current_sessions.iter().copied());
-        while let Ok(completion) = restore_completions.try_recv() {
+        let workspace_material_revision = ui.workspace.material_revision();
+        if allowed_sessions_revision != workspace_material_revision {
+            current_sessions = ui.workspace.session_ids().iter().copied().collect();
+            ui.set_allowed_agent_sessions(current_sessions.iter().copied());
+            allowed_sessions_revision = workspace_material_revision;
+        }
+        for completion in restore_completions.try_iter().take(FRAME_EVENT_BUDGET) {
             let applied = apply_restore_completion(
                 completion,
                 &mut ui,
@@ -6559,7 +6731,7 @@ fn drive_workspace_controller(
                 surface_agent_tab_intent_error(&mut runtime, error);
             }
         }
-        while let Ok(completion) = garden_completions.try_recv() {
+        for completion in garden_completions.try_iter().take(FRAME_EVENT_BUDGET) {
             let observed = !completion.inventories.is_empty();
             let mut changed = false;
             for inventory in &completion.inventories {
@@ -6700,7 +6872,12 @@ fn drive_workspace_controller(
             metrics_projection.apply(update);
         }
         let now = Utc::now();
-        let now = now.with_nanosecond(0).unwrap_or(now);
+        // Relative session labels change at minute granularity. Keying the full
+        // Home frame by seconds caused needless full-material rebuilds.
+        let now = now
+            .with_second(0)
+            .and_then(|now| now.with_nanosecond(0))
+            .unwrap_or(now);
         let drives_tick_animation = ui.creating_session.is_some()
             || sessions.iter().any(|session| session.removing)
             || runtime
@@ -6708,7 +6885,9 @@ fn drive_workspace_controller(
                 .tabs()
                 .iter()
                 .any(|tab| matches!(tab, PaneTab::Pending(_)));
-        let animation = if drives_tick_animation {
+        let animation = if garden_reduced_motion {
+            0
+        } else if drives_tick_animation {
             runtime.state().mascot_tick()
         } else {
             widgets::mascot::canonical_tick(runtime.state().mascot_tick())
@@ -6853,7 +7032,8 @@ fn drive_workspace_controller(
                 frame_material_key = None;
                 continue;
             }
-            if let Some(prepared) = prepare_deck_workspace(&mut loader, deck, &path)
+            if let Some(prepared) =
+                prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
                 && prepare_activation_settings(
                     &mut workspace_config,
                     &mut loader,
@@ -6877,7 +7057,8 @@ fn drive_workspace_controller(
                         deck.close_overlay();
                     } else if workspace_has_unsaved_surface(&runtime) {
                         deck.set_notice("Save or cancel the current draft before switching.");
-                    } else if let Some(prepared) = prepare_deck_workspace(&mut loader, deck, &path)
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
                         && prepare_activation_settings(
                             &mut workspace_config,
                             &mut loader,
@@ -6897,9 +7078,11 @@ fn drive_workspace_controller(
                             let current = deck.active_path().to_path_buf();
                             let mut prepared = Vec::with_capacity(paths.len());
                             let mut failed = false;
-                            for path in &paths {
+                            for (index, path) in paths.iter().enumerate() {
+                                let label =
+                                    format!("Opening workspace {} / {}…", index + 1, paths.len());
                                 let Some(snapshot) =
-                                    prepare_deck_workspace(&mut loader, deck, path)
+                                    prepare_deck_workspace(term, &mut loader, deck, path, &label)
                                 else {
                                     failed = true;
                                     break;
@@ -6908,14 +7091,23 @@ fn drive_workspace_controller(
                             }
                             if failed {
                                 if let Some(loader) = loader.as_mut() {
-                                    let _ = (**loader).activate_prepared(&current);
+                                    let _ = activate_workspace_responsive(
+                                        term,
+                                        &mut **loader,
+                                        &current,
+                                        "Restoring current workspace…",
+                                    );
                                 }
                                 prepared.clear();
                             }
                             if let Some(first) = prepared.first().cloned() {
                                 if let Some(loader) = loader.as_mut()
-                                    && let Err(error) =
-                                        (**loader).activate_prepared(&first.workspace.path)
+                                    && let Err(error) = activate_workspace_responsive(
+                                        term,
+                                        &mut **loader,
+                                        &first.workspace.path,
+                                        "Activating workspace…",
+                                    )
                                 {
                                     deck.set_notice(error.to_string());
                                     drawn_material = None;
@@ -6967,16 +7159,19 @@ fn drive_workspace_controller(
                         };
                         if workspace_has_unsaved_surface(&runtime) {
                             deck.set_notice("Save or cancel the current draft before closing.");
-                        } else if let Some(prepared) =
-                            prepare_deck_workspace(&mut loader, deck, &replacement)
-                            && prepare_activation_settings(
-                                &mut workspace_config,
-                                &mut loader,
-                                deck,
-                                &root_cwd,
-                                &prepared.workspace.path,
-                            )
-                        {
+                        } else if let Some(prepared) = prepare_deck_workspace(
+                            term,
+                            &mut loader,
+                            deck,
+                            &replacement,
+                            "Opening replacement workspace…",
+                        ) && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        ) {
                             deck.close_path(&path);
                             return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                         }
@@ -7060,7 +7255,8 @@ fn drive_workspace_controller(
                 frame_material_key = None;
                 continue;
             };
-            if let Some(prepared) = prepare_deck_workspace(&mut loader, deck, &path)
+            if let Some(prepared) =
+                prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
                 && prepare_activation_settings(
                     &mut workspace_config,
                     &mut loader,
@@ -7871,6 +8067,7 @@ fn enter_workspace_deck(
 }
 
 fn prepare_workspace_deck(
+    term: &mut dyn Terminal,
     loader: &mut dyn WorkspaceLoader,
     paths: &[PathBuf],
 ) -> io::Result<(Vec<WorkspaceSnapshot>, WorkspaceSnapshot, WorkspaceDeck)> {
@@ -7880,14 +8077,18 @@ fn prepare_workspace_deck(
             "a project deck needs at least one workspace",
         ));
     };
-    let primary = loader.open(first_path)?;
-    let primary = refresh_empty_workspace_snapshot(loader, primary);
+    let primary = open_workspace_responsive(term, loader, first_path, "Opening workspace 1…")?;
     let mut snapshots = vec![primary.clone()];
-    for path in remaining_paths {
-        let snapshot = loader.open(path)?;
-        snapshots.push(refresh_empty_workspace_snapshot(loader, snapshot));
+    for (index, path) in remaining_paths.iter().enumerate() {
+        let label = format!("Opening workspace {} / {}…", index + 2, paths.len());
+        snapshots.push(open_workspace_responsive(term, loader, path, &label)?);
     }
-    loader.activate_prepared(&primary.workspace.path)?;
+    activate_workspace_responsive(
+        term,
+        loader,
+        &primary.workspace.path,
+        "Activating workspace…",
+    )?;
     let mut deck = WorkspaceDeck::new(&primary);
     deck.append_snapshots(&snapshots);
     Ok((snapshots, primary, deck))
@@ -8209,16 +8410,23 @@ pub fn run_screen_graph_with_backend_and_notice(
                     }
                     // A workspace this daemon does not serve keeps the switcher on
                     // screen with the reason, so another Recent entry can be tried.
-                    let (snapshots, snapshot, deck) = match prepare_workspace_deck(loader, &paths) {
-                        Ok(prepared) => prepared,
-                        Err(error) => match open_failure_notice(&error) {
-                            Some(notice) => {
-                                welcome.set_notice(Some(notice));
+                    let (snapshots, snapshot, deck) =
+                        match prepare_workspace_deck(term, loader, &paths) {
+                            Ok(prepared) => prepared,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                welcome.set_notice(Some(
+                                    "Workspace opening was cancelled.".to_owned(),
+                                ));
                                 continue;
                             }
-                            None => return Err(error),
-                        },
-                    };
+                            Err(error) => match open_failure_notice(&error) {
+                                Some(notice) => {
+                                    welcome.set_notice(Some(notice));
+                                    continue;
+                                }
+                                None => return Err(error),
+                            },
+                        };
                     welcome.set_notice(None);
                     for snapshot in &snapshots {
                         welcome.record_opened(&snapshot.workspace);
@@ -8246,16 +8454,23 @@ pub fn run_screen_graph_with_backend_and_notice(
                 OpenStep::Choose(paths) => {
                     // Same contract as Recent: the list stays up with the reason so
                     // the workspace this daemon does serve can be chosen instead.
-                    let (snapshots, snapshot, deck) = match prepare_workspace_deck(loader, &paths) {
-                        Ok(prepared) => prepared,
-                        Err(error) => match open_failure_notice(&error) {
-                            Some(notice) => {
-                                open.set_notice(Some(notice));
+                    let (snapshots, snapshot, deck) =
+                        match prepare_workspace_deck(term, loader, &paths) {
+                            Ok(prepared) => prepared,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                open.set_notice(Some(
+                                    "Workspace opening was cancelled.".to_owned(),
+                                ));
                                 continue;
                             }
-                            None => return Err(error),
-                        },
-                    };
+                            Err(error) => match open_failure_notice(&error) {
+                                Some(notice) => {
+                                    open.set_notice(Some(notice));
+                                    continue;
+                                }
+                                None => return Err(error),
+                            },
+                        };
                     open.set_notice(None);
                     for snapshot in &snapshots {
                         welcome.record_opened(&snapshot.workspace);
@@ -8335,8 +8550,7 @@ pub fn run_screen_graph_with_backend_and_notice(
                     // terminal, so whatever the gate remembers is no longer on
                     // screen and the next tick must redraw unconditionally.
                     drawn_material = None;
-                    play_config_save_wave(term, &mut config_form, None)?;
-                    if config_form.commit_save(settings) {
+                    if save_config_responsive(term, &mut config_form, settings, None)? {
                         // Hold the `done` confirmation briefly, then return home
                         // with no key press. A failed write skips this and leaves
                         // Config on screen with the error for retry.
@@ -8346,6 +8560,10 @@ pub fn run_screen_graph_with_backend_and_notice(
                         config_form.reset_save();
                         screen = Screen::Welcome;
                     }
+                }
+                ConfigStep::SaveEnvironment => {
+                    drawn_material = None;
+                    let _ = save_environment_responsive(term, &mut config_form, settings);
                 }
             },
         }
@@ -8557,29 +8775,33 @@ mod tests {
         UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
         UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
         UnavailableSessionCommandPortFactory, WelcomeStep, WorkspaceConfigContext,
-        WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
-        WorkspaceInputRoute, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi,
-        WorkspaceView, adjust_project_bar_pointer, app_event_from_key, close_exited_panes,
-        compose_workspace_shell_frame, controller_terminal_view, copy_terminal_selection,
-        director_organization, dismiss_pr_modal_on_project_bar_click, drain_session_completions,
-        foreground_terminal_geometry, forward_live_terminal_input, garden_click_at, garden_fits,
-        garden_shell_owned_wake, handle_terminal_pointer, home_frame_material,
-        intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
-        key_to_terminal_bytes_for_mode, new_project_notice, play_startup_splash,
-        poll_and_project_terminals, prepare_activation_settings, prepare_batch_settings,
-        prepare_deck_workspace, prepare_workspace_deck, projection_build_counts, recent_paths,
-        registry_contains_path, remove_registry_paths, render_controller_frame,
-        render_home_material, render_home_snapshot, reset_projection_build_counts,
-        restore_open_panes, retarget_director_chords, route_garden_input, route_pr_modal_click,
-        route_workspace_input_before_reducer, run as run_from_start, run_screen_graph_with_backend,
+        WorkspaceConfigStep, WorkspaceCreateCompletion, WorkspaceCreateEffect,
+        WorkspaceCreateToken, WorkspaceDeck, WorkspaceInputRoute, WorkspaceLoader,
+        WorkspaceRuntime, WorkspaceSnapshot, WorkspaceUi, WorkspaceView,
+        activate_workspace_responsive, adjust_project_bar_pointer, app_event_from_key,
+        close_exited_panes, compose_workspace_shell_frame, controller_terminal_view,
+        copy_terminal_selection, director_organization, dismiss_pr_modal_on_project_bar_click,
+        drain_session_completions, foreground_terminal_geometry, forward_live_terminal_input,
+        garden_click_at, garden_fits, garden_shell_owned_wake, handle_terminal_pointer,
+        home_frame_material, intercept_live_terminal_control, is_user_activity,
+        key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
+        open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
+        prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
+        prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
+        remove_registry_paths, render_controller_frame, render_home_material, render_home_snapshot,
+        reset_projection_build_counts, restore_open_panes, retarget_director_chords,
+        route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+        run as run_from_start, run_screen_graph_with_backend,
         run_screen_graph_with_backend_and_notice, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
         run_workspace_controller_with_backend_and_config,
         run_workspace_controller_with_backend_and_settings,
-        run_workspace_deck_with_backend_and_config, safe_session_error, select_right_pane_tab,
-        sidebar_pointer_event, step_config, step_new, step_open, terminal_geometry,
-        visit_garden_agent, welcome_action, workspace_has_unsaved_surface, write_banner,
+        run_workspace_deck_with_backend_and_config, run_workspace_loading, safe_session_error,
+        save_config_responsive, save_environment_responsive, select_right_pane_tab,
+        sidebar_pointer_event, step_config, step_new, step_open, step_workspace_config,
+        terminal_geometry, visit_garden_agent, welcome_action, workspace_has_unsaved_surface,
+        write_banner,
     };
     use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
     use crate::presentation::live_terminal::LiveTerminalControls;
@@ -13680,20 +13902,25 @@ mod tests {
         };
         let base = material(&runtime);
 
-        // A resting tick is not material: the rabbit's four idle phases collapse
-        // onto one frame, so the loop draws nothing while it holds its pose.
-        for _ in 0..3 {
+        // The decorative rabbit holds its resting pose for 32 runtime ticks, so
+        // an idle Home does not repaint at the terminal clock cadence.
+        for _ in 0..31 {
             let _ = runtime.apply_event(AppEvent::Tick);
             assert_eq!(material(&runtime), base, "a resting tick forced a redraw");
         }
-        // The blink and the ear flop are: both must reach the terminal.
+        // The blink and the ear flop are each held for eight ticks, but both
+        // transitions must still reach the terminal.
         let _ = runtime.apply_event(AppEvent::Tick);
         let blink = material(&runtime);
         assert_ne!(blink, base, "the rabbit stopped blinking");
-        let _ = runtime.apply_event(AppEvent::Tick);
+        for _ in 0..8 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+        }
         let flop = material(&runtime);
         assert_ne!(flop, blink, "the rabbit stopped flopping its ear");
-        let _ = runtime.apply_event(AppEvent::Tick);
+        for _ in 0..8 {
+            let _ = runtime.apply_event(AppEvent::Tick);
+        }
         assert_eq!(
             material(&runtime),
             base,
@@ -22969,11 +23196,20 @@ mod tests {
         Empty,
     }
 
+    #[derive(Clone, Copy, Default, Eq, PartialEq)]
+    enum FakeOperationMode {
+        #[default]
+        Inline,
+        Background,
+    }
+
     #[derive(Default)]
     struct FakeLoader {
+        operation_mode: FakeOperationMode,
         opened: Vec<PathBuf>,
         refreshed: Vec<PathBuf>,
         open_snapshot: FakeOpenSnapshot,
+        activate_error: Option<&'static str>,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
         unregistered: Vec<PathBuf>,
@@ -23002,10 +23238,16 @@ mod tests {
         release_after_polls: Option<usize>,
         completion_noise: bool,
         opened_at: Option<DateTime<Utc>>,
+        open_delay: std::time::Duration,
     }
 
     impl WorkspaceLoader for FakeLoader {
+        fn background_operations(&self) -> bool {
+            self.operation_mode == FakeOperationMode::Background
+        }
+
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            std::thread::sleep(self.open_delay);
             self.opened.push(path.to_path_buf());
             let fenced = self.refuse_paths.is_empty()
                 || self.refuse_paths.iter().any(|fenced| fenced == path);
@@ -23043,6 +23285,11 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workspace");
             Ok(snapshot(name))
+        }
+
+        fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
+            self.activate_error
+                .map_or(Ok(()), |error| Err(io::Error::other(error)))
         }
 
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
@@ -23131,6 +23378,197 @@ mod tests {
                 }
             }
             self.create_completions.pop_front()
+        }
+    }
+
+    #[derive(Default)]
+    struct ResponsiveLoadingTerminal {
+        keys: VecDeque<Key>,
+        wait_keys: VecDeque<Key>,
+        frames: Vec<Vec<String>>,
+        draw_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Terminal for ResponsiveLoadingTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            Ok((24, 80))
+        }
+
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.frames.push(frame.to_vec());
+            self.draw_count
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            Ok(())
+        }
+
+        fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+            std::thread::sleep(duration.min(std::time::Duration::from_millis(2)));
+            Ok(())
+        }
+
+        fn wait_for_key(&mut self, duration: std::time::Duration) -> io::Result<Option<Key>> {
+            self.wait(duration)?;
+            Ok(self.wait_keys.pop_front())
+        }
+
+        fn read_key(&mut self) -> io::Result<Key> {
+            self.keys
+                .pop_front()
+                .ok_or_else(|| io::Error::other("no more keys"))
+        }
+    }
+
+    #[test]
+    fn blocking_operations_keep_painting_and_workspace_open_can_be_cancelled() {
+        let mut term = ResponsiveLoadingTerminal {
+            wait_keys: VecDeque::from([Key::Escape]),
+            ..ResponsiveLoadingTerminal::default()
+        };
+        let draw_count = Arc::clone(&term.draw_count);
+
+        let error = run_workspace_loading(&mut term, "Opening workspace…", true, || {
+            while draw_count.load(std::sync::atomic::Ordering::Acquire) < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+        .expect_err("escape cancels the visible wait");
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let painted = term.frames.iter().flatten().cloned().collect::<String>();
+        assert!(painted.contains("Opening workspace…"));
+        assert!(painted.contains("Cancelling…"));
+        assert!(
+            term.frames.len() >= 2,
+            "the loading surface kept repainting"
+        );
+    }
+
+    #[test]
+    fn a_panicking_background_operation_is_reported_as_io_failure() {
+        let mut term = ResponsiveLoadingTerminal::default();
+        let error = run_workspace_loading(
+            &mut term,
+            "Saving settings…",
+            false,
+            || -> io::Result<()> { panic!("injected worker panic") },
+        )
+        .expect_err("worker panic is mapped to a stable error");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error.to_string(),
+            "background operation stopped unexpectedly"
+        );
+    }
+
+    #[test]
+    fn production_workspace_ports_open_refresh_and_activate_on_the_worker_path() {
+        let mut term = ResponsiveLoadingTerminal::default();
+        let mut loader = FakeLoader {
+            operation_mode: FakeOperationMode::Background,
+            open_snapshot: FakeOpenSnapshot::Empty,
+            ..FakeLoader::default()
+        };
+
+        let snapshot = open_workspace_responsive(
+            &mut term,
+            &mut loader,
+            Path::new("/tmp/background"),
+            "Opening workspace…",
+        )
+        .expect("background open succeeds");
+        activate_workspace_responsive(
+            &mut term,
+            &mut loader,
+            &snapshot.workspace.path,
+            "Activating workspace…",
+        )
+        .expect("background activation succeeds");
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/background")]);
+        assert_eq!(loader.refreshed, vec![PathBuf::from("/tmp/background")]);
+
+        let paths = vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")];
+        let (_, active, _) = prepare_workspace_deck(&mut term, &mut loader, &paths)
+            .expect("background deck preparation succeeds");
+        assert_eq!(active.workspace.path, PathBuf::from("/tmp/one"));
+
+        let mut failing_loader = FakeLoader {
+            activate_error: Some("activation failed"),
+            ..FakeLoader::default()
+        };
+        let error = prepare_workspace_deck(
+            &mut term,
+            &mut failing_loader,
+            &[PathBuf::from("/tmp/fail")],
+        )
+        .expect_err("activation failure is propagated");
+        assert_eq!(error.to_string(), "activation failed");
+    }
+
+    #[test]
+    fn cancelling_recent_and_open_list_restores_the_originating_screen() {
+        let cases = [
+            (
+                vec![Key::Char('1'), Key::Quit],
+                Vec::new(),
+                vec![recent("recent")],
+                "Menu",
+            ),
+            (
+                vec![Key::Char('o'), Key::Enter, Key::Quit],
+                vec![ws("open")],
+                Vec::new(),
+                "Open Workspace",
+            ),
+        ];
+
+        for (keys, workspaces, recent, originating_screen) in cases {
+            let mut term = ResponsiveLoadingTerminal {
+                keys: keys.into(),
+                wait_keys: VecDeque::from([Key::Escape]),
+                ..ResponsiveLoadingTerminal::default()
+            };
+            let mut loader = FakeLoader {
+                operation_mode: FakeOperationMode::Background,
+                open_delay: std::time::Duration::from_millis(20),
+                ..FakeLoader::default()
+            };
+            let mut settings = RecordingSettingsPort::default();
+            let mut sessions = UnavailableSessionCommandPortFactory;
+
+            assert_eq!(
+                run_with_settings(
+                    &mut term,
+                    workspaces,
+                    recent,
+                    now(),
+                    Start::Welcome,
+                    &mut loader,
+                    &mut settings,
+                    &mut sessions,
+                )
+                .unwrap(),
+                Exit::Quit
+            );
+            let frames = term
+                .frames
+                .iter()
+                .map(|frame| frame.join("\n"))
+                .collect::<Vec<_>>();
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains("Workspace opening was cancelled.")),
+                "cancel notice was absent from {originating_screen}: {frames:?}"
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains(originating_screen)),
+                "originating screen was absent: {frames:?}"
+            );
         }
     }
 
@@ -23439,6 +23877,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSettingsPort {
         saves: usize,
+        environment_saves: usize,
+        background: bool,
         fail_save: bool,
     }
 
@@ -23599,6 +24039,10 @@ mod tests {
     }
 
     impl SettingsPort for RecordingSettingsPort {
+        fn background_operations(&self) -> bool {
+            self.background
+        }
+
         fn read(
             &mut self,
             _scope: usagi_core::usecase::settings::SettingsScope,
@@ -23617,6 +24061,187 @@ mod tests {
             self.saves += 1;
             Ok(())
         }
+
+        fn save_environment(
+            &mut self,
+            _scope: SettingsScope,
+            _environment: &usagi_core::domain::settings::EnvBindings,
+        ) -> io::Result<()> {
+            self.environment_saves += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn production_config_and_environment_writes_use_the_responsive_worker_path() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Right, &mut settings);
+        for _ in 0..8 {
+            let _ = step_config(&mut config, Key::Down, &mut settings);
+        }
+        assert!(matches!(
+            step_config(&mut config, Key::Enter, &mut settings),
+            ConfigStep::Save
+        ));
+        let mut term = ResponsiveLoadingTerminal::default();
+        assert!(
+            save_config_responsive(&mut term, &mut config, &mut settings, None)
+                .expect("responsive settings save")
+        );
+
+        let mut environment = Config::load_workspace_with_available_models(
+            &mut settings,
+            AvailableAgentModels::all(),
+        );
+        let _ = step_config(&mut environment, Key::Down, &mut settings);
+        let _ = step_config(&mut environment, Key::Enter, &mut settings);
+        let _ = step_config(
+            &mut environment,
+            Key::Paste("A=1".to_owned()),
+            &mut settings,
+        );
+        let _ = step_config(&mut environment, Key::Tab, &mut settings);
+        assert!(matches!(
+            step_config(&mut environment, Key::Enter, &mut settings),
+            ConfigStep::SaveEnvironment
+        ));
+        assert!(save_environment_responsive(
+            &mut term,
+            &mut environment,
+            &mut settings,
+        ));
+
+        assert_eq!(settings.saves, 1);
+        assert_eq!(settings.environment_saves, 1);
+        assert_eq!(environment.settings().env["A"], "1");
+    }
+
+    #[test]
+    fn responsive_save_helpers_cover_empty_and_inline_environment_requests() {
+        let mut background = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut clean = Config::load(&mut background);
+        let mut term = ResponsiveLoadingTerminal::default();
+        assert!(!save_config_responsive(&mut term, &mut clean, &mut background, None).unwrap());
+        assert!(!save_environment_responsive(
+            &mut term,
+            &mut clean,
+            &mut background
+        ));
+
+        let mut inline = RecordingSettingsPort::default();
+        let mut environment = Config::load(&mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Down, &mut inline);
+        let _ = step_config(&mut environment, Key::Enter, &mut inline);
+        let _ = step_config(
+            &mut environment,
+            Key::Paste("INLINE=1".to_owned()),
+            &mut inline,
+        );
+        let _ = step_config(&mut environment, Key::Tab, &mut inline);
+        assert!(save_environment_responsive(
+            &mut term,
+            &mut environment,
+            &mut inline
+        ));
+        assert_eq!(inline.environment_saves, 1);
+    }
+
+    #[test]
+    fn background_environment_shortcut_reaches_both_config_surfaces() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut config = Config::load(&mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+        let _ = step_config(&mut config, Key::Down, &mut settings);
+        let _ = step_config(&mut config, Key::Enter, &mut settings);
+        let save = Key::Management {
+            action: AppKey::SaveRoles,
+            passthrough: vec![0x13],
+        };
+        assert!(matches!(
+            step_config(&mut config, save.clone(), &mut settings),
+            ConfigStep::SaveEnvironment
+        ));
+        assert!(matches!(
+            step_workspace_config(&mut config, save, &mut settings),
+            WorkspaceConfigStep::SaveEnvironment
+        ));
+    }
+
+    #[test]
+    fn workspace_config_dispatches_background_environment_save() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Enter,
+            Key::Paste("WORKSPACE=1".to_owned()),
+            Key::Tab,
+            Key::Enter,
+            Key::Escape,
+        ]);
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        assert_eq!(settings.environment_saves, 1);
+    }
+
+    #[test]
+    fn full_config_dispatches_background_environment_save() {
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut loader = FakeLoader::default();
+        let mut sessions = UnavailableSessionCommandPortFactory;
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Down,
+            Key::Enter,
+            Key::Paste("GLOBAL=1".to_owned()),
+            Key::Management {
+                action: AppKey::SaveRoles,
+                passthrough: vec![0x13],
+            },
+            Key::Escape,
+            Key::Quit,
+        ]);
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                Start::Config,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(settings.environment_saves, 1);
     }
 
     // Focus the dirty Save row from Global Config: cycle the theme, then step down to
@@ -26967,6 +27592,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fixture covers the deck helpers' shared fallback state.
     fn project_deck_composition_helpers_cover_safe_fallbacks() {
         let alpha = snapshot("alpha");
         assert!(!workspace_has_unsaved_surface(&WorkspaceRuntime::new(
@@ -26974,20 +27600,34 @@ mod tests {
             Vec::new(),
         )));
         let mut deck = WorkspaceDeck::new(&alpha);
+        let mut term = FakeTerminal::default();
 
         let mut no_loader: Option<&mut dyn WorkspaceLoader> = None;
         assert!(
-            prepare_deck_workspace(&mut no_loader, &mut deck, Path::new("/tmp/beta")).is_none()
+            prepare_deck_workspace(
+                &mut term,
+                &mut no_loader,
+                &mut deck,
+                Path::new("/tmp/beta"),
+                "Opening…",
+            )
+            .is_none()
         );
         assert!(deck.notice().unwrap().contains("workspace list"));
 
         let mut successful_loader = FakeLoader::default();
         let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut successful_loader);
         assert_eq!(
-            prepare_deck_workspace(&mut loader, &mut deck, Path::new("/tmp/beta"))
-                .unwrap()
-                .workspace
-                .path,
+            prepare_deck_workspace(
+                &mut term,
+                &mut loader,
+                &mut deck,
+                Path::new("/tmp/beta"),
+                "Opening…",
+            )
+            .unwrap()
+            .workspace
+            .path,
             PathBuf::from("/tmp/beta")
         );
 
@@ -26996,7 +27636,16 @@ mod tests {
             ..FakeLoader::default()
         };
         let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut failed_loader);
-        assert!(prepare_deck_workspace(&mut loader, &mut deck, Path::new("/tmp/beta")).is_none());
+        assert!(
+            prepare_deck_workspace(
+                &mut term,
+                &mut loader,
+                &mut deck,
+                Path::new("/tmp/beta"),
+                "Opening…",
+            )
+            .is_none()
+        );
         assert_eq!(deck.notice(), Some("open failed"));
 
         let mut no_config = None;
@@ -27057,7 +27706,7 @@ mod tests {
         assert_eq!(adjust_project_bar_pointer(Key::Other), Key::Other);
 
         assert_eq!(
-            prepare_workspace_deck(&mut FakeLoader::default(), &[])
+            prepare_workspace_deck(&mut term, &mut FakeLoader::default(), &[])
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
@@ -27081,7 +27730,8 @@ mod tests {
             ..FakeLoader::default()
         };
         let paths = vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")];
-        let (_, active, mut deck) = prepare_workspace_deck(&mut fake, &paths).unwrap();
+        let mut term = FakeTerminal::default();
+        let (_, active, mut deck) = prepare_workspace_deck(&mut term, &mut fake, &paths).unwrap();
 
         assert_eq!(fake.opened, paths);
         assert_eq!(fake.refreshed, paths);
@@ -27091,8 +27741,14 @@ mod tests {
         fake.opened.clear();
         fake.refreshed.clear();
         let mut loader: Option<&mut dyn WorkspaceLoader> = Some(&mut fake);
-        let gamma = prepare_deck_workspace(&mut loader, &mut deck, Path::new("/tmp/gamma"))
-            .expect("an added project is prepared");
+        let gamma = prepare_deck_workspace(
+            &mut term,
+            &mut loader,
+            &mut deck,
+            Path::new("/tmp/gamma"),
+            "Opening…",
+        )
+        .expect("an added project is prepared");
         assert_eq!(gamma.session_ids.len(), 1);
         assert_eq!(fake.opened, vec![PathBuf::from("/tmp/gamma")]);
         assert_eq!(fake.refreshed, vec![PathBuf::from("/tmp/gamma")]);
