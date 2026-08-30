@@ -81,12 +81,24 @@ fn ask_at(address: SocketAddr, model: &str, prompt: &str) -> Result<LocalOpinion
     })
     .expect("a chat request containing only strings must serialize");
     let mut stream = connect(address, CONNECT_TIMEOUT)?;
-    configure_timeouts(&stream, IO_TIMEOUT, IO_TIMEOUT)?;
-    write_request(&mut stream, &body)?;
+    let configured = configure_timeouts(&stream, IO_TIMEOUT, IO_TIMEOUT);
+    exchange(&mut stream, &body, configured)
+}
 
-    let raw = read_bounded(&mut stream)?;
+fn exchange(
+    stream: &mut dyn ReadWrite,
+    body: &[u8],
+    configured: Result<(), String>,
+) -> Result<LocalOpinion, String> {
+    configured?;
+    write_request(stream, body)?;
+    let raw = read_bounded(stream)?;
     parse_http_response(&raw)
 }
+
+trait ReadWrite: Read + Write {}
+
+impl<T: Read + Write> ReadWrite for T {}
 
 fn connect(address: SocketAddr, timeout: Duration) -> Result<TcpStream, String> {
     match TcpStream::connect_timeout(&address, timeout) {
@@ -111,7 +123,7 @@ fn configure_timeouts(
     Ok(())
 }
 
-fn write_request(writer: &mut impl Write, body: &[u8]) -> Result<(), String> {
+fn write_request<W: Write + ?Sized>(writer: &mut W, body: &[u8]) -> Result<(), String> {
     let headers = format!(
         "POST /api/chat HTTP/1.0\r\nHost: 127.0.0.1:11434\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -125,7 +137,7 @@ fn write_request(writer: &mut impl Write, body: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn read_bounded(stream: &mut impl Read) -> Result<Vec<u8>, String> {
+fn read_bounded<R: Read + ?Sized>(stream: &mut R) -> Result<Vec<u8>, String> {
     let mut raw = Vec::new();
     let mut limited = stream.take((MAX_RESPONSE_BYTES + 1) as u64);
     loop {
@@ -213,11 +225,27 @@ mod tests {
         }
     }
 
+    impl Read for FailingWriter {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
     struct ErrorReader;
 
     impl Read for ErrorReader {
         fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
             Err(std::io::Error::other("failed"))
+        }
+    }
+
+    impl Write for ErrorReader {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -234,6 +262,16 @@ mod tests {
             self.0 = true;
             buffer[..7].copy_from_slice(b"partial");
             Ok(7)
+        }
+    }
+
+    impl Write for ResetReader {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -324,26 +362,31 @@ mod tests {
         assert!(configure_timeouts(&stream, IO_TIMEOUT, Duration::ZERO).is_err());
         drop(peer);
 
+        let mut unused = std::io::Cursor::new(Vec::new());
+        assert!(exchange(&mut unused, b"body", Err("not configured".into())).is_err());
         for fail_on in [1, 2] {
-            assert!(write_request(&mut FailingWriter { writes: 0, fail_on }, b"body").is_err());
+            assert!(exchange(&mut FailingWriter { writes: 0, fail_on }, b"body", Ok(())).is_err());
         }
-        FailingWriter {
+        let mut complete = FailingWriter {
             writes: 0,
             fail_on: usize::MAX,
-        }
-        .flush()
-        .unwrap();
+        };
+        complete.flush().unwrap();
+        assert_eq!(complete.read(&mut []).unwrap(), 0);
     }
 
     #[test]
     fn read_failures_and_resets_are_mapped() {
+        ErrorReader.flush().unwrap();
         assert!(
-            read_bounded(&mut ErrorReader)
+            exchange(&mut ErrorReader, b"body", Ok(()))
                 .unwrap_err()
                 .contains("failed to read")
         );
 
-        assert_eq!(read_bounded(&mut ResetReader(false)).unwrap(), b"partial");
+        let mut reset = ResetReader(false);
+        reset.flush().unwrap();
+        assert!(exchange(&mut reset, b"body", Ok(())).is_err());
     }
 
     #[test]
