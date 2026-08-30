@@ -416,6 +416,69 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, W
     )
 }
 
+#[test]
+fn running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-clean-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let _ = available_scope(&mut client);
+    git(repo.path(), &["branch", "usagi/orphan", "HEAD"]);
+
+    let request = |client: &mut dyn DaemonClient, apply| {
+        client
+            .request(DaemonRequest::Session {
+                action: SessionAction::Clean,
+                operation_id: OperationId::new().to_string(),
+                payload: serde_json::json!({"apply": apply, "force": false}),
+            })
+            .unwrap()
+    };
+    let DaemonReply::Ok(dry_run) = request(&mut client, false) else {
+        panic!("clean inventory must be a synchronous observation")
+    };
+    assert!(
+        dry_run["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["kind"] == "branch"
+                    && item["name"] == "usagi/orphan"
+                    && item["protected"] == false
+            })
+    );
+
+    let DaemonReply::Ok(applied) = request(&mut client, true) else {
+        panic!("clean apply must report its completed result")
+    };
+    assert_eq!(applied["removed"], 1);
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["show-ref", "--verify", "refs/heads/usagi/orphan"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["show-ref", "--verify", "refs/heads/usagi/agent-e2e"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
 fn launch_intent(
     workspace: WorkspaceId,
     session: SessionId,

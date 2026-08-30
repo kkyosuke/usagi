@@ -76,7 +76,7 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 
 Welcome の Config は、`Global` 見出しに全体へ即時適用する Theme・Modal mode・PR auto-open・Environment、`Workspace init` 見出しに
 新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
-実行した場合は、Home 上の overlay modal に Agent・Team・Issue・Memory だけを表示し、scope 表示は行わない。どちらも
+実行した場合は、Home 上の overlay modal に Agent・Base branch・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
 `←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
 `Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
@@ -204,16 +204,17 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
 | Global | build channel ごとの user data directory にある `settings.json` | Theme・Modal mode・PR auto-open・Environment はすべての workspace に適用する。Agent・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
-| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Team・Issue・Memory だけを保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
+| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field と未知 token は安全な互換動作として Global を継承する |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
 merge して atomic write する。Global Config は Theme・Modal mode・PR auto-open・Agent・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
-Workspace Config は Agent・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
+Workspace Config は Agent・Base branch・Team・Issue・Memory と workspace `env` を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Agent は `default_model`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。
+Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ安全に戻す。
 `default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai`）であり、Config 画面の
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Codex 互換 CLI で、
 実行するのは `codex-fugu`（daemon profile は `sakana-ai`）である。
@@ -321,7 +322,9 @@ alternate screen を復元する。
 
 Home の navigation target は managed `Session(SessionId)` である。表示名と配列 index は identity に
 使わない。selected は cursor、active は command と Closeup の managed session であり、cursor の移動だけでは
-active を変更しない。session が 0 件なら selected は `+ new session`、active は `None` となる。
+active を変更しない。session が 0 件なら selected / active はともに `None` 相当の中立状態となり、
+`+ new session` action を暗黙には選択しない。矢印で action row を明示選択して `Enter` / `t` を入力するか、
+`Ctrl-A` を入力した場合だけ作成フォームを開く。
 
 Closeup の `agent` / `terminal` action は active managed session の `SessionId` から scope を導出する。
 managed session が無い Home は Closeup を開かず、これらの effect を発行しない。`Target::Root` と
@@ -329,8 +332,8 @@ managed session が無い Home は Closeup を開かず、これらの effect �
 生成しない。
 
 daemon snapshot または lifecycle refresh で selected / active session が消えたか使用不能になった場合、
-表示順上の surviving session へ決定的に着地する。surviving session が無ければ selected は
-`+ new session`、active は `None` となり、削除済み session を target にした古い local state を実行に使わない。
+表示順上の surviving session へ決定的に着地する。surviving session が無ければ selected / active は中立状態となり、
+削除済み session を target にした古い local state を実行に使わず、`+ new session` action も暗黙には選択しない。
 削除要求を受理した後も `deleting` 行が snapshot に残る間は selected cursor をその stable identity に保持し、
 行が消えた refresh で初めて surviving session へ移す。
 
@@ -445,6 +448,11 @@ Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない�
 いない Closeup の generic terminal 上の `Ctrl-O x` / `Ctrl-O Ctrl-X` は shell を終了するため、次の `terminal open` は終了済み terminal を再利用せず新しい prompt から始まる。前面 overlay は共通入力境界で
 `Ctrl-C` / `Ctrl-Q` を route より先に所有し、通常は overlay に留まる。例外は `Ctrl-C` で背面へ戻る Closeup action
 modal と、`Ctrl-C` を acknowledge として閉じる session 作成エラーだけであり、いずれも TUI の終了には伝播しない。
+
+daemon 未登録の `.usagi/sessions/<name>` が見つかった場合は、attach 不能・remove 可能な `failed` recovery row として
+sidebar に現れ、failure detail に actual branch、dirty、未統合 commit 件数を表示する。clean かつ基点へ統合済みなら `x` で
+安全に回収できる。dirty、未統合、detached、`usagi/` 外 branch、診断不能な entry は `x` / `X` のどちらでも削除せず、
+commit/stash または PR の作成・merge を促す。orphan recovery では `X` もこの保護を迂回しない。
 
 左 sidebar は、実 session・`+ new session` の左クリックで cursor だけを移し、active session や mode を
 変更しない。実 session は、同じ stable `SessionId` を 400ms 以内（境界を含む）にもう一度左クリックした場合だけ、
@@ -784,7 +792,7 @@ skeleton には Accent（青）を使わないため、静的行から入力欄�
 request を非同期に開始し、完了まで行の直前に 2 行の skeleton を表示する。skeleton の activity glyph と session 名は Success（緑）で同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。IME に依存しない `Ctrl-A` も
-同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、現在 checkout 中の local branch を初期選択する。remote の symbolic alias（`origin/HEAD` など）は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
+同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消す。作成は名前、read-only base branch picker、read-only role picker を受け取り、profile / model は指定せず daemon の workspace default policy に委ねる。base picker は local branch と remote-tracking branch を `local:<name>` / `remote:<remote>/<name>` と表示し、Config の Base branch が現在の inventory にあればそれを、なければ現在 checkout 中の local branch を初期選択する。remote の symbolic alias（`origin/HEAD` など）は候補に含めない。`↑↓` で base、Tab で role を切り替え、daemon へは選択した fully-qualified ref と role ID だけを送る。branch inventory または role catalog を読めない場合は対応する picker を空に縮退させ、base が空なら従来どおり `HEAD` を使う。入力中は英数字・`-`・`_` 以外、64 文字超過、または daemon snapshot で表示中の session と、read-only に検出した `.usagi/sessions/` の既存 worktree と同じ名前を caret 行の下に error として表示し、空の名前は Enter 時に error を表示する。未マージ branch の安全な削除に失敗した session も `failed` 行として snapshot に残るため、その branch が所有する名前には入力中から `session name already exists` を表示する。error は caret 行と同じ 1 行に詰めて末尾を切り捨てるのではなく、sidebar 幅（`unicode-width` 準拠の表示桁数）に合わせて caret 行の**下へ折り返して**表示するため、CJK を含む長い安全文でも切れずに読める。折り返した行数は `+ new session` 行の高さ計上（viewport の scroll 起点と footer）と一致させ、error が伸びてもレイアウトがずれない。これらは local validation で daemon へ送る前に弾き、入力（draft）は失わないので、error を直して再送できる。local validation の error（入力に付随）と、daemon が受付後に作成を拒否したときの表示は別物として扱う。前者は入力欄の直下に出し、後者は下記の作成失敗 dialog で安全な message だけを提示する。
 作成 request の受付後、完了まで入力がなければ、作成された session を選択して Closeup へ移る。完了前に入力があればこの自動遷移を取り消し、
 作成完了後もその時点の操作 surface を保つ。
 完了 snapshot は sidebar row と daemon-issued session ID を同時に置換するため、`a` のような短い名前も
@@ -830,6 +838,7 @@ command の subcommand picker を開き、`←` は閉じる。`Prompt` は入�
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
+`clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch を dry-run で数え、`clean --apply` は merged branch と clean worktree だけを削除する。dirty worktree と unmerged branch は `clean --apply --force` の二重の明示がある場合だけ削除する。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった resource には作用しない。
 Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Issue / Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
@@ -1617,7 +1626,7 @@ tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。描画前に ready になった同方向の wheel burst は最大 32 notch まで 1 action に集約し、移動量を保ったまま frame rebuild / diff / flush を 1 回にする。逆方向または wheel 以外の最初の event は次回へ保持して入力順序を変えず、上限到達時はいったん描画する。`Ctrl-O u` / `Ctrl-O d` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
 snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
@@ -1632,7 +1641,7 @@ daemon の cell / checkpoint frame budget で oldest row の eviction と追記�
 一方の origin を他方の追記量へ混ぜない。保持している間は live bottom までの距離が会話とともに伸びるため、
 `Ctrl-O b` / `Ctrl-O End`（ScrollBottom）が 1 手で live bottom へ戻して追従を再開する。
 
-出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。drag 中も
+出力は mouse drag により選択でき、drag 開始時の press cell から終点までを含めて、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。複数の物理行にまたがる選択では、PTY の明示改行だけを改行としてコピーし、端末幅による自動折り返し境界は改行を挿入せず連結する。drag 中も
 drag を離した後も、選択範囲は右ペインに reverse-video で示し続ける。選択は右ペイン content 内の通常左クリック、次の drag が
 新しい選択を始めるか、その terminal が論理 close / bounded cache eviction されるまで terminal identity ごとに保持する。
 別 terminal へ focus が移った間は非表示になり、focus が戻ると scroll offset・selection・feedback を復元する（release で即座に消えない）。保持中の選択は OS 標準の copy shortcut（macOS: Command+C、Linux: Ctrl+Shift+C、Windows: Ctrl+C）で再コピーできる。この click は text selection

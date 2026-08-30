@@ -62,11 +62,15 @@ shell は header の `[ ⌂ Shell ]` から、下端より重なる専用 drawer
 
 Home の基本操作は次のとおり。
 
+session がない workspace を開いた直後は session 行を選択しない。`+ new session` は `↑` / `↓` で明示選択してから
+`Enter` / `t` で開くか、`Ctrl-A` で直接開く。
+
 | 操作 | 動作 |
 |---|---|
 | `↑` / `↓`、`j` / `k` | session を選ぶ |
 | `←` / `→` | Switch で前 / 次の project tab へ移動する |
-| `Enter` / `t` | 選択した session の Closeup を開く |
+| `Enter` / `t` | 選択した session の Closeup、または明示選択した `+ new session` の作成を開く |
+| `Ctrl-A` | Switch で新規 session の作成を直接開く |
 | `Ctrl-O` | live pane から Switch へ戻る、または Closeup の action を開く |
 | `Ctrl-O` → `+` | workspace を project tab として追加する（表示中の tab は `Ctrl-D` で閉じる） |
 | `Ctrl-O` → `1` … `9` | 1〜9 番目の project tab へ切り替える |
@@ -260,6 +264,7 @@ Welcome の Config は全体設定、workspace のコマンドパレットにあ
 |---|---|
 | Theme / Modal mode / PR auto-open | TUI の配色、Overview / Closeup の操作方式、PR検知時の表示方法 |
 | Agent | 新しい Agent pane の既定 CLI |
+| Base branch | workspace で新しい session を作るときの既定 branch |
 | Team | Enterで構造図付きカードを開き、`none` / 階層型 / フラット / パイプラインから session role 構造を選択 |
 | Issue / Memory | 対応する MCP tool 群の公開可否 |
 | Environment | global と workspace の 2 層で、次回起動する pane へ渡す環境変数 |
