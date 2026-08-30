@@ -408,6 +408,10 @@ fn project_garden_sessions(
                 agents_observed: true,
                 pr_merged: state.celebrates_pr_merge(session.id),
                 agents: session_agents.get(&session.id).cloned().unwrap_or_default(),
+                agent_status: state
+                    .session_roles()
+                    .get(&session.id)
+                    .and_then(|projection| projection.agent_status),
             })
             .collect()
     })
@@ -3016,7 +3020,7 @@ mod tests {
     use std::sync::Arc;
     use usagi_core::domain::agent::{
         AgentInventory, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
-        ProviderResumeProjection, ProviderResumeReason,
+        AgentStatus as DispatchAgentStatus, ProviderResumeProjection, ProviderResumeReason,
     };
     use usagi_core::domain::id::{
         AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
@@ -3577,6 +3581,41 @@ mod tests {
             garden.session_agents[&session]
         );
         assert_eq!(garden.session_agents, sidebar.session_agents);
+    }
+
+    #[test]
+    fn garden_projects_the_daemon_session_dispatch_status() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
+                session,
+                SessionRoleProjection {
+                    role_id: None,
+                    role_summary: None,
+                    parent_session_id: None,
+                    agent_status: Some(DispatchAgentStatus::Idle),
+                },
+            )]))),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+        );
+
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            Path::new("/work"),
+            &[projected_session(session, "builder", "/work/builder")],
+        );
+        assert_eq!(
+            home.garden_sessions.as_ref().expect("garden")[0].agent_status,
+            Some(DispatchAgentStatus::Idle)
+        );
     }
 
     /// runtime-local push の `Interrupted` は、session 単位の fold を通さずに
@@ -4929,6 +4968,7 @@ mod tests {
                     failure_summary: None,
                     agents_observed: false,
                     agents: Vec::new(),
+                    agent_status: None,
                     pr_merged: false,
                 },
             )],
@@ -5012,13 +5052,13 @@ mod tests {
                         failure_summary: None,
                         agents_observed: false,
                         agents: Vec::new(),
+                        agent_status: None,
                         pr_merged: false,
                     },
                 )
             })
             .collect::<Vec<_>>();
-        let later_workspace = rows[4].0;
-        let later_session = rows[4].1.id;
+        let (later_workspace, later_session) = (rows[4].0, rows[4].1.id);
         let project = |state: &AppState| {
             HomeProjection::from_state(state, "active", Path::new("/work"), &[])
                 .with_deck_garden("5 open projects".to_owned(), rows.clone())
@@ -5032,7 +5072,6 @@ mod tests {
             garden_scroll_action(23, 80, &first, now(), true),
             Some(GardenClick::Scroll(1))
         );
-
         let _ = update(&mut state, AppEvent::GardenClick(GardenClick::Scroll(1)));
         let second = project(&state);
         let second_frame = garden_frame(23, 80, &second, now()).expect("shifted viewport fits");

@@ -9333,6 +9333,7 @@ mod tests {
                             failure_summary: None,
                             agents_observed: false,
                             agents: Vec::new(),
+                            agent_status: None,
                             pr_merged: false,
                         },
                     )
@@ -9397,6 +9398,7 @@ mod tests {
                     failure_summary: None,
                     agents_observed: false,
                     agents: Vec::new(),
+                    agent_status: None,
                     pr_merged: false,
                 },
             )],

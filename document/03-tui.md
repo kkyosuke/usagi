@@ -965,6 +965,9 @@ phase をそのまま保つ runtime-local phase を優先し、まだ観測し�
 （`reserved → ready`、`live → running`、`interrupted → interrupted`）で描く。inventory を 1 度も観測していない
 （起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase がそのまま
 うさぎになる。workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
+active project では `session list` の dispatch status も status 行へ重ねる。`starting` / `idle` / `exited` /
+`failed` は inventory の粗い `live → running` より強く、`starting` / `idle` / `stopped` / `failed` と表示する。
+dispatch が `running` の間だけは runtime-local の `waiting` / `interrupted` を保ち、より粗い running 表示で潰さない。
 
 複数 runtime は注目順（`waiting → running → ready → interrupted → idle → done`）に並べ、同 phase の
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は

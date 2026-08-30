@@ -83,6 +83,7 @@ impl CachedGardenSession {
             } else {
                 Vec::new()
             },
+            agent_status: None,
             pr_merged: false,
         }
     }
@@ -1185,6 +1186,7 @@ mod tests {
             failure_summary: None,
             agents_observed: true,
             agents: Vec::new(),
+            agent_status: None,
             pr_merged: false,
         }];
 
