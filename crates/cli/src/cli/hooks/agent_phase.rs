@@ -1,6 +1,6 @@
 //! `usagi agent-phase <phase>` — エージェントのライフサイクル phase を daemon へ報告する内部コマンド。
 //!
-//! usagi がエージェント起動時に Claude のライフサイクルフックへ配線し、フックが phase
+//! usagi がエージェント起動時に各 provider のライフサイクルフックへ配線し、フックが phase
 //! （例: `ended`）を引数に渡して呼ぶ。人手で叩くものではない（`--help` 非表示）。フックは
 //! 終了コードだけを見るため、標準出力には何も書かない。
 //!
@@ -126,6 +126,7 @@ mod tests {
             ("UserPromptSubmit", "running"),
             ("PreToolUse", "running"),
             ("PostToolUse", "waiting"),
+            ("PermissionRequest", "waiting"),
             ("Notification", "waiting"),
             ("Stop", "ended"),
             ("SessionEnd", "exited"),

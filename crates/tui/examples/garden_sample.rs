@@ -157,6 +157,7 @@ fn sample(
             runtime_id: AgentRuntimeId::parse(id).expect("sample IDs are canonical UUIDs"),
             phase: agent_phase,
         }],
+        agent_status: None,
     }
 }
 
@@ -182,5 +183,6 @@ fn sample_agents(
                 phase: *phase,
             })
             .collect(),
+        agent_status: None,
     }
 }
