@@ -4540,6 +4540,14 @@ mod tests {
             &[],
         ));
         assert!(remote.contains("base: remote:origin/main"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let remote_default = joined_home(&HomeProjection::from_state(
+            &state,
+            "work",
+            Path::new("/work"),
+            &[],
+        ));
+        assert!(remote_default.contains("base: remote:origin/(default)"));
     }
 
     #[test]
