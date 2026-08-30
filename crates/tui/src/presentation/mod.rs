@@ -27,7 +27,7 @@ use chrono::{DateTime, Timelike, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{
     AgentInventory, AgentProfileId, AgentResumeRelation, AgentResumeTarget,
-    AgentRuntimeInventoryState, ProviderResumeProjection,
+    AgentRuntimeInventoryState, AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, UserDecisionId, WorkspaceId,
@@ -1206,19 +1206,19 @@ pub struct ControllerBackendComposition {
 /// never cold-starts a daemon, so a project whose daemon is gone simply keeps
 /// its read-only plot.
 pub trait GardenInventoryPort: Send {
-    /// The daemon's safe Agent inventory for one open project.
+    /// The daemon's safe runtime and dispatch observation for one open project.
     ///
     /// # Errors
     ///
     /// Returns safe feedback when the daemon is unavailable or refuses the
     /// workspace. The Garden keeps the plot it has.
-    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String>;
+    fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
 }
 
 struct UnavailableGardenInventoryPort;
 
 impl GardenInventoryPort for UnavailableGardenInventoryPort {
-    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentInventory, String> {
+    fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
         Err("Agent inventory is unavailable".to_owned())
     }
 }
@@ -1934,7 +1934,7 @@ struct GardenObservationCompletion {
     port: Box<dyn GardenInventoryPort>,
     /// Inventories the daemon answered, each already checked to be the
     /// workspace it was asked for.
-    inventories: Vec<AgentInventory>,
+    inventories: Vec<AgentWorkspaceObservation>,
 }
 
 /// Admission for the Garden's cross-project observation lane.
@@ -2002,7 +2002,7 @@ fn spawn_garden_observation_job(
         let mut inventories = Vec::new();
         for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
             if let Ok(inventory) = port.inventory(workspace)
-                && inventory.workspace_id == workspace
+                && inventory.inventory.workspace_id == workspace
             {
                 inventories.push(inventory);
             }
@@ -9110,6 +9110,7 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::{
         AgentInventory, AgentProfileId, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
+        AgentWorkspaceObservation,
     };
     use usagi_core::domain::id::{
         AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId,
@@ -9820,25 +9821,31 @@ mod tests {
         // The daemon answers for whichever workspace the request names, so the
         // other project's Agents reach its plot without a resident controller.
         let runtime_id = AgentRuntimeId::new();
-        assert!(deck.apply_garden_inventory(&AgentInventory {
-            workspace_id: beta.workspace_id,
-            runtimes: vec![AgentRuntimeInventoryItem {
-                runtime: AgentRuntimeRef {
-                    agent_runtime_id: runtime_id,
-                    terminal: TerminalRef {
-                        daemon_generation: DaemonGeneration::new(),
-                        terminal_id: TerminalId::new(),
-                        workspace_id: beta.workspace_id,
+        assert!(deck.apply_garden_inventory(&AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: beta.workspace_id,
+                runtimes: vec![AgentRuntimeInventoryItem {
+                    runtime: AgentRuntimeRef {
+                        agent_runtime_id: runtime_id,
+                        terminal: TerminalRef {
+                            daemon_generation: DaemonGeneration::new(),
+                            terminal_id: TerminalId::new(),
+                            workspace_id: beta.workspace_id,
+                            session_id: Some(beta.session_ids[0]),
+                            worktree_id: WorktreeId::new(),
+                        },
                         session_id: Some(beta.session_ids[0]),
-                        worktree_id: WorktreeId::new(),
                     },
-                    session_id: Some(beta.session_ids[0]),
-                },
-                continuation: AgentContinuationRef::new(),
-                state: AgentRuntimeInventoryState::Live,
-                resumed_from: None,
-            }],
-            resumable: Vec::new(),
+                    continuation: AgentContinuationRef::new(),
+                    state: AgentRuntimeInventoryState::Live,
+                    resumed_from: None,
+                }],
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::from([(
+                beta.session_ids[0],
+                usagi_core::domain::agent::AgentStatus::Idle,
+            )]),
         }));
         let material = build(&deck);
         let plots = material
@@ -9855,7 +9862,8 @@ mod tests {
         );
         let observed = render_home_material(&material);
         assert!(!observed.iter().any(|row| row.contains("project inactive")));
-        assert!(observed.iter().any(|row| row.contains("1 run")));
+        assert!(observed.iter().any(|row| row.contains("idle")));
+        assert!(observed.iter().any(|row| row.contains("0 running")));
     }
 
     #[test]
@@ -19179,12 +19187,15 @@ mod tests {
     #[test]
     fn a_garden_round_observes_every_other_project_and_drops_a_mismatched_answer() {
         struct FakeGardenInventory {
-            answers: BTreeMap<WorkspaceId, Result<AgentInventory, String>>,
+            answers: BTreeMap<WorkspaceId, Result<AgentWorkspaceObservation, String>>,
             asked: Arc<Mutex<Vec<WorkspaceId>>>,
         }
 
         impl super::GardenInventoryPort for FakeGardenInventory {
-            fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentInventory, String> {
+            fn inventory(
+                &mut self,
+                workspace: WorkspaceId,
+            ) -> Result<AgentWorkspaceObservation, String> {
                 self.asked.lock().unwrap().push(workspace);
                 self.answers
                     .remove(&workspace)
@@ -19203,10 +19214,13 @@ mod tests {
         let observed = WorkspaceId::new();
         let mismatched = WorkspaceId::new();
         let unavailable = WorkspaceId::new();
-        let empty_inventory = |workspace| AgentInventory {
-            workspace_id: workspace,
-            runtimes: Vec::new(),
-            resumable: Vec::new(),
+        let empty_inventory = |workspace| AgentWorkspaceObservation {
+            inventory: AgentInventory {
+                workspace_id: workspace,
+                runtimes: Vec::new(),
+                resumable: Vec::new(),
+            },
+            session_statuses: BTreeMap::new(),
         };
         let asked = Arc::new(Mutex::new(Vec::new()));
         let port = FakeGardenInventory {
@@ -19234,7 +19248,7 @@ mod tests {
             completion
                 .inventories
                 .iter()
-                .map(|inventory| inventory.workspace_id)
+                .map(|inventory| inventory.inventory.workspace_id)
                 .collect::<Vec<_>>(),
             vec![observed]
         );
@@ -27330,7 +27344,10 @@ mod tests {
     }
 
     impl super::GardenInventoryPort for CountedPort {
-        fn inventory(&mut self, _workspace: WorkspaceId) -> Result<AgentInventory, String> {
+        fn inventory(
+            &mut self,
+            _workspace: WorkspaceId,
+        ) -> Result<AgentWorkspaceObservation, String> {
             Err("Agent inventory is unavailable".to_owned())
         }
     }

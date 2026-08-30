@@ -2006,8 +2006,22 @@ impl presentation::GardenInventoryPort for DaemonGardenInventoryPort {
     fn inventory(
         &mut self,
         workspace: WorkspaceId,
-    ) -> Result<usagi_core::domain::agent::AgentInventory, String> {
-        fetch_agent_inventory(workspace)
+    ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
+        let mut client =
+            crate::runtime::daemon::policy_client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        match client
+            .request(
+                usagi_core::usecase::client::DaemonRequest::AgentWorkspaceObservation { workspace },
+            )
+            .map_err(|_| "Agent workspace observation is unavailable".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
+                serde_json::from_value(body).map_err(|_| {
+                    "daemon returned an invalid Agent workspace observation".to_owned()
+                })
+            }
+        }
     }
 }
 
