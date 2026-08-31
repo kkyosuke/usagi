@@ -1042,10 +1042,14 @@ phase をそのまま保つ runtime-local phase を優先し、まだ観測し�
 （`reserved → ready`、`live → running`、`interrupted → interrupted`）で描く。inventory を 1 度も観測していない
 （起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase がそのまま
 うさぎになる。workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
-active project では `session list` の dispatch status も pose へ重ねる。`starting` / `idle` / `exited` /
-`failed` は inventory の粗い `live → running` より強く、古い running pose をそれぞれ calm / stopped pose へ落とす。
-通常動作は絵を見れば分かるため `starting` / `idle` / `stopped` の action caption は重ねず、見逃せない `failed` だけを
-文字でも表示する。dispatch が `running` の間は runtime-local の `waiting` / `interrupted` pose を保ち、より粗い
+dispatch status も区画へ重ねる。active project は `session list`、inactive project は観測した
+`AgentWorkspaceObservation.session_statuses` を使い、どちらも全 Agent を
+`running > starting > failed > idle > exited` の共通順位で
+決定的に集約する。record の挿入順や「current run がある最初の1件」で結果を変えない。`starting` / `idle` /
+`exited` / `failed` は inventory の粗い `live → running` より強く、区画全体を calm / stopped / failed の静止 pose に
+する。この pose は個別 runtime を表さないため、うさぎ単位の animation と hitbox を置かない。通常動作は絵を見れば
+分かるため `starting` / `idle` / `stopped` の action caption は重ねず、見逃せない `failed` だけを文字でも表示する。
+dispatch が `running` の間だけは runtime-local の `waiting` / `interrupted` pose と各うさぎの hitbox を保ち、より粗い
 running pose で潰さない。
 
 複数 runtime は注目順（`waiting → running → ready → interrupted → sleep → idle → done`）に並べ、同 phase の
@@ -1097,8 +1101,9 @@ Garden は開いている project 全件を描くが、workspace controller が 
 観測が届いた区画は active project と同じ規則（[区画とうさぎ](#区画とうさぎ)）でうさぎを描く。届く前・daemon が
 居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。runtime phase は inventory の粗い state
 （`reserved → ready`、`live → running`、`interrupted → interrupted`）だが、session の `starting` / `idle` / `exited` /
-`failed` は同じ observation の dispatch status を優先し、粗い `live` を running と数えない。runtime-local phase を
-持つのは controller が resident な active project だけである。
+`failed` は同じ observation の dispatch status を優先し、粗い `live` を running と数えない。複数 Agent の status は
+active project と同じ共通順位で集約済みである。runtime-local phase を持つのは controller が resident な
+active project だけである。
 
 **session と lifecycle は cache のままである**。inactive project の session 一覧・lifecycle・failure summary は、
 その tab が最後に active だったときの daemon snapshot で、そこで新しく生まれた session は tab を開くまで区画にならない。

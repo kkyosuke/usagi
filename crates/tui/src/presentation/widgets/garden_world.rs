@@ -372,6 +372,17 @@ fn draw_sessions(
             draw_lifecycle_pose(canvas, session, places.burrow, tick, reduced_motion);
             continue;
         }
+        if !session.pr_merged
+            && let Some(
+                status @ (DispatchAgentStatus::Starting
+                | DispatchAgentStatus::Idle
+                | DispatchAgentStatus::Exited
+                | DispatchAgentStatus::Failed),
+            ) = session.agent_status
+        {
+            draw_dispatch_pose(canvas, session, places.burrow, status);
+            continue;
+        }
 
         let agents = agent_status::ordered(&session.agents);
         let visible_count = agents.len().min(MAX_WORLD_AGENTS_PER_SESSION);
@@ -948,6 +959,45 @@ fn draw_lifecycle_pose(
     );
 }
 
+/// A non-running dispatch status belongs to the session as a whole. Draw one
+/// static pose beside its burrow instead of animating or targeting a stale
+/// runtime-local phase.
+fn draw_dispatch_pose(
+    canvas: &mut Canvas,
+    session: &GardenSession,
+    home: Point,
+    status: DispatchAgentStatus,
+) {
+    let feature = garden_rabbit_style(stable_hash(&session.id.as_str())).bold();
+    let (sprite, style) = match status {
+        DispatchAgentStatus::Starting => (["", " /)/)", "( . .)", r#"c(")(")v"#], feature),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
+            ([" z", " /)/)", "( -.-)", r#"c(")(")"#], feature.dim())
+        }
+        DispatchAgentStatus::Failed => {
+            (["", " /)/)", "( x.x)", r#"c(")(")/"#], Role::Danger.style())
+        }
+        DispatchAgentStatus::Running => unreachable!("running uses per-runtime motion"),
+    };
+    let canvas_height = i64::try_from(canvas.height).expect("Garden canvas height fits i64");
+    let pose_y = if home.y
+        + i64::try_from(HOME_HEIGHT + RABBIT_HEIGHT).expect("Garden pose height fits i64")
+        <= canvas_height
+    {
+        home.y + i64::try_from(HOME_HEIGHT).expect("home height fits i64")
+    } else {
+        (home.y - i64::try_from(RABBIT_HEIGHT).expect("rabbit height fits i64")).max(0)
+    };
+    canvas.lines(
+        Point {
+            x: home.x + 8,
+            y: pose_y,
+        },
+        sprite,
+        style,
+    );
+}
+
 fn clipped_rect(
     origin: Point,
     width: usize,
@@ -1394,14 +1444,33 @@ mod tests {
     }
 
     #[test]
-    fn terminal_dispatch_states_leave_only_the_ambient_world_clock_alive() {
-        let mut idle = session(SESSION_ID, "idle");
-        idle.agent_status = Some(DispatchAgentStatus::Idle);
-        assert_eq!(
-            canonical_tick(24, 100, std::slice::from_ref(&idle), 0, 73, false),
-            canonical_tick(24, 100, &[], 0, 73, false),
-            "an idle rabbit must not add motion beyond the meadow"
-        );
+    fn non_running_dispatch_states_leave_only_the_ambient_world_clock_alive() {
+        for status in [
+            DispatchAgentStatus::Starting,
+            DispatchAgentStatus::Idle,
+            DispatchAgentStatus::Exited,
+            DispatchAgentStatus::Failed,
+        ] {
+            let mut value = session(SESSION_ID, "status");
+            value.agent_status = Some(status);
+            assert_eq!(
+                canonical_tick(24, 100, std::slice::from_ref(&value), 0, 73, false),
+                canonical_tick(24, 100, &[], 0, 73, false),
+                "{status:?} must not add motion beyond the meadow"
+            );
+            let frame = render(24, 100, "atlas", &[value], 0, 73, false).expect("world fits");
+            assert!(
+                frame.hitboxes.iter().all(|hitbox| hitbox.agent.is_none()),
+                "{status:?} must not target a stale runtime phase"
+            );
+            let text = plain(&frame.rows);
+            assert_eq!(
+                text.contains("failed"),
+                status == DispatchAgentStatus::Failed
+            );
+            assert!(!text.contains("starting"));
+            assert!(!text.contains("stopped"));
+        }
 
         let mut foreground = session(SESSION_ID, "foreground");
         foreground.lifecycle = SessionLifecycle::Failed;
@@ -1691,5 +1760,31 @@ mod tests {
     #[should_panic(expected = "lifestyle tick is reduced modulo its cycle")]
     fn lifestyle_rejects_a_tick_outside_its_cycle() {
         let _ = lifestyle_motion(places(), LIFESTYLE_CYCLE_TICKS);
+    }
+
+    #[test]
+    fn dispatch_pose_moves_above_a_low_burrow() {
+        let value = session(SESSION_ID, "low");
+        let mut canvas = super::Canvas::new(40, 12, 0);
+        super::draw_dispatch_pose(
+            &mut canvas,
+            &value,
+            Point { x: 0, y: 10 },
+            DispatchAgentStatus::Idle,
+        );
+        assert!(plain(&canvas.rows()).contains("/)/)"));
+    }
+
+    #[test]
+    #[should_panic(expected = "running uses per-runtime motion")]
+    fn dispatch_pose_rejects_a_running_status() {
+        let value = session(SESSION_ID, "running");
+        let mut canvas = super::Canvas::new(40, 12, 0);
+        super::draw_dispatch_pose(
+            &mut canvas,
+            &value,
+            Point { x: 0, y: 0 },
+            DispatchAgentStatus::Running,
+        );
     }
 }

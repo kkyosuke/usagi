@@ -110,7 +110,6 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
     assert_eq!(
         snapshot.plan.argv,
         [
-            "--dangerously-bypass-hook-trust",
             "--sandbox",
             "workspace-write",
             "--ask-for-approval",
@@ -251,7 +250,6 @@ fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
     assert_eq!(
         resolved.snapshot.plan.argv,
         [
-            "--dangerously-bypass-hook-trust",
             "--sandbox",
             "workspace-write",
             "--ask-for-approval",
@@ -306,7 +304,6 @@ fn renders_resume_only_without_an_initial_prompt() {
     assert_eq!(
         resolved.snapshot.plan.argv,
         [
-            "--dangerously-bypass-hook-trust",
             "--sandbox",
             "workspace-write",
             "--ask-for-approval",

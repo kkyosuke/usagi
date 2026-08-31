@@ -64,9 +64,10 @@ agent を複数持てる（controller の runtime 一覧を session で絞り込
 最上位でよい）。しかし Garden の目的は実行状態を一覧表より速く把握することなので、ここでは逆効果になる。
 したがって Garden は集約後の値ではなく、**session に属する agent ごとの phase** を描画素材にする。
 
-見た目のために daemon schema、永続 session record、IPC event は増やさない。agent membership は既存の coherent
-Agent inventory と controller の runtime 一覧を stable identity で結合し、agent ごとの詳細な phase は controller が
-既に持っていればそちらを優先する。これにより TUI 起動前から存在する agent も Garden から欠落しない。
+見た目のために永続 session record や IPC event は増やさない。agent membership は coherent Agent inventory と
+controller の runtime 一覧を stable identity で結合し、agent ごとの詳細な phase は controller が既に持っていれば
+そちらを優先する。inactive project は `AgentWorkspaceObservation` で runtime detail と session-level dispatch status を
+同時に読み、availability を推測しない。これにより TUI 起動前から存在する agent も Garden から欠落しない。
 
 ### 状態の対応
 
@@ -195,8 +196,9 @@ daemon lifecycle / Agent phase
 ```
 
 `GardenSession` は表示に必要な `id`、safe label、lifecycle、**その session に属する agent ごとの phase**、
-safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、並び順の tie-break と
-うさぎ 1 羽ぶんの hitbox に使う。
+optional な dispatch status、safe failure summary だけを持つ。agent の phase は stable な runtime identity と対で持ち、
+並び順の tie-break と、dispatch が `running` の間のうさぎ 1 羽ぶんの hitbox に使う。非 running の dispatch status は
+区画全体の静止 pose であり、個別 agent の identity へ誤って束縛しない。
 filesystem path、provider-native ID、terminal output、raw error は renderer に渡さない。
 
 ## UI sample
@@ -240,12 +242,13 @@ session / lifecycle の cache だけを持ち、Agent membership は「観測し
 | 案 | 内容 | 採否 |
 |---|---|---|
 | inactive controller を resident にする | project ごとに workspace controller と lane 一式を常駐させる | **不採用**。tab の数だけ terminal 購読・pane 復元・PR 観測が増え、Garden という screen saver のために process の常時コストを倍以上にする |
-| workspace を名指しした read-only 観測 | Garden が前面の間だけ `AgentInventory { workspace }` を project ごとに読む | **採用** |
+| workspace を名指しした read-only 観測 | Garden が前面の間だけ `AgentWorkspaceObservation { workspace }` を project ごとに読む | **採用** |
 
-採用案が成立するのは、`AgentInventory` が **connection の bound tenant ではなく request が名指しした
+採用案が成立するのは、`AgentWorkspaceObservation` が **connection の bound tenant ではなく request が名指しした
 `WorkspaceId`** を daemon 全体の Agent record から filter して答えるからである。daemon は開いている project を
-tenant として保持するので、既存の client から他 project の membership をそのまま読める。IPC protocol も
-daemon 側の record も増やさない。
+tenant として保持するので、既存の client から他 project の membership をそのまま読める。
+`AgentWorkspaceObservation` は runtime inventory と dispatch 由来の session status を一つの read-only response に束ね、
+daemon 側の durable record は増やさない。
 
 観測を Garden の表示中に限るのは、他の面が他 project の Agent を描かないからである。閉じた Garden の裏で
 読み続ける daemon traffic は誰も見ない。cold start もしない: 観測 lane が daemon を起こせるようにすると、
@@ -279,8 +282,10 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 11. うさぎの plot を左領域へ寄せ、右の notification panel に同じ safe projection から導出した現在状態を表示する。
 12. 左の Garden 領域が 80×18 以上では session の固定 plot を home の巣穴へ変え、stable identity と tick で再現できる生活 cycle、
     池・餌場・木陰、16 cell 単位の camera pan、移動位置に追随する hitbox を追加する。小さい端末は compact plot を保つ。
+13. active / inactive project の dispatch status を同じ deterministic な順位で集約し、非 running status は
+    animation と個別 Agent hitbox を持たない session-level の静止 pose にする。
 
-1〜12 はすべて実装済みで、うさぎは agent 単位である。
+1〜13 はすべて実装済みで、うさぎは agent 単位、非 running の dispatch pose は session 単位である。
 
 受け入れ条件は次のとおりである。
 
@@ -303,6 +308,8 @@ cached lifecycle は従来どおり静止した `cached · …` に留める（�
 - 開いているどの project の session も、その project の Agent を観測できていればうさぎになり、観測できて
   いなければ推測されない。
 - notification panel は表示中の plot と同じ viewport を説明し、完了、入力待ち、実行中、失敗を安全な文で区別する。
+- runtime record の順序を入れ替えても dispatch status の集約は変わらず、非 running status の区画は tick が進んでも
+  静止し、個別 Agent hitbox を持たない。
 - selected session が snapshot 更新で消えた場合は、既存 reconciliation と同じ surviving session へ着地する。
 
 ## 採用しない案

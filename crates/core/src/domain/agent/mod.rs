@@ -45,6 +45,39 @@ pub enum AgentStatus {
     Failed,
 }
 
+/// Deterministically reduces the durable states of every Agent in one session.
+///
+/// A session can retain several dispatchable Agents.  Live work wins over a
+/// retained terminal state, while a failure wins over an idle or exited Agent
+/// once no Agent is running or starting.  Equal states are indistinguishable,
+/// so this result never depends on registry insertion order.
+#[must_use]
+pub fn aggregate_agent_status(
+    statuses: impl IntoIterator<Item = AgentStatus>,
+) -> Option<AgentStatus> {
+    statuses.into_iter().reduce(dominant_agent_status)
+}
+
+/// Returns the status that represents the stronger session-level state.
+#[must_use]
+pub const fn dominant_agent_status(current: AgentStatus, candidate: AgentStatus) -> AgentStatus {
+    if agent_status_rank(current) >= agent_status_rank(candidate) {
+        current
+    } else {
+        candidate
+    }
+}
+
+const fn agent_status_rank(status: AgentStatus) -> u8 {
+    match status {
+        AgentStatus::Running => 5,
+        AgentStatus::Starting => 4,
+        AgentStatus::Failed => 3,
+        AgentStatus::Idle => 2,
+        AgentStatus::Exited => 1,
+    }
+}
+
 /// One immediate dispatch execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatchRun {
@@ -967,5 +1000,24 @@ mod tests {
                 kind
             );
         }
+    }
+
+    #[test]
+    fn session_agent_status_is_order_independent_and_prefers_live_work() {
+        let ordered = [
+            AgentStatus::Exited,
+            AgentStatus::Idle,
+            AgentStatus::Failed,
+            AgentStatus::Starting,
+            AgentStatus::Running,
+        ];
+        let reversed = ordered.into_iter().rev();
+        assert_eq!(aggregate_agent_status(ordered), Some(AgentStatus::Running));
+        assert_eq!(aggregate_agent_status(reversed), Some(AgentStatus::Running));
+        assert_eq!(
+            aggregate_agent_status([AgentStatus::Exited, AgentStatus::Idle, AgentStatus::Failed,]),
+            Some(AgentStatus::Failed)
+        );
+        assert_eq!(aggregate_agent_status([]), None);
     }
 }

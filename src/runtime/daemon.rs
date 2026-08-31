@@ -21,7 +21,9 @@ use usagi_cli::cli::DaemonCommand as CliDaemonCommand;
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
-use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
+use usagi_core::domain::agent::{
+    AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
+};
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{ConnectionId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
@@ -1728,10 +1730,10 @@ fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let mut arguments = codex_product_mcp_arguments(command);
     arguments.extend(["-c".into(), r"features.hooks = true".into()]);
     for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
-        // Codex exposes PermissionRequest for the same user-attention boundary
-        // that Claude exposes as Notification. Each provider therefore reports
-        // `waiting` without pretending it supports the other's native event.
-        if event == "Notification" {
+        // Interactive Codex runs with approval_policy=never inside usagi's
+        // outer sandbox, so PermissionRequest cannot fire. Notification is a
+        // Claude-only hook event. Do not advertise either as a Codex signal.
+        if matches!(event, "Notification" | "PermissionRequest") {
             continue;
         }
         let phase_command = format!("{} agent-phase {}", shell_quote(command), phase.as_token());
@@ -7692,11 +7694,12 @@ fn dispatch_session_action(
                         let (resumable, reason) = runtime.session_resume_status(id);
                         item["agent_resumable"] = serde_json::json!(resumable);
                         item["agent_resume_reason"] = serde_json::json!(reason);
-                        let member = agents
-                            .iter()
-                            .filter(|agent| agent.session_id == Some(id))
-                            .max_by_key(|agent| agent.current_run.is_some());
-                        item["agent_status"] = serde_json::json!(member.map(|agent| agent.status));
+                        item["agent_status"] = serde_json::json!(aggregate_agent_status(
+                            agents
+                                .iter()
+                                .filter(|agent| agent.session_id == Some(id))
+                                .map(|agent| agent.status),
+                        ));
                         // Parentage is immutable lifecycle metadata captured when
                         // the session is created. A later dispatch into an existing
                         // session must never reorganize it.
@@ -18576,13 +18579,13 @@ mod tests {
                 "features.hooks = true",
             ]
         );
-        assert_eq!(codex.len(), 24);
+        assert_eq!(codex.len(), 22);
         for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
-            if event == "Notification" {
+            if matches!(event, "Notification" | "PermissionRequest") {
                 assert!(
                     !codex
                         .iter()
-                        .any(|argument| argument.starts_with("hooks.Notification"))
+                        .any(|argument| argument.starts_with(&format!("hooks.{event}")))
                 );
                 continue;
             }
@@ -18616,6 +18619,74 @@ mod tests {
                 "mcp__usagi",
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rendered_codex_hook_toml_parses_and_executes_every_wired_command() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("hook bin");
+        std::fs::create_dir(&bin).unwrap();
+        let command = bin.join("usagi'fixture");
+        let log = fixture.path().join("hook.log");
+        std::fs::write(
+            &command,
+            "#!/bin/sh\npayload=$(cat)\nprintf '%s|%s\\n' \"$*\" \"$payload\" >> \"$USAGI_HOOK_TEST_LOG\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let arguments = codex_integration_arguments(&command).unwrap();
+        let (pairs, remainder) = arguments.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let assignments = pairs
+            .iter()
+            .filter_map(|pair| pair[1].strip_prefix("hooks.").map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(assignments.len(), 6);
+
+        for assignment in assignments {
+            let (event_and_key, groups) = assignment.split_once(" = ").unwrap();
+            let event = event_and_key.trim();
+            let document = toml::from_str::<toml::Value>(&format!("value = {groups}"))
+                .unwrap_or_else(|error| panic!("invalid generated {event} TOML: {error}"));
+            let groups = document["value"]
+                .as_array()
+                .expect("hook groups are an array");
+            for group in groups {
+                let hooks = group["hooks"].as_array().expect("group hooks are an array");
+                for hook in hooks {
+                    let rendered = hook["command"].as_str().expect("command hook");
+                    let mut child = Command::new("/bin/sh")
+                        .args(["-c", rendered])
+                        .env("USAGI_HOOK_TEST_LOG", &log)
+                        .stdin(std::process::Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    write!(
+                        child.stdin.take().unwrap(),
+                        "{{\"hook_event_name\":\"{event}\",\"source\":\"startup\",\"session_id\":\"fixture-session\"}}"
+                    )
+                    .unwrap();
+                    assert!(child.wait().unwrap().success(), "{event}: {rendered}");
+                }
+            }
+        }
+
+        let calls = std::fs::read_to_string(log).unwrap();
+        for expected in [
+            "codex-session-capture|",
+            "agent-phase ready|",
+            "agent-phase running|",
+            "agent-phase waiting|",
+            "agent-phase ended|",
+            "agent-phase exited|",
+        ] {
+            assert!(calls.contains(expected), "missing {expected}: {calls}");
+        }
+        assert_eq!(calls.lines().count(), 7, "{calls}");
     }
 
     #[test]

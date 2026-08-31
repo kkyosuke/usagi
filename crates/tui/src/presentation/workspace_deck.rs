@@ -1541,7 +1541,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(live.agent_runtime_id, AgentPhase::Running)]
         );
-
         // Re-observing the same inventory changes no draw material.
         assert!(!deck.apply_garden_inventory(&inventory_with_status(
             beta.workspace_id,
@@ -1554,6 +1553,7 @@ mod tests {
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(plot.agents_observed);
         assert!(plot.agents.is_empty());
+        assert_eq!(plot.agent_status, None);
     }
 
     /// The active project's own controller owns its plots, and a cached

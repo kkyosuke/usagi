@@ -893,40 +893,71 @@ fn footer_line(width: usize, scrollable: bool) -> String {
 
 fn plot(session: &GardenSession, tick: u64, reduced_motion: bool) -> Plot {
     let label = signpost(&session.label);
-    let ([mut status, ears, head, body, feet], rabbits) = if session.agents_observed {
+    let ([status, ears, head, body, feet], rabbits) = if session.agents_observed {
         match session.lifecycle {
-            SessionLifecycle::Available => available_plot(session, tick, reduced_motion),
+            SessionLifecycle::Available if session.pr_merged => {
+                available_plot(session, tick, reduced_motion)
+            }
+            SessionLifecycle::Available => match session.agent_status {
+                Some(
+                    status @ (DispatchAgentStatus::Starting
+                    | DispatchAgentStatus::Idle
+                    | DispatchAgentStatus::Exited
+                    | DispatchAgentStatus::Failed),
+                ) => (dispatch_plot(session, status), Vec::new()),
+                Some(DispatchAgentStatus::Running) | None => {
+                    available_plot(session, tick, reduced_motion)
+                }
+            },
             // lifecycle の pose は session そのものの姿で、agent 1 体には対応しない。
             _ => (lifecycle_plot(session, tick, reduced_motion), Vec::new()),
         }
     } else {
         (inactive_plot(session), Vec::new())
     };
-    if session.lifecycle == SessionLifecycle::Available
-        && session.agents_observed
-        && let Some(dispatch_status) = dispatch_status_line(session.agent_status)
-    {
-        status = centered(PLOT_WIDTH, &dispatch_status);
-    }
     Plot {
         rows: [label, status, ears, head, body, feet],
         rabbits,
     }
 }
 
-/// A terminal dispatch status is stronger than the inventory's coarse `Live`
-/// fallback. `Running` deliberately returns `None`: runtime-local Waiting and
-/// Interrupted phases are more precise while a dispatch is active.
-fn dispatch_status_line(status: Option<DispatchAgentStatus>) -> Option<String> {
-    match status? {
-        DispatchAgentStatus::Running => None,
-        // Calm/terminal states are already visible in the pose. Keep the plot
-        // free of action captions; only failure needs an explicit textual alarm.
-        DispatchAgentStatus::Starting | DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => {
-            Some(String::new())
-        }
-        DispatchAgentStatus::Failed => Some(Role::Danger.style().bold().paint("failed")),
-    }
+/// A non-running dispatch state is session-level availability, not one
+/// runtime's phase. Render one static session pose rather than relabeling a
+/// coarse running rabbit and leaving its animation and hitbox live.
+fn dispatch_plot(
+    session: &GardenSession,
+    status: DispatchAgentStatus,
+) -> [String; PLOT_CONTENT_ROWS - 1] {
+    let feature = rabbit_style(&session.id.as_str()).bold();
+    let (label, status_style, rabbit_style, rabbit) = match status {
+        DispatchAgentStatus::Starting => (
+            "",
+            Style::new(),
+            feature,
+            ["", " /)/)", "( . .)", "c(\")(\")v"],
+        ),
+        DispatchAgentStatus::Idle | DispatchAgentStatus::Exited => (
+            "",
+            Style::new().dim(),
+            feature.dim(),
+            [" z", " /)/)", "( -.-)", "c(\")(\")"],
+        ),
+        DispatchAgentStatus::Failed => (
+            "failed",
+            Role::Danger.style().bold(),
+            Role::Danger.style(),
+            ["", " /)/)", "( x.x)", "c(\")(\")/"],
+        ),
+        DispatchAgentStatus::Running => unreachable!("running uses per-runtime phase"),
+    };
+    let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
+    [
+        centered(PLOT_WIDTH, &status_style.paint(label)),
+        ears,
+        head,
+        body,
+        feet,
+    ]
 }
 
 fn inactive_plot(session: &GardenSession) -> [String; PLOT_CONTENT_ROWS - 1] {
@@ -1132,9 +1163,12 @@ fn available_plot(
 
     if agents.len() == 1 {
         let agent = agents[0];
-        let phase = effective_agent_phase(agent.phase, session.agent_status);
-        let (_status, _status_style, rabbit_style, rabbit) =
-            agent_appearance(phase, tick, reduced_motion, &agent.runtime_id.as_str());
+        let (_status, _status_style, rabbit_style, rabbit) = agent_appearance(
+            agent.phase,
+            tick,
+            reduced_motion,
+            &agent.runtime_id.as_str(),
+        );
         let [ears, head, body, feet] = sprite(rabbit, rabbit_style, PLOT_WIDTH);
         // 1 羽だけの区画はうさぎを大きく描くので、その 1 体が sprite 行の全幅を持つ。
         return (
@@ -1154,9 +1188,12 @@ fn available_plot(
     let status = agent_status::glyph_strip(&agents, PLOT_WIDTH);
     let mut rows: [String; SPRITE_ROWS] = std::array::from_fn(|_| String::new());
     for agent in visible {
-        let phase = effective_agent_phase(agent.phase, session.agent_status);
-        let (_, _, style, rabbit) =
-            agent_appearance(phase, tick, reduced_motion, &agent.runtime_id.as_str());
+        let (_, _, style, rabbit) = agent_appearance(
+            agent.phase,
+            tick,
+            reduced_motion,
+            &agent.runtime_id.as_str(),
+        );
         let compact = sprite(rabbit, style, COMPACT_RABBIT_WIDTH);
         for (row, part) in rows.iter_mut().zip(compact) {
             row.push_str(&part);
@@ -1179,20 +1216,6 @@ fn available_plot(
         [centered(PLOT_WIDTH, &status), ears, head, body, feet],
         placed,
     )
-}
-
-/// Reconcile the runtime-local phase with the daemon-owned dispatch state for
-/// motion. The override is deliberately narrow: only a stale coarse `Running`
-/// pose is calmed, so historical waiting/interrupted tabs keep their identity.
-fn effective_agent_phase(phase: AgentPhase, status: Option<DispatchAgentStatus>) -> AgentPhase {
-    if phase != AgentPhase::Running {
-        return phase;
-    }
-    match status {
-        Some(DispatchAgentStatus::Starting | DispatchAgentStatus::Idle) => AgentPhase::Ready,
-        Some(DispatchAgentStatus::Exited | DispatchAgentStatus::Failed) => AgentPhase::Ended,
-        Some(DispatchAgentStatus::Running) | None => phase,
-    }
 }
 
 fn agent_appearance(
@@ -1493,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_status_overrides_the_coarse_live_running_badge() {
+    fn non_running_dispatch_status_replaces_the_coarse_live_running_rabbit() {
         for status in [
             DispatchAgentStatus::Starting,
             DispatchAgentStatus::Idle,
@@ -1507,7 +1530,13 @@ mod tests {
                 AgentPhase::Running,
             );
             session.agent_status = Some(status);
-            let frame = render(24, 100, "x", &[session.clone()], 0, true).expect("garden fits");
+            assert_eq!(
+                super::plot(&session, 0, false),
+                super::plot(&session, 17, false),
+                "{status:?} must use a static session pose"
+            );
+            let frame = render(24, 100, "x", &[session], 17, false).expect("garden fits");
+            assert!(rabbits(&frame).is_empty(), "{status:?} has no Agent hitbox");
             let rows = plain(&frame);
             let text = rows.join("\n");
             assert!(text.contains("1 plots · 1 usagi"), "{status:?}: {text}");
@@ -1521,19 +1550,6 @@ mod tests {
                     "{status:?}: {text}"
                 );
             }
-            let expected_phase = if matches!(
-                status,
-                DispatchAgentStatus::Starting | DispatchAgentStatus::Idle
-            ) {
-                AgentPhase::Ready
-            } else {
-                AgentPhase::Ended
-            };
-            assert_eq!(
-                super::effective_agent_phase(AgentPhase::Running, session.agent_status),
-                expected_phase,
-                "a terminal dispatch state must calm a stale running pose"
-            );
         }
 
         let mut waiting = session(
@@ -2238,6 +2254,18 @@ mod tests {
             AgentPhase::Ready,
         );
         let _ = super::lifecycle_plot(&session, 0, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "running uses per-runtime phase")]
+    fn dispatch_plot_rejects_a_running_status() {
+        let session = session(
+            STEADY_ID,
+            "running",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        let _ = super::dispatch_plot(&session, DispatchAgentStatus::Running);
     }
 
     #[test]
