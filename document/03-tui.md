@@ -144,7 +144,11 @@ project close を実行し、未追加 row では何もしない。filter 入力
 `Esc` は画面上の待機を取り消し、完了済みの late result を破棄して元の workspace authority を再申告する。
 1 件でも失敗すれば membership を変更せず notice を出す。成功時だけ追加した先頭を active にし、
 旧 composition を drop してから新しい composition を作る。通常切替も同じ prepare → commit 境界を使うため、失敗時は current workspace と
-その接続を保つ。未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
+その接続を保つ。既に開いている tab への通常切替は、project tab bar を全画面 loading で置き換えない。target tab と、その tab が
+deck に保持する session 一覧を通信なしで即時に描く。snapshot を短い猶予内に準備できれば spinner は出さず、時間がかかった場合だけ
+右 content pane に表示する。待機中の `Esc` 以外の入力は次の workspace frame へ順序を保って繰り越す。cancel / open error 後に current
+workspace の authority を再申告する間も同じ部分描画を使う。準備完了後は fresh snapshot で session 一覧と content を置き換える。
+未保存の create / notes / environment / roles editor がある間は切替・active close を拒否する。
 
 TUI が resident に持つ `ControllerBackendComposition` は active workspace の 1 件だけである。切替 return が旧 workspace の port、pump、worker、
 subscription をすべて drop してから次の factory を呼ぶ。drop は daemon-owned Agent / terminal / operation を停止せず detach だけを行い、

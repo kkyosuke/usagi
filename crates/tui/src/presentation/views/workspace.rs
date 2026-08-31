@@ -305,6 +305,9 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
+    /// Workspace transition progress replaces only the right-pane content.
+    /// The project bar and cached session sidebar remain stable around it.
+    content_loading: Option<ContentLoading>,
     /// Whether an explicit or forced Closeup action modal covers the right pane
     /// this frame. Empty Closeup remains a plain pane until Enter opens it.
     closeup_action_visible: bool,
@@ -359,6 +362,12 @@ pub struct HomeProjection {
     director_drawer: Option<DirectorDrawerProjection>,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
     root_terminal_drawer: Option<RootTerminalDrawerProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContentLoading {
+    Pending,
+    Visible { label: String, frame: usize },
 }
 
 /// Left-sidebar draft for the inline new-session input.
@@ -549,6 +558,7 @@ impl HomeProjection {
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
+            content_loading: None,
             // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
                 state.route(),
@@ -653,6 +663,25 @@ impl HomeProjection {
     #[must_use]
     pub fn with_create_pending(mut self, name: Option<String>) -> Self {
         self.create_pending = name;
+        self
+    }
+
+    /// Replace the right pane with workspace-open progress while retaining the
+    /// locally cached session list.
+    #[must_use]
+    pub fn with_content_loading(mut self, label: impl Into<String>, frame: usize) -> Self {
+        self.content_loading = Some(ContentLoading::Visible {
+            label: label.into(),
+            frame,
+        });
+        self
+    }
+
+    /// Keep the right pane neutral during the short grace period before a
+    /// workspace-open spinner is warranted.
+    #[must_use]
+    pub fn with_content_pending(mut self) -> Self {
+        self.content_loading = Some(ContentLoading::Pending);
         self
     }
 
@@ -2871,6 +2900,13 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     let footer = Style::new()
         .dim()
         .paint(&widgets::clip_to_width(&footer_hint, width));
+    if let Some(loading) = &home.content_loading {
+        let progress = match loading {
+            ContentLoading::Pending => None,
+            ContentLoading::Visible { label, frame } => Some((label.as_str(), *frame)),
+        };
+        return workspace_content_loading(height, width, header, footer, progress);
+    }
     if home.pane_tabs.is_empty() {
         let feedback = home
             .pane_error
@@ -2944,6 +2980,33 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         height,
         footer,
     )
+}
+
+fn workspace_content_loading(
+    height: usize,
+    width: usize,
+    header: String,
+    footer: String,
+    progress: Option<(&str, usize)>,
+) -> Vec<String> {
+    let block = progress.map_or_else(Vec::new, |(label, frame)| {
+        widgets::loading::hopping_rabbit(frame, frame / 3, label)
+    });
+    let top = height.saturating_sub(2 + block.len()) / 2;
+    let mut rows = vec![header];
+    rows.resize(1 + top, String::new());
+    rows.extend(block.into_iter().map(|row| {
+        let row = widgets::clip_to_width(&row, width);
+        format!(
+            "{}{}",
+            " ".repeat(widgets::centered_padding(
+                width,
+                widgets::display_width(&row)
+            )),
+            row
+        )
+    }));
+    with_footer_gap(rows, height, footer)
 }
 
 /// The selected interrupted tab's body line. It states what an explicit Resume
