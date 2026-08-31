@@ -177,6 +177,24 @@ pub trait DaemonLauncher {
     /// Returns an error when the process cannot be spawned.
     fn launch(&self) -> io::Result<()>;
 
+    /// Report whether the process spawned by [`Self::launch`] exited before it
+    /// registered. `None` means it is still running (or the implementation
+    /// cannot observe it).
+    ///
+    /// # Errors
+    /// Returns an error when the child status cannot be observed safely.
+    fn launched_exit(&self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Stop and reap the process spawned by [`Self::launch`] after the startup
+    /// deadline. A caller that reports a failed launch must not leave that same
+    /// child able to register authority later.
+    ///
+    /// # Errors
+    /// Returns an error when the launched child cannot be stopped or reaped.
+    fn abort_launch(&self) -> io::Result<()>;
+
     /// The failure the launched daemon recorded for itself, if it recorded one.
     ///
     /// A launched daemon is detached with its stderr discarded, exactly as in

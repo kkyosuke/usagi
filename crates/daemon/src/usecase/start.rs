@@ -121,17 +121,55 @@ pub(crate) fn launch_and_confirm(
     let before = launcher.recorded_failure();
     launcher.launch()?;
 
+    let outcome = confirm_launch(store, probe, launcher, sleeper, before.as_deref());
+    match outcome {
+        Ok(pid) => Ok(pid),
+        Err(error) => {
+            let message = error.to_string();
+            launcher.abort_launch().map_err(|abort| {
+                io::Error::other(format!(
+                    "{message}; the launched daemon could not be stopped: {abort}"
+                ))
+            })?;
+            Err(io::Error::other(format!(
+                "{message}; the launched daemon was stopped"
+            )))
+        }
+    }
+}
+
+fn confirm_launch(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    launcher: &dyn DaemonLauncher,
+    sleeper: &dyn Sleeper,
+    before: Option<&str>,
+) -> io::Result<u32> {
     for _ in 0..MAX_POLLS {
         if let Some(record) = store.load()?
             && probe.observe(&record) == usagi_core::domain::daemon::DaemonProcessObservation::Exact
         {
             return Ok(record.pid);
         }
+        if let Some(status) = launcher.launched_exit()? {
+            return Err(io::Error::other(format!(
+                "daemon exited before registering ({status})"
+            )));
+        }
         sleeper.sleep();
     }
 
+    // One last observation closes the gap after the final sleep. If the child
+    // is still not authoritative, stop and reap exactly the child this launch
+    // created before reporting failure; otherwise it could register after the
+    // operator has already been told startup failed.
+    if let Some(record) = store.load()?
+        && probe.observe(&record) == usagi_core::domain::daemon::DaemonProcessObservation::Exact
+    {
+        return Ok(record.pid);
+    }
     Err(io::Error::other(startup_timeout_message(
-        before.as_deref(),
+        before,
         launcher.recorded_failure().as_deref(),
         launcher.failure_log_hint().as_deref(),
     )))
@@ -169,7 +207,9 @@ mod tests {
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
-    use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, Sleeper};
+    use usagi_core::infrastructure::daemon::{
+        DaemonLauncher, DaemonRecordStore, LivenessProbe, Sleeper,
+    };
 
     use crate::usecase::serve::DaemonRecordPort;
     use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
@@ -248,6 +288,69 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert_eq!(sleeper.0.get(), MAX_POLLS);
+        assert_eq!(launcher.aborts(), 1);
+        assert!(error.to_string().contains("launched daemon was stopped"));
+    }
+
+    struct ExitedLauncher;
+
+    impl DaemonLauncher for ExitedLauncher {
+        fn launch(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn launched_exit(&self) -> std::io::Result<Option<String>> {
+            Ok(Some("exit status: 78".into()))
+        }
+
+        fn abort_launch(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_daemon_that_exits_before_registration_reports_its_status_immediately() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let sleeper = CountingSleeper(Cell::new(0));
+
+        let error = launch_and_confirm(&store, &FixedProbe(true), &ExitedLauncher, &sleeper)
+            .expect_err("an exited daemon cannot register later");
+
+        assert_eq!(sleeper.0.get(), 0);
+        assert_eq!(
+            error.to_string(),
+            "daemon exited before registering (exit status: 78); the launched daemon was stopped"
+        );
+    }
+
+    struct StatusErrorLauncher(Cell<usize>);
+
+    impl DaemonLauncher for StatusErrorLauncher {
+        fn launch(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn launched_exit(&self) -> std::io::Result<Option<String>> {
+            Err(std::io::Error::other("child status unavailable"))
+        }
+
+        fn abort_launch(&self) -> std::io::Result<()> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_confirmation_error_still_aborts_the_launched_daemon() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let launcher = StatusErrorLauncher(Cell::new(0));
+
+        let error = launch_and_confirm(&store, &FixedProbe(true), &launcher, &NoopSleeper)
+            .expect_err("an unobservable launch cannot be left running");
+
+        assert_eq!(launcher.0.get(), 1);
+        assert!(error.to_string().contains("child status unavailable"));
+        assert!(error.to_string().contains("launched daemon was stopped"));
     }
 
     /// Reports the seeded pid as reused by an unrelated process and every other

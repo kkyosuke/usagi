@@ -348,6 +348,7 @@ pub struct TestLauncher<'a, F> {
     store: &'a DaemonRecordStore<F>,
     register_pid: Option<u32>,
     launches: Cell<usize>,
+    aborts: Cell<usize>,
 }
 
 impl<'a, F> TestLauncher<'a, F> {
@@ -357,6 +358,7 @@ impl<'a, F> TestLauncher<'a, F> {
             store,
             register_pid: Some(pid),
             launches: Cell::new(0),
+            aborts: Cell::new(0),
         }
     }
 
@@ -366,12 +368,18 @@ impl<'a, F> TestLauncher<'a, F> {
             store,
             register_pid: None,
             launches: Cell::new(0),
+            aborts: Cell::new(0),
         }
     }
 
     /// How many detached daemons this launcher was asked to spawn.
     pub fn launches(&self) -> usize {
         self.launches.get()
+    }
+
+    /// How many timed-out launches were aborted.
+    pub fn aborts(&self) -> usize {
+        self.aborts.get()
     }
 }
 
@@ -381,6 +389,11 @@ impl<F: RecordFile> DaemonLauncher for TestLauncher<'_, F> {
         if let Some(pid) = self.register_pid {
             self.store.save(&DaemonRecord::new(pid))?;
         }
+        Ok(())
+    }
+
+    fn abort_launch(&self) -> io::Result<()> {
+        self.aborts.set(self.aborts.get() + 1);
         Ok(())
     }
 }

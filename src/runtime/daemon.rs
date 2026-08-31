@@ -11175,6 +11175,7 @@ impl ShutdownSignal for SignalShutdown {
 
 struct ServeLauncher {
     exe: PathBuf,
+    launched: RefCell<Option<std::process::Child>>,
 }
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 impl ServeLauncher {
@@ -11201,7 +11202,32 @@ impl DaemonLauncher for ServeLauncher {
             .stderr(std::process::Stdio::null());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        command.spawn()?;
+        let child = command.spawn()?;
+        self.launched.replace(Some(child));
+        Ok(())
+    }
+
+    fn launched_exit(&self) -> std::io::Result<Option<String>> {
+        let mut launched = self.launched.borrow_mut();
+        let Some(child) = launched.as_mut() else {
+            return Ok(None);
+        };
+        let Some(status) = child.try_wait()? else {
+            return Ok(None);
+        };
+        launched.take();
+        Ok(Some(status.to_string()))
+    }
+
+    fn abort_launch(&self) -> std::io::Result<()> {
+        let Some(mut child) = self.launched.borrow_mut().take() else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        child.kill()?;
+        child.wait()?;
         Ok(())
     }
 
@@ -12271,6 +12297,7 @@ fn run_inner(
     });
     let launcher = ServeLauncher {
         exe: std::env::current_exe()?,
+        launched: RefCell::new(None),
     };
     let rollover = IpcRolloverRequester {
         data_dir: &data_dir,

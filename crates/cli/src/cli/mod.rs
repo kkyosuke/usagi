@@ -378,6 +378,13 @@ pub enum SessionCommand {
     },
     Remove {
         name: String,
+        /// Force removal of a dirty worktree.
+        #[arg(long)]
+        force: bool,
+        /// Discard a daemon-diagnosed integrity orphan, including unregistered
+        /// files and unmerged session commits.
+        #[arg(long, requires = "force")]
+        purge_orphan: bool,
     },
     /// Stop resumable idle Agents without removing the session worktree.
     Sleep {
@@ -518,9 +525,18 @@ impl Run for Session {
                 }
                 (SessionAction::Create, payload)
             }
-            SessionCommand::Remove { name } => {
-                (SessionAction::Remove, serde_json::json!({"name": name}))
-            }
+            SessionCommand::Remove {
+                name,
+                force,
+                purge_orphan,
+            } => (
+                SessionAction::Remove,
+                serde_json::json!({
+                    "name": name,
+                    "force": force,
+                    "purge_orphan": purge_orphan,
+                }),
+            ),
             SessionCommand::Sleep { name } => {
                 (SessionAction::Sleep, serde_json::json!({"name": name}))
             }
@@ -892,6 +908,29 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["usagi", "clean", "--dry-run", "--apply"]).is_err());
+        assert!(
+            Cli::try_parse_from(["usagi", "session", "remove", "orphan", "--purge-orphan"])
+                .is_err()
+        );
+        assert!(matches!(
+            Cli::try_parse_from([
+                "usagi",
+                "session",
+                "remove",
+                "orphan",
+                "--force",
+                "--purge-orphan"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Session {
+                command: SessionCommand::Remove {
+                    name,
+                    force: true,
+                    purge_orphan: true,
+                }
+            }) if name == "orphan"
+        ));
     }
 
     #[test]
@@ -1053,6 +1092,35 @@ mod tests {
                 "name":"remote-fix",
                 "role":null,
                 "base_ref":"refs/remotes/origin/main"
+            })
+        ));
+    }
+
+    #[test]
+    fn session_remove_forwards_explicit_orphan_purge_intent() {
+        let parsed = Cli::try_parse_from([
+            "usagi",
+            "session",
+            "remove",
+            "stale",
+            "--force",
+            "--purge-orphan",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        let (outcome, _) = super::execute(parsed);
+
+        assert!(matches!(
+            outcome,
+            RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session {
+                action: usagi_core::usecase::client::SessionAction::Remove,
+                payload,
+                ..
+            }) if payload == serde_json::json!({
+                "name":"stale",
+                "force":true,
+                "purge_orphan":true
             })
         ));
     }
