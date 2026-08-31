@@ -1462,8 +1462,7 @@ mod tests {
             .expect("the Garden draws a grass layer")
     }
 
-    fn assert_rabbit_axis<'a>(name: &str, pose: impl IntoIterator<Item = &'a str>) {
-        let pose = pose.into_iter().collect::<Vec<_>>();
+    fn assert_rabbit_axis(name: &str, pose: &[&str]) {
         let (ears_row, ears, ears_width) = pose
             .iter()
             .enumerate()
@@ -1472,7 +1471,7 @@ mod tests {
                     .into_iter()
                     .find_map(|ears| line.find(ears).map(|column| (row, column, ears.len())))
             })
-            .unwrap_or_else(|| panic!("{name} has no ears: {pose:?}"));
+            .expect("rabbit illustration has ears");
         let face = pose
             .iter()
             .skip(ears_row + 1)
@@ -1481,13 +1480,9 @@ mod tests {
                     .into_iter()
                     .any(|marker| line.contains(marker))
             })
-            .unwrap_or_else(|| panic!("{name} has no face: {pose:?}"));
-        let face_left = face
-            .find('(')
-            .unwrap_or_else(|| panic!("{name} face has no left edge: {face:?}"));
-        let face_right = face
-            .rfind(')')
-            .unwrap_or_else(|| panic!("{name} face has no right edge: {face:?}"));
+            .expect("rabbit illustration has a face below its ears");
+        let face_left = face.find('(').expect("rabbit face has a left edge");
+        let face_right = face.rfind(')').expect("rabbit face has a right edge");
         // Double the centres to avoid losing half-cell precision.
         let ears_axis = ears * 2 + ears_width.saturating_sub(1);
         let face_axis = face_left + face_right;
@@ -1526,10 +1521,13 @@ mod tests {
                     "{status:?}: {text}"
                 );
             }
-            let expected_phase = match status {
-                DispatchAgentStatus::Starting | DispatchAgentStatus::Idle => AgentPhase::Ready,
-                DispatchAgentStatus::Exited | DispatchAgentStatus::Failed => AgentPhase::Ended,
-                DispatchAgentStatus::Running => unreachable!("fixture excludes running"),
+            let expected_phase = if matches!(
+                status,
+                DispatchAgentStatus::Starting | DispatchAgentStatus::Idle
+            ) {
+                AgentPhase::Ready
+            } else {
+                AgentPhase::Ended
             };
             assert_eq!(
                 super::effective_agent_phase(AgentPhase::Running, session.agent_status),
@@ -2651,13 +2649,13 @@ mod tests {
             for progress in 0..action.duration() {
                 assert_rabbit_axis(
                     &format!("{action:?}/{progress}"),
-                    super::running_pose(action, progress),
+                    &super::running_pose(action, progress),
                 );
             }
         }
         for phase in AgentPhase::ALL {
             let (_, _, _, pose) = super::agent_appearance(phase, 5, false, STEADY_ID);
-            assert_rabbit_axis(&format!("{phase:?}"), pose);
+            assert_rabbit_axis(&format!("{phase:?}"), &pose);
         }
     }
 
@@ -2671,10 +2669,8 @@ mod tests {
         ] {
             for tick in 0..6 {
                 let rows = only(lifecycle, AgentPhase::Absent, tick);
-                assert_rabbit_axis(
-                    &format!("{lifecycle:?}/{tick}"),
-                    rows.iter().map(String::as_str),
-                );
+                let pose = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                assert_rabbit_axis(&format!("{lifecycle:?}/{tick}"), &pose);
             }
         }
 
@@ -2687,7 +2683,8 @@ mod tests {
         merged.pr_merged = true;
         for tick in 0..2 {
             let rows = plain(&render(24, 100, "x", &[merged.clone()], tick, false).unwrap());
-            assert_rabbit_axis(&format!("merged/{tick}"), rows.iter().map(String::as_str));
+            let pose = rows.iter().map(String::as_str).collect::<Vec<_>>();
+            assert_rabbit_axis(&format!("merged/{tick}"), &pose);
         }
     }
 

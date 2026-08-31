@@ -1149,8 +1149,7 @@ mod tests {
             .join("\n")
     }
 
-    fn assert_rabbit_axis<'a>(name: &str, pose: impl IntoIterator<Item = &'a str>) {
-        let pose = pose.into_iter().collect::<Vec<_>>();
+    fn assert_rabbit_axis(name: &str, pose: &[&str]) {
         let (ears_row, ears, ears_width) = pose
             .iter()
             .enumerate()
@@ -1159,7 +1158,7 @@ mod tests {
                     .into_iter()
                     .find_map(|ears| line.find(ears).map(|column| (row, column, ears.len())))
             })
-            .unwrap_or_else(|| panic!("{name} has no ears: {pose:?}"));
+            .expect("rabbit illustration has ears");
         let face = pose
             .iter()
             .skip(ears_row + 1)
@@ -1168,7 +1167,7 @@ mod tests {
                     .into_iter()
                     .any(|marker| line.contains(marker))
             })
-            .unwrap_or_else(|| panic!("{name} has no face: {pose:?}"));
+            .expect("rabbit illustration has a face below its ears");
         let face_left = face.find('(').expect("rabbit face has a left edge");
         let face_right = face.rfind(')').expect("rabbit face has a right edge");
         let ears_axis = ears * 2 + ears_width.saturating_sub(1);
@@ -1258,7 +1257,7 @@ mod tests {
                     };
                     assert_rabbit_axis(
                         &format!("{activity:?}/{facing:?}/{tick}"),
-                        super::rabbit_sprite(motion, tick),
+                        &super::rabbit_sprite(motion, tick),
                     );
                 }
             }
@@ -1280,10 +1279,8 @@ mod tests {
                     .iter()
                     .map(|row| super::super::strip_ansi(row))
                     .collect::<Vec<_>>();
-                assert_rabbit_axis(
-                    &format!("{lifecycle:?}/{tick}"),
-                    rows.iter().map(String::as_str),
-                );
+                let pose = rows.iter().map(String::as_str).collect::<Vec<_>>();
+                assert_rabbit_axis(&format!("{lifecycle:?}/{tick}"), &pose);
             }
         }
     }
