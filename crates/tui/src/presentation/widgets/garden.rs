@@ -2211,6 +2211,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "running uses per-runtime phase")]
+    fn dispatch_plot_rejects_a_running_status() {
+        let session = session(
+            STEADY_ID,
+            "running",
+            SessionLifecycle::Available,
+            AgentPhase::Running,
+        );
+        let _ = super::dispatch_plot(&session, DispatchAgentStatus::Running);
+    }
+
+    #[test]
     fn every_lifecycle_and_agent_phase_states_itself_in_text() {
         let cases = [
             (SessionLifecycle::Creating, AgentPhase::Absent, "growing"),

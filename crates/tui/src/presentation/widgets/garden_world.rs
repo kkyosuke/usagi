@@ -1429,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_dispatch_states_do_not_keep_the_world_clock_alive() {
+    fn non_running_dispatch_states_do_not_keep_the_world_clock_alive() {
         for (status, expected) in [
             (DispatchAgentStatus::Starting, "starting"),
             (DispatchAgentStatus::Idle, "idle"),
@@ -1767,5 +1767,31 @@ mod tests {
     #[should_panic(expected = "lifestyle tick is reduced modulo its cycle")]
     fn lifestyle_rejects_a_tick_outside_its_cycle() {
         let _ = lifestyle_motion(places(), LIFESTYLE_CYCLE_TICKS);
+    }
+
+    #[test]
+    fn dispatch_pose_moves_above_a_low_burrow() {
+        let value = session(SESSION_ID, "low");
+        let mut canvas = super::Canvas::new(40, 12, 0);
+        super::draw_dispatch_pose(
+            &mut canvas,
+            &value,
+            Point { x: 0, y: 10 },
+            DispatchAgentStatus::Idle,
+        );
+        assert!(plain(&canvas.rows()).contains("/)/)"));
+    }
+
+    #[test]
+    #[should_panic(expected = "running uses per-runtime motion")]
+    fn dispatch_pose_rejects_a_running_status() {
+        let value = session(SESSION_ID, "running");
+        let mut canvas = super::Canvas::new(40, 12, 0);
+        super::draw_dispatch_pose(
+            &mut canvas,
+            &value,
+            Point { x: 0, y: 0 },
+            DispatchAgentStatus::Running,
+        );
     }
 }

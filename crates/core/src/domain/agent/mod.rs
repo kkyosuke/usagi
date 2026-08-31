@@ -55,9 +55,17 @@ pub enum AgentStatus {
 pub fn aggregate_agent_status(
     statuses: impl IntoIterator<Item = AgentStatus>,
 ) -> Option<AgentStatus> {
-    statuses
-        .into_iter()
-        .max_by_key(|status| agent_status_rank(*status))
+    statuses.into_iter().reduce(dominant_agent_status)
+}
+
+/// Returns the status that represents the stronger session-level state.
+#[must_use]
+pub const fn dominant_agent_status(current: AgentStatus, candidate: AgentStatus) -> AgentStatus {
+    if agent_status_rank(current) >= agent_status_rank(candidate) {
+        current
+    } else {
+        candidate
+    }
 }
 
 const fn agent_status_rank(status: AgentStatus) -> u8 {

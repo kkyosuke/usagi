@@ -33,7 +33,7 @@ use usagi_core::{
             InboxMessage, LaunchMode, LaunchRequest, LaunchScope, ModelSelector,
             OutdatedAgentRuntime, ProviderCaptureProvenance, ProviderKind, ProviderResumePhase,
             ProviderResumeReason, ProviderResumeRef, ProviderResumeStatus, ProviderSessionId,
-            RunStatus, WorkerRef, aggregate_agent_status,
+            RunStatus, WorkerRef, dominant_agent_status,
         },
         id::{
             AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, CompletionFence, ConnectionId,
@@ -1506,8 +1506,7 @@ impl AgentRuntime {
             selected
                 .entry(session)
                 .and_modify(|current: &mut AgentStatus| {
-                    *current = aggregate_agent_status([*current, agent.status])
-                        .expect("two Agent statuses always aggregate");
+                    *current = dominant_agent_status(*current, agent.status);
                 })
                 .or_insert(agent.status);
         }
@@ -4052,6 +4051,31 @@ mod tests {
         )
     }
 
+    fn record_dispatch_status(
+        runtime: &AgentRuntime,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        profile: &str,
+        model: &str,
+        status: AgentStatus,
+    ) {
+        let agent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
+                workspace,
+                session,
+                AgentProfileId::new(profile).unwrap(),
+                ModelSelector::new(model).unwrap(),
+            )
+            .unwrap();
+        let operation =
+            matches!(status, AgentStatus::Starting | AgentStatus::Running).then(OperationId::new);
+        runtime
+            .dispatch
+            .transition_agent(agent.agent_id, status, operation)
+            .unwrap();
+    }
+
     #[test]
     fn saturated_launch_sleeps_the_oldest_completed_resumable_agent() {
         let workspace = WorkspaceId::new();
@@ -4853,88 +4877,31 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let terminal_session = SessionId::new();
-        let idle = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
+        for (scope, profile, model, status) in [
+            (Some(session), "claude", "idle", AgentStatus::Idle),
+            (Some(session), "codex", "running", AgentStatus::Running),
+            (
                 Some(session),
-                AgentProfileId::new("claude").unwrap(),
-                ModelSelector::new("idle").unwrap(),
-            )
-            .unwrap();
-        runtime
-            .dispatch
-            .transition_agent(idle.agent_id, AgentStatus::Idle, None)
-            .unwrap();
-        let running = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(session),
-                AgentProfileId::new("codex").unwrap(),
-                ModelSelector::new("running").unwrap(),
-            )
-            .unwrap();
-        runtime
-            .dispatch
-            .transition_agent(
-                running.agent_id,
-                AgentStatus::Running,
-                Some(OperationId::new()),
-            )
-            .unwrap();
-        let starting = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
-                Some(session),
-                AgentProfileId::new("claude").unwrap(),
-                ModelSelector::new("starting-after-running").unwrap(),
-            )
-            .unwrap();
-        runtime
-            .dispatch
-            .transition_agent(
-                starting.agent_id,
+                "claude",
+                "starting-after-running",
                 AgentStatus::Starting,
-                Some(OperationId::new()),
-            )
-            .unwrap();
-        let failed = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
+            ),
+            (
                 Some(terminal_session),
-                AgentProfileId::new("claude").unwrap(),
-                ModelSelector::new("failed-before-idle").unwrap(),
-            )
-            .unwrap();
-        runtime
-            .dispatch
-            .transition_agent(failed.agent_id, AgentStatus::Failed, None)
-            .unwrap();
-        let terminal_idle = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
+                "claude",
+                "failed-before-idle",
+                AgentStatus::Failed,
+            ),
+            (
                 Some(terminal_session),
-                AgentProfileId::new("codex").unwrap(),
-                ModelSelector::new("idle-after-failed").unwrap(),
-            )
-            .unwrap();
-        runtime
-            .dispatch
-            .transition_agent(terminal_idle.agent_id, AgentStatus::Idle, None)
-            .unwrap();
-        let _root = runtime
-            .dispatch
-            .upsert_agent_by_runtime_model(
-                workspace,
-                None,
-                AgentProfileId::new("codex").unwrap(),
-                ModelSelector::new("root").unwrap(),
-            )
-            .unwrap();
+                "codex",
+                "idle-after-failed",
+                AgentStatus::Idle,
+            ),
+            (None, "codex", "root", AgentStatus::Starting),
+        ] {
+            record_dispatch_status(&runtime, workspace, scope, profile, model, status);
+        }
 
         let observation = runtime.workspace_observation(workspace).unwrap();
         assert_eq!(observation.inventory.workspace_id, workspace);
