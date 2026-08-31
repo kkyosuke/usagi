@@ -470,6 +470,12 @@ pub trait Terminal {
         Ok(None)
     }
 
+    /// Return an input observed by an interruptible wait to the terminal's
+    /// normal input queue. Adapters that can observe input in
+    /// [`Self::wait_for_key`] override this so a key which does not interrupt
+    /// the current animation is delivered by the next [`Self::read_key`].
+    fn defer_key(&mut self, _key: Key) {}
+
     /// 次のキー入力を 1 つ読む（入力があるまでブロックする）。
     ///
     /// # Errors
@@ -557,6 +563,8 @@ mod tests {
         let mut term = DefaultClipboardTerminal;
 
         assert_eq!(term.wait_for_key(Duration::from_millis(1)).unwrap(), None);
+        term.defer_key(Key::Enter);
+        assert_eq!(term.read_key().unwrap(), Key::Quit);
     }
 
     impl ScreenRunner for RecordingRunner {

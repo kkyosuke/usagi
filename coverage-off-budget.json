@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 502,
+  "total": 503,
   "owners": {
     "core": 9,
     "daemon": 336,
     "root-cli": 36,
-    "tui": 121
+    "tui": 122
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -25,7 +25,7 @@
     "crates/tui/src/infrastructure/daemon.rs": 1,
     "crates/tui/src/presentation/frame.rs": 1,
     "crates/tui/src/presentation/live_terminal.rs": 1,
-    "crates/tui/src/presentation/mod.rs": 12,
+    "crates/tui/src/presentation/mod.rs": 13,
     "crates/tui/src/presentation/views/create_session_error_modal.rs": 1,
     "crates/tui/src/presentation/views/decision_modal.rs": 1,
     "crates/tui/src/presentation/views/open.rs": 1,

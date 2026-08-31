@@ -1,6 +1,6 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -3572,6 +3572,9 @@ struct CrosstermTerminal {
     /// [`Key::Live`] へ翻訳する。`Ctrl-O` 以外は passthrough として従来の
     /// `Key` マッピングに委ねるため、live terminal への passthrough を壊さない。
     live_input: LiveInputClassifier,
+    /// Input observed by an interruptible transition but not owned by it.
+    /// `read_key` drains this queue before polling the input pump.
+    deferred_input: VecDeque<Key>,
     /// The concrete OS adapter is owned by the composition root. Selection
     /// commands receive it through the TUI clipboard port rather than creating
     /// subprocesses in presentation code.
@@ -3743,7 +3746,14 @@ impl Terminal for CrosstermTerminal {
         }
     }
 
+    fn defer_key(&mut self, key: Key) {
+        self.deferred_input.push_back(key);
+    }
+
     fn read_key(&mut self) -> std::io::Result<Key> {
+        if let Some(key) = self.deferred_input.pop_front() {
+            return Ok(key);
+        }
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
@@ -4316,6 +4326,7 @@ fn run_in_terminal(
         input_started: Instant::now(),
         renderer: FrameRenderer::new(),
         live_input: LiveInputClassifier::default(),
+        deferred_input: VecDeque::new(),
         clipboard: PlatformClipboard,
     };
     let result = run(&mut terminal);
