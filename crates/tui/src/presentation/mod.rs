@@ -1449,10 +1449,40 @@ fn save_config_responsive(
     let Some((scope, draft)) = form.save_request() else {
         return Ok(false);
     };
-    let result = run_workspace_loading(term, "Saving settings…", false, || {
-        settings.save(scope, &draft)
-    });
+    let result = if let Some(base) = base {
+        run_config_save_loading(term, form, base, || settings.save(scope, &draft))
+    } else {
+        run_workspace_loading(term, "Saving settings…", false, || {
+            settings.save(scope, &draft)
+        })
+    };
     Ok(form.finish_save(draft, result))
+}
+
+/// Persist a workspace Config draft without replacing its Home-owned modal.
+///
+/// The generic workspace loading surface clears the complete frame. Using it
+/// here made Config disappear during the write, then reappear for `done` before
+/// closing. Keep painting the pending Config form over the same Home snapshot
+/// so one modal remains visible throughout the save lifecycle.
+fn run_config_save_loading<T: Send>(
+    term: &mut dyn Terminal,
+    form: &mut Config,
+    base: &[String],
+    operation: impl FnOnce() -> io::Result<T> + Send,
+) -> io::Result<T> {
+    run_workspace_loading_with(
+        term,
+        "Saving settings…",
+        false,
+        false,
+        operation,
+        |height, width, _frame, _status, _show_progress| {
+            let lines = config::render_over(height, width, base, form);
+            form.advance_save_animation();
+            lines
+        },
+    )
 }
 
 fn save_environment_responsive(
@@ -25440,6 +25470,42 @@ mod tests {
                 .iter()
                 .any(|frame| frame.join("\n").contains("Save failed"))
         );
+    }
+
+    #[test]
+    fn background_workspace_config_save_keeps_one_modal_visible_until_done() {
+        let base = vec!["home".to_owned(); 24];
+        let mut settings = RecordingSettingsPort {
+            background: true,
+            ..RecordingSettingsPort::default()
+        };
+        let mut term = ResponsiveLoadingTerminal {
+            keys: VecDeque::from(WORKSPACE_CONFIG_SAVE_KEYS),
+            ..ResponsiveLoadingTerminal::default()
+        };
+
+        run_workspace_config(
+            &mut term,
+            &mut settings,
+            AvailableAgentModels::all(),
+            &[],
+            &base,
+        )
+        .unwrap();
+
+        assert_eq!(settings.saves, 1);
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(frames.iter().all(|frame| frame.contains("Config")));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !frame.contains("Saving settings…"))
+        );
+        assert!(frames.iter().any(|frame| frame.contains("[ done ]")));
     }
 
     #[test]
