@@ -4125,6 +4125,75 @@ mod tests {
     }
 
     #[test]
+    fn saturated_capacity_selection_compares_every_completed_resume_candidate() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let generation = DaemonGeneration::new();
+        let mut agent = AgentRuntime::new(
+            generation,
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                terminate_success: true,
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let mut three_slots = RuntimeCoordinator::new(3, 64 * 1024, 64);
+        three_slots.activate_generation(generation).unwrap();
+        agent.coordinator = three_slots;
+
+        for _ in 0..3 {
+            let admission = agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &AgentLaunchIntent {
+                        workspace,
+                        session: Some(session),
+                        profile: None,
+                    },
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+            let runtime = agent
+                .coordinator
+                .runtime_for_terminal(&admission.terminal)
+                .unwrap();
+            agent
+                .reported_phases
+                .insert(runtime.agent_runtime_id, AgentPhase::Ended);
+        }
+
+        let mut operations = [OperationId::new(), OperationId::new(), OperationId::new()];
+        operations.sort();
+        let mut snapshot = agent.coordinator.snapshot();
+        // Runtime records are keyed independently of operation age. Arrange
+        // their ages so iteration first replaces the candidate, then retains it.
+        snapshot.records[0].operation.operation_id = operations[2];
+        snapshot.records[1].operation.operation_id = operations[0];
+        snapshot.records[2].operation.operation_id = operations[1];
+        let oldest = snapshot.records[1].runtime.clone();
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 3, 64 * 1024, 64).unwrap();
+
+        assert_eq!(agent.sleep_one_for_capacity(), Ok(true));
+        let records = agent.coordinator.snapshot().records;
+        assert_eq!(agent.concurrency().in_use, 2);
+        assert!(records.iter().any(|record| {
+            record.runtime == oldest
+                && record.state == super::super::runtime::RuntimeState::Sleeping
+        }));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.state == super::super::runtime::RuntimeState::Running)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn saturated_launch_refuses_when_no_completed_resume_source_is_safe() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
